@@ -1,0 +1,18 @@
+[package]
+name    = "velox-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+velox-gpu      = { path = "../velox-gpu" }
+velox-shell    = { path = "../velox-shell" }
+velox-renderer = { path = "../velox-renderer" }
+velox-text     = { path = "../velox-text" }
+velox-layout   = { path = "../velox-layout" }
+velox-runtime  = { path = "../velox-runtime" }
+tokio          = { workspace = true }
+pollster       = { workspace = true }
+log            = { workspace = true }
+thiserror      = { workspace = true }
+env_logger     = { workspace = true }
+taffy          = { workspace = true }

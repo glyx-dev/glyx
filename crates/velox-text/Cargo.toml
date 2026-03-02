@@ -1,0 +1,10 @@
+[package]
+name    = "velox-text"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+parley    = { workspace = true, features = ["system"] }
+peniko    = { workspace = true }
+log       = { workspace = true }
+thiserror = { workspace = true }

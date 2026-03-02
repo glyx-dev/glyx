@@ -1,0 +1,4 @@
+[package]
+name    = "velox-3d"
+version = "0.1.0"
+edition = "2021"

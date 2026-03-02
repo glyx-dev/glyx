@@ -1,0 +1,12 @@
+{
+  "name": "velox",
+  "private": true,
+  "workspaces": [
+    "js/packages/@velox/react"
+  ],
+  "dependencies": {
+    "@velox/react": "workspace:*",
+    "react": "^18.2.0",
+    "react-reconciler": "^0.29.0"
+  }
+}

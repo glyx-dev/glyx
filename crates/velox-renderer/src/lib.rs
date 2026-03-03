@@ -342,26 +342,19 @@ impl FrameBuilder {
 
                 if glyphs.is_empty() { continue; }
 
+                // Some fonts / Parley configurations return all glyph x values
+                // as 0.0 (relying on advance widths for layout instead of
+                // explicit positions). When that happens, reconstruct positions
+                // from the raw advances. We deliberately do NOT scale by
+                // layout.width() because that value excludes trailing spaces,
+                // which would shift earlier characters when a space is typed.
                 if glyphs.len() > 1 {
-                    let mut min_x = f32::INFINITY;
-                    let mut max_x = f32::NEG_INFINITY;
-                    for (g, _) in &glyphs {
-                        if g.x < min_x { min_x = g.x; }
-                        if g.x > max_x { max_x = g.x; }
-                    }
-                    if (max_x - min_x).abs() < 0.001 {
-                        let total_w = layout.width().max(1.0);
-                        let mut sum_adv = 0.0f32;
-                        for (_, adv) in &glyphs {
-                            if *adv > 0.0 { sum_adv += *adv; }
-                        }
+                    let all_zero = glyphs.iter().all(|(g, _)| g.x.abs() < 0.001);
+                    if all_zero {
                         let mut cursor = 0.0f32;
-                        let fallback = total_w / glyphs.len().max(1) as f32;
-                        let scale = if sum_adv > 0.0 { total_w / sum_adv } else { 1.0 };
                         for (g, adv) in glyphs.iter_mut() {
                             g.x = cursor;
-                            let step = if *adv > 0.0 { *adv * scale } else { fallback };
-                            cursor += step;
+                            cursor += adv.max(0.0);
                         }
                     }
                 }

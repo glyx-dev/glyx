@@ -6112,7 +6112,7 @@ No matching component was found for:
         }
       };
     }, []);
-    const displayText = value || placeholder;
+    const displayText = focused || value ? value : placeholder;
     const textColor = value ? "#ffffff" : "#888888";
     const inputStyle = {
       backgroundColor: focused ? "#4a4a7e" : "#2a2a3e",
@@ -6125,7 +6125,8 @@ No matching component was found for:
       width: width - 16,
       height: height - 16,
       style: { color: textColor },
-      showCursor: focused
+      showCursor: focused,
+      textAlign: "left"
     }));
   }
 

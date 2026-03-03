@@ -55,6 +55,10 @@ impl TextSystem {
         // two most common paths as an explicit fallback in case fontique's
         // scan missed a directory or was built without the system feature.
 
+        // On Windows, fontique discovers system fonts automatically via the
+        // registry. We only explicitly load the Segoe UI family (our primary
+        // font stack) to guarantee it's available without reading every font
+        // in C:\Windows\Fonts — which can exceed 500 MB of font data.
         #[cfg(target_os = "windows")]
         {
             let font_dir = std::path::Path::new("C:\\Windows\\Fonts");
@@ -62,12 +66,25 @@ impl TextSystem {
                 let mut count = 0usize;
                 if let Ok(entries) = std::fs::read_dir(font_dir) {
                     for entry in entries.flatten() {
-                        if register_font_file(&mut font_cx, &entry.path()) {
+                        let name = entry.file_name()
+                            .to_string_lossy()
+                            .to_ascii_lowercase();
+                        // Load only the core Segoe UI text variants.
+                        // Deliberately excluded: seguiemj (Emoji, ~25 MB),
+                        // seguisym / segoesym (Symbol, ~15 MB), segmdl2 (icons).
+                        // fontique discovers all other system fonts lazily.
+                        let wanted = matches!(name.as_str(),
+                            "segoeui.ttf"   | "segoeuib.ttf" | "segoeuii.ttf" |
+                            "segoeuiz.ttf"  | "segoeuisl.ttf"| "seguisb.ttf"  |
+                            "seguili.ttf"   | "seguibli.ttf" | "seguisbi.ttf" |
+                            "seguisli.ttf"
+                        );
+                        if wanted && register_font_file(&mut font_cx, &entry.path()) {
                             count += 1;
                         }
                     }
                 }
-                log::info!("velox-text: registered {} fonts from C:\\Windows\\Fonts", count);
+                log::info!("velox-text: registered {} Segoe UI / fallback fonts", count);
             } else {
                 log::warn!("velox-text: C:\\Windows\\Fonts not found — text may use fallback glyphs");
             }

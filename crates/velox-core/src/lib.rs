@@ -26,6 +26,8 @@
 //! holds a shaped result. JS Text nodes currently re-shape each frame —
 //! future work: cache shaped layouts keyed by (text, font_size, max_width).
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use velox_gpu::GpuContext;
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout};
 use velox_renderer::{colors, peniko, VeloxRenderer};
@@ -72,8 +74,14 @@ impl CachedLabel {
     fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4]) -> Self {
         let vello_color = peniko::Color::rgba8(color[0], color[1], color[2], color[3]);
         let layout = ts.label_centered(text, font_size, max_width, vello_color);
-        let width  = layout.width()  as f64;
-        let ascent = layout.ascent() as f64;
+        let width  = layout.width() as f64;
+        // For an empty string Parley produces no glyph runs, so ascent() = 0.
+        // Shape a reference "M" at the same size to get the real font ascent.
+        let ascent = if layout.ascent() > 0.1 {
+            layout.ascent() as f64
+        } else {
+            ts.label_centered("M", font_size, max_width, vello_color).ascent() as f64
+        };
         Self { layout, width, ascent }
     }
 
@@ -105,6 +113,13 @@ struct AppState {
     /// Current cursor position in physical pixels.
     cursor_x:     f32,
     cursor_y:     f32,
+    /// Callback to request another frame — used for cursor blinking.
+    /// Wrapped in Arc so it can be cloned into the blink timer thread.
+    request_redraw: Arc<dyn Fn() + Send + Sync>,
+    /// Whether the cursor rect is visible in the current blink phase.
+    cursor_blink_on:       bool,
+    /// When to flip the blink phase next.
+    cursor_blink_deadline: Instant,
 }
 
 struct JsNode {
@@ -304,6 +319,7 @@ fn apply_scene_commands(state: &mut AppState, commands: Vec<SceneCommand>) -> bo
                     if props.padding.is_some()          { node.props.padding          = props.padding;          }
                     if props.gap.is_some()              { node.props.gap              = props.gap;              }
                     if props.show_cursor.is_some()      { node.props.show_cursor      = props.show_cursor;      }
+                    if props.text_align.is_some()       { node.props.text_align       = props.text_align;       }
                 }
             }
             SceneCommand::RemoveNode { id } => {
@@ -358,6 +374,9 @@ pub fn run(config: AppConfig) {
 
                 log::info!("All subsystems initialised.");
 
+                let win = window.clone();
+                let request_redraw: Arc<dyn Fn() + Send + Sync> =
+                    Arc::new(move || win.request_redraw());
                 state = Some(AppState {
                     gpu:          gpu_ctx,
                     renderer,
@@ -370,6 +389,9 @@ pub fn run(config: AppConfig) {
                     js_root:      None,
                     cursor_x:     0.0,
                     cursor_y:     0.0,
+                    request_redraw,
+                    cursor_blink_on:       true,
+                    cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
                 });
 
                 window.request_redraw();
@@ -495,8 +517,16 @@ pub fn run(config: AppConfig) {
                     }
                 };
 
-                // 6. Render the JS scene graph.
+                // 6. Advance cursor blink phase if the deadline has passed.
+                let now = Instant::now();
+                if now >= s.cursor_blink_deadline {
+                    s.cursor_blink_on       = !s.cursor_blink_on;
+                    s.cursor_blink_deadline = now + Duration::from_millis(500);
+                }
+
+                // 7. Render the JS scene graph.
                 let mut frame = s.renderer.begin_frame();
+                let mut any_cursor_active = false;
 
                 if let Some(root_id) = s.js_root {
                     for id in build_render_order(root_id, &s.js_nodes) {
@@ -524,18 +554,33 @@ pub fn run(config: AppConfig) {
                                 let label     = CachedLabel::new(
                                     &mut s.text_sys, text, font_size, rl.width.max(1.0), color,
                                 );
-                                let (tx, ty) = label.centred_origin(rl);
+
+                                // Horizontal origin: left-align or centre depending on textAlign.
+                                let left_align = node.props.text_align.as_deref() == Some("left");
+                                let (tx, ty) = if left_align {
+                                    (rl.x as f64, label.centred_origin(rl).1)
+                                } else {
+                                    label.centred_origin(rl)
+                                };
+
                                 frame.draw_text(&label.layout, tx, ty, rgba_to_vello(color));
 
                                 // Text cursor: a thin rect drawn after the text when focused.
                                 if node.props.show_cursor.unwrap_or(false) {
-                                    let cursor_x = tx + label.width + 2.0;
-                                    let cursor_h = (font_size as f64) * 1.2;
-                                    let cursor_y = ty + label.ascent - cursor_h;
-                                    frame.fill_rounded_rect(
-                                        cursor_x, cursor_y, 2.0, cursor_h,
-                                        0.0, rgba_to_vello(color),
-                                    );
+                                    any_cursor_active = true;
+                                    if s.cursor_blink_on {
+                                        // ty is the top of the text layout.
+                                        // draw_text adds baseline internally, so glyphs
+                                        // run from ty (cap-top) to ty + ascent (baseline).
+                                        // The cursor spans that same range.
+                                        let cursor_x = tx + label.width + 2.0;
+                                        let cursor_y = ty;
+                                        let cursor_h = label.ascent;
+                                        frame.fill_rounded_rect(
+                                            cursor_x, cursor_y, 2.0, cursor_h,
+                                            0.0, rgba_to_vello(color),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -548,11 +593,19 @@ pub fn run(config: AppConfig) {
                 }
                 texture.present();
 
-                // Request next frame if there are pending events (keeps UI responsive
-                // without busy-looping when idle).
-                if !s.runtime.events.lock().unwrap().is_empty() {
-                    // The window handle is not accessible here — events in the queue
-                    // will trigger their own redraws via the input event paths above.
+                // Schedule the next blink redraw without busy-looping.
+                // A background thread sleeps until the next phase flip, then
+                // fires exactly one request_redraw — keeping GPU idle otherwise.
+                if any_cursor_active {
+                    let redraw   = Arc::clone(&s.request_redraw);
+                    let deadline = s.cursor_blink_deadline;
+                    std::thread::spawn(move || {
+                        let now = Instant::now();
+                        if deadline > now {
+                            std::thread::sleep(deadline - now);
+                        }
+                        redraw();
+                    });
                 }
             }
 

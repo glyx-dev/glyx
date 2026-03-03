@@ -147,7 +147,10 @@ export function TextInput({
     };
   }, []);
 
-  const displayText = value || placeholder;
+  // When focused, always show the actual value so the cursor lands after
+  // typed characters (position 0 when value is empty). Show placeholder
+  // only when unfocused and nothing has been typed yet.
+  const displayText = (focused || value) ? value : placeholder;
   const textColor   = value ? '#ffffff' : '#888888';
 
   const inputStyle = {
@@ -166,6 +169,7 @@ export function TextInput({
       height:     height - 16,
       style:      { color: textColor },
       showCursor: focused,
+      textAlign:  'left',
     })
   );
 }

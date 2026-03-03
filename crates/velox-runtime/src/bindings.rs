@@ -117,8 +117,12 @@ pub struct NodeProps {
     pub gap:             Option<f32>,
 
     // ── Cursor UI ───────────────────────────────────────────────────────────
-    /// When true, draw a blinking-cursor rect after the text.
+    /// When true, draw a text cursor rect after the text.
     pub show_cursor: Option<bool>,
+
+    // ── Text alignment ───────────────────────────────────────────────────────
+    /// `"left"` | `"center"` (default). Controls horizontal text origin.
+    pub text_align: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -320,6 +324,7 @@ fn parse_props(
     props.color            = get_color_prop(scope, obj, "color");
 
     props.show_cursor = get_bool_prop(scope, obj, "showCursor");
+    props.text_align  = get_str_prop(scope, obj, "textAlign");
 
     props
 }

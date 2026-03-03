@@ -5950,6 +5950,9 @@ No matching component was found for:
   var pressableRegistry = new Map;
   var inputRegistry = new Map;
   var focusedNodeId = null;
+  var hoveredPressableId = null;
+  var cursorX = 0;
+  var cursorY = 0;
   function registerPressable(nodeId, handlers) {
     pressableRegistry.set(nodeId, handlers);
   }
@@ -5985,6 +5988,7 @@ No matching component was found for:
     const events = __velox_pollEvents();
     if (!events || events.length === 0)
       return;
+    let cursorMovedThisFrame = false;
     for (const ev of events) {
       switch (ev.type) {
         case "mouseButton": {
@@ -6021,8 +6025,32 @@ No matching component was found for:
           handlers.onKeyPress?.({ key: ev.key, text: ev.text });
           break;
         }
+        case "cursorMoved": {
+          cursorX = ev.x;
+          cursorY = ev.y;
+          cursorMovedThisFrame = true;
+          break;
+        }
         default:
           break;
+      }
+    }
+    if (cursorMovedThisFrame) {
+      let newHoveredId = null;
+      for (const [nodeId] of pressableRegistry) {
+        if (hitTest(nodeId, cursorX, cursorY)) {
+          newHoveredId = nodeId;
+          break;
+        }
+      }
+      if (newHoveredId !== hoveredPressableId) {
+        if (hoveredPressableId !== null) {
+          pressableRegistry.get(hoveredPressableId)?.onHoverOut?.();
+        }
+        if (newHoveredId !== null) {
+          pressableRegistry.get(newHoveredId)?.onHoverIn?.();
+        }
+        hoveredPressableId = newHoveredId;
       }
     }
   }
@@ -6040,10 +6068,11 @@ No matching component was found for:
   }
   var View = ({ children, style, ...props }) => import_react.default.createElement("view", { style, ...props }, children);
   var Text = ({ children, style, showCursor, ...props }) => import_react.default.createElement("text", { text: children, style, showCursor, ...props });
-  function Pressable({ children, onPress, onPressIn, onPressOut, style, ...props }) {
+  function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn, onHoverOut, style, ...props }) {
     const nodeIdRef = import_react.useRef(null);
     const handlersRef = import_react.useRef(null);
     const [pressed, setPressed] = import_react.useState(false);
+    const [hovered, setHovered] = import_react.useState(false);
     handlersRef.current = {
       onPress: () => onPress?.(),
       onPressIn: () => {
@@ -6053,6 +6082,14 @@ No matching component was found for:
       onPressOut: () => {
         setPressed(false);
         onPressOut?.();
+      },
+      onHoverIn: () => {
+        setHovered(true);
+        onHoverIn?.();
+      },
+      onHoverOut: () => {
+        setHovered(false);
+        onHoverOut?.();
       }
     };
     const onMount = import_react.useCallback((id) => {
@@ -6060,7 +6097,9 @@ No matching component was found for:
       registerPressable(id, {
         onPress: () => handlersRef.current.onPress(),
         onPressIn: () => handlersRef.current.onPressIn(),
-        onPressOut: () => handlersRef.current.onPressOut()
+        onPressOut: () => handlersRef.current.onPressOut(),
+        onHoverIn: () => handlersRef.current.onHoverIn(),
+        onHoverOut: () => handlersRef.current.onHoverOut()
       });
     }, []);
     import_react.useEffect(() => {
@@ -6070,7 +6109,7 @@ No matching component was found for:
         }
       };
     }, []);
-    const mergedStyle = pressed ? { ...style, backgroundColor: style?.backgroundColor ?? "#555" } : style;
+    const mergedStyle = pressed ? { ...style, borderWidth: 2, borderColor: "#ffffffaa" } : hovered ? { ...style, borderWidth: 1, borderColor: "#ffffff55" } : style;
     return import_react.default.createElement("view", { _veloxOnMount: onMount, style: mergedStyle, ...props }, children);
   }
   function TextInput({
@@ -6117,6 +6156,8 @@ No matching component was found for:
     const inputStyle = {
       backgroundColor: focused ? "#4a4a7e" : "#2a2a3e",
       borderRadius: 6,
+      borderWidth: focused ? 2 : 1,
+      borderColor: focused ? "#8080ff" : "#44446a",
       ...style
     };
     return import_react.default.createElement("view", { _veloxOnMount: onMount, style: inputStyle, width, height, ...props }, import_react.default.createElement("text", {
@@ -6148,18 +6189,20 @@ No matching component was found for:
         style: {
           backgroundColor: "#2a2a3e",
           borderRadius: 16,
+          borderWidth: 1,
+          borderColor: "#44446a",
           padding: 32,
           gap: 20
         },
         width: 400,
-        height: 280,
+        height: 300,
         children: [
           /* @__PURE__ */ jsx_runtime.jsx(Text, {
             fontSize: 22,
             width: 340,
             height: 30,
             style: { color: "#cdd6f4" },
-            children: "Week 12 — Velox Input Demo"
+            children: "Week 13 — Hover + Border Demo"
           }),
           /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
             value: name,
@@ -6180,23 +6223,19 @@ No matching component was found for:
             width: 340,
             height: 20,
             style: { color: "#585b70" },
-            children: "Press the button to greet yourself."
+            children: "Hover the button, then press it."
           }),
           /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
             onPress: greet,
             width: 160,
             height: 44,
-            children: /* @__PURE__ */ jsx_runtime.jsx(View, {
-              style: { backgroundColor: "#6c63ff", borderRadius: 8 },
-              width: 160,
-              height: 44,
-              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                fontSize: 16,
-                width: 140,
-                height: 24,
-                style: { color: "#ffffff" },
-                children: "Say Hello"
-              })
+            style: { backgroundColor: "#6c63ff", borderRadius: 8 },
+            children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 16,
+              width: 140,
+              height: 24,
+              style: { color: "#ffffff" },
+              children: "Say Hello"
             })
           })
         ]
@@ -6204,5 +6243,5 @@ No matching component was found for:
     });
   }
   render(/* @__PURE__ */ jsx_runtime.jsx(App, {}));
-  __velox_log("Week 12: style system + events + Pressable + TextInput ready.");
+  __velox_log("Week 13: text cache + hover states + border support ready.");
 })();

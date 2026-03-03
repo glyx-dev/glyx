@@ -58,16 +58,19 @@ export const Text = ({ children, style, showCursor, ...props }) =>
 // always delegate to the latest closure values without needing re-registration
 // on every render.
 
-export function Pressable({ children, onPress, onPressIn, onPressOut, style, ...props }) {
+export function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn, onHoverOut, style, ...props }) {
   const nodeIdRef    = useRef(null);
   const handlersRef  = useRef(null);
   const [pressed, setPressed] = useState(false);
+  const [hovered, setHovered] = useState(false);
 
   // Always keep handlersRef up to date with the latest prop values.
   handlersRef.current = {
     onPress:    () => onPress?.(),
     onPressIn:  () => { setPressed(true);  onPressIn?.(); },
     onPressOut: () => { setPressed(false); onPressOut?.(); },
+    onHoverIn:  () => { setHovered(true);  onHoverIn?.(); },
+    onHoverOut: () => { setHovered(false); onHoverOut?.(); },
   };
 
   // Called synchronously by createInstance the moment the native node exists.
@@ -78,6 +81,8 @@ export function Pressable({ children, onPress, onPressIn, onPressOut, style, ...
       onPress:    () => handlersRef.current.onPress(),
       onPressIn:  () => handlersRef.current.onPressIn(),
       onPressOut: () => handlersRef.current.onPressOut(),
+      onHoverIn:  () => handlersRef.current.onHoverIn(),
+      onHoverOut: () => handlersRef.current.onHoverOut(),
     });
   }, []); // empty deps — fires exactly once per mount
 
@@ -90,8 +95,14 @@ export function Pressable({ children, onPress, onPressIn, onPressOut, style, ...
     };
   }, []);
 
+  // Visual feedback:
+  //   pressed → brighter border (confirms the click)
+  //   hovered → subtle border (indicates interactivity)
+  //   default → no border override
   const mergedStyle = pressed
-    ? { ...style, backgroundColor: style?.backgroundColor ?? '#555' }
+    ? { ...style, borderWidth: 2, borderColor: '#ffffffaa' }
+    : hovered
+    ? { ...style, borderWidth: 1, borderColor: '#ffffff55' }
     : style;
 
   return React.createElement(
@@ -156,6 +167,8 @@ export function TextInput({
   const inputStyle = {
     backgroundColor: focused ? '#4a4a7e' : '#2a2a3e',
     borderRadius: 6,
+    borderWidth: focused ? 2 : 1,
+    borderColor: focused ? '#8080ff' : '#44446a',
     ...style,
   };
 

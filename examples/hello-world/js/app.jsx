@@ -1,10 +1,10 @@
-// Week 12 milestone — style system + event system + Pressable + TextInput.
+// Week 13 milestone — text cache + hover states + border support.
 //
 // What this demo shows:
-//   - backgroundColor / borderRadius / padding / gap on View nodes
-//   - Pressable button with press feedback (visual state change)
-//   - TextInput with focus detection and live typing
-//   - Text colour via the color style prop
+//   - Text shaping cache: Parley shapes each unique string once, reused every frame
+//   - Hover states: Pressable shows a border when the cursor enters/leaves
+//   - Border support: borderWidth + borderColor on any View node
+//   - TextInput border brightens on focus
 
 import './polyfills.js';
 import React, { useState } from 'react';
@@ -23,16 +23,18 @@ function App() {
       width={1280}
       height={800}
     >
-      {/* Card */}
+      {/* Card — now has a visible border */}
       <View
         style={{
           backgroundColor: '#2a2a3e',
           borderRadius: 16,
+          borderWidth: 1,
+          borderColor: '#44446a',
           padding: 32,
           gap: 20,
         }}
         width={400}
-        height={280}
+        height={300}
       >
         {/* Title */}
         <Text
@@ -41,10 +43,10 @@ function App() {
           height={30}
           style={{ color: '#cdd6f4' }}
         >
-          Week 12 — Velox Input Demo
+          Week 13 — Hover + Border Demo
         </Text>
 
-        {/* Text input */}
+        {/* Text input — border brightens on focus */}
         <TextInput
           value={name}
           onChangeText={handleNameChange}
@@ -71,21 +73,21 @@ function App() {
             height={20}
             style={{ color: '#585b70' }}
           >
-            Press the button to greet yourself.
+            Hover the button, then press it.
           </Text>
         )}
 
-        {/* Pressable button */}
-        <Pressable onPress={greet} width={160} height={44}>
-          <View
-            style={{ backgroundColor: '#6c63ff', borderRadius: 8 }}
-            width={160}
-            height={44}
-          >
-            <Text fontSize={16} width={140} height={24} style={{ color: '#ffffff' }}>
-              Say Hello
-            </Text>
-          </View>
+        {/* Pressable button — style lives directly on Pressable so
+            hover/press borders are visible on the same node as the fill */}
+        <Pressable
+          onPress={greet}
+          width={160}
+          height={44}
+          style={{ backgroundColor: '#6c63ff', borderRadius: 8 }}
+        >
+          <Text fontSize={16} width={140} height={24} style={{ color: '#ffffff' }}>
+            Say Hello
+          </Text>
         </Pressable>
       </View>
     </View>
@@ -94,4 +96,4 @@ function App() {
 
 render(<App />);
 
-__velox_log('Week 12: style system + events + Pressable + TextInput ready.');
+__velox_log('Week 13: text cache + hover states + border support ready.');

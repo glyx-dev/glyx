@@ -20,7 +20,7 @@
 
 // ── Registry ──────────────────────────────────────────────────────────────────
 
-// Map from nodeId -> { onPress, onRelease, onPressIn, onPressOut }
+// Map from nodeId -> { onPress, onPressIn, onPressOut, onHoverIn, onHoverOut }
 const pressableRegistry = new Map();
 
 // Map from nodeId -> { onFocus, onKeyPress, onChangeText }
@@ -28,6 +28,14 @@ const inputRegistry = new Map();
 
 // Currently focused input node id (or null).
 let focusedNodeId = null;
+
+// Currently hovered pressable node id (or null).
+// Updated once per frame from the last cursorMoved event's position.
+let hoveredPressableId = null;
+
+// Last cursor position seen this frame (updated by cursorMoved events).
+let cursorX = 0;
+let cursorY = 0;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -103,6 +111,8 @@ export function dispatchEvents() {
   const events = __velox_pollEvents();
   if (!events || events.length === 0) return;
 
+  let cursorMovedThisFrame = false;
+
   for (const ev of events) {
     switch (ev.type) {
 
@@ -147,9 +157,40 @@ export function dispatchEvents() {
         break;
       }
 
-      // cursorMoved and scroll are available for future hover/scroll support.
+      case 'cursorMoved': {
+        // Track final position — hover is resolved once after the loop
+        // so multiple cursor events per frame produce only one hit-test.
+        cursorX = ev.x;
+        cursorY = ev.y;
+        cursorMovedThisFrame = true;
+        break;
+      }
+
       default:
         break;
+    }
+  }
+
+  // ── Hover state update ────────────────────────────────────────────────────
+  // Run once per frame using the final cursor position.
+  // Only fires onHoverIn/Out callbacks on actual enter/leave transitions.
+  if (cursorMovedThisFrame) {
+    let newHoveredId = null;
+    for (const [nodeId] of pressableRegistry) {
+      if (hitTest(nodeId, cursorX, cursorY)) {
+        newHoveredId = nodeId;
+        break;
+      }
+    }
+
+    if (newHoveredId !== hoveredPressableId) {
+      if (hoveredPressableId !== null) {
+        pressableRegistry.get(hoveredPressableId)?.onHoverOut?.();
+      }
+      if (newHoveredId !== null) {
+        pressableRegistry.get(newHoveredId)?.onHoverIn?.();
+      }
+      hoveredPressableId = newHoveredId;
     }
   }
 }

@@ -123,6 +123,12 @@ pub struct NodeProps {
     // ── Text alignment ───────────────────────────────────────────────────────
     /// `"left"` | `"center"` (default). Controls horizontal text origin.
     pub text_align: Option<String>,
+
+    // ── Border ──────────────────────────────────────────────────────────────
+    /// Border stroke width in logical pixels.
+    pub border_width: Option<f32>,
+    /// Border stroke colour as RGBA [r, g, b, a] 0–255.
+    pub border_color: Option<[u8; 4]>,
 }
 
 #[derive(Debug, Clone)]
@@ -323,8 +329,10 @@ fn parse_props(
     props.background_color = get_color_prop(scope, obj, "backgroundColor");
     props.color            = get_color_prop(scope, obj, "color");
 
-    props.show_cursor = get_bool_prop(scope, obj, "showCursor");
-    props.text_align  = get_str_prop(scope, obj, "textAlign");
+    props.show_cursor   = get_bool_prop(scope, obj, "showCursor");
+    props.text_align    = get_str_prop(scope, obj, "textAlign");
+    props.border_width  = get_num_prop(scope, obj, "borderWidth");
+    props.border_color  = get_color_prop(scope, obj, "borderColor");
 
     props
 }

@@ -38,6 +38,11 @@ use velox_layout::NodeId;
 
 pub use velox_shell::ShellConfig as WindowConfig;
 
+/// Cache key for shaped text: (text, font_size_bits, max_width_bits, color).
+/// `to_bits()` gives an exact bitwise representation of f32, so equal floats
+/// always produce the same key.
+type LabelKey = (String, u32, u32, [u8; 4]);
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Top-level configuration passed to [`run`].
@@ -110,6 +115,11 @@ struct AppState {
     resolved:     Vec<(NodeId, ResolvedLayout)>,
     js_nodes:     std::collections::HashMap<u32, JsNode>,
     js_root:      Option<u32>,
+    /// Shaped text cache — keyed by (text, font_size_bits, max_width_bits, color).
+    /// Entries accumulate over the session; stale entries (e.g. old TextInput
+    /// values) stay in memory but are never matched again. For typical UIs the
+    /// total number of distinct strings is small enough that this is fine.
+    label_cache: std::collections::HashMap<LabelKey, CachedLabel>,
     /// Current cursor position in physical pixels.
     cursor_x:     f32,
     cursor_y:     f32,
@@ -320,6 +330,12 @@ fn apply_scene_commands(state: &mut AppState, commands: Vec<SceneCommand>) -> bo
                     if props.gap.is_some()              { node.props.gap              = props.gap;              }
                     if props.show_cursor.is_some()      { node.props.show_cursor      = props.show_cursor;      }
                     if props.text_align.is_some()       { node.props.text_align       = props.text_align;       }
+                    // Border props are purely visual (no Taffy impact) and React's
+                    // commitUpdate provides the *complete* current prop set — so an
+                    // absent borderWidth/borderColor means "no border", not "keep old".
+                    // Always overwrite so that removing a border via style state works.
+                    node.props.border_width = props.border_width;
+                    node.props.border_color = props.border_color;
                 }
             }
             SceneCommand::RemoveNode { id } => {
@@ -387,6 +403,7 @@ pub fn run(config: AppConfig) {
                     resolved:     Vec::new(),
                     js_nodes:     std::collections::HashMap::new(),
                     js_root:      None,
+                    label_cache:  std::collections::HashMap::new(),
                     cursor_x:     0.0,
                     cursor_y:     0.0,
                     request_redraw,
@@ -414,6 +431,10 @@ pub fn run(config: AppConfig) {
                         x: s.cursor_x,
                         y: s.cursor_y,
                     });
+                    // Request a redraw so hover states (Pressable onHoverIn/Out)
+                    // are reflected this frame.  The cost is one Vello pass per
+                    // cursor event, which is acceptable for a desktop UI.
+                    (s.request_redraw)();
                 }
             }
 
@@ -546,17 +567,44 @@ pub fn run(config: AppConfig) {
                                     rl.width as f64, rl.height as f64,
                                     radius, bg,
                                 );
+
+                                // Optional border stroke drawn on top of fill.
+                                if let Some(bw) = node.props.border_width {
+                                    let bc = node.props.border_color
+                                        .unwrap_or([80, 80, 120, 255]);
+                                    frame.stroke_rounded_rect(
+                                        rl.x as f64, rl.y as f64,
+                                        rl.width as f64, rl.height as f64,
+                                        radius, bw as f64, rgba_to_vello(bc),
+                                    );
+                                }
                             }
                             NodeType::Text => {
                                 let text      = node.props.text.as_deref().unwrap_or("Text");
                                 let font_size = node.props.font_size.unwrap_or(16.0);
                                 let color     = node.props.color.unwrap_or([255, 255, 255, 255]);
-                                let label     = CachedLabel::new(
-                                    &mut s.text_sys, text, font_size, rl.width.max(1.0), color,
+                                let max_width = rl.width.max(1.0);
+                                let left_align = node.props.text_align.as_deref() == Some("left");
+                                let show_cursor = node.props.show_cursor.unwrap_or(false);
+
+                                // ── Text shaping cache ─────────────────────────────────────
+                                // Build key from exact bit representations so equal f32 values
+                                // always match. String is cloned only when inserting (cache miss).
+                                let key: LabelKey = (
+                                    text.to_owned(),
+                                    font_size.to_bits(),
+                                    max_width.to_bits(),
+                                    color,
                                 );
+                                if !s.label_cache.contains_key(&key) {
+                                    let lbl = CachedLabel::new(
+                                        &mut s.text_sys, text, font_size, max_width, color,
+                                    );
+                                    s.label_cache.insert(key.clone(), lbl);
+                                }
+                                let label = s.label_cache.get(&key).unwrap();
 
                                 // Horizontal origin: left-align or centre depending on textAlign.
-                                let left_align = node.props.text_align.as_deref() == Some("left");
                                 let (tx, ty) = if left_align {
                                     (rl.x as f64, label.centred_origin(rl).1)
                                 } else {
@@ -565,19 +613,18 @@ pub fn run(config: AppConfig) {
 
                                 frame.draw_text(&label.layout, tx, ty, rgba_to_vello(color));
 
+                                // Copy metrics out so the label borrow can end (NLL).
+                                let (lw, la) = (label.width, label.ascent);
+
                                 // Text cursor: a thin rect drawn after the text when focused.
-                                if node.props.show_cursor.unwrap_or(false) {
+                                if show_cursor {
                                     any_cursor_active = true;
                                     if s.cursor_blink_on {
                                         // ty is the top of the text layout.
                                         // draw_text adds baseline internally, so glyphs
-                                        // run from ty (cap-top) to ty + ascent (baseline).
-                                        // The cursor spans that same range.
-                                        let cursor_x = tx + label.width + 2.0;
-                                        let cursor_y = ty;
-                                        let cursor_h = label.ascent;
+                                        // run from ty (cap-top) to ty+ascent (baseline).
                                         frame.fill_rounded_rect(
-                                            cursor_x, cursor_y, 2.0, cursor_h,
+                                            tx + lw + 2.0, ty, 2.0, la,
                                             0.0, rgba_to_vello(color),
                                         );
                                     }

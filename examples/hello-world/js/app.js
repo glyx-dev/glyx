@@ -6235,7 +6235,7 @@ No matching component was found for:
   var ITEM_H = 44;
   var ITEM_GAP = 8;
   var SV_PAD = 8;
-  var SV_H = 290;
+  var SV_H = 260;
   var PALETTE = [
     { name: "Rosewater", bg: "#dc8a78", fg: "#1e1e2e" },
     { name: "Flamingo", bg: "#dd7878", fg: "#1e1e2e" },
@@ -6255,6 +6255,7 @@ No matching component was found for:
   function App() {
     const [name, setName] = import_react2.useState("");
     const [greeted, setGreeted] = import_react2.useState(false);
+    const [selected, setSelected] = import_react2.useState(null);
     const greet = () => setGreeted(true);
     const handleNameChange = (text) => {
       setName(text);
@@ -6266,8 +6267,8 @@ No matching component was found for:
       height: 800,
       children: /* @__PURE__ */ jsx_runtime.jsxs(View, {
         style: { flexDirection: "row", gap: 32, backgroundColor: "#1e1e2e" },
-        width: 896,
-        height: 400,
+        width: 960,
+        height: 700,
         children: [
           /* @__PURE__ */ jsx_runtime.jsxs(View, {
             style: {
@@ -6275,37 +6276,48 @@ No matching component was found for:
               borderRadius: 16,
               borderWidth: 1,
               borderColor: "#44446a",
-              padding: 32,
-              gap: 20
+              padding: 24,
+              gap: 16,
+              justifyContent: "flex-start",
+              alignItems: "flex-start"
             },
-            width: 400,
-            height: 360,
+            width: 420,
+            height: 660,
             children: [
               /* @__PURE__ */ jsx_runtime.jsx(Text, {
                 fontSize: 18,
-                width: 336,
+                width: 372,
                 height: 28,
                 style: { color: "#cdd6f4" },
-                children: "Week 14 — ScrollView + Incremental Layout"
+                children: "Week 15A — Multi-line Text + Nested Pressable"
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 13,
+                width: 372,
+                style: { color: "#a6adc8" },
+                children: "This paragraph has no height prop. The layout engine calls Parley to measure its wrapped height automatically. The surrounding container adapts without any fixed height on this Text node."
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(View, {
+                style: { backgroundColor: "#44446a" },
+                width: 372,
+                height: 1
               }),
               /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
                 value: name,
                 onChangeText: handleNameChange,
                 placeholder: "Type your name...",
                 fontSize: 16,
-                width: 336,
+                width: 372,
                 height: 44
               }),
               greeted ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                fontSize: 18,
-                width: 336,
-                height: 26,
+                fontSize: 17,
+                width: 372,
                 style: { color: "#a6e3a1" },
                 children: name.trim() ? `Hello, ${name}!` : "Hello, stranger!"
               }) : /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                fontSize: 14,
-                width: 336,
-                height: 20,
+                fontSize: 13,
+                width: 372,
                 style: { color: "#585b70" },
                 children: "Hover the button, then press it."
               }),
@@ -6315,12 +6327,18 @@ No matching component was found for:
                 height: 44,
                 style: { backgroundColor: "#6c63ff", borderRadius: 8 },
                 children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                  fontSize: 16,
+                  fontSize: 15,
                   width: 140,
                   height: 24,
                   style: { color: "#ffffff" },
                   children: "Say Hello"
                 })
+              }),
+              name.length > 0 && /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 12,
+                width: 372,
+                style: { color: "#6c7086" },
+                children: `You typed ${name.length} character${name.length === 1 ? "" : "s"}. This label also has no fixed height and wraps freely.`
               })
             ]
           }),
@@ -6331,35 +6349,51 @@ No matching component was found for:
               borderWidth: 1,
               borderColor: "#44446a",
               padding: 16,
-              gap: 12
+              gap: 12,
+              justifyContent: "flex-start",
+              alignItems: "flex-start"
             },
-            width: 464,
-            height: 360,
+            width: 476,
+            height: 660,
             children: [
               /* @__PURE__ */ jsx_runtime.jsx(Text, {
                 fontSize: 15,
-                width: 432,
+                width: 444,
                 height: 22,
                 style: { color: "#cdd6f4" },
-                children: "Catppuccin palette — scroll with mouse wheel"
+                children: "Catppuccin palette — scroll and click any colour"
+              }),
+              selected !== null && /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 13,
+                width: 444,
+                height: 20,
+                style: { color: "#a6e3a1" },
+                children: `Selected: ${PALETTE[selected].name} — nested hit-test works while scrolled`
               }),
               /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
-                width: 432,
+                width: 444,
                 height: SV_H,
                 contentHeight: PALETTE.length * ITEM_H + (PALETTE.length - 1) * ITEM_GAP + 2 * SV_PAD,
                 style: { gap: ITEM_GAP, padding: SV_PAD, backgroundColor: "#1a1a2e", borderRadius: 8 },
-                children: PALETTE.map((item, i) => /* @__PURE__ */ jsx_runtime.jsx(View, {
-                  style: { backgroundColor: item.bg, borderRadius: 6 },
-                  width: 416,
+                children: PALETTE.map((item, i) => /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: () => setSelected(i),
+                  width: 428,
                   height: ITEM_H,
+                  style: { backgroundColor: item.bg, borderRadius: 6 },
                   children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
                     fontSize: 14,
-                    width: 380,
+                    width: 392,
                     height: 22,
                     style: { color: item.fg },
                     children: item.name
                   })
                 }, i))
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 12,
+                width: 444,
+                style: { color: "#45475a" },
+                children: "Scroll the list, then click a colour while scrolled. The selection label above should update — confirming scroll-adjusted hit-testing."
               })
             ]
           })
@@ -6368,5 +6402,5 @@ No matching component was found for:
     });
   }
   render(/* @__PURE__ */ jsx_runtime.jsx(App, {}));
-  __velox_log("Week 14: ScrollView + incremental layout ready.");
+  __velox_log("Week 15A: multi-line text + ScrollView Pressable hit-test ready.");
 })();

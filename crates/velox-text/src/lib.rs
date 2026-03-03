@@ -180,6 +180,23 @@ impl TextSystem {
     pub fn bold(&mut self, text: &str, font_size: f32, color: Color) -> TextLayout {
         self.bold_label(text, font_size, color)
     }
+
+    /// Measure the natural (width, height) of `text` at `font_size` wrapped to
+    /// `max_width` pixels.  Color and weight do not affect metrics.
+    ///
+    /// Used by the Taffy measure function so Text nodes with no explicit
+    /// `height` prop report their real wrapped height to the layout engine.
+    pub fn measure(&mut self, text: &str, font_size: f32, max_width: f32) -> (f32, f32) {
+        let layout = self.shape(
+            text,
+            font_size,
+            max_width.max(1.0),
+            Color::rgba(1.0, 1.0, 1.0, 1.0),
+            FontWeight::NORMAL,
+            Alignment::Start,
+        );
+        (layout.width(), layout.height())
+    }
 }
 
 impl Default for TextSystem {

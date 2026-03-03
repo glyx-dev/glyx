@@ -18,9 +18,9 @@
 //!
 //! `apply_scene_commands` tracks whether any *layout-affecting* prop changed
 //! in an UpdateNode command.  Layout props are: width, height, flex,
-//! flex_direction, justify_content, align_items, padding, gap.  Visual-only
-//! props (color, background, border, text content, clip, scroll_offset_y)
-//! skip the Taffy rebuild entirely, saving ~1 ms per hover/scroll frame.
+//! flex_direction, justify_content, align_items, padding, gap, text, font_size.
+//! Visual-only props (color, background, border, clip, scroll_offset_y) skip
+//! the Taffy rebuild entirely, saving ~1 ms per hover/scroll frame.
 //!
 //! ## Recursive renderer (Week 14)
 //!
@@ -28,6 +28,21 @@
 //! a depth-first recursive function that carries a cumulative `scroll_y`
 //! offset.  ScrollView nodes push a Vello clip layer, apply their
 //! `scroll_offset_y` to all descendants, then pop the layer.
+//!
+//! ## Multi-line text / measure function (Week 15A)
+//!
+//! Text leaf nodes carry a `TextMeasureCtx` so Taffy can call a measure
+//! closure during layout.  The closure shapes the text with Parley and
+//! returns its natural (width, height).  If no explicit `height` prop is set,
+//! Taffy uses the measured height — enabling dynamic multi-line text without
+//! fixed height props in JS.
+//!
+//! ## ScrollView nested hit-test fix (Week 15A)
+//!
+//! After every layout pass, `update_scroll_positions` walks the JS tree and
+//! writes *scroll-adjusted* Y values into the runtime layout cache.
+//! JS hit-testing via `__velox_getLayout` then returns the visually correct
+//! position for Pressables inside scrolled containers.
 //!
 //! ## Text shaping
 //!
@@ -37,7 +52,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use velox_gpu::GpuContext;
-use velox_layout::{flex_column, LayoutTree, ResolvedLayout};
+use velox_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
 use velox_renderer::{colors, peniko, VeloxRenderer, FrameBuilder};
 use velox_runtime::{init_v8, InputEvent, NodeProps, NodeType, SceneCommand, VeloxRuntime};
 use velox_shell::ShellEvent;
@@ -78,16 +93,21 @@ pub struct AppConfig {
 struct CachedLabel {
     layout: TextLayout,
     /// Pre-computed advance width for horizontal centering.
-    width:  f64,
-    /// Pre-computed ascent for *visual* vertical centering.
-    ascent: f64,
+    width:       f64,
+    /// Pre-computed ascent for *visual* vertical centering (single-line).
+    ascent:      f64,
+    /// Parley's full line-box height including all wrapped lines.
+    /// Used to detect whether the layout box was auto-sized to the text —
+    /// in which case we top-align rather than center-align vertically.
+    text_height: f64,
 }
 
 impl CachedLabel {
     fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4]) -> Self {
         let vello_color = peniko::Color::rgba8(color[0], color[1], color[2], color[3]);
-        let layout = ts.label_centered(text, font_size, max_width, vello_color);
-        let width  = layout.width() as f64;
+        let layout      = ts.label_centered(text, font_size, max_width, vello_color);
+        let width       = layout.width() as f64;
+        let text_height = layout.height() as f64;
         // For an empty string Parley produces no glyph runs, so ascent() = 0.
         // Shape a reference "M" at the same size to get the real font ascent.
         let ascent = if layout.ascent() > 0.1 {
@@ -95,7 +115,7 @@ impl CachedLabel {
         } else {
             ts.label_centered("M", font_size, max_width, vello_color).ascent() as f64
         };
-        Self { layout, width, ascent }
+        Self { layout, width, ascent, text_height }
     }
 }
 
@@ -198,6 +218,8 @@ fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::prelude::St
             style
         }
         NodeType::Text => {
+            // Height is intentionally left as Auto when not set — Taffy will
+            // call the measure function to determine the natural wrapped height.
             let mut style = taffy::prelude::Style::default();
             if let Some(w) = props.width  { style.size.width  = length(w); }
             if let Some(h) = props.height { style.size.height = length(h); }
@@ -235,10 +257,24 @@ fn rebuild_layout_from_scene(
             }
         }
 
-        let layout_id = if child_ids.is_empty() {
-            layout.add_node(style, Some(format!("js-{}", id))).ok()?
-        } else {
+        let layout_id = if !child_ids.is_empty() {
+            // Container node (has children) — no measure context needed.
             layout.add_container(style, &child_ids, Some(format!("js-{}", id))).ok()?
+        } else {
+            match node_type {
+                NodeType::Text => {
+                    // Text leaf: attach TextMeasureCtx so Taffy can call the
+                    // measure function when height is not explicitly set.
+                    let ctx = TextMeasureCtx {
+                        text:      props.text.clone().unwrap_or_default(),
+                        font_size: props.font_size.unwrap_or(16.0),
+                    };
+                    layout.add_text_node(style, ctx, Some(format!("js-{}", id))).ok()?
+                }
+                NodeType::View => {
+                    layout.add_node(style, Some(format!("js-{}", id))).ok()?
+                }
+            }
         };
 
         if let Some(node) = nodes.get_mut(&id) {
@@ -258,8 +294,11 @@ fn rebuild_layout_from_scene(
 }
 
 /// Returns true if the props have any layout-affecting change relative to
-/// the stored node props.  Visual-only changes (color, border, text content,
+/// the stored node props.  Visual-only changes (color, background, border,
 /// clip, scroll_offset_y) return false so Taffy is not rebuilt unnecessarily.
+///
+/// `text` and `font_size` are layout-affecting for Text nodes because they
+/// change the measured (wrapped) height returned by the Taffy measure function.
 fn layout_props_changed(new: &NodeProps, old: &NodeProps) -> bool {
     new.width            != old.width
     || new.height        != old.height
@@ -269,6 +308,8 @@ fn layout_props_changed(new: &NodeProps, old: &NodeProps) -> bool {
     || new.align_items      != old.align_items
     || new.padding          != old.padding
     || new.gap              != old.gap
+    || new.text             != old.text
+    || new.font_size        != old.font_size
 }
 
 fn apply_scene_commands(state: &mut AppState, commands: Vec<SceneCommand>) -> bool {
@@ -328,6 +369,11 @@ fn apply_scene_commands(state: &mut AppState, commands: Vec<SceneCommand>) -> bo
 }
 
 /// Re-run Taffy and update the runtime layout cache.
+///
+/// Uses `compute_with_measure` so Text nodes with no explicit `height` prop
+/// have their natural wrapped height computed by Parley via the measure
+/// closure.  The closure captures `&mut text_sys` (a different field from
+/// `layout` — Rust's split-borrow allows this).
 fn recompute_layout(state: &mut AppState) {
     if !state.layout_dirty { return; }
     log::info!("Layout dirty, recomputing...");
@@ -336,11 +382,47 @@ fn recompute_layout(state: &mut AppState) {
         return;
     };
     rebuild_layout_from_scene(&mut state.layout, &mut state.js_nodes, root_id);
-    match state.layout.compute(state.gpu.width() as f32, state.gpu.height() as f32) {
+
+    let w = state.gpu.width()  as f32;
+    let h = state.gpu.height() as f32;
+
+    // Split-borrow: layout and text_sys are separate AppState fields.
+    // The measure closure captures text_sys; compute_with_measure borrows layout.
+    let layout   = &mut state.layout;
+    let text_sys = &mut state.text_sys;
+
+    let result = layout.compute_with_measure(w, h, |known_dims, available, _id, ctx, _style| {
+        use taffy::prelude::{AvailableSpace, Size};
+
+        let Some(ctx) = ctx else {
+            // Non-text leaf (e.g. an empty View) — Taffy uses style dimensions.
+            return Size::ZERO;
+        };
+
+        // Use the available width from Taffy's flex pass when width is not
+        // fixed in the style.  Fall back to MAX so Parley doesn't wrap.
+        let max_w = known_dims.width.unwrap_or_else(|| match available.width {
+            AvailableSpace::Definite(w) => w,
+            _                          => f32::MAX,
+        });
+
+        let (tw, th) = text_sys.measure(&ctx.text, ctx.font_size, max_w);
+
+        Size {
+            // Respect explicit width from style; otherwise use shaped width.
+            width:  known_dims.width.unwrap_or(tw),
+            // Respect explicit height from style; otherwise use shaped (wrapped) height.
+            height: known_dims.height.unwrap_or(th),
+        }
+    });
+
+    match result {
         Ok(r) => {
             log::info!("Layout computed: {} nodes", r.len());
             state.resolved = r;
-            // Push absolute positions into the JS layout cache for hit-testing.
+            // Push raw absolute positions into the JS layout cache.
+            // update_scroll_positions() overwrites these with scroll-adjusted
+            // values immediately after recompute_layout returns.
             for (js_id, node) in &state.js_nodes {
                 if let Some(lid) = node.layout_id {
                     if let Some((_, rl)) = state.resolved.iter().find(|(nid, _)| *nid == lid) {
@@ -352,6 +434,75 @@ fn recompute_layout(state: &mut AppState) {
         Err(e) => log::error!("Layout error: {}", e),
     }
     state.layout_dirty = false;
+}
+
+// ── Scroll-adjusted layout cache (Week 15A) ───────────────────────────────────
+
+/// Walk the JS tree and write scroll-adjusted Y values into the layout cache.
+///
+/// `recompute_layout` stores raw absolute Taffy positions.  A Pressable inside
+/// a ScrollView appears at a *different* visual Y when scrolled, so hit-testing
+/// via `__velox_getLayout` would miss unless we correct the cached Y.
+///
+/// This function mirrors the scroll accumulation and clamping logic in
+/// `render_subtree` so the cached positions exactly match what's drawn.
+/// It runs every frame (not just when layout is dirty) because scroll state
+/// changes as a visual-only prop update.
+fn update_scroll_positions(state: &AppState) {
+    if let Some(root_id) = state.js_root {
+        let mut cache = state.runtime.layout_cache.lock().unwrap();
+        scroll_walk(root_id, &state.js_nodes, &state.resolved, 0.0, &mut cache);
+    }
+}
+
+fn scroll_walk(
+    id:       u32,
+    nodes:    &std::collections::HashMap<u32, JsNode>,
+    resolved: &[(NodeId, ResolvedLayout)],
+    scroll_y: f64,
+    cache:    &mut std::collections::HashMap<u32, [f32; 4]>,
+) {
+    let Some(node)      = nodes.get(&id)                                      else { return };
+    let Some(layout_id) = node.layout_id                                      else { return };
+    let Some((_, rl))   = resolved.iter().find(|(nid, _)| *nid == layout_id) else { return };
+
+    // Store the scroll-adjusted Y — this is what the cursor hit-tests against.
+    cache.insert(id, [rl.x, (rl.y as f64 - scroll_y) as f32, rl.width, rl.height]);
+
+    let is_clip = node.props.clip.unwrap_or(false);
+
+    // Mirror the same clamping logic as render_subtree so the stored positions
+    // match the visual positions exactly.
+    let child_scroll_y = {
+        let raw = scroll_y + node.props.scroll_offset_y.unwrap_or(0.0) as f64;
+        if is_clip {
+            let rh = rl.height as f64;
+            let max_child_bottom = node.children.iter()
+                .filter_map(|&cid| {
+                    let cn   = nodes.get(&cid)?;
+                    let clid = cn.layout_id?;
+                    resolved.iter()
+                        .find(|(nid, _)| *nid == clid)
+                        .map(|(_, crl)| (crl.y + crl.height) as f64)
+                })
+                .fold(f64::NEG_INFINITY, f64::max);
+
+            if max_child_bottom.is_finite() {
+                let pad   = node.props.padding.unwrap_or(0.0) as f64;
+                let max_s = (max_child_bottom + pad - (rl.y as f64 + rh)).max(0.0);
+                raw.min(max_s).max(0.0)
+            } else {
+                raw.max(0.0)
+            }
+        } else {
+            raw
+        }
+    };
+
+    let children: Vec<u32> = node.children.clone();
+    for child_id in children {
+        scroll_walk(child_id, nodes, resolved, child_scroll_y, cache);
+    }
 }
 
 // ── Recursive renderer ────────────────────────────────────────────────────────
@@ -491,7 +642,16 @@ fn render_subtree(
             } else {
                 rx + (bw - label.width).max(0.0) / 2.0
             };
-            let ty = ry + (bh - label.ascent).max(0.0) / 2.0;
+            // Vertical placement:
+            //   auto-sized box  (bh ≈ text_height) → top-align so all wrapped
+            //                   lines stay inside the box.
+            //   fixed-size box  (bh > text_height)  → center using ascent so a
+            //                   single-line label sits visually centred.
+            let ty = if bh <= label.text_height + 2.0 {
+                ry  // top-align: box was sized by the measure function
+            } else {
+                ry + (bh - label.ascent).max(0.0) / 2.0  // center in larger box
+            };
 
             frame.draw_text(&label.layout, tx, ty, rgba_to_vello(color));
 
@@ -636,17 +796,22 @@ pub fn run(config: AppConfig) {
                 // 3. Recompute layout only when layout-affecting props changed.
                 recompute_layout(s);
 
-                // 4. Run JS frame callback — dispatchEvents, React state updates.
+                // 4. Write scroll-adjusted positions into the layout cache so
+                //    JS hit-testing (step 5) works correctly for Pressables
+                //    inside scrolled ScrollViews.
+                update_scroll_positions(s);
+
+                // 5. Run JS frame callback — dispatchEvents, React state updates.
                 s.runtime.frame_tick();
 
-                // 5. Apply post-frame commands (React re-renders from events).
+                // 6. Apply post-frame commands (React re-renders from events).
                 let post_commands = s.runtime.drain_scene_commands();
                 apply_scene_commands(s, post_commands);
 
-                // 6. Re-layout if any post-frame command dirtied layout.
+                // 7. Re-layout if any post-frame command dirtied layout.
                 recompute_layout(s);
 
-                // 7. Acquire the next swapchain texture.
+                // 8. Acquire the next swapchain texture.
                 let texture = match s.gpu.current_texture() {
                     Ok(t)  => t,
                     Err(e) => {
@@ -656,14 +821,14 @@ pub fn run(config: AppConfig) {
                     }
                 };
 
-                // 8. Advance cursor blink phase if the deadline has passed.
+                // 9. Advance cursor blink phase if the deadline has passed.
                 let now = Instant::now();
                 if now >= s.cursor_blink_deadline {
                     s.cursor_blink_on       = !s.cursor_blink_on;
                     s.cursor_blink_deadline = now + Duration::from_millis(500);
                 }
 
-                // 9. Render the JS scene graph (depth-first, scroll-aware).
+                // 10. Render the JS scene graph (depth-first, scroll-aware).
                 let mut frame = s.renderer.begin_frame();
                 let mut any_cursor_active = false;
 

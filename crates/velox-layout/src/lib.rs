@@ -8,6 +8,15 @@
 //!     Vello draw-call placement
 //!
 //! Taffy knows nothing about rendering. It only computes geometry.
+//!
+//! ## Measure function (Week 15A)
+//!
+//! Text leaf nodes store a `TextMeasureCtx` so Taffy can call the measure
+//! function to determine their natural size.  When a Text node has no
+//! explicit `height` prop, Taffy passes available space to the measure
+//! closure; the caller (velox-core) shapes the text with Parley and returns
+//! the actual wrapped height.  Nodes with explicit height skip the measure
+//! call (Taffy uses the definite size directly).
 
 use std::collections::HashMap;
 use taffy::prelude::*;
@@ -42,11 +51,28 @@ pub struct NodeMeta {
     pub tag: Option<String>,
 }
 
+/// Context stored in Text leaf nodes so Taffy can call a measure function
+/// when the node has no explicit `height` prop.
+///
+/// Passed to `add_text_node`; the caller provides a measure closure to
+/// `compute_with_measure` that receives this context and returns the
+/// natural (width, height) of the shaped text.
+#[derive(Debug, Clone)]
+pub struct TextMeasureCtx {
+    pub text:      String,
+    pub font_size: f32,
+}
+
 // ── LayoutTree ────────────────────────────────────────────────────────────────
 
 /// Wraps Taffy with metadata and a clean compute API.
+///
+/// `TaffyTree<TextMeasureCtx>` stores text content per Text leaf node so
+/// the measure function closure can shape the text and return its height.
+/// Non-text nodes (Views) are created with `new_leaf` / `new_with_children`
+/// and have no context (`None` passed to measure).
 pub struct LayoutTree {
-    tree:  TaffyTree<()>,
+    tree:  TaffyTree<TextMeasureCtx>,
     meta:  HashMap<NodeId, NodeMeta>,
     root:  Option<NodeId>,
 }
@@ -60,11 +86,28 @@ impl LayoutTree {
         }
     }
 
-    /// Add a node with the given Taffy style.
+    /// Add a non-text leaf node (View) with the given Taffy style.
     ///
     /// Returns a `NodeId` you use to add children and read results.
     pub fn add_node(&mut self, style: Style, tag: Option<String>) -> Result<NodeId, LayoutError> {
         let id = self.tree.new_leaf(style)?;
+        self.meta.insert(id, NodeMeta { tag });
+        Ok(id)
+    }
+
+    /// Add a Text leaf node with content metadata for the measure function.
+    ///
+    /// When the node has no explicit `height` in `style`, Taffy will call
+    /// the measure closure passed to `compute_with_measure`, giving the
+    /// caller (velox-core) a chance to shape the text and return its real
+    /// height from Parley.
+    pub fn add_text_node(
+        &mut self,
+        style: Style,
+        ctx:   TextMeasureCtx,
+        tag:   Option<String>,
+    ) -> Result<NodeId, LayoutError> {
+        let id = self.tree.new_leaf_with_context(style, ctx)?;
         self.meta.insert(id, NodeMeta { tag });
         Ok(id)
     }
@@ -81,30 +124,46 @@ impl LayoutTree {
         Ok(id)
     }
 
-    /// Set the root node.  The root is what `compute()` runs from.
+    /// Set the root node.  The root is what `compute_with_measure()` runs from.
     pub fn set_root(&mut self, node: NodeId) {
         self.root = Some(node);
     }
 
     /// Compute the layout for all nodes given a viewport size in pixels.
     ///
-    /// Call this every time the window resizes.  Returns all resolved
-    /// layouts in a flat `Vec` so callers can iterate without touching Taffy.
-    pub fn compute(
+    /// `measure_fn` is called by Taffy for every Text leaf node that has no
+    /// explicit dimension.  Signature matches Taffy 0.5's
+    /// `compute_layout_with_measure`.
+    ///
+    /// For a non-text node the closure receives `None` for the context
+    /// parameter and should return `Size::ZERO` (Taffy ignores the result
+    /// when the node has definite dimensions from its style).
+    pub fn compute_with_measure<F>(
         &mut self,
         viewport_width:  f32,
         viewport_height: f32,
-    ) -> Result<Vec<(NodeId, ResolvedLayout)>, LayoutError> {
+        measure_fn: F,
+    ) -> Result<Vec<(NodeId, ResolvedLayout)>, LayoutError>
+    where
+        F: FnMut(
+            Size<Option<f32>>,
+            Size<AvailableSpace>,
+            NodeId,
+            Option<&mut TextMeasureCtx>,
+            &Style,
+        ) -> Size<f32>,
+    {
         let root = self.root.ok_or_else(|| LayoutError::Taffy(
             taffy::TaffyError::InvalidInputNode(NodeId::from(u64::MAX))
         ))?;
 
-        self.tree.compute_layout(
+        self.tree.compute_layout_with_measure(
             root,
             Size {
                 width:  AvailableSpace::Definite(viewport_width),
                 height: AvailableSpace::Definite(viewport_height),
             },
+            measure_fn,
         )?;
 
         let mut results = Vec::with_capacity(self.meta.len());

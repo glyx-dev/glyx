@@ -1,23 +1,25 @@
-// Week 14 milestone — incremental layout + ScrollView.
+// Week 15A milestone — multi-line text + ScrollView nested Pressable hit-test.
 //
 // What this demo shows:
-//   - Incremental layout: hover/scroll state changes skip Taffy entirely —
-//     only visual props changed, so layout is not recomputed each frame.
-//   - ScrollView: Catppuccin palette list clips children with a Vello layer
-//     and shifts them by scrollOffsetY on each mouse-wheel tick.
-//   - All Week 13 features still present: text cache, hover borders, TextInput.
+//   1. Multi-line text: paragraphs with no explicit `height` prop — Taffy
+//      calls the measure function, Parley shapes and wraps the text, and the
+//      container expands to fit the measured height automatically.
+//   2. ScrollView nested Pressable: each palette row is now a <Pressable>,
+//      verifying that hit-testing works correctly at any scroll position
+//      (scroll-adjusted Y values are now written into the layout cache).
+//   3. All Week 14 features: incremental layout, text cache, TextInput, scroll cap.
 
 import './polyfills.js';
 import React, { useState } from 'react';
 import { View, Text, Pressable, TextInput, ScrollView, render } from '@velox/react';
 
-// Layout constants — used both for rendering and for the scroll cap.
-const ITEM_H   = 44;   // height of each palette swatch
-const ITEM_GAP = 8;    // gap between swatches (ScrollView style.gap)
-const SV_PAD   = 8;    // ScrollView padding (all sides)
-const SV_H     = 290;  // visible height of the ScrollView
+// Layout constants for the scrollable list.
+const ITEM_H   = 44;
+const ITEM_GAP = 8;
+const SV_PAD   = 8;
+const SV_H     = 260;
 
-// Catppuccin Mocha palette — enough items to require scrolling.
+// Catppuccin Mocha palette — each row is now a Pressable.
 const PALETTE = [
   { name: 'Rosewater', bg: '#dc8a78', fg: '#1e1e2e' },
   { name: 'Flamingo',  bg: '#dd7878', fg: '#1e1e2e' },
@@ -36,8 +38,9 @@ const PALETTE = [
 ];
 
 function App() {
-  const [name, setName]       = useState('');
-  const [greeted, setGreeted] = useState(false);
+  const [name, setName]         = useState('');
+  const [greeted, setGreeted]   = useState(false);
+  const [selected, setSelected] = useState(null);
 
   const greet = () => setGreeted(true);
   const handleNameChange = (text) => { setName(text); setGreeted(false); };
@@ -48,58 +51,79 @@ function App() {
       width={1280}
       height={800}
     >
-      {/* Two-column layout — backgroundColor prevents the default BRAND_GREEN fallback */}
+      {/* Two-column layout */}
       <View
         style={{ flexDirection: 'row', gap: 32, backgroundColor: '#1e1e2e' }}
-        width={896}
-        height={400}
+        width={960}
+        height={700}
       >
 
-        {/* ── Left: interaction card (hover + border + TextInput) ─────── */}
+        {/* ── Left: interaction card ───────────────────────────────────── */}
         <View
           style={{
             backgroundColor: '#2a2a3e',
             borderRadius: 16,
             borderWidth: 1,
             borderColor: '#44446a',
-            padding: 32,
-            gap: 20,
+            padding: 24,
+            gap: 16,
+            justifyContent: 'flex-start',
+            alignItems: 'flex-start',
           }}
-          width={400}
-          height={360}
+          width={420}
+          height={660}
         >
+          {/* Static title — explicit height (single line) */}
           <Text
             fontSize={18}
-            width={336}
+            width={372}
             height={28}
             style={{ color: '#cdd6f4' }}
           >
-            Week 14 — ScrollView + Incremental Layout
+            Week 15A — Multi-line Text + Nested Pressable
           </Text>
+
+          {/* ── Multi-line paragraph — NO explicit height prop ────────────
+               Taffy calls the measure function; Parley shapes and wraps the
+               text at max_width = 372 px; the node grows to fit.         */}
+          <Text
+            fontSize={13}
+            width={372}
+            style={{ color: '#a6adc8' }}
+          >
+            This paragraph has no height prop. The layout engine calls Parley
+            to measure its wrapped height automatically. The surrounding
+            container adapts without any fixed height on this Text node.
+          </Text>
+
+          {/* Divider */}
+          <View
+            style={{ backgroundColor: '#44446a' }}
+            width={372}
+            height={1}
+          />
 
           <TextInput
             value={name}
             onChangeText={handleNameChange}
             placeholder="Type your name..."
             fontSize={16}
-            width={336}
+            width={372}
             height={44}
           />
 
           {greeted ? (
             <Text
-              fontSize={18}
-              width={336}
-              height={26}
+              fontSize={17}
+              width={372}
               style={{ color: '#a6e3a1' }}
             >
               {name.trim() ? `Hello, ${name}!` : 'Hello, stranger!'}
             </Text>
           ) : (
             <Text
-              fontSize={14}
-              width={336}
-              height={20}
+              fontSize={13}
+              width={372}
               style={{ color: '#585b70' }}
             >
               Hover the button, then press it.
@@ -112,13 +136,24 @@ function App() {
             height={44}
             style={{ backgroundColor: '#6c63ff', borderRadius: 8 }}
           >
-            <Text fontSize={16} width={140} height={24} style={{ color: '#ffffff' }}>
+            <Text fontSize={15} width={140} height={24} style={{ color: '#ffffff' }}>
               Say Hello
             </Text>
           </Pressable>
+
+          {/* Dynamic multi-line label — updates as user types, no fixed height */}
+          {name.length > 0 && (
+            <Text
+              fontSize={12}
+              width={372}
+              style={{ color: '#6c7086' }}
+            >
+              {`You typed ${name.length} character${name.length === 1 ? '' : 's'}. This label also has no fixed height and wraps freely.`}
+            </Text>
+          )}
         </View>
 
-        {/* ── Right: scrollable palette list ──────────────────────────── */}
+        {/* ── Right: scrollable Pressable list ─────────────────────────── */}
         <View
           style={{
             backgroundColor: '#2a2a3e',
@@ -127,45 +162,68 @@ function App() {
             borderColor: '#44446a',
             padding: 16,
             gap: 12,
+            justifyContent: 'flex-start',
+            alignItems: 'flex-start',
           }}
-          width={464}
-          height={360}
+          width={476}
+          height={660}
         >
           <Text
             fontSize={15}
-            width={432}
+            width={444}
             height={22}
             style={{ color: '#cdd6f4' }}
           >
-            Catppuccin palette — scroll with mouse wheel
+            Catppuccin palette — scroll and click any colour
           </Text>
 
-          {/* ScrollView: contentHeight is explicit so the scroll cap is exact.
-               Formula: n * ITEM_H + (n-1) * ITEM_GAP + 2 * SV_PAD */}
+          {selected !== null && (
+            <Text
+              fontSize={13}
+              width={444}
+              height={20}
+              style={{ color: '#a6e3a1' }}
+            >
+              {`Selected: ${PALETTE[selected].name} — nested hit-test works while scrolled`}
+            </Text>
+          )}
+
+          {/* Each palette row is a Pressable — verifies nested hit-testing */}
           <ScrollView
-            width={432}
+            width={444}
             height={SV_H}
             contentHeight={PALETTE.length * ITEM_H + (PALETTE.length - 1) * ITEM_GAP + 2 * SV_PAD}
             style={{ gap: ITEM_GAP, padding: SV_PAD, backgroundColor: '#1a1a2e', borderRadius: 8 }}
           >
             {PALETTE.map((item, i) => (
-              <View
+              <Pressable
                 key={i}
-                style={{ backgroundColor: item.bg, borderRadius: 6 }}
-                width={416}
+                onPress={() => setSelected(i)}
+                width={428}
                 height={ITEM_H}
+                style={{ backgroundColor: item.bg, borderRadius: 6 }}
               >
                 <Text
                   fontSize={14}
-                  width={380}
+                  width={392}
                   height={22}
                   style={{ color: item.fg }}
                 >
                   {item.name}
                 </Text>
-              </View>
+              </Pressable>
             ))}
           </ScrollView>
+
+          {/* Auto-sized hint text */}
+          <Text
+            fontSize={12}
+            width={444}
+            style={{ color: '#45475a' }}
+          >
+            Scroll the list, then click a colour while scrolled. The selection
+            label above should update — confirming scroll-adjusted hit-testing.
+          </Text>
         </View>
 
       </View>
@@ -175,4 +233,4 @@ function App() {
 
 render(<App />);
 
-__velox_log('Week 14: ScrollView + incremental layout ready.');
+__velox_log('Week 15A: multi-line text + ScrollView Pressable hit-test ready.');

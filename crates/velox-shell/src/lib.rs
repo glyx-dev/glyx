@@ -10,23 +10,26 @@
 //! This keeps idle CPU at ~0% on a static UI, which is critical for both
 //! battery life and thermal behaviour on laptops.
 //!
-//! When future subsystems need continuous rendering (animations, 3D, AI
-//! progress) they will call `request_redraw()` from their update callbacks.
-//! For games, switch to `ControlFlow::Poll` via the shell config.
+//! ## API surface
+//!
+//! `ShellEvent` deliberately uses only primitive Rust types so that upstream
+//! crates (velox-core, velox-runtime) have no dependency on winit.
 
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::{ElementState, KeyEvent, MouseButton, WindowEvent},
+    event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::PhysicalKey,
+    keyboard::{Key, NamedKey, PhysicalKey},
     window::{Window, WindowAttributes, WindowId},
 };
 
 // ── Public event type ────────────────────────────────────────────────────────
 
 /// Platform-agnostic events emitted by the shell.
+///
+/// All fields use primitive Rust types — no winit types leak through.
 #[derive(Debug, Clone)]
 pub enum ShellEvent {
     /// Window is ready; GPU context can now be created.
@@ -37,22 +40,31 @@ pub enum ShellEvent {
     RedrawRequested,
     /// User/OS requested the window to close.
     CloseRequested,
-    /// Keyboard input.
-    KeyInput { key: PhysicalKey, state: ElementState },
-    /// Mouse button.
-    MouseInput { button: MouseButton, state: ElementState },
+    /// Keyboard key pressed or released.
+    ///
+    /// - `key`:     a stable name string, e.g. `"KeyA"`, `"Enter"`, `"Backspace"`.
+    /// - `text`:    the Unicode character produced (only on press, for printable keys).
+    /// - `pressed`: true on key-down, false on key-up.
+    KeyInput { key: String, text: Option<String>, pressed: bool },
+    /// Mouse button pressed or released at the current cursor position.
+    ///
+    /// - `button`: 0 = left, 1 = right, 2 = middle.
+    /// - `pressed`: true on button-down, false on button-up.
+    MouseInput { button: u8, pressed: bool },
     /// Cursor moved to physical pixel position.
     CursorMoved { x: f64, y: f64 },
+    /// Vertical scroll (positive = scroll down).
+    Scroll { delta_y: f32 },
 }
 
 // ── Shell config ─────────────────────────────────────────────────────────────
 
 pub struct ShellConfig {
-    pub title:       String,
-    pub width:       u32,
-    pub height:      u32,
+    pub title:      String,
+    pub width:      u32,
+    pub height:     u32,
     /// Use Poll (games/continuous rendering) instead of Wait (UI/battery).
-    pub continuous:  bool,
+    pub continuous: bool,
 }
 
 impl Default for ShellConfig {
@@ -75,8 +87,6 @@ where
 {
     let event_loop = EventLoop::new().expect("Failed to create EventLoop");
 
-    // Wait   — sleeps when idle. Best for productivity/UI apps. Near-zero idle CPU.
-    // Poll   — runs as fast as possible. Best for games and continuous animation.
     let control_flow = if config.continuous {
         ControlFlow::Poll
     } else {
@@ -136,7 +146,6 @@ impl ApplicationHandler for ShellApp {
                     width:  size.width,
                     height: size.height,
                 });
-                // Request a redraw after resize so the frame updates immediately.
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -144,11 +153,6 @@ impl ApplicationHandler for ShellApp {
 
             WindowEvent::RedrawRequested => {
                 (self.handler)(ShellEvent::RedrawRequested);
-
-                // In Poll mode the OS drives continuous redraws automatically.
-                // In Wait mode we only redraw when explicitly asked — so we do
-                // NOT re-request here.  The app requests a new frame when its
-                // state changes (animation tick, async completion, etc.).
                 if self.config.continuous {
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -157,17 +161,42 @@ impl ApplicationHandler for ShellApp {
             }
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent { physical_key, state, .. }, ..
+                event: KeyEvent { physical_key, logical_key, state, .. }, ..
             } => {
-                (self.handler)(ShellEvent::KeyInput { key: physical_key, state });
-                // Key input might change app state — request a redraw.
+                // Convert PhysicalKey to a stable name string.
+                let key_name = match physical_key {
+                    PhysicalKey::Code(code) => format!("{:?}", code),
+                    PhysicalKey::Unidentified(_) => "Unidentified".into(),
+                };
+
+                // Extract printable text from the logical key (press only).
+                let text = if state == ElementState::Pressed {
+                    match &logical_key {
+                        Key::Character(s) if s.len() == 1 => Some(s.to_string()),
+                        Key::Named(NamedKey::Space) => Some(" ".to_string()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
+                let pressed = state == ElementState::Pressed;
+
+                (self.handler)(ShellEvent::KeyInput { key: key_name, text, pressed });
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
             }
 
             WindowEvent::MouseInput { button, state, .. } => {
-                (self.handler)(ShellEvent::MouseInput { button, state });
+                let btn = match button {
+                    MouseButton::Left   => 0u8,
+                    MouseButton::Right  => 1,
+                    MouseButton::Middle => 2,
+                    _                   => 3,
+                };
+                let pressed = state == ElementState::Pressed;
+                (self.handler)(ShellEvent::MouseInput { button: btn, pressed });
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -175,9 +204,19 @@ impl ApplicationHandler for ShellApp {
 
             WindowEvent::CursorMoved { position, .. } => {
                 (self.handler)(ShellEvent::CursorMoved { x: position.x, y: position.y });
-                // Cursor moves do not necessarily need a redraw — only request
-                // one when hover states are implemented.
-                // if let Some(w) = &self.window { w.request_redraw(); }
+                // Hover-state redraws are triggered by the cursor-moved handler in
+                // velox-core when needed. No unconditional redraw here.
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                let delta_y = match delta {
+                    MouseScrollDelta::LineDelta(_, y)   => y * 40.0,
+                    MouseScrollDelta::PixelDelta(pos)   => pos.y as f32,
+                };
+                (self.handler)(ShellEvent::Scroll { delta_y });
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
 
             _ => {}

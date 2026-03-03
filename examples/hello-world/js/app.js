@@ -5803,8 +5803,12 @@ No matching component was found for:
   // js/packages/@velox/react/src/hostConfig.js
   var import_constants = __toESM(require_constants(), 1);
   function createInstance(type, props) {
-    const { children, ...nodeProps } = props;
+    const { children, style, ref: _ref, _veloxOnMount, ...rest } = props;
+    const nodeProps = { ...rest, ...style };
     const id = __velox_createNode(type, nodeProps);
+    if (typeof _veloxOnMount === "function") {
+      _veloxOnMount(id);
+    }
     return { id };
   }
   function createTextInstance(text) {
@@ -5856,7 +5860,8 @@ No matching component was found for:
     return newProps;
   }
   function commitUpdate(instance, updatePayload) {
-    const { children, ...nodeProps } = updatePayload;
+    const { children, style, ref: _ref, _veloxOnMount, ...rest } = updatePayload;
+    const nodeProps = { ...rest, ...style };
     __velox_updateNode(instance.id, nodeProps);
   }
   function commitTextUpdate() {}
@@ -5930,6 +5935,8 @@ No matching component was found for:
     supportsPersistence: false,
     supportsHydration: false,
     isPrimaryRenderer: true,
+    supportsMicrotasks: true,
+    scheduleMicrotask: (fn) => Promise.resolve().then(fn),
     getCurrentEventPriority,
     getInstanceFromNode,
     beforeActiveInstanceBlur,
@@ -5939,26 +5946,262 @@ No matching component was found for:
   };
   var hostConfig_default = HostConfig;
 
+  // js/packages/@velox/react/src/events.js
+  var pressableRegistry = new Map;
+  var inputRegistry = new Map;
+  var focusedNodeId = null;
+  function registerPressable(nodeId, handlers) {
+    pressableRegistry.set(nodeId, handlers);
+  }
+  function unregisterPressable(nodeId) {
+    pressableRegistry.delete(nodeId);
+  }
+  function registerInput(nodeId, handlers) {
+    inputRegistry.set(nodeId, handlers);
+  }
+  function unregisterInput(nodeId) {
+    if (focusedNodeId === nodeId)
+      focusedNodeId = null;
+    inputRegistry.delete(nodeId);
+  }
+  function setFocus(nodeId) {
+    if (focusedNodeId !== nodeId) {
+      if (focusedNodeId !== null) {
+        const prev = inputRegistry.get(focusedNodeId);
+        prev?.onBlur?.();
+      }
+      focusedNodeId = nodeId;
+      const handlers = inputRegistry.get(nodeId);
+      handlers?.onFocus?.();
+    }
+  }
+  function hitTest(nodeId, px, py) {
+    const layout = __velox_getLayout(nodeId);
+    if (!layout)
+      return false;
+    return px >= layout.x && px < layout.x + layout.width && py >= layout.y && py < layout.y + layout.height;
+  }
+  function dispatchEvents() {
+    const events = __velox_pollEvents();
+    if (!events || events.length === 0)
+      return;
+    for (const ev of events) {
+      switch (ev.type) {
+        case "mouseButton": {
+          if (!ev.pressed)
+            break;
+          let handled = false;
+          for (const [nodeId, handlers] of pressableRegistry) {
+            if (hitTest(nodeId, ev.x, ev.y)) {
+              handlers.onPress?.();
+              handled = true;
+              break;
+            }
+          }
+          for (const [nodeId] of inputRegistry) {
+            if (hitTest(nodeId, ev.x, ev.y)) {
+              setFocus(nodeId);
+              handled = true;
+              break;
+            }
+          }
+          if (!handled && focusedNodeId !== null) {
+            const prev = inputRegistry.get(focusedNodeId);
+            prev?.onBlur?.();
+            focusedNodeId = null;
+          }
+          break;
+        }
+        case "keyInput": {
+          if (!ev.pressed || focusedNodeId === null)
+            break;
+          const handlers = inputRegistry.get(focusedNodeId);
+          if (!handlers)
+            break;
+          handlers.onKeyPress?.({ key: ev.key, text: ev.text });
+          break;
+        }
+        default:
+          break;
+      }
+    }
+  }
+
   // js/packages/@velox/react/src/index.js
   var VeloxReconciler = import_react_reconciler.default(hostConfig_default);
   var rootContainer = VeloxReconciler.createContainer({ isVeloxRoot: true }, 0, null, false, null, "", (err) => __velox_log("[React] Recoverable error: " + err.message), null);
+  globalThis.__velox_frameCallback = function veloxFrameCallback() {
+    VeloxReconciler.flushSync(() => {
+      dispatchEvents();
+    });
+  };
   function render(element) {
     VeloxReconciler.updateContainer(element, rootContainer, null, null);
   }
-  var View = ({ children, ...props }) => import_react.default.createElement("view", props, children);
-  var Text = ({ children, ...props }) => import_react.default.createElement("text", { text: children, ...props });
+  var View = ({ children, style, ...props }) => import_react.default.createElement("view", { style, ...props }, children);
+  var Text = ({ children, style, showCursor, ...props }) => import_react.default.createElement("text", { text: children, style, showCursor, ...props });
+  function Pressable({ children, onPress, onPressIn, onPressOut, style, ...props }) {
+    const nodeIdRef = import_react.useRef(null);
+    const handlersRef = import_react.useRef(null);
+    const [pressed, setPressed] = import_react.useState(false);
+    handlersRef.current = {
+      onPress: () => onPress?.(),
+      onPressIn: () => {
+        setPressed(true);
+        onPressIn?.();
+      },
+      onPressOut: () => {
+        setPressed(false);
+        onPressOut?.();
+      }
+    };
+    const onMount = import_react.useCallback((id) => {
+      nodeIdRef.current = id;
+      registerPressable(id, {
+        onPress: () => handlersRef.current.onPress(),
+        onPressIn: () => handlersRef.current.onPressIn(),
+        onPressOut: () => handlersRef.current.onPressOut()
+      });
+    }, []);
+    import_react.useEffect(() => {
+      return () => {
+        if (nodeIdRef.current !== null) {
+          unregisterPressable(nodeIdRef.current);
+        }
+      };
+    }, []);
+    const mergedStyle = pressed ? { ...style, backgroundColor: style?.backgroundColor ?? "#555" } : style;
+    return import_react.default.createElement("view", { _veloxOnMount: onMount, style: mergedStyle, ...props }, children);
+  }
+  function TextInput({
+    value = "",
+    onChangeText,
+    placeholder = "",
+    fontSize = 16,
+    width = 240,
+    height = 44,
+    style,
+    ...props
+  }) {
+    const nodeIdRef = import_react.useRef(null);
+    const handlersRef = import_react.useRef(null);
+    const [focused, setFocused] = import_react.useState(false);
+    handlersRef.current = {
+      onFocus: () => setFocused(true),
+      onBlur: () => setFocused(false),
+      onKeyPress: ({ key, text }) => {
+        if (key === "Backspace") {
+          onChangeText?.(value.slice(0, -1));
+        } else if (text) {
+          onChangeText?.(value + text);
+        }
+      }
+    };
+    const onMount = import_react.useCallback((id) => {
+      nodeIdRef.current = id;
+      registerInput(id, {
+        onFocus: () => handlersRef.current.onFocus(),
+        onBlur: () => handlersRef.current.onBlur(),
+        onKeyPress: (ev) => handlersRef.current.onKeyPress(ev)
+      });
+    }, []);
+    import_react.useEffect(() => {
+      return () => {
+        if (nodeIdRef.current !== null) {
+          unregisterInput(nodeIdRef.current);
+        }
+      };
+    }, []);
+    const displayText = value || placeholder;
+    const textColor = value ? "#ffffff" : "#888888";
+    const inputStyle = {
+      backgroundColor: focused ? "#4a4a7e" : "#2a2a3e",
+      borderRadius: 6,
+      ...style
+    };
+    return import_react.default.createElement("view", { _veloxOnMount: onMount, style: inputStyle, width, height, ...props }, import_react.default.createElement("text", {
+      text: displayText,
+      fontSize,
+      width: width - 16,
+      height: height - 16,
+      style: { color: textColor },
+      showCursor: focused
+    }));
+  }
 
   // examples/hello-world/js/app.jsx
   var jsx_runtime = __toESM(require_jsx_runtime(), 1);
-  render(/* @__PURE__ */ jsx_runtime.jsx(View, {
-    width: 360,
-    height: 180,
-    children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-      fontSize: 20,
-      width: 200,
-      height: 28,
-      children: "Hello Velox"
-    })
-  }));
-  __velox_log("Week 11: React rendered through Velox pipeline.");
+  function App() {
+    const [name, setName] = import_react2.useState("");
+    const [greeted, setGreeted] = import_react2.useState(false);
+    const greet = () => setGreeted(true);
+    const handleNameChange = (text) => {
+      setName(text);
+      setGreeted(false);
+    };
+    return /* @__PURE__ */ jsx_runtime.jsx(View, {
+      style: { backgroundColor: "#1e1e2e", borderRadius: 0 },
+      width: 1280,
+      height: 800,
+      children: /* @__PURE__ */ jsx_runtime.jsxs(View, {
+        style: {
+          backgroundColor: "#2a2a3e",
+          borderRadius: 16,
+          padding: 32,
+          gap: 20
+        },
+        width: 400,
+        height: 280,
+        children: [
+          /* @__PURE__ */ jsx_runtime.jsx(Text, {
+            fontSize: 22,
+            width: 340,
+            height: 30,
+            style: { color: "#cdd6f4" },
+            children: "Week 12 — Velox Input Demo"
+          }),
+          /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+            value: name,
+            onChangeText: handleNameChange,
+            placeholder: "Type your name...",
+            fontSize: 16,
+            width: 340,
+            height: 44
+          }),
+          greeted ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+            fontSize: 18,
+            width: 340,
+            height: 26,
+            style: { color: "#a6e3a1" },
+            children: name.trim() ? `Hello, ${name}!` : "Hello, stranger!"
+          }) : /* @__PURE__ */ jsx_runtime.jsx(Text, {
+            fontSize: 14,
+            width: 340,
+            height: 20,
+            style: { color: "#585b70" },
+            children: "Press the button to greet yourself."
+          }),
+          /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+            onPress: greet,
+            width: 160,
+            height: 44,
+            children: /* @__PURE__ */ jsx_runtime.jsx(View, {
+              style: { backgroundColor: "#6c63ff", borderRadius: 8 },
+              width: 160,
+              height: 44,
+              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 16,
+                width: 140,
+                height: 24,
+                style: { color: "#ffffff" },
+                children: "Say Hello"
+              })
+            })
+          })
+        ]
+      })
+    });
+  }
+  render(/* @__PURE__ */ jsx_runtime.jsx(App, {}));
+  __velox_log("Week 12: style system + events + Pressable + TextInput ready.");
 })();

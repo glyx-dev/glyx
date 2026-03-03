@@ -9,7 +9,7 @@
 //!   - the window first appears,
 //!   - the window is resized,
 //!   - a JS async completion arrives (driven by the runtime tick), or
-//!   - any other state mutation occurs.
+//!   - any other state mutation occurs (mouse, keyboard, scroll).
 //!
 //! This keeps idle CPU usage near zero — important for battery life and for
 //! not saturating the GPU on a static UI.
@@ -28,8 +28,8 @@
 
 use velox_gpu::GpuContext;
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout};
-use velox_renderer::{colors, VeloxRenderer};
-use velox_runtime::{init_v8, NodeProps, NodeType, SceneCommand, VeloxRuntime};
+use velox_renderer::{colors, peniko, VeloxRenderer};
+use velox_runtime::{init_v8, InputEvent, NodeProps, NodeType, SceneCommand, VeloxRuntime};
 use velox_shell::ShellEvent;
 use velox_text::{TextLayout, TextSystem};
 use velox_layout::NodeId;
@@ -65,22 +65,19 @@ struct CachedLabel {
     /// Pre-computed advance width for horizontal centering.
     width:  f64,
     /// Pre-computed ascent for *visual* vertical centering.
-    /// Use ascent, not height — height includes leading above/below glyphs.
     ascent: f64,
 }
 
 impl CachedLabel {
-    fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32) -> Self {
-        let layout = ts.label_centered(text, font_size, max_width, colors::TEXT_PRIMARY);
+    fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4]) -> Self {
+        let vello_color = peniko::Color::rgba8(color[0], color[1], color[2], color[3]);
+        let layout = ts.label_centered(text, font_size, max_width, vello_color);
         let width  = layout.width()  as f64;
         let ascent = layout.ascent() as f64;
         Self { layout, width, ascent }
     }
 
     /// Top-left draw origin that visually centres the text inside `rl`.
-    ///
-    /// `draw_text` adds `glyph_run.baseline()` before passing to Vello, so
-    /// the baseline lands at `ty + ascent` — which is the centred position.
     fn centred_origin(&self, rl: &ResolvedLayout) -> (f64, f64) {
         let bw = rl.width  as f64;
         let bh = rl.height as f64;
@@ -105,6 +102,9 @@ struct AppState {
     resolved:     Vec<(NodeId, ResolvedLayout)>,
     js_nodes:     std::collections::HashMap<u32, JsNode>,
     js_root:      Option<u32>,
+    /// Current cursor position in physical pixels.
+    cursor_x:     f32,
+    cursor_y:     f32,
 }
 
 struct JsNode {
@@ -114,40 +114,81 @@ struct JsNode {
     layout_id: Option<NodeId>,
 }
 
+// ── Colour helpers ─────────────────────────────────────────────────────────────
+
+fn rgba_to_vello(c: [u8; 4]) -> peniko::Color {
+    peniko::Color::rgba8(c[0], c[1], c[2], c[3])
+}
+
 // ── Layout helpers ────────────────────────────────────────────────────────────
 
 fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::prelude::Style {
+    use taffy::prelude::*;
+
     match node_type {
         NodeType::View => {
-            let mut style = taffy::prelude::Style::default();
-            style.display           = taffy::prelude::Display::Flex;
-            style.flex_direction    = taffy::prelude::FlexDirection::Column;
-            style.align_items       = Some(taffy::prelude::AlignItems::Center);
-            style.justify_content   = Some(taffy::prelude::JustifyContent::Center);
-            if let Some(w) = props.width  { style.size.width  = taffy::prelude::length(w); }
-            if let Some(h) = props.height { style.size.height = taffy::prelude::length(h); }
+            let mut style = Style::default();
+            style.display = Display::Flex;
+
+            // flex_direction
+            style.flex_direction = match props.flex_direction.as_deref() {
+                Some("row")            => FlexDirection::Row,
+                Some("row-reverse")    => FlexDirection::RowReverse,
+                Some("column-reverse") => FlexDirection::ColumnReverse,
+                _                      => FlexDirection::Column,
+            };
+
+            // justify_content
+            style.justify_content = match props.justify_content.as_deref() {
+                Some("flex-start")    => Some(JustifyContent::FlexStart),
+                Some("flex-end")      => Some(JustifyContent::FlexEnd),
+                Some("space-between") => Some(JustifyContent::SpaceBetween),
+                Some("space-around")  => Some(JustifyContent::SpaceAround),
+                Some("space-evenly")  => Some(JustifyContent::SpaceEvenly),
+                _                     => Some(JustifyContent::Center),
+            };
+
+            // align_items
+            style.align_items = match props.align_items.as_deref() {
+                Some("flex-start") => Some(AlignItems::FlexStart),
+                Some("flex-end")   => Some(AlignItems::FlexEnd),
+                Some("stretch")    => Some(AlignItems::Stretch),
+                Some("baseline")   => Some(AlignItems::Baseline),
+                _                  => Some(AlignItems::Center),
+            };
+
+            if let Some(w) = props.width  { style.size.width  = length(w); }
+            if let Some(h) = props.height { style.size.height = length(h); }
+
+            if let Some(p) = props.padding {
+                style.padding = Rect {
+                    left:   length(p),
+                    right:  length(p),
+                    top:    length(p),
+                    bottom: length(p),
+                };
+            }
+
+            if let Some(g) = props.gap {
+                style.gap = Size { width: length(g), height: length(g) };
+            }
+
+            if let Some(f) = props.flex {
+                style.flex_grow = f;
+            }
+
             style
         }
         NodeType::Text => {
             let mut style = taffy::prelude::Style::default();
-            // Use the explicit dimensions from props so Taffy can position the
-            // text node within its parent flex container correctly.
-            // Without these, Taffy gives the node zero size — the container
-            // then centres a zero-size box, which places the draw origin at the
-            // container midpoint. Text extends right and down from there,
-            // appearing in the bottom-right quadrant instead of the centre.
-            if let Some(w) = props.width  { style.size.width  = taffy::prelude::length(w); }
-            if let Some(h) = props.height { style.size.height = taffy::prelude::length(h); }
+            if let Some(w) = props.width  { style.size.width  = length(w); }
+            if let Some(h) = props.height { style.size.height = length(h); }
             style
         }
     }
 }
 
 /// Rebuild the entire Taffy tree from the current JS node map.
-///
-/// Called whenever `layout_dirty` is true and a JS root exists.
-/// The full rebuild is correct at this scale; incremental updates are a
-/// Week 14+ concern (hundreds of nodes, animations).
 fn rebuild_layout_from_scene(
     layout:  &mut LayoutTree,
     nodes:   &mut std::collections::HashMap<u32, JsNode>,
@@ -198,8 +239,7 @@ fn rebuild_layout_from_scene(
     }
 }
 
-/// Depth-first render order with cycle detection (guards against JS bugs
-/// that create circular parent-child references).
+/// Depth-first render order with cycle detection.
 fn build_render_order(
     root_id: u32,
     nodes:   &std::collections::HashMap<u32, JsNode>,
@@ -224,6 +264,60 @@ fn build_render_order(
     out
 }
 
+fn apply_scene_commands(state: &mut AppState, commands: Vec<SceneCommand>) -> bool {
+    if commands.is_empty() {
+        return false;
+    }
+    for cmd in commands {
+        match cmd {
+            SceneCommand::CreateNode { id, node_type, props } => {
+                state.js_nodes.insert(id, JsNode {
+                    node_type,
+                    props,
+                    children:  Vec::new(),
+                    layout_id: None,
+                });
+                if state.js_root.is_none() {
+                    state.js_root = Some(id);
+                }
+            }
+            SceneCommand::AppendChild { parent_id, child_id } => {
+                if let Some(parent) = state.js_nodes.get_mut(&parent_id) {
+                    if !parent.children.contains(&child_id) {
+                        parent.children.push(child_id);
+                    }
+                }
+            }
+            SceneCommand::UpdateNode { id, props } => {
+                if let Some(node) = state.js_nodes.get_mut(&id) {
+                    if props.width.is_some()            { node.props.width            = props.width;            }
+                    if props.height.is_some()           { node.props.height           = props.height;           }
+                    if props.text.is_some()             { node.props.text             = props.text;             }
+                    if props.font_size.is_some()        { node.props.font_size        = props.font_size;        }
+                    if props.color.is_some()            { node.props.color            = props.color;            }
+                    if props.background_color.is_some() { node.props.background_color = props.background_color; }
+                    if props.border_radius.is_some()    { node.props.border_radius    = props.border_radius;    }
+                    if props.flex.is_some()             { node.props.flex             = props.flex;             }
+                    if props.flex_direction.is_some()   { node.props.flex_direction   = props.flex_direction;   }
+                    if props.justify_content.is_some()  { node.props.justify_content  = props.justify_content;  }
+                    if props.align_items.is_some()      { node.props.align_items      = props.align_items;      }
+                    if props.padding.is_some()          { node.props.padding          = props.padding;          }
+                    if props.gap.is_some()              { node.props.gap              = props.gap;              }
+                    if props.show_cursor.is_some()      { node.props.show_cursor      = props.show_cursor;      }
+                }
+            }
+            SceneCommand::RemoveNode { id } => {
+                state.js_nodes.remove(&id);
+            }
+            SceneCommand::SetRoot { id } => {
+                state.js_root = Some(id);
+            }
+        }
+    }
+    state.layout_dirty = true;
+    true
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn run(config: AppConfig) {
@@ -239,8 +333,6 @@ pub fn run(config: AppConfig) {
 
     init_v8();
 
-    // Destructure so `window` can be moved into velox_shell::run() while
-    // `js_src` is captured by the event-loop closure.
     let AppConfig { window, js_src } = config;
 
     let mut state: Option<AppState> = None;
@@ -257,10 +349,6 @@ pub fn run(config: AppConfig) {
 
                 let mut rt = VeloxRuntime::new(tokio_handle.clone());
 
-                // Evaluate application startup JavaScript.
-                // Synchronous scene-graph calls (createNode, appendChild)
-                // execute immediately. Async calls (readFile) queue Promises
-                // that resolve during the render-loop tick().
                 if let Some(ref js) = js_src {
                     match rt.eval(js) {
                         Ok(_)  => log::info!("JS startup eval complete."),
@@ -280,6 +368,8 @@ pub fn run(config: AppConfig) {
                     resolved:     Vec::new(),
                     js_nodes:     std::collections::HashMap::new(),
                     js_root:      None,
+                    cursor_x:     0.0,
+                    cursor_y:     0.0,
                 });
 
                 window.request_redraw();
@@ -293,6 +383,47 @@ pub fn run(config: AppConfig) {
                 }
             }
 
+            // ── Cursor movement ───────────────────────────────────────────
+            ShellEvent::CursorMoved { x, y } => {
+                if let Some(s) = &mut state {
+                    s.cursor_x = x as f32;
+                    s.cursor_y = y as f32;
+                    s.runtime.push_event(InputEvent::CursorMoved {
+                        x: s.cursor_x,
+                        y: s.cursor_y,
+                    });
+                }
+            }
+
+            // ── Mouse button ──────────────────────────────────────────────
+            ShellEvent::MouseInput { button, pressed } => {
+                if let Some(s) = &mut state {
+                    s.runtime.push_event(InputEvent::MouseButton {
+                        x:       s.cursor_x,
+                        y:       s.cursor_y,
+                        button,
+                        pressed,
+                    });
+                    // Request redraw so pressed state updates visually this frame.
+                    // velox-shell already requests redraw for mouse events; this
+                    // is left here as documentation of intent.
+                }
+            }
+
+            // ── Keyboard ──────────────────────────────────────────────────
+            ShellEvent::KeyInput { key, text, pressed } => {
+                if let Some(s) = &mut state {
+                    s.runtime.push_event(InputEvent::KeyInput { key, text, pressed });
+                }
+            }
+
+            // ── Scroll ────────────────────────────────────────────────────
+            ShellEvent::Scroll { delta_y } => {
+                if let Some(s) = &mut state {
+                    s.runtime.push_event(InputEvent::Scroll { delta_y });
+                }
+            }
+
             // ── Draw ──────────────────────────────────────────────────────
             ShellEvent::RedrawRequested => {
                 let Some(s) = &mut state else { return };
@@ -300,64 +431,61 @@ pub fn run(config: AppConfig) {
                 // 1. Resolve async JS Promises (readFile, etc.).
                 s.runtime.tick();
 
-                // 2. Process scene-graph commands queued by JS bindings.
                 let commands = s.runtime.drain_scene_commands();
-                if !commands.is_empty() {
-                    for cmd in commands {
-                        match cmd {
-                            SceneCommand::CreateNode { id, node_type, props } => {
-                                s.js_nodes.insert(id, JsNode {
-                                    node_type,
-                                    props,
-                                    children:  Vec::new(),
-                                    layout_id: None,
-                                });
-                                // The first node created becomes the scene root.
-                                if s.js_root.is_none() {
-                                    s.js_root = Some(id);
-                                }
-                            }
-                            SceneCommand::AppendChild { parent_id, child_id } => {
-                                if let Some(parent) = s.js_nodes.get_mut(&parent_id) {
-                                    if !parent.children.contains(&child_id) {
-                                        parent.children.push(child_id);
-                                    }
-                                }
-                            }
-                            SceneCommand::UpdateNode { id, props } => {
-                                if let Some(node) = s.js_nodes.get_mut(&id) {
-                                    if props.width.is_some()     { node.props.width     = props.width;     }
-                                    if props.height.is_some()    { node.props.height    = props.height;    }
-                                    if props.text.is_some()      { node.props.text      = props.text;      }
-                                    if props.font_size.is_some() { node.props.font_size = props.font_size; }
-                                }
-                            }
-                            SceneCommand::RemoveNode { id } => {
-                                s.js_nodes.remove(&id);
-                                // Stale child refs in parent nodes are skipped
-                                // gracefully by rebuild_layout_from_scene.
-                            }
-                            SceneCommand::SetRoot { id } => {
-                                s.js_root = Some(id);
-                            }
-                        }
-                    }
+                if apply_scene_commands(s, commands) {
                     s.layout_dirty = true;
                 }
 
                 // 3. Recompute layout if the scene has changed.
                 if s.layout_dirty {
+                    log::info!("Layout dirty, recomputing...");
                     if let Some(root_id) = s.js_root {
                         rebuild_layout_from_scene(&mut s.layout, &mut s.js_nodes, root_id);
                         match s.layout.compute(s.gpu.width() as f32, s.gpu.height() as f32) {
-                            Ok(r)  => { s.resolved = r; }
+                            Ok(r)  => {
+                                log::info!("Layout computed: {} nodes", r.len());
+                                s.resolved = r;
+                                // Update the layout cache so JS hit-testing works.
+                                for (js_id, node) in &s.js_nodes {
+                                    if let Some(lid) = node.layout_id {
+                                        if let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == lid) {
+                                            s.runtime.update_layout(*js_id, rl.x, rl.y, rl.width, rl.height);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => { log::error!("Layout error: {}", e); return; }
+                        }
+                    } else {
+                        log::warn!("No JS root, skipping layout");
+                    }
+                    s.layout_dirty = false;
+                } else {
+                    // log::info!("Layout clean, skipping compute");
+                }
+
+                s.runtime.frame_tick();
+                let post_frame_commands = s.runtime.drain_scene_commands();
+                if apply_scene_commands(s, post_frame_commands) {
+                    if let Some(root_id) = s.js_root {
+                        rebuild_layout_from_scene(&mut s.layout, &mut s.js_nodes, root_id);
+                        match s.layout.compute(s.gpu.width() as f32, s.gpu.height() as f32) {
+                            Ok(r)  => {
+                                s.resolved = r;
+                                for (js_id, node) in &s.js_nodes {
+                                    if let Some(lid) = node.layout_id {
+                                        if let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == lid) {
+                                            s.runtime.update_layout(*js_id, rl.x, rl.y, rl.width, rl.height);
+                                        }
+                                    }
+                                }
+                            }
                             Err(e) => { log::error!("Layout error: {}", e); return; }
                         }
                     }
-                    s.layout_dirty = false;
                 }
 
-                // 4. Acquire the next swapchain texture.
+                // 5. Acquire the next swapchain texture.
                 let texture = match s.gpu.current_texture() {
                     Ok(t)  => t,
                     Err(e) => {
@@ -367,7 +495,7 @@ pub fn run(config: AppConfig) {
                     }
                 };
 
-                // 5. Render the JS scene graph (or a blank frame if no JS root yet).
+                // 6. Render the JS scene graph.
                 let mut frame = s.renderer.begin_frame();
 
                 if let Some(root_id) = s.js_root {
@@ -378,20 +506,37 @@ pub fn run(config: AppConfig) {
 
                         match node.node_type {
                             NodeType::View => {
+                                let bg = node.props.background_color
+                                    .map(rgba_to_vello)
+                                    .unwrap_or(colors::BRAND_GREEN);
+                                let radius = node.props.border_radius.unwrap_or(8.0) as f64;
+
                                 frame.fill_rounded_rect(
                                     rl.x as f64, rl.y as f64,
                                     rl.width as f64, rl.height as f64,
-                                    8.0, colors::BRAND_GREEN,
+                                    radius, bg,
                                 );
                             }
                             NodeType::Text => {
                                 let text      = node.props.text.as_deref().unwrap_or("Text");
                                 let font_size = node.props.font_size.unwrap_or(16.0);
+                                let color     = node.props.color.unwrap_or([255, 255, 255, 255]);
                                 let label     = CachedLabel::new(
-                                    &mut s.text_sys, text, font_size, rl.width.max(1.0),
+                                    &mut s.text_sys, text, font_size, rl.width.max(1.0), color,
                                 );
                                 let (tx, ty) = label.centred_origin(rl);
-                                frame.draw_text(&label.layout, tx, ty, colors::TEXT_PRIMARY);
+                                frame.draw_text(&label.layout, tx, ty, rgba_to_vello(color));
+
+                                // Text cursor: a thin rect drawn after the text when focused.
+                                if node.props.show_cursor.unwrap_or(false) {
+                                    let cursor_x = tx + label.width + 2.0;
+                                    let cursor_h = (font_size as f64) * 1.2;
+                                    let cursor_y = ty + label.ascent - cursor_h;
+                                    frame.fill_rounded_rect(
+                                        cursor_x, cursor_y, 2.0, cursor_h,
+                                        0.0, rgba_to_vello(color),
+                                    );
+                                }
                             }
                         }
                     }
@@ -402,13 +547,18 @@ pub fn run(config: AppConfig) {
                     return;
                 }
                 texture.present();
+
+                // Request next frame if there are pending events (keeps UI responsive
+                // without busy-looping when idle).
+                if !s.runtime.events.lock().unwrap().is_empty() {
+                    // The window handle is not accessible here — events in the queue
+                    // will trigger their own redraws via the input event paths above.
+                }
             }
 
             ShellEvent::CloseRequested => {
                 log::info!("Window close requested — shutting down.");
             }
-
-            _ => {}
         }
     });
 

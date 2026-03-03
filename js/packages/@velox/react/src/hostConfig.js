@@ -12,9 +12,19 @@ import { DefaultEventPriority } from 'react-reconciler/constants';
 // ── Instance creation ─────────────────────────────────────────────────────────
 
 function createInstance(type, props) {
-  // Strip `children` — React manages the tree; we only pass style/data props.
-  const { children, ...nodeProps } = props;
+  // Strip `children` — React manages the tree.
+  // Flatten `style` into the top-level prop object so Rust sees
+  // backgroundColor, borderRadius, etc. directly (not nested under style).
+  // Strip `_veloxOnMount` — a callback that components use to learn their
+  // native node ID synchronously, without relying on ref forwarding.
+  const { children, style, ref: _ref, _veloxOnMount, ...rest } = props;
+  const nodeProps = { ...rest, ...style };
   const id = __velox_createNode(type, nodeProps);
+  // Fire the mount callback immediately so the component can register its ID
+  // before any useEffect / useLayoutEffect runs.
+  if (typeof _veloxOnMount === 'function') {
+    _veloxOnMount(id);
+  }
   return { id };
 }
 
@@ -98,7 +108,8 @@ function prepareUpdate(_instance, _type, _oldProps, newProps) {
 }
 
 function commitUpdate(instance, updatePayload) {
-  const { children, ...nodeProps } = updatePayload;
+  const { children, style, ref: _ref, _veloxOnMount, ...rest } = updatePayload;
+  const nodeProps = { ...rest, ...style };
   __velox_updateNode(instance.id, nodeProps);
 }
 
@@ -205,6 +216,13 @@ const HostConfig = {
   supportsPersistence: false,
   supportsHydration:   false,
   isPrimaryRenderer:   true,
+
+  // Microtask scheduling — tells React to flush sync callbacks via microtasks
+  // rather than via the Scheduler (MessageChannel path). This ensures that
+  // flushSync's finally block can correctly flush pending sync work when
+  // setState is called from outside React's event system.
+  supportsMicrotasks: true,
+  scheduleMicrotask:  (fn) => Promise.resolve().then(fn),
 
   // Event system
   getCurrentEventPriority,

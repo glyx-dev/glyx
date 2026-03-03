@@ -32,7 +32,7 @@ pub mod bindings;
 pub mod runtime;
 
 pub use runtime::VeloxRuntime;
-pub use bindings::{NodeProps, NodeType, SceneCommand};
+pub use bindings::{NodeProps, NodeType, SceneCommand, InputEvent};
 
 // ── V8 platform init ──────────────────────────────────────────────────────────
 

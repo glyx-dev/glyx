@@ -369,6 +369,24 @@ impl FrameBuilder {
         }
     }
 
+    /// Push a rectangular clip layer.  All drawing until the matching
+    /// `pop_layer` call is clipped to the rectangle `(x, y, x+w, y+h)`.
+    pub fn push_layer(&mut self, x: f64, y: f64, w: f64, h: f64) {
+        use vello::kurbo::Rect;
+        let rect = Rect::new(x, y, x + w, y + h);
+        self.scene.push_layer(
+            vello::peniko::Mix::Normal,
+            1.0,
+            Affine::IDENTITY,
+            &rect,
+        );
+    }
+
+    /// Pop the most recently pushed clip layer.
+    pub fn pop_layer(&mut self) {
+        self.scene.pop_layer();
+    }
+
     pub fn append_scene(&mut self, other: &Scene, transform: Option<Affine>) {
         self.scene.append(other, transform);
     }

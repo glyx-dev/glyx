@@ -129,6 +129,15 @@ pub struct NodeProps {
     pub border_width: Option<f32>,
     /// Border stroke colour as RGBA [r, g, b, a] 0–255.
     pub border_color: Option<[u8; 4]>,
+
+    // ── Scroll / clip ────────────────────────────────────────────────────────
+    /// When true, clip children rendering to this node's layout bounds.
+    /// Used by ScrollView to prevent children from overflowing visually.
+    pub clip: Option<bool>,
+    /// Vertical scroll offset in pixels (positive = scrolled toward bottom).
+    /// Children are rendered offset upward by this amount, producing the
+    /// visual effect of scrolling down through content taller than the node.
+    pub scroll_offset_y: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -333,6 +342,9 @@ fn parse_props(
     props.text_align    = get_str_prop(scope, obj, "textAlign");
     props.border_width  = get_num_prop(scope, obj, "borderWidth");
     props.border_color  = get_color_prop(scope, obj, "borderColor");
+
+    props.clip            = get_bool_prop(scope, obj, "clip");
+    props.scroll_offset_y = get_num_prop(scope, obj, "scrollOffsetY");
 
     props
 }

@@ -26,6 +26,11 @@ const pressableRegistry = new Map();
 // Map from nodeId -> { onFocus, onKeyPress, onChangeText }
 const inputRegistry = new Map();
 
+// Map from nodeId -> { onScroll }
+// ScrollViews register here so scroll events can be routed to whichever
+// scroll view the cursor is currently over.
+const scrollRegistry = new Map();
+
 // Currently focused input node id (or null).
 let focusedNodeId = null;
 
@@ -72,6 +77,23 @@ export function registerInput(nodeId, handlers) {
 export function unregisterInput(nodeId) {
   if (focusedNodeId === nodeId) focusedNodeId = null;
   inputRegistry.delete(nodeId);
+}
+
+/**
+ * Register a ScrollView node so scroll events are routed to it.
+ * @param {number} nodeId
+ * @param {{ onScroll: (deltaY: number) => void }} handlers
+ */
+export function registerScrollView(nodeId, handlers) {
+  scrollRegistry.set(nodeId, handlers);
+}
+
+/**
+ * Unregister a ScrollView node (called when the component unmounts).
+ * @param {number} nodeId
+ */
+export function unregisterScrollView(nodeId) {
+  scrollRegistry.delete(nodeId);
 }
 
 /**
@@ -163,6 +185,18 @@ export function dispatchEvents() {
         cursorX = ev.x;
         cursorY = ev.y;
         cursorMovedThisFrame = true;
+        break;
+      }
+
+      case 'scroll': {
+        // Route the scroll delta to whichever ScrollView the cursor is over
+        // (front-to-back, stop at first hit).
+        for (const [nodeId, handlers] of scrollRegistry) {
+          if (hitTest(nodeId, cursorX, cursorY)) {
+            handlers.onScroll?.(ev.deltaY);
+            break;
+          }
+        }
         break;
       }
 

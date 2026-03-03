@@ -14,23 +14,31 @@
 //! This keeps idle CPU usage near zero — important for battery life and for
 //! not saturating the GPU on a static UI.
 //!
-//! ## Layout dirty flag
+//! ## Incremental layout (Week 14)
 //!
-//! Taffy layout is only recomputed when `layout_dirty` is true. It is set
-//! on init and whenever the window resizes or the JS scene changes. Unchanged
-//! frames skip Taffy entirely.
+//! `apply_scene_commands` tracks whether any *layout-affecting* prop changed
+//! in an UpdateNode command.  Layout props are: width, height, flex,
+//! flex_direction, justify_content, align_items, padding, gap.  Visual-only
+//! props (color, background, border, text content, clip, scroll_offset_y)
+//! skip the Taffy rebuild entirely, saving ~1 ms per hover/scroll frame.
+//!
+//! ## Recursive renderer (Week 14)
+//!
+//! The flat `build_render_order` loop has been replaced by `render_subtree`,
+//! a depth-first recursive function that carries a cumulative `scroll_y`
+//! offset.  ScrollView nodes push a Vello clip layer, apply their
+//! `scroll_offset_y` to all descendants, then pop the layer.
 //!
 //! ## Text shaping
 //!
-//! Parley text shaping is expensive relative to rendering. `CachedLabel`
-//! holds a shaped result. JS Text nodes currently re-shape each frame —
-//! future work: cache shaped layouts keyed by (text, font_size, max_width).
+//! `CachedLabel` holds a shaped result keyed by (text, font_size, max_width,
+//! color).  Cache misses call Parley once; cache hits return instantly.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use velox_gpu::GpuContext;
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout};
-use velox_renderer::{colors, peniko, VeloxRenderer};
+use velox_renderer::{colors, peniko, VeloxRenderer, FrameBuilder};
 use velox_runtime::{init_v8, InputEvent, NodeProps, NodeType, SceneCommand, VeloxRuntime};
 use velox_shell::ShellEvent;
 use velox_text::{TextLayout, TextSystem};
@@ -89,18 +97,6 @@ impl CachedLabel {
         };
         Self { layout, width, ascent }
     }
-
-    /// Top-left draw origin that visually centres the text inside `rl`.
-    fn centred_origin(&self, rl: &ResolvedLayout) -> (f64, f64) {
-        let bw = rl.width  as f64;
-        let bh = rl.height as f64;
-        let bx = rl.x      as f64;
-        let by = rl.y      as f64;
-
-        let tx = bx + (bw - self.width).max(0.0) / 2.0;
-        let ty = by + (bh - self.ascent).max(0.0) / 2.0;
-        (tx, ty)
-    }
 }
 
 // ── Application state ─────────────────────────────────────────────────────────
@@ -116,9 +112,6 @@ struct AppState {
     js_nodes:     std::collections::HashMap<u32, JsNode>,
     js_root:      Option<u32>,
     /// Shaped text cache — keyed by (text, font_size_bits, max_width_bits, color).
-    /// Entries accumulate over the session; stale entries (e.g. old TextInput
-    /// values) stay in memory but are never matched again. For typical UIs the
-    /// total number of distinct strings is small enough that this is fine.
     label_cache: std::collections::HashMap<LabelKey, CachedLabel>,
     /// Current cursor position in physical pixels.
     cursor_x:     f32,
@@ -264,35 +257,25 @@ fn rebuild_layout_from_scene(
     }
 }
 
-/// Depth-first render order with cycle detection.
-fn build_render_order(
-    root_id: u32,
-    nodes:   &std::collections::HashMap<u32, JsNode>,
-) -> Vec<u32> {
-    fn visit(
-        id:    u32,
-        nodes: &std::collections::HashMap<u32, JsNode>,
-        seen:  &mut std::collections::HashSet<u32>,
-        out:   &mut Vec<u32>,
-    ) {
-        if !seen.insert(id) { return; }
-        out.push(id);
-        if let Some(node) = nodes.get(&id) {
-            for child in &node.children {
-                visit(*child, nodes, seen, out);
-            }
-        }
-    }
-    let mut out  = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    visit(root_id, nodes, &mut seen, &mut out);
-    out
+/// Returns true if the props have any layout-affecting change relative to
+/// the stored node props.  Visual-only changes (color, border, text content,
+/// clip, scroll_offset_y) return false so Taffy is not rebuilt unnecessarily.
+fn layout_props_changed(new: &NodeProps, old: &NodeProps) -> bool {
+    new.width            != old.width
+    || new.height        != old.height
+    || new.flex          != old.flex
+    || new.flex_direction   != old.flex_direction
+    || new.justify_content  != old.justify_content
+    || new.align_items      != old.align_items
+    || new.padding          != old.padding
+    || new.gap              != old.gap
 }
 
 fn apply_scene_commands(state: &mut AppState, commands: Vec<SceneCommand>) -> bool {
     if commands.is_empty() {
         return false;
     }
+    let mut layout_changed = false;
     for cmd in commands {
         match cmd {
             SceneCommand::CreateNode { id, node_type, props } => {
@@ -305,6 +288,7 @@ fn apply_scene_commands(state: &mut AppState, commands: Vec<SceneCommand>) -> bo
                 if state.js_root.is_none() {
                     state.js_root = Some(id);
                 }
+                layout_changed = true;
             }
             SceneCommand::AppendChild { parent_id, child_id } => {
                 if let Some(parent) = state.js_nodes.get_mut(&parent_id) {
@@ -312,42 +296,217 @@ fn apply_scene_commands(state: &mut AppState, commands: Vec<SceneCommand>) -> bo
                         parent.children.push(child_id);
                     }
                 }
+                layout_changed = true;
             }
             SceneCommand::UpdateNode { id, props } => {
                 if let Some(node) = state.js_nodes.get_mut(&id) {
-                    if props.width.is_some()            { node.props.width            = props.width;            }
-                    if props.height.is_some()           { node.props.height           = props.height;           }
-                    if props.text.is_some()             { node.props.text             = props.text;             }
-                    if props.font_size.is_some()        { node.props.font_size        = props.font_size;        }
-                    if props.color.is_some()            { node.props.color            = props.color;            }
-                    if props.background_color.is_some() { node.props.background_color = props.background_color; }
-                    if props.border_radius.is_some()    { node.props.border_radius    = props.border_radius;    }
-                    if props.flex.is_some()             { node.props.flex             = props.flex;             }
-                    if props.flex_direction.is_some()   { node.props.flex_direction   = props.flex_direction;   }
-                    if props.justify_content.is_some()  { node.props.justify_content  = props.justify_content;  }
-                    if props.align_items.is_some()      { node.props.align_items      = props.align_items;      }
-                    if props.padding.is_some()          { node.props.padding          = props.padding;          }
-                    if props.gap.is_some()              { node.props.gap              = props.gap;              }
-                    if props.show_cursor.is_some()      { node.props.show_cursor      = props.show_cursor;      }
-                    if props.text_align.is_some()       { node.props.text_align       = props.text_align;       }
-                    // Border props are purely visual (no Taffy impact) and React's
-                    // commitUpdate provides the *complete* current prop set — so an
-                    // absent borderWidth/borderColor means "no border", not "keep old".
-                    // Always overwrite so that removing a border via style state works.
-                    node.props.border_width = props.border_width;
-                    node.props.border_color = props.border_color;
+                    // Detect layout-affecting changes *before* overwriting.
+                    // React's commitUpdate always sends the complete current prop
+                    // set, so comparing old vs new is reliable.
+                    if layout_props_changed(&props, &node.props) {
+                        layout_changed = true;
+                    }
+                    // Replace the entire props struct — React provides the full
+                    // current state, so None means "this prop was removed".
+                    node.props = props;
                 }
             }
             SceneCommand::RemoveNode { id } => {
                 state.js_nodes.remove(&id);
+                layout_changed = true;
             }
             SceneCommand::SetRoot { id } => {
                 state.js_root = Some(id);
+                layout_changed = true;
             }
         }
     }
-    state.layout_dirty = true;
+    if layout_changed {
+        state.layout_dirty = true;
+    }
     true
+}
+
+/// Re-run Taffy and update the runtime layout cache.
+fn recompute_layout(state: &mut AppState) {
+    if !state.layout_dirty { return; }
+    log::info!("Layout dirty, recomputing...");
+    let Some(root_id) = state.js_root else {
+        log::warn!("No JS root, skipping layout");
+        return;
+    };
+    rebuild_layout_from_scene(&mut state.layout, &mut state.js_nodes, root_id);
+    match state.layout.compute(state.gpu.width() as f32, state.gpu.height() as f32) {
+        Ok(r) => {
+            log::info!("Layout computed: {} nodes", r.len());
+            state.resolved = r;
+            // Push absolute positions into the JS layout cache for hit-testing.
+            for (js_id, node) in &state.js_nodes {
+                if let Some(lid) = node.layout_id {
+                    if let Some((_, rl)) = state.resolved.iter().find(|(nid, _)| *nid == lid) {
+                        state.runtime.update_layout(*js_id, rl.x, rl.y, rl.width, rl.height);
+                    }
+                }
+            }
+        }
+        Err(e) => log::error!("Layout error: {}", e),
+    }
+    state.layout_dirty = false;
+}
+
+// ── Recursive renderer ────────────────────────────────────────────────────────
+
+/// Render one node and all its descendants.
+///
+/// `scroll_y` is the cumulative vertical scroll offset in pixels that has
+/// been applied by ancestor ScrollView nodes.  It shifts each node's
+/// rendered position upward relative to its Taffy-computed layout position,
+/// producing a scroll effect.
+///
+/// When a node has `clip: true`, a Vello clip layer is pushed around the
+/// children's rendering so they cannot bleed outside this node's bounds.
+fn render_subtree(
+    id: u32,
+    nodes: &std::collections::HashMap<u32, JsNode>,
+    resolved: &[(NodeId, ResolvedLayout)],
+    frame: &mut FrameBuilder,
+    text_sys: &mut TextSystem,
+    label_cache: &mut std::collections::HashMap<LabelKey, CachedLabel>,
+    cursor_blink_on: bool,
+    scroll_y: f64,
+    any_cursor_active: &mut bool,
+) {
+    let Some(node)      = nodes.get(&id)                                     else { return };
+    let Some(layout_id) = node.layout_id                                     else { return };
+    let Some((_, rl))   = resolved.iter().find(|(nid, _)| *nid == layout_id) else { return };
+
+    // Apply the accumulated scroll offset from ancestor ScrollViews.
+    let rx = rl.x as f64;
+    let ry = rl.y as f64 - scroll_y;
+    let rw = rl.width  as f64;
+    let rh = rl.height as f64;
+
+    match node.node_type {
+        NodeType::View => {
+            let bg     = node.props.background_color
+                .map(rgba_to_vello)
+                .unwrap_or(colors::BRAND_GREEN);
+            let radius = node.props.border_radius.unwrap_or(0.0) as f64;
+
+            frame.fill_rounded_rect(rx, ry, rw, rh, radius, bg);
+
+            // Optional border stroke drawn on top of fill.
+            if let Some(bw) = node.props.border_width {
+                let bc = node.props.border_color.unwrap_or([80, 80, 120, 255]);
+                frame.stroke_rounded_rect(rx, ry, rw, rh, radius, bw as f64, rgba_to_vello(bc));
+            }
+
+            // ScrollView clip: push a Vello layer that clips children to the
+            // node's visual bounds, then shift their positions by scroll_offset_y.
+            let is_clip = node.props.clip.unwrap_or(false);
+
+            // Compute the effective child scroll, clamped so no child can
+            // scroll above the clip's top edge or below the clip's bottom.
+            //
+            // For clip nodes we compute the max scroll from the actual
+            // Taffy-resolved child extents — this is the definitive ground
+            // truth regardless of what the JS side sent.  The JS side sends
+            // a JS-computed cap via `scrollOffsetY`, but the Rust clamp here
+            // ensures the last item never disappears even if that cap is stale.
+            let child_scroll_y = {
+                let raw = scroll_y + node.props.scroll_offset_y.unwrap_or(0.0) as f64;
+                if is_clip {
+                    // Bottom of the furthest-down direct child (absolute coords).
+                    let max_child_bottom = node.children.iter()
+                        .filter_map(|&cid| {
+                            let cn   = nodes.get(&cid)?;
+                            let clid = cn.layout_id?;
+                            resolved.iter()
+                                .find(|(nid, _)| *nid == clid)
+                                .map(|(_, crl)| (crl.y + crl.height) as f64)
+                        })
+                        .fold(f64::NEG_INFINITY, f64::max);
+
+                    if max_child_bottom.is_finite() {
+                        // Add trailing padding so the last item doesn't flush
+                        // against the clip edge when fully scrolled.
+                        let pad   = node.props.padding.unwrap_or(0.0) as f64;
+                        let max_s = (max_child_bottom + pad - (rl.y as f64 + rh)).max(0.0);
+                        raw.min(max_s).max(0.0)
+                    } else {
+                        raw.max(0.0)
+                    }
+                } else {
+                    raw
+                }
+            };
+
+            if is_clip {
+                frame.push_layer(rx, ry, rw, rh);
+            }
+
+            // Clone children ids so we can release the node borrow before
+            // recursing (multiple immutable borrows of `nodes` are fine,
+            // but being explicit avoids future confusion).
+            let children: Vec<u32> = node.children.clone();
+            for child_id in children {
+                render_subtree(
+                    child_id, nodes, resolved, frame,
+                    text_sys, label_cache,
+                    cursor_blink_on, child_scroll_y, any_cursor_active,
+                );
+            }
+
+            if is_clip {
+                frame.pop_layer();
+            }
+        }
+
+        NodeType::Text => {
+            let text       = node.props.text.as_deref().unwrap_or("Text");
+            let font_size  = node.props.font_size.unwrap_or(16.0);
+            let color      = node.props.color.unwrap_or([255, 255, 255, 255]);
+            let max_width  = rw.max(1.0) as f32;
+            let left_align = node.props.text_align.as_deref() == Some("left");
+            let show_cursor = node.props.show_cursor.unwrap_or(false);
+
+            // ── Text shaping cache ─────────────────────────────────────────────
+            let key: LabelKey = (
+                text.to_owned(),
+                font_size.to_bits(),
+                max_width.to_bits(),
+                color,
+            );
+            if !label_cache.contains_key(&key) {
+                let lbl = CachedLabel::new(text_sys, text, font_size, max_width, color);
+                label_cache.insert(key.clone(), lbl);
+            }
+            let label = label_cache.get(&key).unwrap();
+
+            // Compute draw origin with scroll offset applied.
+            let bw = rw;
+            let bh = rh;
+            let tx = if left_align {
+                rx
+            } else {
+                rx + (bw - label.width).max(0.0) / 2.0
+            };
+            let ty = ry + (bh - label.ascent).max(0.0) / 2.0;
+
+            frame.draw_text(&label.layout, tx, ty, rgba_to_vello(color));
+
+            // Copy metrics before label borrow ends (NLL).
+            let (lw, la) = (label.width, label.ascent);
+
+            // Text cursor: a thin rect drawn after the text when focused.
+            if show_cursor {
+                *any_cursor_active = true;
+                if cursor_blink_on {
+                    frame.fill_rounded_rect(tx + lw + 2.0, ty, 2.0, la, 0.0, rgba_to_vello(color));
+                }
+            }
+        }
+    }
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -432,8 +591,7 @@ pub fn run(config: AppConfig) {
                         y: s.cursor_y,
                     });
                     // Request a redraw so hover states (Pressable onHoverIn/Out)
-                    // are reflected this frame.  The cost is one Vello pass per
-                    // cursor event, which is acceptable for a desktop UI.
+                    // are reflected this frame.
                     (s.request_redraw)();
                 }
             }
@@ -447,9 +605,6 @@ pub fn run(config: AppConfig) {
                         button,
                         pressed,
                     });
-                    // Request redraw so pressed state updates visually this frame.
-                    // velox-shell already requests redraw for mouse events; this
-                    // is left here as documentation of intent.
                 }
             }
 
@@ -474,61 +629,24 @@ pub fn run(config: AppConfig) {
                 // 1. Resolve async JS Promises (readFile, etc.).
                 s.runtime.tick();
 
-                let commands = s.runtime.drain_scene_commands();
-                if apply_scene_commands(s, commands) {
-                    s.layout_dirty = true;
-                }
+                // 2. Apply pre-frame scene commands (initial mount, etc.).
+                let pre_commands = s.runtime.drain_scene_commands();
+                apply_scene_commands(s, pre_commands);
 
-                // 3. Recompute layout if the scene has changed.
-                if s.layout_dirty {
-                    log::info!("Layout dirty, recomputing...");
-                    if let Some(root_id) = s.js_root {
-                        rebuild_layout_from_scene(&mut s.layout, &mut s.js_nodes, root_id);
-                        match s.layout.compute(s.gpu.width() as f32, s.gpu.height() as f32) {
-                            Ok(r)  => {
-                                log::info!("Layout computed: {} nodes", r.len());
-                                s.resolved = r;
-                                // Update the layout cache so JS hit-testing works.
-                                for (js_id, node) in &s.js_nodes {
-                                    if let Some(lid) = node.layout_id {
-                                        if let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == lid) {
-                                            s.runtime.update_layout(*js_id, rl.x, rl.y, rl.width, rl.height);
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => { log::error!("Layout error: {}", e); return; }
-                        }
-                    } else {
-                        log::warn!("No JS root, skipping layout");
-                    }
-                    s.layout_dirty = false;
-                } else {
-                    // log::info!("Layout clean, skipping compute");
-                }
+                // 3. Recompute layout only when layout-affecting props changed.
+                recompute_layout(s);
 
+                // 4. Run JS frame callback — dispatchEvents, React state updates.
                 s.runtime.frame_tick();
-                let post_frame_commands = s.runtime.drain_scene_commands();
-                if apply_scene_commands(s, post_frame_commands) {
-                    if let Some(root_id) = s.js_root {
-                        rebuild_layout_from_scene(&mut s.layout, &mut s.js_nodes, root_id);
-                        match s.layout.compute(s.gpu.width() as f32, s.gpu.height() as f32) {
-                            Ok(r)  => {
-                                s.resolved = r;
-                                for (js_id, node) in &s.js_nodes {
-                                    if let Some(lid) = node.layout_id {
-                                        if let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == lid) {
-                                            s.runtime.update_layout(*js_id, rl.x, rl.y, rl.width, rl.height);
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => { log::error!("Layout error: {}", e); return; }
-                        }
-                    }
-                }
 
-                // 5. Acquire the next swapchain texture.
+                // 5. Apply post-frame commands (React re-renders from events).
+                let post_commands = s.runtime.drain_scene_commands();
+                apply_scene_commands(s, post_commands);
+
+                // 6. Re-layout if any post-frame command dirtied layout.
+                recompute_layout(s);
+
+                // 7. Acquire the next swapchain texture.
                 let texture = match s.gpu.current_texture() {
                     Ok(t)  => t,
                     Err(e) => {
@@ -538,100 +656,29 @@ pub fn run(config: AppConfig) {
                     }
                 };
 
-                // 6. Advance cursor blink phase if the deadline has passed.
+                // 8. Advance cursor blink phase if the deadline has passed.
                 let now = Instant::now();
                 if now >= s.cursor_blink_deadline {
                     s.cursor_blink_on       = !s.cursor_blink_on;
                     s.cursor_blink_deadline = now + Duration::from_millis(500);
                 }
 
-                // 7. Render the JS scene graph.
+                // 9. Render the JS scene graph (depth-first, scroll-aware).
                 let mut frame = s.renderer.begin_frame();
                 let mut any_cursor_active = false;
 
                 if let Some(root_id) = s.js_root {
-                    for id in build_render_order(root_id, &s.js_nodes) {
-                        let Some(node)      = s.js_nodes.get(&id)                                  else { continue };
-                        let Some(layout_id) = node.layout_id                                       else { continue };
-                        let Some((_, rl))   = s.resolved.iter().find(|(nid, _)| *nid == layout_id) else { continue };
-
-                        match node.node_type {
-                            NodeType::View => {
-                                let bg = node.props.background_color
-                                    .map(rgba_to_vello)
-                                    .unwrap_or(colors::BRAND_GREEN);
-                                let radius = node.props.border_radius.unwrap_or(8.0) as f64;
-
-                                frame.fill_rounded_rect(
-                                    rl.x as f64, rl.y as f64,
-                                    rl.width as f64, rl.height as f64,
-                                    radius, bg,
-                                );
-
-                                // Optional border stroke drawn on top of fill.
-                                if let Some(bw) = node.props.border_width {
-                                    let bc = node.props.border_color
-                                        .unwrap_or([80, 80, 120, 255]);
-                                    frame.stroke_rounded_rect(
-                                        rl.x as f64, rl.y as f64,
-                                        rl.width as f64, rl.height as f64,
-                                        radius, bw as f64, rgba_to_vello(bc),
-                                    );
-                                }
-                            }
-                            NodeType::Text => {
-                                let text      = node.props.text.as_deref().unwrap_or("Text");
-                                let font_size = node.props.font_size.unwrap_or(16.0);
-                                let color     = node.props.color.unwrap_or([255, 255, 255, 255]);
-                                let max_width = rl.width.max(1.0);
-                                let left_align = node.props.text_align.as_deref() == Some("left");
-                                let show_cursor = node.props.show_cursor.unwrap_or(false);
-
-                                // ── Text shaping cache ─────────────────────────────────────
-                                // Build key from exact bit representations so equal f32 values
-                                // always match. String is cloned only when inserting (cache miss).
-                                let key: LabelKey = (
-                                    text.to_owned(),
-                                    font_size.to_bits(),
-                                    max_width.to_bits(),
-                                    color,
-                                );
-                                if !s.label_cache.contains_key(&key) {
-                                    let lbl = CachedLabel::new(
-                                        &mut s.text_sys, text, font_size, max_width, color,
-                                    );
-                                    s.label_cache.insert(key.clone(), lbl);
-                                }
-                                let label = s.label_cache.get(&key).unwrap();
-
-                                // Horizontal origin: left-align or centre depending on textAlign.
-                                let (tx, ty) = if left_align {
-                                    (rl.x as f64, label.centred_origin(rl).1)
-                                } else {
-                                    label.centred_origin(rl)
-                                };
-
-                                frame.draw_text(&label.layout, tx, ty, rgba_to_vello(color));
-
-                                // Copy metrics out so the label borrow can end (NLL).
-                                let (lw, la) = (label.width, label.ascent);
-
-                                // Text cursor: a thin rect drawn after the text when focused.
-                                if show_cursor {
-                                    any_cursor_active = true;
-                                    if s.cursor_blink_on {
-                                        // ty is the top of the text layout.
-                                        // draw_text adds baseline internally, so glyphs
-                                        // run from ty (cap-top) to ty+ascent (baseline).
-                                        frame.fill_rounded_rect(
-                                            tx + lw + 2.0, ty, 2.0, la,
-                                            0.0, rgba_to_vello(color),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    render_subtree(
+                        root_id,
+                        &s.js_nodes,
+                        &s.resolved,
+                        &mut frame,
+                        &mut s.text_sys,
+                        &mut s.label_cache,
+                        s.cursor_blink_on,
+                        0.0,
+                        &mut any_cursor_active,
+                    );
                 }
 
                 if let Err(e) = s.renderer.render_frame(&s.gpu, &texture, frame) {
@@ -641,8 +688,6 @@ pub fn run(config: AppConfig) {
                 texture.present();
 
                 // Schedule the next blink redraw without busy-looping.
-                // A background thread sleeps until the next phase flip, then
-                // fires exactly one request_redraw — keeping GPU idle otherwise.
                 if any_cursor_active {
                     let redraw   = Arc::clone(&s.request_redraw);
                     let deadline = s.cursor_blink_deadline;

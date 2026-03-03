@@ -6,6 +6,7 @@ import HostConfig from './hostConfig.js';
 import {
   registerPressable, unregisterPressable,
   registerInput, unregisterInput,
+  registerScrollView, unregisterScrollView,
   dispatchEvents,
 } from './events.js';
 
@@ -109,6 +110,88 @@ export function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn,
     'view',
     { _veloxOnMount: onMount, style: mergedStyle, ...props },
     children
+  );
+}
+
+// ── ScrollView ────────────────────────────────────────────────────────────────
+//
+// A vertically-scrollable container backed by a Vello clip layer.
+//
+// The native view receives two extra props that the Rust renderer handles:
+//   clip: true          — push a Vello clip layer around children
+//   scrollOffsetY: n    — shift children upward by n pixels
+//
+// Scroll deltas arrive via the `scroll` input event, routed by events.js to
+// whichever ScrollView the cursor is currently over.  The component converts
+// deltas into a React state integer and re-renders, which triggers a
+// visual-only UpdateNode (no Taffy rebuild — incremental layout).
+
+export function ScrollView({
+  children,
+  style,
+  width        = 300,
+  height       = 200,
+  contentHeight,        // explicit content height override (more reliable than auto-detect)
+  ...props
+}) {
+  const nodeIdRef    = useRef(null);
+  const maxScrollRef = useRef(0);
+  const [scrollY, setScrollY] = useState(0);
+
+  // ── Compute max scroll ──────────────────────────────────────────────────────
+  // Prefer the explicit `contentHeight` prop when provided (most reliable).
+  // Otherwise estimate by summing child `height` props from the React element
+  // tree — works for uniform-height lists where heights are explicit props.
+  const childArray = React.Children.toArray(children);
+  const gap        = (style && style.gap)     || 0;
+  const padding    = (style && style.padding) || 0;
+  const autoContentH = childArray.reduce((sum, c) => sum + (c.props?.height || 0), 0)
+                     + Math.max(0, childArray.length - 1) * gap
+                     + 2 * padding;
+  const resolvedContentH = contentHeight ?? autoContentH;
+
+  // Always keep maxScrollRef current so the stable `onScroll` callback reads
+  // the latest cap without needing to be re-registered on each render.
+  maxScrollRef.current = Math.max(0, resolvedContentH - height);
+
+  // ── Stable scroll handler ───────────────────────────────────────────────────
+  // Empty dep array → created once, re-registered never.
+  // Reads maxScrollRef.current (not a captured value) so the cap is always fresh.
+  const onScroll = useCallback((deltaY) => {
+    setScrollY((prev) => {
+      const max = maxScrollRef.current;
+      return Math.min(max, Math.max(0, prev + deltaY));
+    });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const onMount = useCallback((id) => {
+    nodeIdRef.current = id;
+    registerScrollView(id, { onScroll });
+  }, [onScroll]);
+
+  useEffect(() => {
+    return () => {
+      if (nodeIdRef.current !== null) {
+        unregisterScrollView(nodeIdRef.current);
+      }
+    };
+  }, []);
+
+  const viewStyle = {
+    // Items stack from top: prevents Taffy centering overflowing content
+    // above the viewport origin, which would make early items invisible.
+    justifyContent: 'flex-start',
+    alignItems:     'flex-start',
+    // Rust: push Vello clip layer + shift children by scrollOffsetY.
+    clip:           true,
+    scrollOffsetY:  scrollY,
+    ...style,
+  };
+
+  return React.createElement(
+    'view',
+    { _veloxOnMount: onMount, style: viewStyle, width, height, ...props },
+    children,
   );
 }
 

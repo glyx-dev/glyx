@@ -5949,6 +5949,7 @@ No matching component was found for:
   // js/packages/@velox/react/src/events.js
   var pressableRegistry = new Map;
   var inputRegistry = new Map;
+  var scrollRegistry = new Map;
   var focusedNodeId = null;
   var hoveredPressableId = null;
   var cursorX = 0;
@@ -5966,6 +5967,12 @@ No matching component was found for:
     if (focusedNodeId === nodeId)
       focusedNodeId = null;
     inputRegistry.delete(nodeId);
+  }
+  function registerScrollView(nodeId, handlers) {
+    scrollRegistry.set(nodeId, handlers);
+  }
+  function unregisterScrollView(nodeId) {
+    scrollRegistry.delete(nodeId);
   }
   function setFocus(nodeId) {
     if (focusedNodeId !== nodeId) {
@@ -6029,6 +6036,15 @@ No matching component was found for:
           cursorX = ev.x;
           cursorY = ev.y;
           cursorMovedThisFrame = true;
+          break;
+        }
+        case "scroll": {
+          for (const [nodeId, handlers] of scrollRegistry) {
+            if (hitTest(nodeId, cursorX, cursorY)) {
+              handlers.onScroll?.(ev.deltaY);
+              break;
+            }
+          }
           break;
         }
         default:
@@ -6112,6 +6128,49 @@ No matching component was found for:
     const mergedStyle = pressed ? { ...style, borderWidth: 2, borderColor: "#ffffffaa" } : hovered ? { ...style, borderWidth: 1, borderColor: "#ffffff55" } : style;
     return import_react.default.createElement("view", { _veloxOnMount: onMount, style: mergedStyle, ...props }, children);
   }
+  function ScrollView({
+    children,
+    style,
+    width = 300,
+    height = 200,
+    contentHeight,
+    ...props
+  }) {
+    const nodeIdRef = import_react.useRef(null);
+    const maxScrollRef = import_react.useRef(0);
+    const [scrollY, setScrollY] = import_react.useState(0);
+    const childArray = import_react.default.Children.toArray(children);
+    const gap = style && style.gap || 0;
+    const padding = style && style.padding || 0;
+    const autoContentH = childArray.reduce((sum, c) => sum + (c.props?.height || 0), 0) + Math.max(0, childArray.length - 1) * gap + 2 * padding;
+    const resolvedContentH = contentHeight ?? autoContentH;
+    maxScrollRef.current = Math.max(0, resolvedContentH - height);
+    const onScroll = import_react.useCallback((deltaY) => {
+      setScrollY((prev) => {
+        const max = maxScrollRef.current;
+        return Math.min(max, Math.max(0, prev + deltaY));
+      });
+    }, []);
+    const onMount = import_react.useCallback((id) => {
+      nodeIdRef.current = id;
+      registerScrollView(id, { onScroll });
+    }, [onScroll]);
+    import_react.useEffect(() => {
+      return () => {
+        if (nodeIdRef.current !== null) {
+          unregisterScrollView(nodeIdRef.current);
+        }
+      };
+    }, []);
+    const viewStyle = {
+      justifyContent: "flex-start",
+      alignItems: "flex-start",
+      clip: true,
+      scrollOffsetY: scrollY,
+      ...style
+    };
+    return import_react.default.createElement("view", { _veloxOnMount: onMount, style: viewStyle, width, height, ...props }, children);
+  }
   function TextInput({
     value = "",
     onChangeText,
@@ -6173,6 +6232,26 @@ No matching component was found for:
 
   // examples/hello-world/js/app.jsx
   var jsx_runtime = __toESM(require_jsx_runtime(), 1);
+  var ITEM_H = 44;
+  var ITEM_GAP = 8;
+  var SV_PAD = 8;
+  var SV_H = 290;
+  var PALETTE = [
+    { name: "Rosewater", bg: "#dc8a78", fg: "#1e1e2e" },
+    { name: "Flamingo", bg: "#dd7878", fg: "#1e1e2e" },
+    { name: "Pink", bg: "#ea76cb", fg: "#1e1e2e" },
+    { name: "Mauve", bg: "#8839ef", fg: "#ffffff" },
+    { name: "Red", bg: "#d20f39", fg: "#ffffff" },
+    { name: "Maroon", bg: "#e64553", fg: "#ffffff" },
+    { name: "Peach", bg: "#fe640b", fg: "#1e1e2e" },
+    { name: "Yellow", bg: "#df8e1d", fg: "#1e1e2e" },
+    { name: "Green", bg: "#40a02b", fg: "#ffffff" },
+    { name: "Teal", bg: "#179299", fg: "#ffffff" },
+    { name: "Sky", bg: "#04a5e5", fg: "#1e1e2e" },
+    { name: "Sapphire", bg: "#209fb5", fg: "#1e1e2e" },
+    { name: "Blue", bg: "#1e66f5", fg: "#ffffff" },
+    { name: "Lavender", bg: "#7287fd", fg: "#ffffff" }
+  ];
   function App() {
     const [name, setName] = import_react2.useState("");
     const [greeted, setGreeted] = import_react2.useState(false);
@@ -6182,66 +6261,112 @@ No matching component was found for:
       setGreeted(false);
     };
     return /* @__PURE__ */ jsx_runtime.jsx(View, {
-      style: { backgroundColor: "#1e1e2e", borderRadius: 0 },
+      style: { backgroundColor: "#1e1e2e" },
       width: 1280,
       height: 800,
       children: /* @__PURE__ */ jsx_runtime.jsxs(View, {
-        style: {
-          backgroundColor: "#2a2a3e",
-          borderRadius: 16,
-          borderWidth: 1,
-          borderColor: "#44446a",
-          padding: 32,
-          gap: 20
-        },
-        width: 400,
-        height: 300,
+        style: { flexDirection: "row", gap: 32, backgroundColor: "#1e1e2e" },
+        width: 896,
+        height: 400,
         children: [
-          /* @__PURE__ */ jsx_runtime.jsx(Text, {
-            fontSize: 22,
-            width: 340,
-            height: 30,
-            style: { color: "#cdd6f4" },
-            children: "Week 13 — Hover + Border Demo"
+          /* @__PURE__ */ jsx_runtime.jsxs(View, {
+            style: {
+              backgroundColor: "#2a2a3e",
+              borderRadius: 16,
+              borderWidth: 1,
+              borderColor: "#44446a",
+              padding: 32,
+              gap: 20
+            },
+            width: 400,
+            height: 360,
+            children: [
+              /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 18,
+                width: 336,
+                height: 28,
+                style: { color: "#cdd6f4" },
+                children: "Week 14 — ScrollView + Incremental Layout"
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+                value: name,
+                onChangeText: handleNameChange,
+                placeholder: "Type your name...",
+                fontSize: 16,
+                width: 336,
+                height: 44
+              }),
+              greeted ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 18,
+                width: 336,
+                height: 26,
+                style: { color: "#a6e3a1" },
+                children: name.trim() ? `Hello, ${name}!` : "Hello, stranger!"
+              }) : /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 14,
+                width: 336,
+                height: 20,
+                style: { color: "#585b70" },
+                children: "Hover the button, then press it."
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                onPress: greet,
+                width: 160,
+                height: 44,
+                style: { backgroundColor: "#6c63ff", borderRadius: 8 },
+                children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                  fontSize: 16,
+                  width: 140,
+                  height: 24,
+                  style: { color: "#ffffff" },
+                  children: "Say Hello"
+                })
+              })
+            ]
           }),
-          /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
-            value: name,
-            onChangeText: handleNameChange,
-            placeholder: "Type your name...",
-            fontSize: 16,
-            width: 340,
-            height: 44
-          }),
-          greeted ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
-            fontSize: 18,
-            width: 340,
-            height: 26,
-            style: { color: "#a6e3a1" },
-            children: name.trim() ? `Hello, ${name}!` : "Hello, stranger!"
-          }) : /* @__PURE__ */ jsx_runtime.jsx(Text, {
-            fontSize: 14,
-            width: 340,
-            height: 20,
-            style: { color: "#585b70" },
-            children: "Hover the button, then press it."
-          }),
-          /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-            onPress: greet,
-            width: 160,
-            height: 44,
-            style: { backgroundColor: "#6c63ff", borderRadius: 8 },
-            children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 16,
-              width: 140,
-              height: 24,
-              style: { color: "#ffffff" },
-              children: "Say Hello"
-            })
+          /* @__PURE__ */ jsx_runtime.jsxs(View, {
+            style: {
+              backgroundColor: "#2a2a3e",
+              borderRadius: 16,
+              borderWidth: 1,
+              borderColor: "#44446a",
+              padding: 16,
+              gap: 12
+            },
+            width: 464,
+            height: 360,
+            children: [
+              /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 15,
+                width: 432,
+                height: 22,
+                style: { color: "#cdd6f4" },
+                children: "Catppuccin palette — scroll with mouse wheel"
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
+                width: 432,
+                height: SV_H,
+                contentHeight: PALETTE.length * ITEM_H + (PALETTE.length - 1) * ITEM_GAP + 2 * SV_PAD,
+                style: { gap: ITEM_GAP, padding: SV_PAD, backgroundColor: "#1a1a2e", borderRadius: 8 },
+                children: PALETTE.map((item, i) => /* @__PURE__ */ jsx_runtime.jsx(View, {
+                  style: { backgroundColor: item.bg, borderRadius: 6 },
+                  width: 416,
+                  height: ITEM_H,
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 14,
+                    width: 380,
+                    height: 22,
+                    style: { color: item.fg },
+                    children: item.name
+                  })
+                }, i))
+              })
+            ]
           })
         ]
       })
     });
   }
   render(/* @__PURE__ */ jsx_runtime.jsx(App, {}));
-  __velox_log("Week 13: text cache + hover states + border support ready.");
+  __velox_log("Week 14: ScrollView + incremental layout ready.");
 })();

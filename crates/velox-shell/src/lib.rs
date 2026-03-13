@@ -81,7 +81,7 @@ impl Default for ShellConfig {
 /// Run the shell event loop, calling `handler` for every `ShellEvent`.
 ///
 /// Blocks until the window is closed. Must be called from the main thread.
-pub fn run<F>(config: ShellConfig, mut handler: F)
+pub fn run<F>(config: ShellConfig, handler: F)
 where
     F: FnMut(ShellEvent) + 'static,
 {
@@ -98,7 +98,7 @@ where
     let mut app = ShellApp {
         config,
         window:  None,
-        handler: Box::new(move |ev| handler(ev)),
+        handler: Box::new(handler),
     };
 
     event_loop.run_app(&mut app).expect("Event loop error");

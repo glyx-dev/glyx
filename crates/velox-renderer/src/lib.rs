@@ -15,7 +15,7 @@ use thiserror::Error;
 use velox_gpu::GpuContext;
 use vello::{
     kurbo::{Affine, RoundedRect, Stroke},
-    peniko::{Brush, Color, Fill},
+    peniko::{Brush, Color, Fill, Image},
     AaConfig, Renderer, RendererOptions, Scene,
 };
 pub use vello::kurbo;
@@ -109,11 +109,11 @@ struct Vert { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             cache:         None,
         });
 
-        // Linear — smoother than Nearest at any scale / HiDPI factor.
+        // Nearest preserves crispness during blit.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("blit-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
 
@@ -303,6 +303,7 @@ impl FrameBuilder {
         self.fill_rounded_rect(x, y, w, h, 0.0, color);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn stroke_rounded_rect(&mut self, x: f64, y: f64, w: f64, h: f64,
                                 radius: f64, stroke_width: f64, color: Color) {
         let rect   = RoundedRect::new(x, y, x + w, y + h, radius);
@@ -369,11 +370,35 @@ impl FrameBuilder {
         }
     }
 
+    pub fn draw_image(&mut self, image: &Image, x: f64, y: f64, w: f64, h: f64) {
+        if image.width == 0 || image.height == 0 {
+            return;
+        }
+        let sx = w / image.width as f64;
+        let sy = h / image.height as f64;
+        let transform = Affine::new([sx, 0.0, 0.0, sy, x, y]);
+        self.draw_image_with_transform(image, transform);
+    }
+
+    pub fn draw_image_with_transform(&mut self, image: &Image, transform: Affine) {
+        self.scene.draw_image(image, transform);
+    }
+
     /// Push a rectangular clip layer.  All drawing until the matching
     /// `pop_layer` call is clipped to the rectangle `(x, y, x+w, y+h)`.
     pub fn push_layer(&mut self, x: f64, y: f64, w: f64, h: f64) {
         use vello::kurbo::Rect;
         let rect = Rect::new(x, y, x + w, y + h);
+        self.scene.push_layer(
+            vello::peniko::Mix::Normal,
+            1.0,
+            Affine::IDENTITY,
+            &rect,
+        );
+    }
+
+    pub fn push_rounded_layer(&mut self, x: f64, y: f64, w: f64, h: f64, radius: f64) {
+        let rect = RoundedRect::new(x, y, x + w, y + h, radius);
         self.scene.push_layer(
             vello::peniko::Mix::Normal,
             1.0,

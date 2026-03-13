@@ -116,6 +116,7 @@ This step must be run whenever `app.jsx`, `polyfills.js`, or any file in
 ### Rust build and run
 
 ```
+$env:RUST_LOG="info"; cargo run -p hello-world
 RUST_LOG=info cargo run -p hello-world
 ```
 

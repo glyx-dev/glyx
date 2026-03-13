@@ -16,3 +16,4 @@ log            = { workspace = true }
 thiserror      = { workspace = true }
 env_logger     = { workspace = true }
 taffy          = { workspace = true }
+image          = { workspace = true }

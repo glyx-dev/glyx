@@ -49,6 +49,22 @@ export const View = ({ children, style, ...props }) =>
 export const Text = ({ children, style, showCursor, ...props }) =>
   React.createElement('text', { text: children, style, showCursor, ...props });
 
+export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', style, ...props }) {
+  const imageId = React.useMemo(() => {
+    if (!src) return null;
+    return __velox_createImage(src);
+  }, [src]);
+
+  return React.createElement('image', {
+    imageId,
+    resizeMode,
+    style,
+    width,
+    height,
+    ...props,
+  });
+}
+
 // ── Pressable ─────────────────────────────────────────────────────────────────
 //
 // Registration strategy: register SYNCHRONOUSLY inside _veloxOnMount, which

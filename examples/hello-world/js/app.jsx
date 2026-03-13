@@ -11,7 +11,7 @@
 
 import './polyfills.js';
 import React, { useState } from 'react';
-import { View, Text, Pressable, TextInput, ScrollView, render } from '@velox/react';
+import { View, Text, Image, Pressable, TextInput, ScrollView, render } from '@velox/react';
 
 // Layout constants for the scrollable list.
 const ITEM_H   = 44;
@@ -151,6 +151,51 @@ function App() {
               {`You typed ${name.length} character${name.length === 1 ? '' : 's'}. This label also has no fixed height and wraps freely.`}
             </Text>
           )}
+
+          <Text
+            fontSize={13}
+            width={372}
+            height={20}
+            style={{ color: '#a6adc8' }}
+          >
+            Week 15B image demo:
+          </Text>
+
+          <Image
+            src="C:/myweb/Apps/velox_project/sample.png"
+            width={372}
+            height={209}
+            resizeMode="cover"
+            style={{ borderRadius: 8 }}
+          />
+
+          <View
+            style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-start', alignItems: 'flex-start' }}
+            width={372}
+            height={84}
+          >
+            <Image
+              src="C:/myweb/Apps/velox_project/sample.png"
+              width={118}
+              height={84}
+              resizeMode="contain"
+              style={{ borderRadius: 6, borderWidth: 1, borderColor: '#45475a' }}
+            />
+            <Image
+              src="C:/myweb/Apps/velox_project/sample.png"
+              width={118}
+              height={84}
+              resizeMode="cover"
+              style={{ borderRadius: 6, borderWidth: 1, borderColor: '#45475a' }}
+            />
+            <Image
+              src="C:/myweb/Apps/velox_project/sample.png"
+              width={118}
+              height={84}
+              resizeMode="stretch"
+              style={{ borderRadius: 6, borderWidth: 1, borderColor: '#45475a' }}
+            />
+          </View>
         </View>
 
         {/* ── Right: scrollable Pressable list ─────────────────────────── */}
@@ -233,4 +278,4 @@ function App() {
 
 render(<App />);
 
-__velox_log('Week 15A: multi-line text + ScrollView Pressable hit-test ready.');
+__velox_log('Week 15B: image support loaded.');

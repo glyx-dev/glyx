@@ -79,6 +79,7 @@ pub fn new_layout_cache() -> LayoutCache {
 pub enum NodeType {
     View,
     Text,
+    Image,
 }
 
 /// All layout + visual props that JS can set on a node.
@@ -138,11 +139,18 @@ pub struct NodeProps {
     /// Children are rendered offset upward by this amount, producing the
     /// visual effect of scrolling down through content taller than the node.
     pub scroll_offset_y: Option<f32>,
+
+    // ── Image ────────────────────────────────────────────────────────────────
+    /// Native image resource identifier returned by `__velox_createImage`.
+    pub image_id: Option<u32>,
+    /// `"cover"` | `"contain"` | `"stretch"` (default).
+    pub image_resize_mode: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub enum SceneCommand {
     CreateNode  { id: u32, node_type: NodeType, props: NodeProps },
+    CreateImage { id: u32, path: String },
     AppendChild { parent_id: u32, child_id: u32 },
     UpdateNode  { id: u32, props: NodeProps },
     RemoveNode  { id: u32 },
@@ -172,6 +180,7 @@ pub fn register_all(
         events,
         layout_cache,
         next_id: std::sync::atomic::AtomicU32::new(1),
+        next_image_id: std::sync::atomic::AtomicU32::new(1),
     });
     let ptr   = Box::into_raw(state) as *mut std::ffi::c_void;
     // Safety: ptr is valid for the lifetime of the isolate.
@@ -189,6 +198,7 @@ pub fn register_all(
     }
 
     register!("__velox_readFile",    read_file_callback);
+    register!("__velox_createImage", create_image_callback);
     register!("__velox_createNode",  create_node_callback);
     register!("__velox_appendChild", append_child_callback);
     register!("__velox_updateNode",  update_node_callback);
@@ -205,6 +215,7 @@ struct AsyncState {
     events:       EventQueue,
     layout_cache: LayoutCache,
     next_id:      std::sync::atomic::AtomicU32,
+    next_image_id: std::sync::atomic::AtomicU32,
 }
 
 fn set_func(
@@ -228,6 +239,7 @@ fn parse_node_type(scope: &mut v8::HandleScope, value: v8::Local<v8::Value>) -> 
         .to_lowercase();
     match s.as_str() {
         "text" => NodeType::Text,
+        "image" => NodeType::Image,
         _ => NodeType::View,
     }
 }
@@ -345,6 +357,8 @@ fn parse_props(
 
     props.clip            = get_bool_prop(scope, obj, "clip");
     props.scroll_offset_y = get_num_prop(scope, obj, "scrollOffsetY");
+    props.image_id        = get_num_prop(scope, obj, "imageId").map(|v| v as u32);
+    props.image_resize_mode = get_str_prop(scope, obj, "resizeMode");
 
     props
 }
@@ -547,6 +561,28 @@ fn create_node_callback(
 
     state.scene.lock().unwrap()
         .push_back(SceneCommand::CreateNode { id, node_type, props });
+
+    rv.set(v8::Number::new(scope, id as f64).into());
+}
+
+fn create_image_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let path = args
+        .get(0)
+        .to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+
+    let id = state.next_image_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state.scene.lock().unwrap()
+        .push_back(SceneCommand::CreateImage { id, path });
 
     rv.set(v8::Number::new(scope, id as f64).into());
 }

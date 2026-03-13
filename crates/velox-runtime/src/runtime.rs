@@ -156,7 +156,7 @@ impl VeloxRuntime {
         let func = v8::Local::<v8::Function>::try_from(val).unwrap();
         let recv = global.into();
         let mut try_catch = v8::TryCatch::new(scope);
-        if let Some(_) = func.call(&mut try_catch, recv, &[]) {
+        if func.call(&mut try_catch, recv, &[]).is_some() {
             try_catch.perform_microtask_checkpoint();
         } else if let Some(exc) = try_catch.exception() {
             let msg = exc

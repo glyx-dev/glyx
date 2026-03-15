@@ -1,0 +1,20 @@
+{
+  "window": {
+    "title":  "Velox — Hello World",
+    "width":  1280,
+    "height": 800
+  },
+  "capabilities": {
+    "fs": {
+      "read":  ["**"],
+      "write": []
+    },
+    "network": {
+      "allow": []
+    },
+    "db":      false,
+    "battery": false,
+    "usb":     false,
+    "shell":   false
+  }
+}

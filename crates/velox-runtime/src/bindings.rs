@@ -545,6 +545,19 @@ fn read_file_callback(
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    // Capability gate — throws a JS Error if fs.read is not declared.
+    if !velox_security::get().can_read_fs() {
+        let msg = v8::String::new(
+            scope,
+            "Capability required: fs.read — add it to velox.config.json \
+             under \"capabilities\": { \"fs\": { \"read\": [\"**\"] } }",
+        )
+        .unwrap();
+        let ex = v8::Exception::error(scope, msg);
+        scope.throw_exception(ex);
+        return;
+    }
+
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };

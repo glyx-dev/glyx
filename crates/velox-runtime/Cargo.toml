@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-v8        = { workspace = true }
-tokio     = { workspace = true }
-log       = { workspace = true }
-thiserror = { workspace = true }
-anyhow    = { workspace = true }
+v8             = { workspace = true }
+tokio          = { workspace = true }
+log            = { workspace = true }
+thiserror      = { workspace = true }
+anyhow         = { workspace = true }
+velox-security = { path = "../velox-security" }

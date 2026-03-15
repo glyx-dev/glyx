@@ -60,9 +60,47 @@ use velox_gpu::GpuContext;
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
 use velox_renderer::{colors, peniko, VeloxRenderer, FrameBuilder};
 use velox_runtime::{init_v8, InputEvent, NodeProps, NodeType, SceneCommand, VeloxRuntime, WindowController};
+use velox_security::Capabilities;
 use velox_shell::ShellEvent;
 use velox_text::{TextLayout, TextSystem};
 use velox_layout::NodeId;
+
+// ── Config file parsing ───────────────────────────────────────────────────────
+
+/// Subset of `velox.config.json` that velox-core cares about.
+/// The file may contain other keys (window title etc.) which are ignored here
+/// since the window is configured via `AppConfig::window` in the example crate.
+#[derive(serde::Deserialize, Default)]
+struct VeloxConfigFile {
+    capabilities: Option<Capabilities>,
+}
+
+/// Load `velox.config.json` from the current working directory and initialise
+/// the global capability store.  Missing file → permissive warning + defaults.
+fn load_velox_config() {
+    let caps = std::fs::read_to_string("velox.config.json")
+        .ok()
+        .and_then(|src| {
+            serde_json::from_str::<VeloxConfigFile>(&src)
+                .map_err(|e| { log::error!("velox.config.json parse error: {e}"); e })
+                .ok()
+        })
+        .and_then(|cfg| cfg.capabilities);
+
+    match &caps {
+        Some(c) => log::info!(
+            "velox-security: capabilities loaded (fs_read={}, db={}, network={})",
+            c.can_read_fs(),
+            c.db,
+            c.network.as_ref().map(|n| n.allow.len()).unwrap_or(0),
+        ),
+        None => log::warn!(
+            "velox-security: no velox.config.json found — all capabilities default to OFF"
+        ),
+    }
+
+    velox_security::init(caps.unwrap_or_default());
+}
 
 pub use velox_shell::ShellConfig as WindowConfig;
 mod scene;
@@ -471,6 +509,10 @@ fn build_window_controller(window: Arc<winit::window::Window>) -> WindowControll
 
 pub fn run(config: AppConfig) {
     env_logger::init();
+
+    // Load velox.config.json and lock in the capability set before any
+    // JS bindings are registered.  Must be the first thing after the logger.
+    load_velox_config();
 
     // Tokio runtime for async JS bindings.
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()

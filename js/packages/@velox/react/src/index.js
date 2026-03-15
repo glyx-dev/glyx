@@ -345,6 +345,22 @@ export function useMediaQuery(minWidth) {
  * veloxWindow.getWindowSize();       // → { width, height } physical pixels
  * veloxWindow.getScreenSize();       // → { width, height } physical pixels
  */
+// ── Secure env access ─────────────────────────────────────────────────────────
+//
+// Reads a single environment variable by name.
+// Returns null if the name is not in the `env.allow` capability list, or if
+// the variable does not exist in the process environment.
+// `process.env` is not available — only explicitly allowed names are readable.
+
+/**
+ * Read a single environment variable declared in `velox.config.json`.
+ * @param {string} name — The variable name (e.g. `"API_KEY"`).
+ * @returns {string | null}
+ */
+export function getEnv(name) {
+  return typeof __velox_getEnv !== 'undefined' ? __velox_getEnv(name) : null;
+}
+
 export const veloxWindow = {
   setFullscreen: (full)     => typeof __velox_setFullscreen !== 'undefined' && __velox_setFullscreen(full),
   setMaximized:  (max)      => typeof __velox_setMaximized  !== 'undefined' && __velox_setMaximized(max),

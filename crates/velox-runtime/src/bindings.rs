@@ -213,6 +213,7 @@ pub fn register_all(
         };
     }
 
+    register!("__velox_getEnv",      get_env_callback);
     register!("__velox_readFile",    read_file_callback);
     register!("__velox_createImage", create_image_callback);
     register!("__velox_createNode",  create_node_callback);
@@ -535,6 +536,37 @@ fn get_layout_callback(
         rv.set(obj.into());
     } else {
         rv.set(v8::null(scope).into());
+    }
+}
+
+// ── Sync binding: __velox_getEnv ──────────────────────────────────────────────
+//
+// Returns the value of an environment variable as a string, or JS `null` if
+// the variable is absent OR the name is not in the `env.allow` capability list.
+//
+// Returning null (rather than throwing) is intentional — a capability miss is
+// not a programmer error; the app should handle missing values gracefully.
+
+fn get_env_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let name = args
+        .get(0)
+        .to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+
+    // Silent null for undeclared names — does not reveal that the var exists.
+    if !velox_security::get().can_get_env(&name) {
+        rv.set(v8::null(scope).into());
+        return;
+    }
+
+    match std::env::var(&name) {
+        Ok(val) => rv.set(v8::String::new(scope, &val).unwrap().into()),
+        Err(_)  => rv.set(v8::null(scope).into()),
     }
 }
 

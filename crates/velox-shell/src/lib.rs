@@ -59,29 +59,41 @@ pub enum ShellEvent {
 
 // ── Shell config ─────────────────────────────────────────────────────────────
 
+/// How the window should appear on first launch.
+///
+/// The three modes are mutually exclusive — using an enum eliminates any
+/// ambiguity that arises from combining boolean flags.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum StartupMode {
+    /// Fixed-size window.  `width` and `height` from `ShellConfig` are used.
+    #[default]
+    Windowed,
+    /// Maximised window — taskbar remains visible.
+    Maximized,
+    /// Borderless fullscreen — covers the taskbar.
+    Fullscreen,
+}
+
 pub struct ShellConfig {
-    pub title:      String,
-    /// Ignored when `start_maximized` or `start_fullscreen` is true.
-    pub width:      u32,
-    /// Ignored when `start_maximized` or `start_fullscreen` is true.
-    pub height:     u32,
+    pub title:        String,
+    /// Width in physical pixels. Only used when `startup_mode` is `Windowed`.
+    pub width:        u32,
+    /// Height in physical pixels. Only used when `startup_mode` is `Windowed`.
+    pub height:       u32,
     /// Use Poll (games/continuous rendering) instead of Wait (UI/battery).
-    pub continuous:       bool,
-    /// Open the window maximised (taskbar remains visible).
-    pub start_maximized:  bool,
-    /// Open the window in borderless fullscreen (covers taskbar).
-    pub start_fullscreen: bool,
+    pub continuous:   bool,
+    /// How the window appears on first launch.
+    pub startup_mode: StartupMode,
 }
 
 impl Default for ShellConfig {
     fn default() -> Self {
         Self {
-            title:            "Velox".into(),
-            width:            1280,
-            height:           800,
-            continuous:       false,
-            start_maximized:  false,
-            start_fullscreen: false,
+            title:        "Velox".into(),
+            width:        1280,
+            height:       800,
+            continuous:   false,
+            startup_mode: StartupMode::Windowed,
         }
     }
 }
@@ -126,12 +138,16 @@ impl ApplicationHandler for ShellApp {
             .with_title(&self.config.title)
             .with_visible(true);
 
-        if self.config.start_fullscreen {
-            attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
-        } else if self.config.start_maximized {
-            attrs = attrs.with_maximized(true);
-        } else {
-            attrs = attrs.with_inner_size(PhysicalSize::new(self.config.width, self.config.height));
+        match self.config.startup_mode {
+            StartupMode::Fullscreen => {
+                attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            }
+            StartupMode::Maximized => {
+                attrs = attrs.with_maximized(true);
+            }
+            StartupMode::Windowed => {
+                attrs = attrs.with_inner_size(PhysicalSize::new(self.config.width, self.config.height));
+            }
         }
 
         let window = Arc::new(

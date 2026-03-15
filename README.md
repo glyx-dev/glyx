@@ -56,19 +56,19 @@ velox/
 │
 ├── crates/
 │   ├── velox-core/               # App lifecycle, event loop, subsystem wiring
-│   ├── velox-shell/              # winit window + input events
+│   ├── velox-shell/              # winit window + input events + StartupMode
 │   ├── velox-gpu/                # wgpu device + surface management
 │   ├── velox-renderer/           # Vello 2D rendering (shapes, text draw calls)
-│   ├── velox-layout/             # Taffy Flexbox integration
+│   ├── velox-layout/             # Taffy Flexbox integration + measure function
 │   ├── velox-text/               # Parley + Swash text shaping pipeline
 │   ├── velox-runtime/            # V8 embedding + native JS bindings
-│   ├── velox-security/           # Capability enforcer (stub — Week 14)
-│   ├── velox-db/                 # SQLite via sqlx (stub — Week 16)
-│   ├── velox-3d/                 # wgpu 3D scene graph (stub — Week 18)
-│   ├── velox-ai/                 # Candle ML inference (stub — Week 19)
-│   ├── velox-sysapi/             # OS APIs: battery, network, hardware (stub — Week 17)
-│   ├── velox-perf/               # Performance monitoring (stub — Week 15)
-│   └── velox-cli/                # CLI: create, dev, build (stub — Week 20)
+│   ├── velox-security/           # Capability enforcer — OnceLock, fs/network/env gates
+│   ├── velox-db/                 # SQLite via sqlx (stub — Phase 7)
+│   ├── velox-3d/                 # wgpu 3D scene graph (stub — Phase 17)
+│   ├── velox-ai/                 # Candle ML inference (stub — Phase 18)
+│   ├── velox-sysapi/             # OS APIs: battery, network, hardware (stub — Phase 15)
+│   ├── velox-perf/               # Performance monitoring (stub — Phase 14)
+│   └── velox-cli/                # CLI: create, dev, build (stub — Phase 10)
 │
 ├── js/
 │   └── packages/
@@ -76,7 +76,7 @@ velox/
 │       │   └── src/
 │       │       ├── hostConfig.js # react-reconciler HostConfig (25 methods)
 │       │       ├── events.js     # Hit-testing, pressable/input/scroll registry
-│       │       ├── index.js      # Reconciler, View, Text, Pressable, ScrollView, TextInput, hooks
+│       │       ├── index.js      # Reconciler + all components + hooks + getEnv
 │       │       └── index.d.ts    # TypeScript declarations
 │       └── @velox/router/
 │           └── src/
@@ -86,6 +86,7 @@ velox/
 └── examples/
     └── hello-world/
         ├── src/main.rs           # Entry point — passes AppConfig to velox_core::run()
+        ├── velox.config.json     # Window settings + capability declarations
         └── js/
             ├── app.jsx           # React source (edit this)
             ├── app.js            # Bun build output — loaded by Rust via include_str!
@@ -157,60 +158,125 @@ available in any JS evaluated by the runtime.
 | `__velox_updateNode` | `(id: number, props: object) => true` | Updates props on an existing node |
 | `__velox_removeNode` | `(id: number) => true` | Removes a node from the scene graph |
 | `__velox_setRoot` | `(id: number) => true` | Explicitly sets the scene root node |
+| `__velox_getLayout` | `(id: number) => { x, y, width, height }` | Returns the resolved layout position for hit-testing |
+| `__velox_pollEvents` | `() => InputEvent[]` | Drains the pending input event queue (mouse, keyboard, scroll, resize) |
+| `__velox_createImage` | `(path: string) => number` | Decodes an image file and returns a texture id |
+| `__velox_getWindowSize` | `() => { width, height }` | Current window inner size in logical pixels |
+| `__velox_getScreenSize` | `() => { width, height }` | Current display dimensions in logical pixels |
+| `__velox_setFullscreen` | `(on: boolean) => void` | Enter / exit borderless fullscreen |
+| `__velox_setMaximized` | `(on: boolean) => void` | Maximize / restore window |
+| `__velox_setMinimized` | `() => void` | Iconify the window |
+| `__velox_isFullscreen` | `() => boolean` | Whether the window is currently fullscreen |
+| `__velox_isMaximized` | `() => boolean` | Whether the window is currently maximized |
+| `__velox_getEnv` | `(name: string) => string \| null` | Reads a process env var — only names declared in `capabilities.env.allow` return a value |
 
 ### Asynchronous (return a Promise)
 
 | Binding | Signature | Description |
 |---------|-----------|-------------|
-| `__velox_readFile` | `(path: string) => Promise<string>` | Reads a file from disk via tokio |
+| `__velox_readFile` | `(path: string) => Promise<string>` | Reads a file from disk via tokio — requires `fs.read` capability |
 
 ### Node types
 
 | Type string | Taffy style | Vello output |
 |-------------|-------------|--------------|
-| `"view"` | Flex column, centred | Rounded rectangle |
-| `"text"` | Auto size | Parley-shaped glyph run |
+| `"view"` | Flex container (column default) | Rounded rectangle fill + optional border |
+| `"text"` | Measure-based auto size | Parley-shaped multi-line glyph run |
+| `"image"` | Fixed or flex size | Decoded texture — contain / cover / stretch resize modes |
+| `"pressable"` | Flex container | Rounded rectangle with hover/press border feedback |
+| `"textInput"` | Fixed or flex size | Editable text field with cursor and focus state |
+| `"scrollView"` | Clip container | Clipped children shifted by scroll offset |
 
 ### Node props
 
 | Prop | Type | Applies to |
 |------|------|------------|
-| `width` | `number` (px) | view, text |
-| `height` | `number` (px) | view, text |
+| `width` | `number` (px) | all |
+| `height` | `number` (px) | all |
+| `flex` | `number` | all |
+| `flexDirection` | `"row" \| "column"` | view, pressable, scrollView |
+| `justifyContent` | `"flex-start" \| "center" \| "flex-end" \| "space-between"` | view, pressable |
+| `alignItems` | `"flex-start" \| "center" \| "flex-end" \| "stretch"` | view, pressable |
+| `padding` | `number` (px) | view, pressable, scrollView |
+| `gap` | `number` (px) | view, pressable |
+| `backgroundColor` | `string` (hex or rgba) | all |
+| `borderRadius` | `number` (px) | view, pressable, image |
+| `borderWidth` | `number` (px) | view, pressable |
+| `borderColor` | `string` (hex or rgba) | view, pressable |
+| `color` | `string` (hex or rgba) | text, textInput |
+| `fontSize` | `number` (px) | text, textInput |
 | `text` | `string` | text |
-| `fontSize` | `number` (px) | text |
+| `clip` | `boolean` | scrollView |
+| `scrollOffsetY` | `number` (px) | scrollView |
+| `imageId` | `number` | image (id from `__velox_createImage`) |
+| `imageResizeMode` | `"contain" \| "cover" \| "stretch"` | image |
 
 ---
 
 ## React API (`@velox/react`)
 
 ```jsx
-import { View, Text, render } from '@velox/react';
+import {
+  View, Text, Pressable, TextInput, ScrollView, Image,
+  render, getEnv,
+  useWindowSize, useScreenSize, useMediaQuery,
+  veloxWindow,
+} from '@velox/react';
 
-render(
-  <View width={360} height={180}>
-    <Text fontSize={20} width={200} height={28}>Hello Velox</Text>
-  </View>
-);
+render(<App />);
 ```
 
-### `render(element)`
+### Components
 
-Mounts a React element tree into the Velox scene graph. Call once at startup.
-State updates re-render automatically through the reconciler.
+| Component | Description |
+|-----------|-------------|
+| `<View>` | Flex container — the primary layout primitive |
+| `<Text>` | Multi-line text label; auto-sizes via Taffy measure |
+| `<Pressable>` | Tappable container with `onPress`, `onHoverIn`, `onHoverOut` |
+| `<TextInput>` | Editable single-line text field with `onChangeText`, `value` |
+| `<ScrollView>` | Vertically scrollable clipping container with `onScroll` |
+| `<Image>` | Renders a decoded image; `resizeMode` = `"contain"` / `"cover"` / `"stretch"` |
 
-### `<View>`
+### Hooks
 
-A rectangular flex container. Maps to the `"view"` scene graph node type.
+| Hook | Returns | Description |
+|------|---------|-------------|
+| `useWindowSize()` | `{ width, height }` | Reactive window dimensions — re-renders on resize |
+| `useScreenSize()` | `{ width, height }` | Display dimensions (updates on fullscreen toggle) |
+| `useMediaQuery(minWidth)` | `boolean` | True when window width ≥ minWidth |
 
-Props: `width`, `height`
+### `veloxWindow` (imperative API)
 
-### `<Text>`
+```js
+veloxWindow.maximize()          // fill screen minus taskbar
+veloxWindow.unmaximize()        // restore previous size
+veloxWindow.minimize()          // iconify
+veloxWindow.setFullscreen(true) // borderless fullscreen
+veloxWindow.setFullscreen(false)
+veloxWindow.isFullscreen()      // → boolean
+veloxWindow.isMaximized()       // → boolean
+veloxWindow.getSize()           // → { width, height }
+```
 
-A text label. `children` becomes the `text` prop on the native node.
-Maps to the `"text"` scene graph node type.
+### `getEnv(name)`
 
-Props: `fontSize`, `width`, `height`
+```js
+import { getEnv } from '@velox/react';
+const key = getEnv('API_KEY'); // string | null
+```
+
+Reads a process environment variable. Only names listed in `capabilities.env.allow`
+in `velox.config.json` return a value — all others return `null`.
+
+**Use for non-secret config only** — feature flags, base URLs, theme names, app IDs.
+Real secrets (API keys, OAuth credentials) should never pass through `getEnv()`.
+If your network call happens in Rust, keep the key in Rust (OS keychain via
+`velox-sysapi`) and expose only the response to JS.
+
+Velox loads a `.env` file automatically at startup (via `dotenvy`) for local
+development. **Do not ship a `.env` file in a production installer.**
+Production non-secret config uses OS-level env vars (set by the launch script,
+service manager, or installer).
 
 ---
 
@@ -225,6 +291,58 @@ Packages that touch `window`, `document`, or browser APIs will not work.
 | [zustand](https://github.com/pmndrs/zustand) | `^5` | Global state management. Uses `useSyncExternalStore` — fully compatible. `bun add zustand` and import directly. |
 
 More packages will be listed here as they are verified against the runtime.
+
+---
+
+## `velox.config.json`
+
+Every Velox app ships a `velox.config.json` in its directory. It is read by
+`velox-core` before V8 starts and controls the window and the capability set.
+
+```json
+{
+  "window": {
+    "title":       "My App",
+    "width":       1280,
+    "height":      800,
+    "startupMode": "windowed"
+  },
+  "capabilities": {
+    "fs":      { "read": ["**"], "write": ["$APP_DATA/**"] },
+    "network": { "allow": ["api.myservice.com"] },
+    "env":     { "allow": ["API_KEY", "DATABASE_URL", "MY_APP_*"] },
+    "db":      false,
+    "battery": false,
+    "usb":     false,
+    "shell":   false
+  }
+}
+```
+
+### `window`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `title` | `string` | `"Velox App"` | Title bar text |
+| `width` | `number` | 1280 | Initial window width in logical pixels |
+| `height` | `number` | 800 | Initial window height in logical pixels |
+| `startupMode` | `"windowed" \| "maximized" \| "fullscreen"` | `"windowed"` | Window state at launch. Omitting `width`/`height` implies `"maximized"` |
+
+### `capabilities`
+
+Capabilities are enforced in Rust — JS cannot bypass them regardless of what
+npm packages are installed.
+
+| Key | Value | Description |
+|-----|-------|-------------|
+| `fs.read` | `string[]` (glob patterns) | Paths the app may read. `["**"]` = all. |
+| `fs.write` | `string[]` (glob patterns) | Paths the app may write. |
+| `network.allow` | `string[]` (hostnames) | Outbound HTTP/WS hostnames. `["*"]` = all. |
+| `env.allow` | `string[]` (name patterns) | Env var names readable via `getEnv()`. Supports trailing `*` wildcard. |
+| `db` | `boolean` | Enables SQLite API (Phase 7). |
+| `battery` | `boolean` | Enables battery status API (Phase 15). |
+| `usb` | `boolean` | Enables USB/HID API (Phase 15). |
+| `shell` | `boolean` | Enables shell command execution (reserved, not yet implemented). |
 
 ---
 
@@ -276,21 +394,27 @@ changes, keeping idle CPU near zero.
 | 15A | Multi-line text via Taffy measure function; scroll hit-test correction |
 | 15B | Image component (cover / contain / stretch); rounded clip layer |
 | 16 | Dev overlay (FPS/heap/nodes, Ctrl+Shift+D); hot reload; `useWindowSize` / `useMediaQuery`; `veloxWindow` imperative API |
+| 17 | `velox.config.json` parsing; `velox-security` capability enforcer; `fs.read` gate on `readFile`; `StartupMode` enum (windowed / maximized / fullscreen) |
 | 17B | `@velox/router` — named-route history stack; 3-screen demo |
+| 17C | `getEnv()` binding + `env.allow` capability; build-time vs runtime vs keychain secret guidance |
 
 ---
 
 ## Roadmap (upcoming)
 
-| Week | Goal |
-|------|------|
-| 17 | `velox.config.ts` parsing; capability system enforced in Rust |
-| 18 | 3D — wgpu 3D pass, `@velox/three` minimal API |
-| 19 | Local AI — Candle, model loading, text completion |
-| 20 | CLI — `velox create`, `velox dev`, `velox build` |
-| 21 | Plugin API — V8 isolate sandbox for untrusted third-party plugins |
-| 22 | TanStack Router adapter (`@velox/router/tanstack`) for web-targeting apps |
-| 23–26 | Reference application built entirely on Velox |
+| Phase | Goal |
+|-------|------|
+| 7 (Weeks 18–19) | File system bindings (`writeFile`, `listDir`, …); SQLite via `sqlx`; LanceDB vector store |
+| 8 (Week 20) | OS dialogs, clipboard, system tray, desktop notifications, window management |
+| 9 (Week 21) | V8 snapshots — startup drops from ~1000 ms to ~50 ms; source code not in binary |
+| 10 (Week 22) | CLI — `velox create`, `velox dev`, `velox build`, cross-platform targets |
+| 11 (Weeks 23–28) | Reference application (SQLite notes app) built entirely on Velox |
+| 12 (Week 29) | Network — `fetch`, WebSocket, mDNS device discovery |
+| 15 (Week 33) | Extended OS APIs — battery, camera, microphone, gamepads, OS keychain |
+| 16 (Week 34) | Full dev mode — Vite HMR, React Fast Refresh, Chrome DevTools Protocol |
+| 17 (Weeks 35–37) | 3D — wgpu 3D pass, `@velox/three`, physics (rapier3d) |
+| 18 (Weeks 38–39) | Local AI — Candle inference, Whisper transcription, LanceDB semantic search |
+| 19 (Weeks 40–44) | Mobile targets — iOS (Metal) and Android (Vulkan) |
 
 ---
 
@@ -298,12 +422,13 @@ changes, keeping idle CPU near zero.
 
 | Crate | Single responsibility |
 |-------|-----------------------|
-| `velox-shell` | OS window, winit event loop, input delivery |
+| `velox-shell` | OS window, winit event loop, input delivery, `StartupMode` |
 | `velox-gpu` | wgpu device, queue, surface, swapchain |
 | `velox-renderer` | Vello scene construction, frame begin/end, render pass |
-| `velox-layout` | Taffy tree ownership, style helpers, layout compute |
+| `velox-layout` | Taffy tree ownership, style helpers, layout compute, measure function |
 | `velox-text` | Parley shaping, Swash rasterisation, label caching |
 | `velox-runtime` | V8 isolate, context, native bindings, async Promise bridge |
+| `velox-security` | `Capabilities` OnceLock, capability helpers, all binding gates |
 | `velox-core` | Wires all crates together, owns the event loop and AppState |
 
 ---

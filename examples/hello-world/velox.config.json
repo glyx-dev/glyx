@@ -1,10 +1,9 @@
 {
   "window": {
-    "title":      "Velox — Hello World",
-    "width":      1280,
-    "height":     800,
-    "maximized":  false,
-    "fullscreen": false
+    "title":       "Velox — Hello World",
+    "width":       1280,
+    "height":      800,
+    "startupMode": "windowed"
   },
   "capabilities": {
     "fs": {
@@ -12,6 +11,9 @@
       "write": []
     },
     "network": {
+      "allow": []
+    },
+    "env": {
       "allow": []
     },
     "db":      false,

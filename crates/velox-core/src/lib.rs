@@ -77,17 +77,15 @@ struct VeloxConfigFile {
 /// All fields are optional — absent fields leave `AppConfig::window` unchanged.
 #[derive(serde::Deserialize)]
 struct WindowCfgJson {
-    title:      Option<String>,
-    /// Explicit width in physical pixels. Omit to start maximised.
-    width:      Option<u32>,
-    /// Explicit height in physical pixels. Omit to start maximised.
-    height:     Option<u32>,
-    /// Start maximised (taskbar remains visible). Default: false.
-    #[serde(default)]
-    maximized:  bool,
-    /// Start borderless fullscreen (covers taskbar). Default: false.
-    #[serde(default)]
-    fullscreen: bool,
+    title:        Option<String>,
+    /// Width in physical pixels. Only used when `startupMode` is `"windowed"`.
+    width:        Option<u32>,
+    /// Height in physical pixels. Only used when `startupMode` is `"windowed"`.
+    height:       Option<u32>,
+    /// `"windowed"` (default) | `"maximized"` | `"fullscreen"`.
+    /// Omitting `width`/`height` with no `startupMode` also implies `"maximized"`.
+    #[serde(rename = "startupMode")]
+    startup_mode: Option<String>,
 }
 
 /// Load `velox.config.json` from the current working directory.
@@ -107,17 +105,17 @@ fn load_velox_config(cfg: &mut WindowConfig) -> Capabilities {
     if let Some(w) = file.as_ref().and_then(|f| f.window.as_ref()) {
         if let Some(t) = &w.title { cfg.title = t.clone(); }
 
-        if w.fullscreen {
-            cfg.start_fullscreen = true;
-            cfg.start_maximized  = false;
-        } else if w.maximized || (w.width.is_none() && w.height.is_none()) {
-            // No explicit size → start maximised.
-            cfg.start_maximized  = true;
-            cfg.start_fullscreen = false;
-        } else {
-            if let Some(wd) = w.width  { cfg.width  = wd; }
-            if let Some(ht) = w.height { cfg.height = ht; }
-        }
+        cfg.startup_mode = match w.startup_mode.as_deref() {
+            Some("fullscreen") => StartupMode::Fullscreen,
+            Some("maximized")  => StartupMode::Maximized,
+            // Omitting width+height with no explicit mode implies maximized.
+            None if w.width.is_none() && w.height.is_none() => StartupMode::Maximized,
+            _ => {
+                if let Some(wd) = w.width  { cfg.width  = wd; }
+                if let Some(ht) = w.height { cfg.height = ht; }
+                StartupMode::Windowed
+            }
+        };
     }
 
     let caps = file.and_then(|f| f.capabilities).unwrap_or_default();
@@ -140,6 +138,7 @@ fn load_velox_config(cfg: &mut WindowConfig) -> Capabilities {
 }
 
 pub use velox_shell::ShellConfig as WindowConfig;
+pub use velox_shell::StartupMode;
 mod scene;
 mod layout;
 mod render;
@@ -546,6 +545,16 @@ fn build_window_controller(window: Arc<winit::window::Window>) -> WindowControll
 
 pub fn run(mut config: AppConfig) {
     env_logger::init();
+
+    // Load .env from the working directory (or any parent) if one exists.
+    // Silently ignored when absent — production apps may rely on OS-level env
+    // vars set by the installer instead of a bundled file.
+    // dotenvy does NOT override vars that are already set in the environment.
+    match dotenvy::dotenv() {
+        Ok(path) => log::info!("velox: loaded env from {}", path.display()),
+        Err(dotenvy::Error::Io(_)) => {} // no .env file — normal in production
+        Err(e) => log::warn!("velox: .env parse error: {e}"),
+    }
 
     // Load velox.config.json, apply window overrides, and lock capabilities —
     // all before V8 is initialised so no binding can run unchecked.

@@ -36,6 +36,28 @@ pub struct NetworkCapability {
     pub allow: Vec<String>,
 }
 
+/// Environment variable access declarations.
+///
+/// Only variables whose names match an entry in `allow` are readable from JS.
+/// Patterns support a trailing `*` wildcard: `"MY_APP_*"` allows all vars
+/// with that prefix.  JS cannot enumerate or dump the process environment —
+/// it can only read names it explicitly requests that are in the allowlist.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct EnvCapability {
+    /// Allowed env var name patterns. Supports trailing `*` wildcard.
+    pub allow: Vec<String>,
+}
+
+/// Matches an env var name against a single pattern.
+/// Supports exact match and trailing `*` wildcard only.
+fn env_pattern_matches(pattern: &str, name: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        name.starts_with(prefix)
+    } else {
+        pattern == name
+    }
+}
+
 /// The full capability set for one Velox application.
 ///
 /// Deserialises from the `"capabilities"` key in `velox.config.json`.
@@ -43,6 +65,7 @@ pub struct NetworkCapability {
 pub struct Capabilities {
     pub fs:      Option<FsCapability>,
     pub network: Option<NetworkCapability>,
+    pub env:     Option<EnvCapability>,
     #[serde(default)]
     pub db:      bool,
     #[serde(default)]
@@ -69,6 +92,15 @@ impl Capabilities {
         self.network
             .as_ref()
             .map(|n| n.allow.iter().any(|h| h == "*" || h == host))
+            .unwrap_or(false)
+    }
+
+    /// True if `name` matches any pattern in the `env.allow` list.
+    /// Returns `false` (silently) when no `env` capability is declared.
+    pub fn can_get_env(&self, name: &str) -> bool {
+        self.env
+            .as_ref()
+            .map(|e| e.allow.iter().any(|p| env_pattern_matches(p, name)))
             .unwrap_or(false)
     }
 }

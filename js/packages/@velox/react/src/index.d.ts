@@ -97,6 +97,20 @@ export declare function useScreenSize(): { width: number; height: number };
 /** True when window width >= minWidth. Equivalent to CSS min-width media query. */
 export declare function useMediaQuery(minWidth: number): boolean;
 
+// ── Secure env access ─────────────────────────────────────────────────────────
+
+/**
+ * Read a single environment variable declared under `capabilities.env.allow`
+ * in `velox.config.json`. Returns `null` if the name is not on the allowlist
+ * or the variable is absent from the process environment.
+ *
+ * `process.env` is not available — only explicitly declared names are readable.
+ *
+ * @example
+ * const key = getEnv('API_KEY'); // declared as "API_KEY" in env.allow
+ */
+export declare function getEnv(name: string): string | null;
+
 // ── Window imperative API ─────────────────────────────────────────────────────
 
 export declare const veloxWindow: {

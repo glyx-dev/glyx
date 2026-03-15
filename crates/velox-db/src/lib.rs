@@ -140,6 +140,121 @@ fn json_to_string(v: &serde_json::Value) -> Option<String> {
     }
 }
 
+// ── Vector Store ──────────────────────────────────────────────────────────────
+
+/// An embedded vector store backed by SQLite.
+///
+/// Vectors are stored as raw f32 little-endian bytes in a BLOB column.
+/// Similarity search is brute-force cosine similarity — correct and fast enough
+/// for typical in-app vector datasets (< 100 k vectors).
+#[derive(Clone)]
+pub struct VectorStore {
+    pub pool: SqlitePool,
+}
+
+/// Open (or create) a vector store database at the given path.
+///
+/// Accepts the same path format as [`open`], including `":memory:"`.
+/// Creates the internal `__velox_vectors` table if it does not already exist.
+pub async fn open_vector_store(path: &str) -> Result<VectorStore> {
+    let pool = open(path).await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS __velox_vectors (
+            table_name TEXT NOT NULL,
+            id         TEXT NOT NULL,
+            vector     BLOB NOT NULL,
+            metadata   TEXT,
+            PRIMARY KEY (table_name, id)
+        )",
+    )
+    .execute(&pool)
+    .await?;
+    log::info!("velox-db: vector store opened {:?}", path);
+    Ok(VectorStore { pool })
+}
+
+/// Insert or replace a vector record in the given logical table.
+///
+/// - `table`    — namespace / collection name (e.g. `"embeddings"`).
+/// - `id`       — unique string key for this record.
+/// - `vector`   — embedding as a slice of `f32` values.
+/// - `metadata` — optional JSON string stored alongside the vector.
+pub async fn vector_upsert(
+    store:    &VectorStore,
+    table:    &str,
+    id:       &str,
+    vector:   &[f32],
+    metadata: Option<&str>,
+) -> Result<()> {
+    let bytes: Vec<u8> = vector.iter().flat_map(|f| f.to_le_bytes()).collect();
+    sqlx::query(
+        "INSERT OR REPLACE INTO __velox_vectors (table_name, id, vector, metadata) \
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(table)
+    .bind(id)
+    .bind(bytes)
+    .bind(metadata)
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
+/// Return the `limit` nearest records to `query` in the given table.
+///
+/// Results are sorted by descending cosine similarity (1.0 = identical direction).
+/// Each entry is `(id, score, metadata_json_or_null)`.
+pub async fn vector_search(
+    store: &VectorStore,
+    table: &str,
+    query: &[f32],
+    limit: usize,
+) -> Result<Vec<(String, f32, Option<String>)>> {
+    let rows = sqlx::query(
+        "SELECT id, vector, metadata FROM __velox_vectors WHERE table_name = ?",
+    )
+    .bind(table)
+    .fetch_all(&store.pool)
+    .await?;
+
+    let mut scored: Vec<(String, f32, Option<String>)> = rows
+        .iter()
+        .filter_map(|row| {
+            let id:   String         = row.try_get(0).ok()?;
+            let bytes: Vec<u8>       = row.try_get(1).ok()?;
+            let meta: Option<String> = row.try_get(2).ok()?;
+            let vec = bytes_to_f32(&bytes);
+            let score = cosine_similarity(query, &vec);
+            Some((id, score, meta))
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(limit);
+    Ok(scored)
+}
+
+// ── Vector helpers ────────────────────────────────────────────────────────────
+
+fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot:   f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if mag_a == 0.0 || mag_b == 0.0 { 0.0 } else { dot / (mag_a * mag_b) }
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
 /// Read a single cell from a `SqliteRow` and convert it to a `serde_json::Value`.
 ///
 /// Strategy: try `i64` first (INTEGER storage class), then `f64` (REAL), then

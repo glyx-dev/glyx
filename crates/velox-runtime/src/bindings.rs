@@ -197,8 +197,10 @@ pub fn register_all(
         next_id:    std::sync::atomic::AtomicU32::new(1),
         next_image_id: std::sync::atomic::AtomicU32::new(1),
         window,
-        db_pools:   Arc::new(Mutex::new(HashMap::new())),
-        next_db_id: std::sync::atomic::AtomicU32::new(1),
+        db_pools:      Arc::new(Mutex::new(HashMap::new())),
+        next_db_id:    std::sync::atomic::AtomicU32::new(1),
+        vector_stores: Arc::new(Mutex::new(HashMap::new())),
+        next_vdb_id:   std::sync::atomic::AtomicU32::new(1),
     });
     let ptr   = Box::into_raw(state) as *mut std::ffi::c_void;
     // Safety: ptr is valid for the lifetime of the isolate.
@@ -247,6 +249,12 @@ pub fn register_all(
     register!("__velox_db_run",         db_run_callback);
     register!("__velox_db_close",       db_close_callback);
     register!("__velox_db_transaction", db_transaction_callback);
+
+    // ── Vector database ─────────────────────────────────────────────────────
+    register!("__velox_vectorDb_open",   vectordb_open_callback);
+    register!("__velox_vectorDb_upsert", vectordb_upsert_callback);
+    register!("__velox_vectorDb_search", vectordb_search_callback);
+    register!("__velox_vectorDb_close",  vectordb_close_callback);
 }
 
 struct AsyncState {
@@ -258,9 +266,12 @@ struct AsyncState {
     next_id:      std::sync::atomic::AtomicU32,
     next_image_id: std::sync::atomic::AtomicU32,
     window:       Option<WindowController>,
-    // ── Database handles ─────────────────────────────────────────────────────
+    // ── SQLite handles ───────────────────────────────────────────────────────
     db_pools:     Arc<Mutex<HashMap<u32, velox_db::SqlitePool>>>,
     next_db_id:   std::sync::atomic::AtomicU32,
+    // ── Vector store handles ─────────────────────────────────────────────────
+    vector_stores: Arc<Mutex<HashMap<u32, velox_db::VectorStore>>>,
+    next_vdb_id:   std::sync::atomic::AtomicU32,
 }
 
 fn set_func(
@@ -1241,6 +1252,182 @@ fn db_transaction_callback(
         }
         .await;
         queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+// ── Vector database callbacks ─────────────────────────────────────────────────
+//
+// All async. Gated by `db: true` capability (vector stores are local DB storage).
+// `vectorDb_open`   → Promise<string>  — resolves with handle number as a string.
+// `vectorDb_upsert` → Promise<string>  — resolves with "" on success.
+// `vectorDb_search` → Promise<string>  — resolves with JSON array of {id,score,metadata}.
+// `vectorDb_close`  → Promise<string>  — resolves with "" on success.
+
+/// `__velox_vectorDb_open(path) -> Promise<string>` — handle number.
+fn vectordb_open_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().db {
+        throw_cap_error(scope, "db");
+        return;
+    }
+    let data   = args.data().unwrap();
+    let ext    = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state  = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let path   = v8_arg_to_string(scope, &args, 0);
+    let handle = state.next_vdb_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let stores = Arc::clone(&state.vector_stores);
+    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = velox_db::open_vector_store(&path).await
+            .map(|store| {
+                stores.lock().unwrap().insert(handle, store);
+                handle.to_string()
+            })
+            .map_err(|e| e.to_string());
+        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_vectorDb_upsert(handle, table, id, vectorJson, metadataJson) -> Promise<string>`
+///
+/// `vectorJson`   — JSON array of f32 numbers (the embedding).
+/// `metadataJson` — JSON string for the metadata payload, or `""` for none.
+fn vectordb_upsert_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().db {
+        throw_cap_error(scope, "db");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle      = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let table       = v8_arg_to_string(scope, &args, 1);
+    let id          = v8_arg_to_string(scope, &args, 2);
+    let vector_json = v8_arg_to_string(scope, &args, 3);
+    let meta_json   = v8_arg_to_string(scope, &args, 4);
+
+    let store = match state.vector_stores.lock().unwrap().get(&handle).cloned() {
+        Some(s) => s,
+        None => {
+            throw_js_error(scope, &format!("vectorDb: unknown handle {handle}"));
+            return;
+        }
+    };
+
+    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result: Result<String, String> = async {
+            let vector: Vec<f64> = serde_json::from_str(&vector_json)
+                .map_err(|e| format!("vectorDb.upsert: invalid vector JSON: {e}"))?;
+            let vec_f32: Vec<f32> = vector.iter().map(|&v| v as f32).collect();
+            let meta = if meta_json.is_empty() { None } else { Some(meta_json.as_str()) };
+            velox_db::vector_upsert(&store, &table, &id, &vec_f32, meta).await
+                .map(|_| String::new())
+                .map_err(|e| e.to_string())
+        }
+        .await;
+        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_vectorDb_search(handle, table, queryJson, limit) -> Promise<string>` — JSON results.
+///
+/// `queryJson` — JSON array of f32 numbers (the query embedding).
+/// Resolves with a JSON array of `{id, score, metadata}` objects.
+fn vectordb_search_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().db {
+        throw_cap_error(scope, "db");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle     = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let table      = v8_arg_to_string(scope, &args, 1);
+    let query_json = v8_arg_to_string(scope, &args, 2);
+    let limit      = args.get(3).number_value(scope).unwrap_or(10.0) as usize;
+
+    let store = match state.vector_stores.lock().unwrap().get(&handle).cloned() {
+        Some(s) => s,
+        None => {
+            throw_js_error(scope, &format!("vectorDb: unknown handle {handle}"));
+            return;
+        }
+    };
+
+    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result: Result<String, String> = async {
+            let query: Vec<f64> = serde_json::from_str(&query_json)
+                .map_err(|e| format!("vectorDb.search: invalid query JSON: {e}"))?;
+            let query_f32: Vec<f32> = query.iter().map(|&v| v as f32).collect();
+            let hits = velox_db::vector_search(&store, &table, &query_f32, limit).await
+                .map_err(|e| e.to_string())?;
+
+            let json_hits: Vec<serde_json::Value> = hits.into_iter().map(|(id, score, meta)| {
+                let metadata = meta
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .unwrap_or(serde_json::Value::Null);
+                serde_json::json!({ "id": id, "score": score, "metadata": metadata })
+            }).collect();
+            serde_json::to_string(&json_hits).map_err(|e| e.to_string())
+        }
+        .await;
+        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_vectorDb_close(handle) -> Promise<string>`
+///
+/// Removes the store from the handle map and closes the underlying pool.
+/// Idempotent: closing an unknown handle resolves immediately without error.
+fn vectordb_close_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().db {
+        throw_cap_error(scope, "db");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let store  = state.vector_stores.lock().unwrap().remove(&handle);
+
+    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        if let Some(s) = store {
+            s.pool.close().await;
+        }
+        queue_clone.lock().unwrap().push_back(Completion {
+            resolver_ptr: resolver,
+            result: Ok(String::new()),
+        });
     });
 }
 

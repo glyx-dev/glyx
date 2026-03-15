@@ -1,10 +1,11 @@
-// Week 18 — Data Layer demo (+ Week 17B router still present).
+// Week 19 — Vector Database demo (+ Weeks 17B/18 still present).
 //
 // Screens:
-//   home        — greeting, TextInput, Image, → palette, → data demo
+//   home        — greeting, TextInput, Image, → palette, → data demo, → vector DB demo
 //   palette     — scrollable Catppuccin palette, tap a colour → detail
 //   colorDetail — full-card colour detail, ← Back to palette
 //   data        — Week 18: file system (write/read/list) + SQLite (run/query/transaction)
+//   vectorDb    — Week 19: in-memory vector store, RGB nearest-colour search
 //
 // The header bar (window controls + dimensions) lives outside the router.
 
@@ -12,7 +13,7 @@ import './polyfills.js';
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, Image, Pressable, TextInput, ScrollView, render,
-  useWindowSize, useMediaQuery, veloxWindow, fs, db,
+  useWindowSize, useMediaQuery, veloxWindow, fs, db, vectorDb,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
 
@@ -296,6 +297,202 @@ function DataScreen() {
   );
 }
 
+// ── Screen: Vector DB (Week 19) ───────────────────────────────────────────────
+//
+// Seeds the 14 Catppuccin palette colours as 3-D RGB vectors into an
+// in-memory vector store on mount. User enters R/G/B values (0–255) and
+// presses "Find Nearest" — top-5 results ranked by cosine similarity.
+
+function hexToVec(hex) {
+  return [
+    parseInt(hex.slice(1, 3), 16) / 255,
+    parseInt(hex.slice(3, 5), 16) / 255,
+    parseInt(hex.slice(5, 7), 16) / 255,
+  ];
+}
+
+function VectorDbScreen() {
+  const { width: winW, height: winH } = useWindowSize();
+
+  const [status,  setStatus]  = useState('Opening vector store…');
+  const [vdb,     setVdb]     = useState(null);
+  const [queryR,  setQueryR]  = useState('220');
+  const [queryG,  setQueryG]  = useState('80');
+  const [queryB,  setQueryB]  = useState('60');
+  const [results, setResults] = useState([]);
+
+  const contentW = winW - 2 * PAD;
+  const contentH = winH - HEADER_H - 2 * PAD;
+  const inner    = contentW - 32;
+  const svH      = contentH - 72;
+
+  // Open an in-memory vector store and seed palette colours on mount.
+  useEffect(() => {
+    let store;
+    vectorDb.open(':memory:')
+      .then((s) => {
+        store = s;
+        return Promise.all(
+          PALETTE.map(({ name, bg }) =>
+            store.upsert('colors', name, hexToVec(bg), { hex: bg })
+          )
+        );
+      })
+      .then(() => {
+        setVdb(store);
+        setStatus('Ready — enter RGB (0–255) and press Find Nearest.');
+      })
+      .catch((e) => setStatus('Error: ' + e.message));
+  }, []);
+
+  const search = () => {
+    if (!vdb) return;
+    const r = Math.max(0, Math.min(255, parseInt(queryR) || 0)) / 255;
+    const g = Math.max(0, Math.min(255, parseInt(queryG) || 0)) / 255;
+    const b = Math.max(0, Math.min(255, parseInt(queryB) || 0)) / 255;
+    vdb.search('colors', [r, g, b], 5)
+      .then((hits) => {
+        setResults(hits);
+        setStatus('Top-' + hits.length + ' nearest colours by cosine similarity.');
+      })
+      .catch((e) => setStatus('Search error: ' + e.message));
+  };
+
+  return (
+    <View
+      style={{
+        backgroundColor: '#2a2a3e',
+        borderRadius:    16,
+        borderWidth:     1,
+        borderColor:     '#44446a',
+        padding:         16,
+        gap:             8,
+        justifyContent:  'flex-start',
+        alignItems:      'flex-start',
+      }}
+      width={contentW}
+      height={contentH}
+    >
+      {/* Header row */}
+      <View
+        style={{ flexDirection: 'row', gap: 12, alignItems: 'flex-start' }}
+        width={inner}
+        height={32}
+      >
+        <BackBtn />
+        <Text fontSize={14} width={inner - 110} height={20} style={{ color: '#cdd6f4' }}>
+          Week 19 — Vector Database
+        </Text>
+      </View>
+
+      {/* Status */}
+      <Text fontSize={11} width={inner} height={16} style={{ color: '#a6e3a1' }}>
+        {status}
+      </Text>
+
+      {/* Scrollable content */}
+      <ScrollView
+        width={inner}
+        height={svH}
+        contentHeight={560}
+        style={{ gap: 10, padding: 4 }}
+      >
+        <Text fontSize={13} width={inner} height={20} style={{ color: '#89b4fa' }}>
+          Nearest-colour search  (cosine similarity on RGB vectors)
+        </Text>
+        <Text fontSize={11} width={inner} style={{ color: '#a6adc8' }}>
+          {'14 Catppuccin colours seeded as 3-D RGB unit vectors.\n' +
+           'Enter an RGB value (0–255) to find the nearest matches.'}
+        </Text>
+
+        {/* RGB query inputs + search button */}
+        <View
+          style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-start' }}
+          width={inner}
+          height={36}
+        >
+          <TextInput
+            value={queryR}
+            onChangeText={setQueryR}
+            placeholder="R"
+            fontSize={13}
+            width={80}
+            height={36}
+          />
+          <TextInput
+            value={queryG}
+            onChangeText={setQueryG}
+            placeholder="G"
+            fontSize={13}
+            width={80}
+            height={36}
+          />
+          <TextInput
+            value={queryB}
+            onChangeText={setQueryB}
+            placeholder="B"
+            fontSize={13}
+            width={80}
+            height={36}
+          />
+          <SmallBtn label="Find Nearest" onPress={search} width={120} />
+        </View>
+
+        {/* Results */}
+        {results.length > 0 ? (
+          <View
+            style={{ gap: 6, alignItems: 'flex-start' }}
+            width={inner}
+            height={results.length * 38}
+          >
+            {results.map((hit, i) => (
+              <View
+                key={i}
+                style={{
+                  flexDirection:   'row',
+                  gap:             10,
+                  alignItems:      'flex-start',
+                  backgroundColor: '#1e1e2e',
+                  borderRadius:    6,
+                  padding:         8,
+                  borderWidth:     1,
+                  borderColor:     '#313244',
+                }}
+                width={inner}
+                height={30}
+              >
+                <View
+                  style={{ backgroundColor: hit.metadata?.hex ?? '#888', borderRadius: 4 }}
+                  width={16}
+                  height={16}
+                />
+                <Text fontSize={13} width={110} height={18} style={{ color: '#cdd6f4' }}>
+                  {hit.id}
+                </Text>
+                <Text fontSize={12} width={80} height={18} style={{ color: '#6c7086' }}>
+                  {hit.metadata?.hex ?? ''}
+                </Text>
+                <Text fontSize={12} width={70} height={18} style={{ color: '#a6e3a1' }}>
+                  {(hit.score * 100).toFixed(1) + '%'}
+                </Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
+
+        {/* Divider + API note */}
+        <View style={{ backgroundColor: '#44446a' }} width={inner} height={1} />
+        <Text fontSize={11} width={inner} style={{ color: '#45475a' }}>
+          {'vectorDb.open(":memory:")  — ephemeral in-process store\n' +
+           'store.upsert(table, id, vector, metadata)\n' +
+           'store.search(table, queryVec, limit) → [{id, score, metadata}]\n' +
+           'Backed by SQLite BLOB + brute-force cosine similarity (Rust).'}
+        </Text>
+      </ScrollView>
+    </View>
+  );
+}
+
 // ── Screen: Home ─────────────────────────────────────────────────────────────
 
 function HomeScreen() {
@@ -419,6 +616,23 @@ function HomeScreen() {
         >
           <Text fontSize={13} width={leftIn - 20} height={20} style={{ color: '#89b4fa' }}>
             File System + SQLite Demo →
+          </Text>
+        </Pressable>
+
+        {/* Navigate to vector DB demo screen */}
+        <Pressable
+          onPress={() => navigate('vectorDb')}
+          width={leftIn}
+          height={40}
+          style={{
+            backgroundColor: '#1e2a1e',
+            borderRadius:    8,
+            borderWidth:     1,
+            borderColor:     '#2a6e3a',
+          }}
+        >
+          <Text fontSize={13} width={leftIn - 20} height={20} style={{ color: '#a6e3a1' }}>
+            Vector Database Demo →
           </Text>
         </Pressable>
 
@@ -710,6 +924,7 @@ function App() {
           <Route name="palette"     component={PaletteScreen}    />
           <Route name="colorDetail" component={ColorDetailScreen} />
           <Route name="data"        component={DataScreen}       />
+          <Route name="vectorDb"    component={VectorDbScreen}   />
         </Router>
       </View>
 
@@ -719,4 +934,4 @@ function App() {
 
 render(<App />);
 
-__velox_log('Week 18: file system + SQLite data layer loaded.');
+__velox_log('Week 19: vector database (cosine similarity on SQLite BLOBs) loaded.');

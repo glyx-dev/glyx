@@ -12,6 +12,9 @@ Thumbs.db
 .vscode/settings.json
 .idea/
 
+*.db
+*.db-shm
+*.db-wal
 # The generated bundle (examples/hello-world/js/app.js) is intentionally
 # committed so `cargo build` works on a fresh checkout without requiring
 # a prior `bun build` run.

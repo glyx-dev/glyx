@@ -534,3 +534,61 @@ export const db = {
       : _noBinding('db.transaction');
   },
 };
+
+// ── Vector Database ────────────────────────────────────────────────────────────
+//
+// vectorDb.open(path) → Promise<VectorDbHandle>
+//
+// VectorDbHandle:
+//   .upsert(table, id, vector, metadata?) → Promise<void>
+//   .search(table, queryVector, limit?)   → Promise<{id,score,metadata}[]>
+//   .close()                             → Promise<void>
+
+export const vectorDb = {
+  /**
+   * Open (or create) a vector store at the given path.
+   * `":memory:"` opens an in-process ephemeral store (lost on close).
+   * @param {string} path
+   * @returns {Promise<VectorDbHandle>}
+   */
+  open: (path) => {
+    if (typeof __velox_vectorDb_open === 'undefined') return _noBinding('vectorDb.open');
+    return __velox_vectorDb_open(path).then((s) => {
+      const handle = Number(s);
+      return {
+        /**
+         * Insert or replace a vector record.
+         * @param {string}   table    — collection name
+         * @param {string}   id       — unique record key
+         * @param {number[]} vector   — embedding (array of floats)
+         * @param {any}      [meta]   — optional metadata (JSON-serialisable)
+         * @returns {Promise<void>}
+         */
+        upsert(table, id, vector, meta) {
+          const metaStr = meta !== undefined ? JSON.stringify(meta) : '';
+          return __velox_vectorDb_upsert(handle, table, id, JSON.stringify(vector), metaStr);
+        },
+
+        /**
+         * Find the nearest vectors by cosine similarity.
+         * @param {string}   table       — collection name
+         * @param {number[]} queryVector — query embedding
+         * @param {number}   [limit=10]  — max results
+         * @returns {Promise<{id:string, score:number, metadata:any}[]>}
+         */
+        search(table, queryVector, limit = 10) {
+          return __velox_vectorDb_search(handle, table, JSON.stringify(queryVector), limit)
+            .then(JSON.parse);
+        },
+
+        /**
+         * Close the vector store and release its resources.
+         * @returns {Promise<void>}
+         */
+        close() {
+          return __velox_vectorDb_close(handle);
+        },
+      };
+    });
+  },
+};

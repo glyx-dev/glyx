@@ -31,7 +31,7 @@
   };
   var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
 
-  // node_modules/.bun/react@18.3.1/node_modules/react/cjs/react.production.min.js
+  // ../../node_modules/.bun/react@18.3.1/node_modules/react/cjs/react.production.min.js
   var require_react_production_min = __commonJS((exports) => {
     var l = Symbol.for("react.element");
     var n = Symbol.for("react.portal");
@@ -322,14 +322,14 @@
     exports.version = "18.3.1";
   });
 
-  // node_modules/.bun/react@18.3.1/node_modules/react/index.js
+  // ../../node_modules/.bun/react@18.3.1/node_modules/react/index.js
   var require_react = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_production_min();
     } else {}
   });
 
-  // node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/cjs/scheduler.production.min.js
+  // ../../node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/cjs/scheduler.production.min.js
   var require_scheduler_production_min = __commonJS((exports) => {
     function f(a, b) {
       var c = a.length;
@@ -595,14 +595,14 @@
     };
   });
 
-  // node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/index.js
+  // ../../node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/index.js
   var require_scheduler = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_scheduler_production_min();
     } else {}
   });
 
-  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler.production.min.js
+  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler.production.min.js
   var require_react_reconciler_production_min = __commonJS((exports, module) => {
     module.exports = function $$$reconciler($$$hostConfig) {
       var exports2 = {};
@@ -5700,14 +5700,14 @@ No matching component was found for:
     };
   });
 
-  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/index.js
+  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/index.js
   var require_react_reconciler = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_reconciler_production_min();
     } else {}
   });
 
-  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler-constants.production.min.js
+  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler-constants.production.min.js
   var require_react_reconciler_constants_production_min = __commonJS((exports) => {
     exports.ConcurrentRoot = 1;
     exports.ContinuousEventPriority = 4;
@@ -5717,14 +5717,14 @@ No matching component was found for:
     exports.LegacyRoot = 0;
   });
 
-  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/constants.js
+  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/constants.js
   var require_constants = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_reconciler_constants_production_min();
     } else {}
   });
 
-  // node_modules/.bun/react@18.3.1/node_modules/react/cjs/react-jsx-runtime.production.min.js
+  // ../../node_modules/.bun/react@18.3.1/node_modules/react/cjs/react-jsx-runtime.production.min.js
   var require_react_jsx_runtime_production_min = __commonJS((exports) => {
     var f = require_react();
     var k = Symbol.for("react.element");
@@ -5749,14 +5749,14 @@ No matching component was found for:
     exports.jsxs = q;
   });
 
-  // node_modules/.bun/react@18.3.1/node_modules/react/jsx-runtime.js
+  // ../../node_modules/.bun/react@18.3.1/node_modules/react/jsx-runtime.js
   var require_jsx_runtime = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_jsx_runtime_production_min();
     } else {}
   });
 
-  // examples/hello-world/js/polyfills.js
+  // js/polyfills.js
   if (typeof performance === "undefined") {
     globalThis.performance = {
       now: () => Number(__velox_getTime())
@@ -5793,14 +5793,14 @@ No matching component was found for:
     };
   }
 
-  // examples/hello-world/js/app.jsx
+  // js/app.jsx
   var import_react3 = __toESM(require_react(), 1);
 
-  // js/packages/@velox/react/src/index.js
+  // ../../js/packages/@velox/react/src/index.js
   var import_react = __toESM(require_react(), 1);
   var import_react_reconciler = __toESM(require_react_reconciler(), 1);
 
-  // js/packages/@velox/react/src/hostConfig.js
+  // ../../js/packages/@velox/react/src/hostConfig.js
   var import_constants = __toESM(require_constants(), 1);
   function createInstance(type, props) {
     const { children, style, ref: _ref, _veloxOnMount, ...rest } = props;
@@ -5946,7 +5946,7 @@ No matching component was found for:
   };
   var hostConfig_default = HostConfig;
 
-  // js/packages/@velox/react/src/events.js
+  // ../../js/packages/@velox/react/src/events.js
   var pressableRegistry = new Map;
   var inputRegistry = new Map;
   var scrollRegistry = new Map;
@@ -6086,7 +6086,7 @@ No matching component was found for:
     }
   }
 
-  // js/packages/@velox/react/src/index.js
+  // ../../js/packages/@velox/react/src/index.js
   var VeloxReconciler = import_react_reconciler.default(hostConfig_default);
   var rootContainer = VeloxReconciler.createContainer({ isVeloxRoot: true }, 0, null, false, null, "", (err) => __velox_log("[React] Recoverable error: " + err.message), null);
   globalThis.__velox_frameCallback = function veloxFrameCallback() {
@@ -6340,8 +6340,29 @@ No matching component was found for:
       return typeof __velox_db_transaction !== "undefined" ? __velox_db_transaction(handle, JSON.stringify(stmts)) : _noBinding("db.transaction");
     }
   };
+  var vectorDb = {
+    open: (path) => {
+      if (typeof __velox_vectorDb_open === "undefined")
+        return _noBinding("vectorDb.open");
+      return __velox_vectorDb_open(path).then((s) => {
+        const handle = Number(s);
+        return {
+          upsert(table, id, vector, meta) {
+            const metaStr = meta !== undefined ? JSON.stringify(meta) : "";
+            return __velox_vectorDb_upsert(handle, table, id, JSON.stringify(vector), metaStr);
+          },
+          search(table, queryVector, limit = 10) {
+            return __velox_vectorDb_search(handle, table, JSON.stringify(queryVector), limit).then(JSON.parse);
+          },
+          close() {
+            return __velox_vectorDb_close(handle);
+          }
+        };
+      });
+    }
+  };
 
-  // js/packages/@velox/router/src/index.js
+  // ../../js/packages/@velox/router/src/index.js
   var import_react2 = __toESM(require_react(), 1);
   var RouterCtx = import_react2.createContext(null);
   function Router({ children, initialRoute }) {
@@ -6391,7 +6412,7 @@ No matching component was found for:
     return { name: ctx.routeName, params: ctx.params, canGoBack: ctx.canGoBack };
   }
 
-  // examples/hello-world/js/app.jsx
+  // js/app.jsx
   var jsx_runtime = __toESM(require_jsx_runtime(), 1);
   var HEADER_H = 48;
   var PAD = 16;
@@ -6669,6 +6690,204 @@ No matching component was found for:
       ]
     });
   }
+  function hexToVec(hex) {
+    return [
+      parseInt(hex.slice(1, 3), 16) / 255,
+      parseInt(hex.slice(3, 5), 16) / 255,
+      parseInt(hex.slice(5, 7), 16) / 255
+    ];
+  }
+  function VectorDbScreen() {
+    const { width: winW, height: winH } = useWindowSize();
+    const [status, setStatus] = import_react3.useState("Opening vector store…");
+    const [vdb, setVdb] = import_react3.useState(null);
+    const [queryR, setQueryR] = import_react3.useState("220");
+    const [queryG, setQueryG] = import_react3.useState("80");
+    const [queryB, setQueryB] = import_react3.useState("60");
+    const [results, setResults] = import_react3.useState([]);
+    const contentW = winW - 2 * PAD;
+    const contentH = winH - HEADER_H - 2 * PAD;
+    const inner = contentW - 32;
+    const svH = contentH - 72;
+    import_react3.useEffect(() => {
+      let store;
+      vectorDb.open(":memory:").then((s) => {
+        store = s;
+        return Promise.all(PALETTE.map(({ name, bg }) => store.upsert("colors", name, hexToVec(bg), { hex: bg })));
+      }).then(() => {
+        setVdb(store);
+        setStatus("Ready — enter RGB (0–255) and press Find Nearest.");
+      }).catch((e) => setStatus("Error: " + e.message));
+    }, []);
+    const search = () => {
+      if (!vdb)
+        return;
+      const r = Math.max(0, Math.min(255, parseInt(queryR) || 0)) / 255;
+      const g = Math.max(0, Math.min(255, parseInt(queryG) || 0)) / 255;
+      const b = Math.max(0, Math.min(255, parseInt(queryB) || 0)) / 255;
+      vdb.search("colors", [r, g, b], 5).then((hits) => {
+        setResults(hits);
+        setStatus("Top-" + hits.length + " nearest colours by cosine similarity.");
+      }).catch((e) => setStatus("Search error: " + e.message));
+    };
+    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
+      style: {
+        backgroundColor: "#2a2a3e",
+        borderRadius: 16,
+        borderWidth: 1,
+        borderColor: "#44446a",
+        padding: 16,
+        gap: 8,
+        justifyContent: "flex-start",
+        alignItems: "flex-start"
+      },
+      width: contentW,
+      height: contentH,
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: { flexDirection: "row", gap: 12, alignItems: "flex-start" },
+          width: inner,
+          height: 32,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(BackBtn, {}),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 14,
+              width: inner - 110,
+              height: 20,
+              style: { color: "#cdd6f4" },
+              children: "Week 19 — Vector Database"
+            })
+          ]
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 11,
+          width: inner,
+          height: 16,
+          style: { color: "#a6e3a1" },
+          children: status
+        }),
+        /* @__PURE__ */ jsx_runtime.jsxs(ScrollView, {
+          width: inner,
+          height: svH,
+          contentHeight: 560,
+          style: { gap: 10, padding: 4 },
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 13,
+              width: inner,
+              height: 20,
+              style: { color: "#89b4fa" },
+              children: "Nearest-colour search  (cosine similarity on RGB vectors)"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 11,
+              width: inner,
+              style: { color: "#a6adc8" },
+              children: `14 Catppuccin colours seeded as 3-D RGB unit vectors.
+` + "Enter an RGB value (0–255) to find the nearest matches."
+            }),
+            /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
+              width: inner,
+              height: 36,
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+                  value: queryR,
+                  onChangeText: setQueryR,
+                  placeholder: "R",
+                  fontSize: 13,
+                  width: 80,
+                  height: 36
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+                  value: queryG,
+                  onChangeText: setQueryG,
+                  placeholder: "G",
+                  fontSize: 13,
+                  width: 80,
+                  height: 36
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+                  value: queryB,
+                  onChangeText: setQueryB,
+                  placeholder: "B",
+                  fontSize: 13,
+                  width: 80,
+                  height: 36
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+                  label: "Find Nearest",
+                  onPress: search,
+                  width: 120
+                })
+              ]
+            }),
+            results.length > 0 ? /* @__PURE__ */ jsx_runtime.jsx(View, {
+              style: { gap: 6, alignItems: "flex-start" },
+              width: inner,
+              height: results.length * 38,
+              children: results.map((hit, i) => /* @__PURE__ */ jsx_runtime.jsxs(View, {
+                style: {
+                  flexDirection: "row",
+                  gap: 10,
+                  alignItems: "flex-start",
+                  backgroundColor: "#1e1e2e",
+                  borderRadius: 6,
+                  padding: 8,
+                  borderWidth: 1,
+                  borderColor: "#313244"
+                },
+                width: inner,
+                height: 30,
+                children: [
+                  /* @__PURE__ */ jsx_runtime.jsx(View, {
+                    style: { backgroundColor: hit.metadata?.hex ?? "#888", borderRadius: 4 },
+                    width: 16,
+                    height: 16
+                  }),
+                  /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 13,
+                    width: 110,
+                    height: 18,
+                    style: { color: "#cdd6f4" },
+                    children: hit.id
+                  }),
+                  /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 12,
+                    width: 80,
+                    height: 18,
+                    style: { color: "#6c7086" },
+                    children: hit.metadata?.hex ?? ""
+                  }),
+                  /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 12,
+                    width: 70,
+                    height: 18,
+                    style: { color: "#a6e3a1" },
+                    children: (hit.score * 100).toFixed(1) + "%"
+                  })
+                ]
+              }, i))
+            }) : null,
+            /* @__PURE__ */ jsx_runtime.jsx(View, {
+              style: { backgroundColor: "#44446a" },
+              width: inner,
+              height: 1
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 11,
+              width: inner,
+              style: { color: "#45475a" },
+              children: `vectorDb.open(":memory:")  — ephemeral in-process store
+` + `store.upsert(table, id, vector, metadata)
+` + `store.search(table, queryVec, limit) → [{id, score, metadata}]
+` + "Backed by SQLite BLOB + brute-force cosine similarity (Rust)."
+            })
+          ]
+        })
+      ]
+    });
+  }
   function HomeScreen() {
     const { width: winW, height: winH } = useWindowSize();
     const isWide = useMediaQuery(900);
@@ -6800,6 +7019,24 @@ No matching component was found for:
                 height: 20,
                 style: { color: "#89b4fa" },
                 children: "File System + SQLite Demo →"
+              })
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+              onPress: () => navigate("vectorDb"),
+              width: leftIn,
+              height: 40,
+              style: {
+                backgroundColor: "#1e2a1e",
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: "#2a6e3a"
+              },
+              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 13,
+                width: leftIn - 20,
+                height: 20,
+                style: { color: "#a6e3a1" },
+                children: "Vector Database Demo →"
               })
             }),
             /* @__PURE__ */ jsx_runtime.jsx(Image, {
@@ -7140,6 +7377,10 @@ useRoute().params gives them back here.`
               /* @__PURE__ */ jsx_runtime.jsx(Route, {
                 name: "data",
                 component: DataScreen
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Route, {
+                name: "vectorDb",
+                component: VectorDbScreen
               })
             ]
           })
@@ -7148,5 +7389,5 @@ useRoute().params gives them back here.`
     });
   }
   render(/* @__PURE__ */ jsx_runtime.jsx(App, {}));
-  __velox_log("Week 18: file system + SQLite data layer loaded.");
+  __velox_log("Week 19: vector database (cosine similarity on SQLite BLOBs) loaded.");
 })();

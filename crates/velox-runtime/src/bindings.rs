@@ -1,7 +1,7 @@
 //! Native function bindings exposed to JavaScript.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -194,9 +194,11 @@ pub fn register_all(
         scene,
         events,
         layout_cache,
-        next_id: std::sync::atomic::AtomicU32::new(1),
+        next_id:    std::sync::atomic::AtomicU32::new(1),
         next_image_id: std::sync::atomic::AtomicU32::new(1),
         window,
+        db_pools:   Arc::new(Mutex::new(HashMap::new())),
+        next_db_id: std::sync::atomic::AtomicU32::new(1),
     });
     let ptr   = Box::into_raw(state) as *mut std::ffi::c_void;
     // Safety: ptr is valid for the lifetime of the isolate.
@@ -231,6 +233,20 @@ pub fn register_all(
     register!("__velox_setMinimized",  set_minimized_callback);
     register!("__velox_isFullscreen",  is_fullscreen_callback);
     register!("__velox_isMaximized",   is_maximized_callback);
+
+    // ── File system (write-side) ────────────────────────────────────────────
+    register!("__velox_writeFile",  write_file_callback);
+    register!("__velox_appendFile", append_file_callback);
+    register!("__velox_listDir",    list_dir_callback);
+    register!("__velox_deleteFile", delete_file_callback);
+    register!("__velox_mkdirp",     mkdirp_callback);
+
+    // ── SQLite database ─────────────────────────────────────────────────────
+    register!("__velox_db_open",        db_open_callback);
+    register!("__velox_db_query",       db_query_callback);
+    register!("__velox_db_run",         db_run_callback);
+    register!("__velox_db_close",       db_close_callback);
+    register!("__velox_db_transaction", db_transaction_callback);
 }
 
 struct AsyncState {
@@ -242,6 +258,9 @@ struct AsyncState {
     next_id:      std::sync::atomic::AtomicU32,
     next_image_id: std::sync::atomic::AtomicU32,
     window:       Option<WindowController>,
+    // ── Database handles ─────────────────────────────────────────────────────
+    db_pools:     Arc<Mutex<HashMap<u32, velox_db::SqlitePool>>>,
+    next_db_id:   std::sync::atomic::AtomicU32,
 }
 
 fn set_func(
@@ -849,4 +868,420 @@ fn is_maximized_callback(
 
     let result = state.window.as_ref().map(|ctrl| (ctrl.is_maximized)()).unwrap_or(false);
     rv.set(v8::Boolean::new(scope, result).into());
+}
+
+// ── File system bindings ──────────────────────────────────────────────────────
+//
+// All async, all return Promise<string> (empty string for void operations).
+// fs.write capability is required for all mutation operations.
+// fs.read  capability is required for listing / reading.
+
+/// `__velox_writeFile(path, content) -> Promise<void>`
+fn write_file_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().can_write_fs() {
+        throw_cap_error(scope, "fs.write");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let path    = v8_arg_to_string(scope, &args, 0);
+    let content = v8_arg_to_string(scope, &args, 1);
+
+    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::fs::write(&path, content)
+            .await
+            .map(|_| String::new())
+            .map_err(|e| e.to_string());
+        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_appendFile(path, content) -> Promise<void>`
+fn append_file_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().can_write_fs() {
+        throw_cap_error(scope, "fs.write");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let path    = v8_arg_to_string(scope, &args, 0);
+    let content = v8_arg_to_string(scope, &args, 1);
+
+    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let result = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true).append(true).open(&path).await?;
+            file.write_all(content.as_bytes()).await?;
+            Ok::<_, std::io::Error>(())
+        }
+        .await
+        .map(|_| String::new())
+        .map_err(|e| e.to_string());
+
+        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_listDir(path) -> Promise<string>` — JSON array of `{ name, isDir }` objects.
+fn list_dir_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().can_read_fs() {
+        throw_cap_error(scope, "fs.read");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let path = v8_arg_to_string(scope, &args, 0);
+
+    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result: Result<String, String> = async {
+            let mut entries_json = Vec::new();
+            let mut rd = tokio::fs::read_dir(&path).await
+                .map_err(|e| e.to_string())?;
+            while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
+                let meta   = entry.metadata().await.map_err(|e| e.to_string())?;
+                let name   = entry.file_name().to_string_lossy().into_owned();
+                let is_dir = meta.is_dir();
+                entries_json.push(serde_json::json!({ "name": name, "isDir": is_dir }));
+            }
+            serde_json::to_string(&entries_json).map_err(|e| e.to_string())
+        }
+        .await;
+
+        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_deleteFile(path) -> Promise<void>`
+fn delete_file_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().can_write_fs() {
+        throw_cap_error(scope, "fs.write");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let path = v8_arg_to_string(scope, &args, 0);
+
+    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::fs::remove_file(&path)
+            .await
+            .map(|_| String::new())
+            .map_err(|e| e.to_string());
+        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_mkdirp(path) -> Promise<void>` — creates the directory and all parents.
+fn mkdirp_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().can_write_fs() {
+        throw_cap_error(scope, "fs.write");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let path = v8_arg_to_string(scope, &args, 0);
+
+    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::fs::create_dir_all(&path)
+            .await
+            .map(|_| String::new())
+            .map_err(|e| e.to_string());
+        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+// ── Database bindings ─────────────────────────────────────────────────────────
+//
+// All async. Gated by `db: true` capability.
+// `db_open`  → Promise<string>  — resolves with the handle number as a string.
+// `db_query` → Promise<string>  — resolves with JSON array of row objects.
+// `db_run`   → Promise<string>  — resolves with JSON `{ rowsAffected, lastInsertId }`.
+
+/// `__velox_db_open(path) -> Promise<string>` — handle number.
+fn db_open_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().db {
+        throw_cap_error(scope, "db");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let path      = v8_arg_to_string(scope, &args, 0);
+    let handle    = state.next_db_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pools     = Arc::clone(&state.db_pools);
+    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = velox_db::open(&path).await
+            .map(|pool| {
+                pools.lock().unwrap().insert(handle, pool);
+                handle.to_string()
+            })
+            .map_err(|e| e.to_string());
+        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_db_query(handle, sql, paramsJson) -> Promise<string>` — JSON rows.
+fn db_query_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().db {
+        throw_cap_error(scope, "db");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle      = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let sql         = v8_arg_to_string(scope, &args, 1);
+    let params_json = v8_arg_to_string(scope, &args, 2);
+
+    // Resolve the pool before spawning — fail fast if handle is invalid.
+    let pool = match state.db_pools.lock().unwrap().get(&handle).cloned() {
+        Some(p) => p,
+        None => {
+            throw_js_error(scope, &format!("db: unknown handle {handle}"));
+            return;
+        }
+    };
+
+    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result: Result<String, String> = async {
+            let params: Vec<serde_json::Value> =
+                serde_json::from_str(&params_json).unwrap_or_default();
+            let rows = velox_db::query(&pool, &sql, params).await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_string(&rows).map_err(|e| e.to_string())
+        }
+        .await;
+        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_db_run(handle, sql, paramsJson) -> Promise<string>` — JSON `{ rowsAffected, lastInsertId }`.
+fn db_run_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().db {
+        throw_cap_error(scope, "db");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle      = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let sql         = v8_arg_to_string(scope, &args, 1);
+    let params_json = v8_arg_to_string(scope, &args, 2);
+
+    let pool = match state.db_pools.lock().unwrap().get(&handle).cloned() {
+        Some(p) => p,
+        None => {
+            throw_js_error(scope, &format!("db: unknown handle {handle}"));
+            return;
+        }
+    };
+
+    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result: Result<String, String> = async {
+            let params: Vec<serde_json::Value> =
+                serde_json::from_str(&params_json).unwrap_or_default();
+            let (rows_affected, last_insert_id) = velox_db::run(&pool, &sql, params).await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_string(&serde_json::json!({
+                "rowsAffected":  rows_affected,
+                "lastInsertId":  last_insert_id,
+            }))
+            .map_err(|e| e.to_string())
+        }
+        .await;
+        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_db_close(handle) -> Promise<void>`
+///
+/// Removes the pool from the handle map and drains all connections gracefully.
+/// Idempotent: closing an unknown handle resolves immediately without error.
+fn db_close_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().db {
+        throw_cap_error(scope, "db");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    // Remove synchronously so no new queries can grab this pool.
+    let pool = state.db_pools.lock().unwrap().remove(&handle);
+
+    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        if let Some(pool) = pool {
+            pool.close().await;
+        }
+        queue_clone.lock().unwrap().push_back(Completion {
+            resolver_ptr: resolver,
+            result: Ok(String::new()),
+        });
+    });
+}
+
+/// `__velox_db_transaction(handle, statementsJson) -> Promise<void>`
+///
+/// `statementsJson` is a JSON array of `{ sql: string, params: any[] }` objects.
+/// All statements execute in a single SQLite transaction; any failure rolls back.
+fn db_transaction_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().db {
+        throw_cap_error(scope, "db");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle     = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let stmts_json = v8_arg_to_string(scope, &args, 1);
+
+    let pool = match state.db_pools.lock().unwrap().get(&handle).cloned() {
+        Some(p) => p,
+        None => {
+            throw_js_error(scope, &format!("db: unknown handle {handle}"));
+            return;
+        }
+    };
+
+    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result: Result<String, String> = async {
+            let raw: Vec<serde_json::Value> = serde_json::from_str(&stmts_json)
+                .map_err(|e| format!("db.transaction: invalid JSON: {e}"))?;
+            let stmts: Vec<velox_db::TxStmt> = raw.into_iter().map(|s| velox_db::TxStmt {
+                sql:    s["sql"].as_str().unwrap_or("").to_owned(),
+                params: s["params"].as_array().cloned().unwrap_or_default(),
+            }).collect();
+            velox_db::transaction(&pool, stmts).await.map_err(|e| e.to_string())?;
+            Ok(String::new())
+        }
+        .await;
+        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+// ── Shared helpers ────────────────────────────────────────────────────────────
+
+/// Extract argument `idx` as an owned `String` from a V8 callback.
+fn v8_arg_to_string(
+    scope: &mut v8::HandleScope,
+    args:  &v8::FunctionCallbackArguments,
+    idx:   i32,
+) -> String {
+    args.get(idx)
+        .to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default()
+}
+
+/// Allocate a `PromiseResolver`, return `(resolver_ptr, promise, queue_clone)`.
+fn make_promise<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    state: &AsyncState,
+) -> (usize, v8::Local<'s, v8::Promise>, CompletionQueue) {
+    let resolver     = v8::PromiseResolver::new(scope).unwrap();
+    let promise      = resolver.get_promise(scope);
+    let global_res   = v8::Global::new(scope, resolver);
+    let resolver_ptr = Box::into_raw(Box::new(global_res)) as usize;
+    let queue_clone  = Arc::clone(&state.queue);
+    (resolver_ptr, promise, queue_clone)
+}
+
+/// Throw a JS Error for a missing capability.
+fn throw_cap_error(scope: &mut v8::HandleScope, cap: &str) {
+    let msg = format!(
+        "Capability required: {cap} — add it to velox.config.json under \"capabilities\""
+    );
+    throw_js_error(scope, &msg);
+}
+
+/// Throw a generic JS Error with the given message.
+fn throw_js_error(scope: &mut v8::HandleScope, msg: &str) {
+    let s  = v8::String::new(scope, msg).unwrap();
+    let ex = v8::Exception::error(scope, s);
+    scope.throw_exception(ex);
 }

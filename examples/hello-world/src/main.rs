@@ -20,11 +20,11 @@ fn main() {
         js_src: Some(include_str!("../js/app.js").to_string()),
         dev_mode: Some(velox_core::DevModeConfig::new(
             std::path::PathBuf::from("."),
-            std::path::PathBuf::from("examples/hello-world/js/app.jsx"),
-            std::path::PathBuf::from("examples/hello-world/js/app.js"),
+            std::path::PathBuf::from("js/app.jsx"),
+            std::path::PathBuf::from("js/app.js"),
             vec![
-                std::path::PathBuf::from("examples/hello-world/js"),
-                std::path::PathBuf::from("js/packages/@velox/react/src"),
+                std::path::PathBuf::from("js"),
+                std::path::PathBuf::from("../../js/packages/@velox/react/src"),
             ],
         )),
     });

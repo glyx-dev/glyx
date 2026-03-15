@@ -370,3 +370,167 @@ export const veloxWindow = {
   getWindowSize: ()         => typeof __velox_getWindowSize !== 'undefined' ? __velox_getWindowSize() : { width: 0, height: 0 },
   getScreenSize: ()         => typeof __velox_getScreenSize !== 'undefined' ? __velox_getScreenSize() : { width: 0, height: 0 },
 };
+
+// ── File system API ───────────────────────────────────────────────────────────
+//
+// All methods return Promises. Requires `fs.read` / `fs.write` capabilities
+// declared in `velox.config.json`. Attempting to call without the capability
+// rejects the Promise with a descriptive error.
+//
+// Usage:
+//   import { fs } from '@velox/react';
+//   await fs.writeFile('data/notes.txt', 'hello');
+//   const entries = await fs.listDir('data/');  // [{ name, isDir }, ...]
+
+const _noBinding = (name) => Promise.reject(new Error(`${name}: binding not available`));
+
+export const fs = {
+  /** Read the entire file as a UTF-8 string. Requires `fs.read`. */
+  readFile:   (path)          => typeof __velox_readFile   !== 'undefined' ? __velox_readFile(path)          : _noBinding('readFile'),
+  /** Write (overwrite) a file with the given string content. Requires `fs.write`. */
+  writeFile:  (path, content) => typeof __velox_writeFile  !== 'undefined' ? __velox_writeFile(path, content) : _noBinding('writeFile'),
+  /** Append string content to a file (creates it if missing). Requires `fs.write`. */
+  appendFile: (path, content) => typeof __velox_appendFile !== 'undefined' ? __velox_appendFile(path, content): _noBinding('appendFile'),
+  /** List directory entries. Resolves with `[{ name: string, isDir: boolean }]`. Requires `fs.read`. */
+  listDir:    (path)          => typeof __velox_listDir    !== 'undefined' ? __velox_listDir(path).then(JSON.parse)   : _noBinding('listDir'),
+  /** Delete a file. Requires `fs.write`. */
+  deleteFile: (path)          => typeof __velox_deleteFile !== 'undefined' ? __velox_deleteFile(path)         : _noBinding('deleteFile'),
+  /** Create a directory and all missing parents. Requires `fs.write`. */
+  mkdirp:     (path)          => typeof __velox_mkdirp     !== 'undefined' ? __velox_mkdirp(path)             : _noBinding('mkdirp'),
+};
+
+// ── SQLite database API ───────────────────────────────────────────────────────
+//
+// Thin async wrapper over the Rust `sqlx` bindings. Requires `db: true` in
+// `velox.config.json`.
+//
+// Usage:
+//   import { db } from '@velox/react';
+//   const handle = await db.open('app.db');
+//   await db.run(handle, 'CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)');
+//   await db.run(handle, 'INSERT INTO items (name) VALUES (?)', ['hello']);
+//   const rows = await db.query(handle, 'SELECT * FROM items');  // [{ id, name }, ...]
+
+// ── SQLite default-handle state ───────────────────────────────────────────────
+//
+// `_defaultHandle` is set automatically when the first db.open() resolves.
+// This lets single-db apps skip passing the handle on every call:
+//
+//   Single-DB (simple):
+//     await db.open('app.db');
+//     await db.run('INSERT INTO items (name) VALUES (?)', ['hello']);
+//     const rows = await db.query('SELECT * FROM items');
+//
+//   Multi-DB (explicit handle):
+//     const h1 = await db.open('users.db');
+//     const h2 = await db.open('logs.db');
+//     db.setDefault(h2);
+//     await db.run(h1, 'INSERT INTO users ...', []);   // explicit
+//     await db.run('INSERT INTO logs ...', []);         // uses default (h2)
+
+let _defaultHandle = null;
+
+/** Resolve the handle: explicit number > default > error. */
+function _dbHandle(h) {
+  if (typeof h === 'number') return h;
+  if (_defaultHandle !== null) return _defaultHandle;
+  throw new Error('db: no handle provided and no default set (call db.open() first)');
+}
+
+export const db = {
+  /**
+   * Open (or create) a SQLite database at the given path.
+   * `":memory:"` opens an in-memory database.
+   * The first call auto-sets the default handle; use `db.setDefault(h)` to change it.
+   * @returns {Promise<number>} Opaque integer handle for subsequent calls.
+   */
+  open: (path) =>
+    typeof __velox_db_open !== 'undefined'
+      ? __velox_db_open(path).then((s) => {
+          const h = Number(s);
+          if (_defaultHandle === null) _defaultHandle = h;
+          return h;
+        })
+      : _noBinding('db.open'),
+
+  /** Manually set the default handle used when no handle is passed to run/query/transaction. */
+  setDefault: (handle) => { _defaultHandle = handle; },
+
+  /**
+   * Close a database and release its connections.
+   * Idempotent — closing an already-closed handle is a no-op.
+   * @param {number} [handle] - Defaults to the current default handle.
+   * @returns {Promise<void>}
+   */
+  close: (handle) => {
+    const h = handle ?? _defaultHandle;
+    if (h === null || h === undefined) return Promise.resolve();
+    if (_defaultHandle === h) _defaultHandle = null;
+    return typeof __velox_db_close !== 'undefined'
+      ? __velox_db_close(h)
+      : _noBinding('db.close');
+  },
+
+  /**
+   * Execute a SELECT statement and return all rows as plain objects.
+   *
+   * Overloaded — handle is optional when a default is set:
+   *   db.query('SELECT * FROM items')             // uses default handle
+   *   db.query('SELECT * FROM items WHERE id=?', [1])
+   *   db.query(handle, 'SELECT * FROM items')     // explicit handle
+   *   db.query(handle, 'SELECT * FROM items WHERE id=?', [1])
+   *
+   * @returns {Promise<Object[]>}
+   */
+  query: (handleOrSql, sqlOrParams = [], paramsOrUndef = []) => {
+    const isExplicit = typeof handleOrSql === 'number';
+    const handle = isExplicit ? handleOrSql        : _dbHandle(null);
+    const sql    = isExplicit ? sqlOrParams         : handleOrSql;
+    const params = isExplicit ? paramsOrUndef       : sqlOrParams;
+    return typeof __velox_db_query !== 'undefined'
+      ? __velox_db_query(handle, sql, JSON.stringify(params)).then(JSON.parse)
+      : _noBinding('db.query');
+  },
+
+  /**
+   * Execute an INSERT / UPDATE / DELETE / DDL statement.
+   *
+   * Overloaded — handle is optional when a default is set:
+   *   db.run('CREATE TABLE IF NOT EXISTS ...')
+   *   db.run('INSERT INTO items (name) VALUES (?)', ['hello'])
+   *   db.run(handle, 'INSERT INTO items (name) VALUES (?)', ['hello'])
+   *
+   * @returns {Promise<{ rowsAffected: number, lastInsertId: number }>}
+   */
+  run: (handleOrSql, sqlOrParams = [], paramsOrUndef = []) => {
+    const isExplicit = typeof handleOrSql === 'number';
+    const handle = isExplicit ? handleOrSql  : _dbHandle(null);
+    const sql    = isExplicit ? sqlOrParams   : handleOrSql;
+    const params = isExplicit ? paramsOrUndef : sqlOrParams;
+    return typeof __velox_db_run !== 'undefined'
+      ? __velox_db_run(handle, sql, JSON.stringify(params)).then(JSON.parse)
+      : _noBinding('db.run');
+  },
+
+  /**
+   * Execute multiple SQL statements atomically in a single transaction.
+   * Any failure rolls back all statements.
+   *
+   * Overloaded — handle is optional when a default is set:
+   *   db.transaction([
+   *     { sql: 'INSERT INTO a (x) VALUES (?)', params: [1] },
+   *     { sql: 'UPDATE b SET n = n + 1 WHERE id = ?', params: [42] },
+   *   ])
+   *   db.transaction(handle, [...stmts])
+   *
+   * @returns {Promise<void>}
+   */
+  transaction: (handleOrStmts, stmtsOrUndef) => {
+    const isExplicit = typeof handleOrStmts === 'number';
+    const handle = isExplicit ? handleOrStmts : _dbHandle(null);
+    const stmts  = isExplicit ? stmtsOrUndef  : handleOrStmts;
+    return typeof __velox_db_transaction !== 'undefined'
+      ? __velox_db_transaction(handle, JSON.stringify(stmts))
+      : _noBinding('db.transaction');
+  },
+};

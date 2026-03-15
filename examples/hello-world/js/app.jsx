@@ -1,18 +1,18 @@
-// Week 17B — Named-route router demo.
+// Week 18 — Data Layer demo (+ Week 17B router still present).
 //
-// Three screens wired through @velox/router:
-//   home        — greeting, TextInput, Image, button to enter palette
+// Screens:
+//   home        — greeting, TextInput, Image, → palette, → data demo
 //   palette     — scrollable Catppuccin palette, tap a colour → detail
 //   colorDetail — full-card colour detail, ← Back to palette
+//   data        — Week 18: file system (write/read/list) + SQLite (run/query/transaction)
 //
-// The header bar (window controls + dimensions) lives outside the router
-// so it persists across screen transitions.
+// The header bar (window controls + dimensions) lives outside the router.
 
 import './polyfills.js';
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, Image, Pressable, TextInput, ScrollView, render,
-  useWindowSize, useMediaQuery, veloxWindow,
+  useWindowSize, useMediaQuery, veloxWindow, fs, db,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
 
@@ -43,6 +43,22 @@ const PALETTE = [
 
 // ── Shared sub-components ─────────────────────────────────────────────────────
 
+/** Small action button used in the Data screen. */
+function SmallBtn({ label, onPress, width: w = 118 }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      width={w}
+      height={32}
+      style={{ backgroundColor: '#313244', borderRadius: 6, borderWidth: 1, borderColor: '#44446a' }}
+    >
+      <Text fontSize={11} width={w - 20} height={18} style={{ color: '#cdd6f4' }}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
 function WinBtn({ label, onPress, active = false }) {
   return (
     <Pressable
@@ -71,6 +87,212 @@ function BackBtn({ label = '← Back' }) {
         {label}
       </Text>
     </Pressable>
+  );
+}
+
+// ── Screen: Data (Week 18 — File System + SQLite) ─────────────────────────────
+
+function DataScreen() {
+  const { width: winW, height: winH } = useWindowSize();
+  const navigate = useNavigate();
+
+  // ── FS state ──────────────────────────────────────────────────────────────
+  const [noteText,   setNoteText]   = useState('');
+  const [loadedNote, setLoadedNote] = useState('');
+  const [fileList,   setFileList]   = useState([]);
+
+  // ── DB state ──────────────────────────────────────────────────────────────
+  const [itemName, setItemName] = useState('');
+  const [dbItems,  setDbItems]  = useState([]);
+  const [dbReady,  setDbReady]  = useState(false);
+
+  // ── Status ────────────────────────────────────────────────────────────────
+  const [status, setStatus] = useState('Initialising…');
+
+  // Open DB and create table on mount.
+  useEffect(() => {
+    db.open('velox_demo.db')
+      .then(async () => {
+        await db.run(
+          'CREATE TABLE IF NOT EXISTS items ' +
+          '(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)'
+        );
+        const rows = await db.query('SELECT * FROM items ORDER BY id DESC');
+        setDbItems(rows);
+        setDbReady(true);
+        setStatus('DB ready. Try writing a note or adding an item.');
+      })
+      .catch((e) => setStatus('DB error: ' + e.message));
+  }, []);
+
+  // ── FS handlers ───────────────────────────────────────────────────────────
+  const saveNote = () =>
+    fs.writeFile('velox-note.txt', noteText)
+      .then(() => setStatus('Note saved to velox-note.txt'))
+      .catch((e) => setStatus('Save error: ' + e.message));
+
+  const loadNote = () =>
+    fs.readFile('velox-note.txt')
+      .then((t) => { setLoadedNote(t); setStatus('Note loaded.'); })
+      .catch((e) => setStatus('Load error: ' + e.message));
+
+  const listFiles = () =>
+    fs.listDir('.')
+      .then((entries) => {
+        setFileList(entries.slice(0, 10));
+        setStatus(`${entries.length} entries in working dir`);
+      })
+      .catch((e) => setStatus('List error: ' + e.message));
+
+  // ── DB handlers ───────────────────────────────────────────────────────────
+  const addItem = () => {
+    if (!itemName.trim()) return;
+    db.run('INSERT INTO items (name) VALUES (?)', [itemName.trim()])
+      .then(() => db.query('SELECT * FROM items ORDER BY id DESC'))
+      .then((rows) => { setDbItems(rows); setItemName(''); setStatus('Item added.'); })
+      .catch((e) => setStatus('Insert error: ' + e.message));
+  };
+
+  const refreshItems = () =>
+    db.query('SELECT * FROM items ORDER BY id DESC')
+      .then((rows) => { setDbItems(rows); setStatus(`${rows.length} items loaded.`); })
+      .catch((e) => setStatus('Query error: ' + e.message));
+
+  const clearItems = () =>
+    // Demo: use transaction() even for a single statement
+    db.transaction([{ sql: 'DELETE FROM items', params: [] }])
+      .then(() => { setDbItems([]); setStatus('All items deleted.'); })
+      .catch((e) => setStatus('Clear error: ' + e.message));
+
+  // ── Layout ────────────────────────────────────────────────────────────────
+  const contentW = winW - 2 * PAD;
+  const contentH = winH - HEADER_H - 2 * PAD;
+  const inner    = contentW - 32;
+  const svH      = contentH - 70;   // card height minus header row + status
+
+  return (
+    <View
+      style={{
+        backgroundColor: '#2a2a3e',
+        borderRadius:    16,
+        borderWidth:     1,
+        borderColor:     '#44446a',
+        padding:         16,
+        gap:             8,
+        justifyContent:  'flex-start',
+        alignItems:      'flex-start',
+      }}
+      width={contentW}
+      height={contentH}
+    >
+      {/* Header row */}
+      <View
+        style={{ flexDirection: 'row', gap: 12, alignItems: 'flex-start' }}
+        width={inner}
+        height={32}
+      >
+        <BackBtn />
+        <Text fontSize={14} width={inner - 110} height={20} style={{ color: '#cdd6f4' }}>
+          Week 18 — File System + SQLite
+        </Text>
+      </View>
+
+      {/* Status bar */}
+      <Text fontSize={11} width={inner} height={16} style={{ color: '#a6e3a1' }}>
+        {status}
+      </Text>
+
+      {/* Scrollable content */}
+      <ScrollView
+        width={inner}
+        height={svH}
+        contentHeight={800}
+        style={{ gap: 10, padding: 4 }}
+      >
+        {/* ── File System ─────────────────────────────────────────────── */}
+        <Text fontSize={13} width={inner} height={20} style={{ color: '#89b4fa' }}>
+          File System  (fs.write + fs.read)
+        </Text>
+
+        <TextInput
+          value={noteText}
+          onChangeText={setNoteText}
+          placeholder="Type a note to save…"
+          fontSize={13}
+          width={inner}
+          height={40}
+        />
+
+        <View
+          style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-start' }}
+          width={inner}
+          height={34}
+        >
+          <SmallBtn label="Save Note"  onPress={saveNote}  />
+          <SmallBtn label="Load Note"  onPress={loadNote}  />
+          <SmallBtn label="List Dir"   onPress={listFiles} />
+        </View>
+
+        {loadedNote ? (
+          <Text fontSize={12} width={inner} style={{ color: '#a6adc8' }}>
+            {'Loaded: ' + loadedNote}
+          </Text>
+        ) : null}
+
+        {fileList.map((e, i) => (
+          <Text key={i} fontSize={11} width={inner} height={15} style={{ color: '#6c7086' }}>
+            {(e.isDir ? '▸ ' : '  ') + e.name}
+          </Text>
+        ))}
+
+        {/* ── Divider ────────────────────────────────────────────────── */}
+        <View style={{ backgroundColor: '#44446a' }} width={inner} height={1} />
+
+        {/* ── SQLite ──────────────────────────────────────────────────── */}
+        <Text fontSize={13} width={inner} height={20} style={{ color: '#89b4fa' }}>
+          {dbReady ? 'SQLite  (velox_demo.db)' : 'SQLite — opening…'}
+        </Text>
+
+        <TextInput
+          value={itemName}
+          onChangeText={setItemName}
+          placeholder="Item name…"
+          fontSize={13}
+          width={inner}
+          height={40}
+        />
+
+        <View
+          style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-start' }}
+          width={inner}
+          height={34}
+        >
+          <SmallBtn label="Add Item"     onPress={addItem}      />
+          <SmallBtn label="Refresh"      onPress={refreshItems} />
+          <SmallBtn label="Clear All"    onPress={clearItems}   />
+        </View>
+
+        {dbItems.length === 0 ? (
+          <Text fontSize={11} width={inner} height={16} style={{ color: '#45475a' }}>
+            {dbReady ? 'No items yet — add one above.' : ''}
+          </Text>
+        ) : null}
+
+        {dbItems.map((row, i) => (
+          <Text key={i} fontSize={12} width={inner} height={18} style={{ color: '#cdd6f4' }}>
+            {'#' + row.id + '   ' + row.name}
+          </Text>
+        ))}
+
+        {/* ── Transaction note ─────────────────────────────────────────── */}
+        <View style={{ backgroundColor: '#44446a' }} width={inner} height={1} />
+        <Text fontSize={11} width={inner} style={{ color: '#45475a' }}>
+          {'"Clear All" uses db.transaction([{sql, params}]) — atomic batch.\n' +
+           '"Add Item" / "Refresh" use db.run() / db.query() without a handle\n' +
+           '(default set automatically by the first db.open() call).'}
+        </Text>
+      </ScrollView>
+    </View>
   );
 }
 
@@ -180,6 +402,23 @@ function HomeScreen() {
         >
           <Text fontSize={13} width={leftIn - 20} height={20} style={{ color: '#cdd6f4' }}>
             View Colour Palette →
+          </Text>
+        </Pressable>
+
+        {/* Navigate to data demo screen */}
+        <Pressable
+          onPress={() => navigate('data')}
+          width={leftIn}
+          height={40}
+          style={{
+            backgroundColor: '#1a2a3e',
+            borderRadius:    8,
+            borderWidth:     1,
+            borderColor:     '#2a4a6e',
+          }}
+        >
+          <Text fontSize={13} width={leftIn - 20} height={20} style={{ color: '#89b4fa' }}>
+            File System + SQLite Demo →
           </Text>
         </Pressable>
 
@@ -470,6 +709,7 @@ function App() {
           <Route name="home"        component={HomeScreen}       />
           <Route name="palette"     component={PaletteScreen}    />
           <Route name="colorDetail" component={ColorDetailScreen} />
+          <Route name="data"        component={DataScreen}       />
         </Router>
       </View>
 
@@ -479,4 +719,4 @@ function App() {
 
 render(<App />);
 
-__velox_log('Week 17B: named-route router loaded.');
+__velox_log('Week 18: file system + SQLite data layer loaded.');

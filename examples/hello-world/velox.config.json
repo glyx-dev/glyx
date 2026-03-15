@@ -8,7 +8,7 @@
   "capabilities": {
     "fs": {
       "read":  ["**"],
-      "write": []
+      "write": ["**"]
     },
     "network": {
       "allow": []
@@ -16,7 +16,7 @@
     "env": {
       "allow": []
     },
-    "db":      false,
+    "db":      true,
     "battery": false,
     "usb":     false,
     "shell":   false

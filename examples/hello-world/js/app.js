@@ -6284,6 +6284,62 @@ No matching component was found for:
     getWindowSize: () => typeof __velox_getWindowSize !== "undefined" ? __velox_getWindowSize() : { width: 0, height: 0 },
     getScreenSize: () => typeof __velox_getScreenSize !== "undefined" ? __velox_getScreenSize() : { width: 0, height: 0 }
   };
+  var _noBinding = (name) => Promise.reject(new Error(`${name}: binding not available`));
+  var fs = {
+    readFile: (path) => typeof __velox_readFile !== "undefined" ? __velox_readFile(path) : _noBinding("readFile"),
+    writeFile: (path, content) => typeof __velox_writeFile !== "undefined" ? __velox_writeFile(path, content) : _noBinding("writeFile"),
+    appendFile: (path, content) => typeof __velox_appendFile !== "undefined" ? __velox_appendFile(path, content) : _noBinding("appendFile"),
+    listDir: (path) => typeof __velox_listDir !== "undefined" ? __velox_listDir(path).then(JSON.parse) : _noBinding("listDir"),
+    deleteFile: (path) => typeof __velox_deleteFile !== "undefined" ? __velox_deleteFile(path) : _noBinding("deleteFile"),
+    mkdirp: (path) => typeof __velox_mkdirp !== "undefined" ? __velox_mkdirp(path) : _noBinding("mkdirp")
+  };
+  var _defaultHandle = null;
+  function _dbHandle(h) {
+    if (typeof h === "number")
+      return h;
+    if (_defaultHandle !== null)
+      return _defaultHandle;
+    throw new Error("db: no handle provided and no default set (call db.open() first)");
+  }
+  var db = {
+    open: (path) => typeof __velox_db_open !== "undefined" ? __velox_db_open(path).then((s) => {
+      const h = Number(s);
+      if (_defaultHandle === null)
+        _defaultHandle = h;
+      return h;
+    }) : _noBinding("db.open"),
+    setDefault: (handle) => {
+      _defaultHandle = handle;
+    },
+    close: (handle) => {
+      const h = handle ?? _defaultHandle;
+      if (h === null || h === undefined)
+        return Promise.resolve();
+      if (_defaultHandle === h)
+        _defaultHandle = null;
+      return typeof __velox_db_close !== "undefined" ? __velox_db_close(h) : _noBinding("db.close");
+    },
+    query: (handleOrSql, sqlOrParams = [], paramsOrUndef = []) => {
+      const isExplicit = typeof handleOrSql === "number";
+      const handle = isExplicit ? handleOrSql : _dbHandle(null);
+      const sql = isExplicit ? sqlOrParams : handleOrSql;
+      const params = isExplicit ? paramsOrUndef : sqlOrParams;
+      return typeof __velox_db_query !== "undefined" ? __velox_db_query(handle, sql, JSON.stringify(params)).then(JSON.parse) : _noBinding("db.query");
+    },
+    run: (handleOrSql, sqlOrParams = [], paramsOrUndef = []) => {
+      const isExplicit = typeof handleOrSql === "number";
+      const handle = isExplicit ? handleOrSql : _dbHandle(null);
+      const sql = isExplicit ? sqlOrParams : handleOrSql;
+      const params = isExplicit ? paramsOrUndef : sqlOrParams;
+      return typeof __velox_db_run !== "undefined" ? __velox_db_run(handle, sql, JSON.stringify(params)).then(JSON.parse) : _noBinding("db.run");
+    },
+    transaction: (handleOrStmts, stmtsOrUndef) => {
+      const isExplicit = typeof handleOrStmts === "number";
+      const handle = isExplicit ? handleOrStmts : _dbHandle(null);
+      const stmts = isExplicit ? stmtsOrUndef : handleOrStmts;
+      return typeof __velox_db_transaction !== "undefined" ? __velox_db_transaction(handle, JSON.stringify(stmts)) : _noBinding("db.transaction");
+    }
+  };
 
   // js/packages/@velox/router/src/index.js
   var import_react2 = __toESM(require_react(), 1);
@@ -6358,6 +6414,21 @@ No matching component was found for:
     { name: "Blue", bg: "#1e66f5", fg: "#ffffff" },
     { name: "Lavender", bg: "#7287fd", fg: "#ffffff" }
   ];
+  function SmallBtn({ label, onPress, width: w = 118 }) {
+    return /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+      onPress,
+      width: w,
+      height: 32,
+      style: { backgroundColor: "#313244", borderRadius: 6, borderWidth: 1, borderColor: "#44446a" },
+      children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+        fontSize: 11,
+        width: w - 20,
+        height: 18,
+        style: { color: "#cdd6f4" },
+        children: label
+      })
+    });
+  }
   function WinBtn({ label, onPress, active = false }) {
     return /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
       onPress,
@@ -6387,6 +6458,215 @@ No matching component was found for:
         style: { color: "#cdd6f4" },
         children: label
       })
+    });
+  }
+  function DataScreen() {
+    const { width: winW, height: winH } = useWindowSize();
+    const navigate = useNavigate();
+    const [noteText, setNoteText] = import_react3.useState("");
+    const [loadedNote, setLoadedNote] = import_react3.useState("");
+    const [fileList, setFileList] = import_react3.useState([]);
+    const [itemName, setItemName] = import_react3.useState("");
+    const [dbItems, setDbItems] = import_react3.useState([]);
+    const [dbReady, setDbReady] = import_react3.useState(false);
+    const [status, setStatus] = import_react3.useState("Initialising…");
+    import_react3.useEffect(() => {
+      db.open("velox_demo.db").then(async () => {
+        await db.run("CREATE TABLE IF NOT EXISTS items " + "(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)");
+        const rows = await db.query("SELECT * FROM items ORDER BY id DESC");
+        setDbItems(rows);
+        setDbReady(true);
+        setStatus("DB ready. Try writing a note or adding an item.");
+      }).catch((e) => setStatus("DB error: " + e.message));
+    }, []);
+    const saveNote = () => fs.writeFile("velox-note.txt", noteText).then(() => setStatus("Note saved to velox-note.txt")).catch((e) => setStatus("Save error: " + e.message));
+    const loadNote = () => fs.readFile("velox-note.txt").then((t) => {
+      setLoadedNote(t);
+      setStatus("Note loaded.");
+    }).catch((e) => setStatus("Load error: " + e.message));
+    const listFiles = () => fs.listDir(".").then((entries) => {
+      setFileList(entries.slice(0, 10));
+      setStatus(`${entries.length} entries in working dir`);
+    }).catch((e) => setStatus("List error: " + e.message));
+    const addItem = () => {
+      if (!itemName.trim())
+        return;
+      db.run("INSERT INTO items (name) VALUES (?)", [itemName.trim()]).then(() => db.query("SELECT * FROM items ORDER BY id DESC")).then((rows) => {
+        setDbItems(rows);
+        setItemName("");
+        setStatus("Item added.");
+      }).catch((e) => setStatus("Insert error: " + e.message));
+    };
+    const refreshItems = () => db.query("SELECT * FROM items ORDER BY id DESC").then((rows) => {
+      setDbItems(rows);
+      setStatus(`${rows.length} items loaded.`);
+    }).catch((e) => setStatus("Query error: " + e.message));
+    const clearItems = () => db.transaction([{ sql: "DELETE FROM items", params: [] }]).then(() => {
+      setDbItems([]);
+      setStatus("All items deleted.");
+    }).catch((e) => setStatus("Clear error: " + e.message));
+    const contentW = winW - 2 * PAD;
+    const contentH = winH - HEADER_H - 2 * PAD;
+    const inner = contentW - 32;
+    const svH = contentH - 70;
+    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
+      style: {
+        backgroundColor: "#2a2a3e",
+        borderRadius: 16,
+        borderWidth: 1,
+        borderColor: "#44446a",
+        padding: 16,
+        gap: 8,
+        justifyContent: "flex-start",
+        alignItems: "flex-start"
+      },
+      width: contentW,
+      height: contentH,
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: { flexDirection: "row", gap: 12, alignItems: "flex-start" },
+          width: inner,
+          height: 32,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(BackBtn, {}),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 14,
+              width: inner - 110,
+              height: 20,
+              style: { color: "#cdd6f4" },
+              children: "Week 18 — File System + SQLite"
+            })
+          ]
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 11,
+          width: inner,
+          height: 16,
+          style: { color: "#a6e3a1" },
+          children: status
+        }),
+        /* @__PURE__ */ jsx_runtime.jsxs(ScrollView, {
+          width: inner,
+          height: svH,
+          contentHeight: 800,
+          style: { gap: 10, padding: 4 },
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 13,
+              width: inner,
+              height: 20,
+              style: { color: "#89b4fa" },
+              children: "File System  (fs.write + fs.read)"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+              value: noteText,
+              onChangeText: setNoteText,
+              placeholder: "Type a note to save…",
+              fontSize: 13,
+              width: inner,
+              height: 40
+            }),
+            /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
+              width: inner,
+              height: 34,
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+                  label: "Save Note",
+                  onPress: saveNote
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+                  label: "Load Note",
+                  onPress: loadNote
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+                  label: "List Dir",
+                  onPress: listFiles
+                })
+              ]
+            }),
+            loadedNote ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: inner,
+              style: { color: "#a6adc8" },
+              children: "Loaded: " + loadedNote
+            }) : null,
+            fileList.map((e, i) => /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 11,
+              width: inner,
+              height: 15,
+              style: { color: "#6c7086" },
+              children: (e.isDir ? "▸ " : "  ") + e.name
+            }, i)),
+            /* @__PURE__ */ jsx_runtime.jsx(View, {
+              style: { backgroundColor: "#44446a" },
+              width: inner,
+              height: 1
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 13,
+              width: inner,
+              height: 20,
+              style: { color: "#89b4fa" },
+              children: dbReady ? "SQLite  (velox_demo.db)" : "SQLite — opening…"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+              value: itemName,
+              onChangeText: setItemName,
+              placeholder: "Item name…",
+              fontSize: 13,
+              width: inner,
+              height: 40
+            }),
+            /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
+              width: inner,
+              height: 34,
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+                  label: "Add Item",
+                  onPress: addItem
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+                  label: "Refresh",
+                  onPress: refreshItems
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+                  label: "Clear All",
+                  onPress: clearItems
+                })
+              ]
+            }),
+            dbItems.length === 0 ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 11,
+              width: inner,
+              height: 16,
+              style: { color: "#45475a" },
+              children: dbReady ? "No items yet — add one above." : ""
+            }) : null,
+            dbItems.map((row, i) => /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: inner,
+              height: 18,
+              style: { color: "#cdd6f4" },
+              children: "#" + row.id + "   " + row.name
+            }, i)),
+            /* @__PURE__ */ jsx_runtime.jsx(View, {
+              style: { backgroundColor: "#44446a" },
+              width: inner,
+              height: 1
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 11,
+              width: inner,
+              style: { color: "#45475a" },
+              children: `"Clear All" uses db.transaction([{sql, params}]) — atomic batch.
+` + `"Add Item" / "Refresh" use db.run() / db.query() without a handle
+` + "(default set automatically by the first db.open() call)."
+            })
+          ]
+        })
+      ]
     });
   }
   function HomeScreen() {
@@ -6502,6 +6782,24 @@ No matching component was found for:
                 height: 20,
                 style: { color: "#cdd6f4" },
                 children: "View Colour Palette →"
+              })
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+              onPress: () => navigate("data"),
+              width: leftIn,
+              height: 40,
+              style: {
+                backgroundColor: "#1a2a3e",
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: "#2a4a6e"
+              },
+              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 13,
+                width: leftIn - 20,
+                height: 20,
+                style: { color: "#89b4fa" },
+                children: "File System + SQLite Demo →"
               })
             }),
             /* @__PURE__ */ jsx_runtime.jsx(Image, {
@@ -6838,6 +7136,10 @@ useRoute().params gives them back here.`
               /* @__PURE__ */ jsx_runtime.jsx(Route, {
                 name: "colorDetail",
                 component: ColorDetailScreen
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Route, {
+                name: "data",
+                component: DataScreen
               })
             ]
           })
@@ -6846,5 +7148,5 @@ useRoute().params gives them back here.`
     });
   }
   render(/* @__PURE__ */ jsx_runtime.jsx(App, {}));
-  __velox_log("Week 17B: named-route router loaded.");
+  __velox_log("Week 18: file system + SQLite data layer loaded.");
 })();

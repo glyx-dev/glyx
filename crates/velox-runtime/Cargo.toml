@@ -10,3 +10,5 @@ log            = { workspace = true }
 thiserror      = { workspace = true }
 anyhow         = { workspace = true }
 velox-security = { path = "../velox-security" }
+velox-db       = { path = "../velox-db" }
+serde_json     = { workspace = true }

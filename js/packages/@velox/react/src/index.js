@@ -8,6 +8,7 @@ import {
   registerInput, unregisterInput,
   registerScrollView, unregisterScrollView,
   dispatchEvents,
+  addWindowSizeListener, removeWindowSizeListener,
 } from './events.js';
 
 // ── Reconciler ────────────────────────────────────────────────────────────────
@@ -285,3 +286,71 @@ export function TextInput({
     })
   );
 }
+
+// ── Responsive layout hooks ───────────────────────────────────────────────────
+
+/**
+ * Returns the current window size in physical pixels, updating on resize.
+ * @returns {{ width: number, height: number }}
+ */
+export function useWindowSize() {
+  const [size, setSize] = useState(() => {
+    const s = typeof __velox_getWindowSize !== 'undefined' ? __velox_getWindowSize() : null;
+    return s ? { width: s.width, height: s.height } : { width: 0, height: 0 };
+  });
+
+  useEffect(() => {
+    const handler = (s) => setSize(s);
+    addWindowSizeListener(handler);
+    return () => removeWindowSizeListener(handler);
+  }, []);
+
+  return size;
+}
+
+/**
+ * Returns the current monitor size in physical pixels (read-once, does not update).
+ * @returns {{ width: number, height: number }}
+ */
+export function useScreenSize() {
+  const [size] = useState(() => {
+    const s = typeof __velox_getScreenSize !== 'undefined' ? __velox_getScreenSize() : null;
+    return s ? { width: s.width, height: s.height } : { width: 0, height: 0 };
+  });
+  return size;
+}
+
+/**
+ * Returns true when the window width is at least `minWidth` pixels.
+ * Equivalent to CSS `@media (min-width: Xpx)`.
+ * @param {number} minWidth
+ * @returns {boolean}
+ */
+export function useMediaQuery(minWidth) {
+  const { width } = useWindowSize();
+  return width >= minWidth;
+}
+
+// ── Window imperative API ─────────────────────────────────────────────────────
+
+/**
+ * Imperative window control API.
+ *
+ * @example
+ * veloxWindow.setFullscreen(true);   // game-style fullscreen (covers taskbar)
+ * veloxWindow.setMaximized(true);    // maximize (taskbar remains visible)
+ * veloxWindow.setMinimized();        // minimize to taskbar
+ * veloxWindow.isFullscreen();        // → boolean
+ * veloxWindow.isMaximized();         // → boolean
+ * veloxWindow.getWindowSize();       // → { width, height } physical pixels
+ * veloxWindow.getScreenSize();       // → { width, height } physical pixels
+ */
+export const veloxWindow = {
+  setFullscreen: (full)     => typeof __velox_setFullscreen !== 'undefined' && __velox_setFullscreen(full),
+  setMaximized:  (max)      => typeof __velox_setMaximized  !== 'undefined' && __velox_setMaximized(max),
+  setMinimized:  ()         => typeof __velox_setMinimized  !== 'undefined' && __velox_setMinimized(),
+  isFullscreen:  ()         => typeof __velox_isFullscreen  !== 'undefined' ? __velox_isFullscreen()  : false,
+  isMaximized:   ()         => typeof __velox_isMaximized   !== 'undefined' ? __velox_isMaximized()   : false,
+  getWindowSize: ()         => typeof __velox_getWindowSize !== 'undefined' ? __velox_getWindowSize() : { width: 0, height: 0 },
+  getScreenSize: ()         => typeof __velox_getScreenSize !== 'undefined' ? __velox_getScreenSize() : { width: 0, height: 0 },
+};

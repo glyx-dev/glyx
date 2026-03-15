@@ -7,6 +7,7 @@ use crate::{
     bindings::{
         new_completion_queue, new_event_queue, new_layout_cache, new_scene_queue, register_all,
         CompletionQueue, EventQueue, InputEvent, LayoutCache, SceneCommand, SceneQueue,
+        WindowController,
     },
     RuntimeError,
 };
@@ -20,8 +21,13 @@ pub struct VeloxRuntime {
     pub layout_cache: LayoutCache,
 }
 
+pub struct HeapStats {
+    pub used_heap_size: usize,
+    pub total_heap_size: usize,
+}
+
 impl VeloxRuntime {
-    pub fn new(tokio_handle: Handle) -> Self {
+    pub fn new(tokio_handle: Handle, window: Option<WindowController>) -> Self {
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
 
         let events       = new_event_queue();
@@ -42,6 +48,7 @@ impl VeloxRuntime {
                 Arc::clone(&scene),
                 Arc::clone(&events),
                 Arc::clone(&layout_cache),
+                window,
             );
 
             (v8::Global::new(scope, ctx), queue, scene)
@@ -187,5 +194,14 @@ impl VeloxRuntime {
     pub fn drain_scene_commands(&mut self) -> Vec<SceneCommand> {
         let mut q = self.scene.lock().unwrap();
         q.drain(..).collect()
+    }
+
+    pub fn heap_stats(&mut self) -> HeapStats {
+        let mut stats = v8::HeapStatistics::default();
+        self.isolate.get_heap_statistics(&mut stats);
+        HeapStats {
+            used_heap_size: stats.used_heap_size(),
+            total_heap_size: stats.total_heap_size(),
+        }
     }
 }

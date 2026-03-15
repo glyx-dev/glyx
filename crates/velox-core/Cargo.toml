@@ -10,6 +10,7 @@ velox-renderer = { path = "../velox-renderer" }
 velox-text     = { path = "../velox-text" }
 velox-layout   = { path = "../velox-layout" }
 velox-runtime  = { path = "../velox-runtime" }
+winit          = { workspace = true }
 tokio          = { workspace = true }
 pollster       = { workspace = true }
 log            = { workspace = true }
@@ -17,3 +18,4 @@ thiserror      = { workspace = true }
 env_logger     = { workspace = true }
 taffy          = { workspace = true }
 image          = { workspace = true }
+notify         = { workspace = true }

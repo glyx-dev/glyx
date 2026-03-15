@@ -88,6 +88,15 @@ pub(crate) fn apply_scene_commands(state: &mut AppState, commands: Vec<SceneComm
                 }
             }
             SceneCommand::RemoveNode { id } => {
+                // If this is an Image node, drop its decoded resource from the
+                // id-keyed cache.  images_by_path keeps the bytes for reuse on
+                // remount (no re-decode), but images must not accumulate stale
+                // entries for node ids that no longer exist.
+                if let Some(node) = state.js_nodes.get(&id) {
+                    if let Some(image_id) = node.props.image_id {
+                        state.images.remove(&image_id);
+                    }
+                }
                 state.js_nodes.remove(&id);
                 layout_changed = true;
             }

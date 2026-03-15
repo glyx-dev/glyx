@@ -31,6 +31,9 @@ const inputRegistry = new Map();
 // scroll view the cursor is currently over.
 const scrollRegistry = new Map();
 
+// Listeners notified on window resize: Array<(size: {width, height}) => void>
+const windowSizeListeners = [];
+
 // Currently focused input node id (or null).
 let focusedNodeId = null;
 
@@ -94,6 +97,23 @@ export function registerScrollView(nodeId, handlers) {
  */
 export function unregisterScrollView(nodeId) {
   scrollRegistry.delete(nodeId);
+}
+
+/**
+ * Subscribe to window resize events.
+ * @param {(size: {width: number, height: number}) => void} fn
+ */
+export function addWindowSizeListener(fn) {
+  windowSizeListeners.push(fn);
+}
+
+/**
+ * Unsubscribe from window resize events.
+ * @param {(size: {width: number, height: number}) => void} fn
+ */
+export function removeWindowSizeListener(fn) {
+  const idx = windowSizeListeners.indexOf(fn);
+  if (idx >= 0) windowSizeListeners.splice(idx, 1);
 }
 
 /**
@@ -197,6 +217,12 @@ export function dispatchEvents() {
             break;
           }
         }
+        break;
+      }
+
+      case 'resize': {
+        const size = { width: ev.width, height: ev.height };
+        for (const fn of windowSizeListeners) fn(size);
         break;
       }
 

@@ -49,12 +49,17 @@
 //! `CachedLabel` holds a shaped result keyed by (text, font_size, max_width,
 //! color).  Cache misses call Parley once; cache hits return instantly.
 
+use notify::{RecursiveMode, Watcher};
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use velox_gpu::GpuContext;
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
 use velox_renderer::{colors, peniko, VeloxRenderer, FrameBuilder};
-use velox_runtime::{init_v8, InputEvent, NodeProps, NodeType, SceneCommand, VeloxRuntime};
+use velox_runtime::{init_v8, InputEvent, NodeProps, NodeType, SceneCommand, VeloxRuntime, WindowController};
 use velox_shell::ShellEvent;
 use velox_text::{TextLayout, TextSystem};
 use velox_layout::NodeId;
@@ -88,9 +93,33 @@ pub struct AppConfig {
     /// velox_core::run(velox_core::AppConfig {
     ///     window: velox_core::WindowConfig::default(),
     ///     js_src: Some(include_str!("../js/app.js").to_string()),
+    ///     dev_mode: None,
     /// });
     /// ```
     pub js_src: Option<String>,
+    pub dev_mode: Option<DevModeConfig>,
+}
+
+#[derive(Clone)]
+pub struct DevModeConfig {
+    pub project_root: PathBuf,
+    pub entry_jsx: PathBuf,
+    pub output_js: PathBuf,
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl DevModeConfig {
+    pub fn new(project_root: PathBuf, entry_jsx: PathBuf, output_js: PathBuf, watch_paths: Vec<PathBuf>) -> Self {
+        Self { project_root, entry_jsx, output_js, watch_paths }
+    }
+
+    pub fn from_entry(project_root: PathBuf, entry_jsx: PathBuf, output_js: PathBuf) -> Self {
+        let mut watch_paths = Vec::new();
+        if let Some(parent) = entry_jsx.parent() {
+            watch_paths.push(parent.to_path_buf());
+        }
+        Self { project_root, entry_jsx, output_js, watch_paths }
+    }
 }
 
 // ── Cached label ──────────────────────────────────────────────────────────────
@@ -154,6 +183,7 @@ struct AppState {
     cursor_blink_on:       bool,
     /// When to flip the blink phase next.
     cursor_blink_deadline: Instant,
+    dev_mode: Option<DevModeState>,
 }
 
 struct JsNode {
@@ -163,10 +193,278 @@ struct JsNode {
     layout_id: Option<NodeId>,
 }
 
+enum DevBuildEvent {
+    BuildOk(String),
+    BuildErr(String),
+}
+
+struct DevModeState {
+    rx: Receiver<DevBuildEvent>,
+    overlay_visible: bool,
+    last_reload: Option<Instant>,
+    last_build_message: String,
+    frame_times_ms: VecDeque<f64>,
+    last_frame_at: Option<Instant>,
+    ctrl_down: bool,
+    shift_down: bool,
+}
+
 // ── Colour helpers ─────────────────────────────────────────────────────────────
 
 fn rgba_to_vello(c: [u8; 4]) -> peniko::Color {
     peniko::Color::rgba8(c[0], c[1], c[2], c[3])
+}
+
+fn dev_mode_config_from_env() -> Option<DevModeConfig> {
+    let root = std::env::var("VELOX_DEV_ROOT").ok()
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())?;
+    let entry_jsx = std::env::var("VELOX_DEV_ENTRY").ok().map(PathBuf::from)?;
+    let output_js = std::env::var("VELOX_DEV_OUTPUT").ok().map(PathBuf::from)?;
+    let watch_paths = std::env::var("VELOX_DEV_WATCH")
+        .ok()
+        .map(|v| v.split(';').filter(|s| !s.trim().is_empty()).map(PathBuf::from).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if watch_paths.is_empty() {
+        Some(DevModeConfig::from_entry(root, entry_jsx, output_js))
+    } else {
+        Some(DevModeConfig::new(root, entry_jsx, output_js, watch_paths))
+    }
+}
+
+fn start_dev_mode_worker(
+    redraw: Arc<dyn Fn() + Send + Sync>,
+    config: Option<DevModeConfig>,
+) -> Option<Receiver<DevBuildEvent>> {
+    let config = config.or_else(dev_mode_config_from_env)?;
+    let cwd = if config.project_root.is_absolute() {
+        config.project_root.clone()
+    } else {
+        std::env::current_dir().ok()?.join(config.project_root)
+    };
+    let app_jsx = if config.entry_jsx.is_absolute() {
+        config.entry_jsx.clone()
+    } else {
+        cwd.join(config.entry_jsx)
+    };
+    let app_js = if config.output_js.is_absolute() {
+        config.output_js.clone()
+    } else {
+        cwd.join(config.output_js)
+    };
+    if !app_jsx.exists() || app_js.as_os_str().is_empty() {
+        return None;
+    }
+
+    let (out_tx, out_rx) = mpsc::channel::<DevBuildEvent>();
+    std::thread::spawn(move || {
+        let (watch_tx, watch_rx) = mpsc::channel::<()>();
+        let out_tx_watch = out_tx.clone();
+        let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            match res {
+                Ok(_) => {
+                    let _ = watch_tx.send(());
+                }
+                Err(e) => {
+                    let _ = out_tx_watch.send(DevBuildEvent::BuildErr(e.to_string()));
+                }
+            }
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                let _ = out_tx.send(DevBuildEvent::BuildErr(e.to_string()));
+                return;
+            }
+        };
+
+        let watch_paths = if config.watch_paths.is_empty() {
+            app_jsx.parent().map(|p| vec![p.to_path_buf()]).unwrap_or_default()
+        } else {
+            config.watch_paths.clone()
+        };
+        for p in &watch_paths {
+            let wp = if p.is_absolute() { p.clone() } else { cwd.join(p) };
+            if wp.exists() {
+                let _ = watcher.watch(&wp, RecursiveMode::Recursive);
+            }
+        }
+
+        while watch_rx.recv().is_ok() {
+            while watch_rx.recv_timeout(Duration::from_millis(180)).is_ok() {}
+
+            let output = Command::new("bun")
+                .arg("build")
+                .arg(app_jsx.as_os_str())
+                .arg("--outfile")
+                .arg(app_js.as_os_str())
+                .arg("--target")
+                .arg("browser")
+                .arg("--format")
+                .arg("iife")
+                .arg("--define")
+                .arg("process.env.NODE_ENV='production'")
+                .current_dir(&cwd)
+                .output();
+
+            match output {
+                Ok(out) if out.status.success() => {
+                    match std::fs::read_to_string(&app_js) {
+                        Ok(js) => {
+                            let _ = out_tx.send(DevBuildEvent::BuildOk(js));
+                        }
+                        Err(e) => {
+                            let _ = out_tx.send(DevBuildEvent::BuildErr(e.to_string()));
+                        }
+                    }
+                }
+                Ok(out) => {
+                    let mut msg = String::new();
+                    if !out.stderr.is_empty() {
+                        msg.push_str(&String::from_utf8_lossy(&out.stderr));
+                    }
+                    if !out.stdout.is_empty() {
+                        if !msg.is_empty() {
+                            msg.push('\n');
+                        }
+                        msg.push_str(&String::from_utf8_lossy(&out.stdout));
+                    }
+                    if msg.is_empty() {
+                        msg = "bun build failed".to_string();
+                    }
+                    let _ = out_tx.send(DevBuildEvent::BuildErr(msg));
+                }
+                Err(e) => {
+                    let _ = out_tx.send(DevBuildEvent::BuildErr(e.to_string()));
+                }
+            }
+            redraw();
+        }
+    });
+
+    Some(out_rx)
+}
+
+fn handle_dev_build_events(state: &mut AppState) {
+    let Some(dev) = state.dev_mode.as_mut() else { return };
+    loop {
+        match dev.rx.try_recv() {
+            Ok(DevBuildEvent::BuildOk(js)) => {
+                state.js_nodes.clear();
+                state.js_root = None;
+                state.images.clear();
+                state.images_by_path.clear();
+                state.image_cache_hits = 0;
+                state.image_cache_misses = 0;
+                state.label_cache.clear();
+                state.resolved.clear();
+                state.layout = LayoutTree::new();
+                state.runtime.layout_cache.lock().unwrap().clear();
+                let _ = state.runtime.drain_scene_commands();
+                match state.runtime.eval(&js) {
+                    Ok(_) => {
+                        dev.last_reload = Some(Instant::now());
+                        dev.last_build_message = "reload ok".to_string();
+                        state.layout_dirty = true;
+                    }
+                    Err(e) => {
+                        dev.last_build_message = format!("reload error: {}", e);
+                    }
+                }
+            }
+            Ok(DevBuildEvent::BuildErr(msg)) => {
+                dev.last_build_message = format!("build error: {}", msg);
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
+fn draw_dev_overlay(state: &mut AppState, frame: &mut FrameBuilder) {
+    let Some(dev) = state.dev_mode.as_mut() else { return };
+    let now = Instant::now();
+    if let Some(prev) = dev.last_frame_at {
+        let ms = (now - prev).as_secs_f64() * 1000.0;
+        dev.frame_times_ms.push_back(ms);
+        while dev.frame_times_ms.len() > 60 {
+            dev.frame_times_ms.pop_front();
+        }
+    }
+    dev.last_frame_at = Some(now);
+
+    if !dev.overlay_visible {
+        return;
+    }
+
+    let frame_ms = dev.frame_times_ms.back().copied().unwrap_or(0.0);
+    let avg_ms = if dev.frame_times_ms.is_empty() {
+        0.0
+    } else {
+        dev.frame_times_ms.iter().sum::<f64>() / dev.frame_times_ms.len() as f64
+    };
+    let fps = if avg_ms > 0.0 { 1000.0 / avg_ms } else { 0.0 };
+    let heap = state.runtime.heap_stats();
+    let since = dev.last_reload.map(|t| now.saturating_duration_since(t).as_secs()).unwrap_or(0);
+
+    frame.fill_rounded_rect(16.0, 16.0, 470.0, 140.0, 8.0, peniko::Color::rgba8(20, 20, 30, 220));
+
+    let lines = [
+        "Dev overlay (Ctrl+Shift+D)".to_string(),
+        format!("FPS {:.1} | frame {:.2}ms | avg60 {:.2}ms", fps, frame_ms, avg_ms),
+        format!("Nodes {} | JS heap {} / {} MB", state.js_nodes.len(), heap.used_heap_size / (1024 * 1024), heap.total_heap_size / (1024 * 1024)),
+        format!("Last reload {}s ago", since),
+        dev.last_build_message.clone(),
+    ];
+
+    for (i, line) in lines.iter().enumerate() {
+        let text = state.text_sys.label(line, 13.0, peniko::Color::rgba8(230, 230, 240, 255));
+        frame.draw_text(&text, 26.0, 34.0 + (i as f64 * 22.0), peniko::Color::rgba8(230, 230, 240, 255));
+    }
+}
+
+// ── Window controller builder ─────────────────────────────────────────────────
+
+fn build_window_controller(window: Arc<winit::window::Window>) -> WindowController {
+    use winit::window::Fullscreen;
+
+    let w1 = Arc::clone(&window);
+    let w2 = Arc::clone(&window);
+    let w3 = Arc::clone(&window);
+    let w4 = Arc::clone(&window);
+    let w5 = Arc::clone(&window);
+    let w6 = Arc::clone(&window);
+    let w7 = Arc::clone(&window);
+
+    WindowController {
+        get_window_size: Arc::new(move || {
+            let s = w1.inner_size();
+            (s.width, s.height)
+        }),
+        get_screen_size: Arc::new(move || {
+            let monitor = w2.current_monitor()?;
+            let s = monitor.size();
+            Some((s.width, s.height))
+        }),
+        set_fullscreen: Arc::new(move |full| {
+            if full {
+                w3.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            } else {
+                w3.set_fullscreen(None);
+            }
+        }),
+        set_maximized: Arc::new(move |maximized| {
+            w4.set_maximized(maximized);
+        }),
+        set_minimized: Arc::new(move || {
+            w5.set_minimized(true);
+        }),
+        is_fullscreen: Arc::new(move || {
+            w6.fullscreen().is_some()
+        }),
+        is_maximized: Arc::new(move || {
+            w7.is_maximized()
+        }),
+    }
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -184,7 +482,7 @@ pub fn run(config: AppConfig) {
 
     init_v8();
 
-    let AppConfig { window, js_src } = config;
+    let AppConfig { window, js_src, dev_mode } = config;
 
     let mut state: Option<AppState> = None;
 
@@ -198,7 +496,8 @@ pub fn run(config: AppConfig) {
                 let renderer = VeloxRenderer::new(&gpu_ctx)
                     .expect("Failed to initialise Vello renderer");
 
-                let mut rt = VeloxRuntime::new(tokio_handle.clone());
+                let window_ctrl = build_window_controller(Arc::clone(&window));
+                let mut rt = VeloxRuntime::new(tokio_handle.clone(), Some(window_ctrl));
 
                 if let Some(ref js) = js_src {
                     match rt.eval(js) {
@@ -229,9 +528,19 @@ pub fn run(config: AppConfig) {
                     label_cache:  std::collections::HashMap::new(),
                     cursor_x:     0.0,
                     cursor_y:     0.0,
-                    request_redraw,
+                    request_redraw: Arc::clone(&request_redraw),
                     cursor_blink_on:       true,
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
+                    dev_mode: start_dev_mode_worker(Arc::clone(&request_redraw), dev_mode.clone()).map(|rx| DevModeState {
+                        rx,
+                        overlay_visible: true,
+                        last_reload: None,
+                        last_build_message: "watching changes".to_string(),
+                        frame_times_ms: VecDeque::new(),
+                        last_frame_at: Some(Instant::now()),
+                        ctrl_down: false,
+                        shift_down: false,
+                    }),
                 });
 
                 window.request_redraw();
@@ -242,6 +551,7 @@ pub fn run(config: AppConfig) {
                 if let Some(s) = &mut state {
                     s.gpu.resize(width, height);
                     s.layout_dirty = true;
+                    s.runtime.push_event(InputEvent::Resize { width, height });
                 }
             }
 
@@ -275,6 +585,17 @@ pub fn run(config: AppConfig) {
             // ── Keyboard ──────────────────────────────────────────────────
             ShellEvent::KeyInput { key, text, pressed } => {
                 if let Some(s) = &mut state {
+                    if let Some(dev) = s.dev_mode.as_mut() {
+                        match key.as_str() {
+                            "ControlLeft" | "ControlRight" => dev.ctrl_down = pressed,
+                            "ShiftLeft" | "ShiftRight" => dev.shift_down = pressed,
+                            "KeyD" if pressed && dev.ctrl_down && dev.shift_down => {
+                                dev.overlay_visible = !dev.overlay_visible;
+                                (s.request_redraw)();
+                            }
+                            _ => {}
+                        }
+                    }
                     s.runtime.push_event(InputEvent::KeyInput { key, text, pressed });
                 }
             }
@@ -289,6 +610,7 @@ pub fn run(config: AppConfig) {
             // ── Draw ──────────────────────────────────────────────────────
             ShellEvent::RedrawRequested => {
                 let Some(s) = &mut state else { return };
+                handle_dev_build_events(s);
 
                 // 1. Resolve async JS Promises (readFile, etc.).
                 s.runtime.tick();
@@ -348,6 +670,13 @@ pub fn run(config: AppConfig) {
                         any_cursor_active: &mut any_cursor_active,
                     };
                     render_subtree(root_id, 0.0, &mut render_ctx);
+                }
+                draw_dev_overlay(s, &mut frame);
+
+                // Keep the dev overlay live by requesting the next frame
+                // whenever the overlay is visible (dev-only; harmless cost).
+                if s.dev_mode.as_ref().map(|d| d.overlay_visible).unwrap_or(false) {
+                    (s.request_redraw)();
                 }
 
                 if let Err(e) = s.renderer.render_frame(&s.gpu, &texture, frame) {

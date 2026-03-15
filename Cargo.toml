@@ -49,6 +49,7 @@ pollster  = "0.3"
 bytemuck  = { version = "1", features = ["derive"] }
 smallvec  = "1"
 image     = { version = "0.25", default-features = true }
+notify    = "6.1"
 
 [profile.dev]
 opt-level = 1          # faster compiles, decent perf in dev

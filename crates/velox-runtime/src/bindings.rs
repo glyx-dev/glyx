@@ -48,6 +48,20 @@ pub enum InputEvent {
     KeyInput { key: String, text: Option<String>, pressed: bool },
     /// Vertical scroll delta (positive = down).
     Scroll { delta_y: f32 },
+    /// Window resized to new physical pixel dimensions.
+    Resize { width: u32, height: u32 },
+}
+
+/// Callbacks for window control operations.
+/// Constructed by velox-core from Arc<winit::window::Window> and passed to register_all.
+pub struct WindowController {
+    pub get_window_size: Arc<dyn Fn() -> (u32, u32) + Send + Sync>,
+    pub get_screen_size: Arc<dyn Fn() -> Option<(u32, u32)> + Send + Sync>,
+    pub set_fullscreen:  Arc<dyn Fn(bool) + Send + Sync>,
+    pub set_maximized:   Arc<dyn Fn(bool) + Send + Sync>,
+    pub set_minimized:   Arc<dyn Fn() + Send + Sync>,
+    pub is_fullscreen:   Arc<dyn Fn() -> bool + Send + Sync>,
+    pub is_maximized:    Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 /// Thread-safe queue of input events for JS to poll each frame.
@@ -167,6 +181,7 @@ pub fn register_all(
     scene:        SceneQueue,
     events:       EventQueue,
     layout_cache: LayoutCache,
+    window:       Option<WindowController>,
 ) {
     set_func(scope, global, "__velox_getTime", get_time);
     set_func(scope, global, "__velox_log",     js_log);
@@ -181,6 +196,7 @@ pub fn register_all(
         layout_cache,
         next_id: std::sync::atomic::AtomicU32::new(1),
         next_image_id: std::sync::atomic::AtomicU32::new(1),
+        window,
     });
     let ptr   = Box::into_raw(state) as *mut std::ffi::c_void;
     // Safety: ptr is valid for the lifetime of the isolate.
@@ -206,6 +222,14 @@ pub fn register_all(
     register!("__velox_setRoot",     set_root_callback);
     register!("__velox_pollEvents",  poll_events_callback);
     register!("__velox_getLayout",   get_layout_callback);
+
+    register!("__velox_getWindowSize", get_window_size_callback);
+    register!("__velox_getScreenSize", get_screen_size_callback);
+    register!("__velox_setFullscreen", set_fullscreen_callback);
+    register!("__velox_setMaximized",  set_maximized_callback);
+    register!("__velox_setMinimized",  set_minimized_callback);
+    register!("__velox_isFullscreen",  is_fullscreen_callback);
+    register!("__velox_isMaximized",   is_maximized_callback);
 }
 
 struct AsyncState {
@@ -216,6 +240,7 @@ struct AsyncState {
     layout_cache: LayoutCache,
     next_id:      std::sync::atomic::AtomicU32,
     next_image_id: std::sync::atomic::AtomicU32,
+    window:       Option<WindowController>,
 }
 
 fn set_func(
@@ -464,6 +489,11 @@ fn poll_events_callback(
                 set_str!("type", "scroll");
                 set_num!("deltaY", delta_y);
             }
+            InputEvent::Resize { width, height } => {
+                set_str!("type", "resize");
+                set_num!("width", width);
+                set_num!("height", height);
+            }
         }
 
         array.set_index(scope, i as u32, obj.into());
@@ -647,4 +677,131 @@ fn set_root_callback(
     let id = args.get(0).number_value(scope).unwrap_or_default() as u32;
     state.scene.lock().unwrap().push_back(SceneCommand::SetRoot { id });
     rv.set(v8::Boolean::new(scope, true).into());
+}
+
+// ── Window control bindings ───────────────────────────────────────────────────
+
+fn get_window_size_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if let Some(ctrl) = &state.window {
+        let (w, h) = (ctrl.get_window_size)();
+        let obj = v8::Object::new(scope);
+        macro_rules! set_num {
+            ($key:literal, $val:expr) => {
+                let k = v8::String::new(scope, $key).unwrap();
+                let v = v8::Number::new(scope, $val as f64);
+                obj.set(scope, k.into(), v.into());
+            };
+        }
+        set_num!("width",  w);
+        set_num!("height", h);
+        rv.set(obj.into());
+    } else {
+        rv.set(v8::null(scope).into());
+    }
+}
+
+fn get_screen_size_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if let Some(ctrl) = &state.window {
+        if let Some((w, h)) = (ctrl.get_screen_size)() {
+            let obj = v8::Object::new(scope);
+            macro_rules! set_num {
+                ($key:literal, $val:expr) => {
+                    let k = v8::String::new(scope, $key).unwrap();
+                    let v = v8::Number::new(scope, $val as f64);
+                    obj.set(scope, k.into(), v.into());
+                };
+            }
+            set_num!("width",  w);
+            set_num!("height", h);
+            rv.set(obj.into());
+            return;
+        }
+    }
+    rv.set(v8::null(scope).into());
+}
+
+fn set_fullscreen_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let enable = args.get(0).boolean_value(scope);
+    if let Some(ctrl) = &state.window {
+        (ctrl.set_fullscreen)(enable);
+    }
+}
+
+fn set_maximized_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let enable = args.get(0).boolean_value(scope);
+    if let Some(ctrl) = &state.window {
+        (ctrl.set_maximized)(enable);
+    }
+}
+
+fn set_minimized_callback(
+    _scope: &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if let Some(ctrl) = &state.window {
+        (ctrl.set_minimized)();
+    }
+}
+
+fn is_fullscreen_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let result = state.window.as_ref().map(|ctrl| (ctrl.is_fullscreen)()).unwrap_or(false);
+    rv.set(v8::Boolean::new(scope, result).into());
+}
+
+fn is_maximized_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let result = state.window.as_ref().map(|ctrl| (ctrl.is_maximized)()).unwrap_or(false);
+    rv.set(v8::Boolean::new(scope, result).into());
 }

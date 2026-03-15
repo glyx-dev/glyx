@@ -190,22 +190,49 @@ pub(crate) fn recompute_layout(state: &mut AppState) {
 pub(crate) fn update_scroll_positions(state: &AppState) {
     if let Some(root_id) = state.js_root {
         let mut cache = state.runtime.layout_cache.lock().unwrap();
-        scroll_walk(root_id, &state.js_nodes, &state.resolved, 0.0, &mut cache);
+        scroll_walk(root_id, &state.js_nodes, &state.resolved, 0.0, None, &mut cache);
     }
 }
 
+/// [x, y, width, height] in screen space of the nearest clipping ancestor.
+type ClipRect = Option<[f32; 4]>;
+
 fn scroll_walk(
-    id:       u32,
-    nodes:    &std::collections::HashMap<u32, JsNode>,
-    resolved: &[(NodeId, ResolvedLayout)],
-    scroll_y: f64,
-    cache:    &mut std::collections::HashMap<u32, [f32; 4]>,
+    id:        u32,
+    nodes:     &std::collections::HashMap<u32, JsNode>,
+    resolved:  &[(NodeId, ResolvedLayout)],
+    scroll_y:  f64,
+    clip_rect: ClipRect,
+    cache:     &mut std::collections::HashMap<u32, [f32; 4]>,
 ) {
     let Some(node)      = nodes.get(&id)                                      else { return };
     let Some(layout_id) = node.layout_id                                      else { return };
     let Some((_, rl))   = resolved.iter().find(|(nid, _)| *nid == layout_id) else { return };
 
-    cache.insert(id, [rl.x, (rl.y as f64 - scroll_y) as f32, rl.width, rl.height]);
+    let visible_x = rl.x;
+    let visible_y = (rl.y as f64 - scroll_y) as f32;
+
+    // If this node is inside a clipping ancestor, check whether it is at least
+    // partially within the clip bounds.  A node that is fully outside the clip
+    // window is invisible — write impossible coords so hit-testing misses it.
+    if let Some([cx, cy, cw, ch]) = clip_rect {
+        let node_bottom = visible_y + rl.height;
+        let node_right  = visible_x + rl.width;
+        if node_bottom <= cy || visible_y >= cy + ch
+            || node_right <= cx || visible_x >= cx + cw
+        {
+            cache.insert(id, [-9999.0, -9999.0, 0.0, 0.0]);
+            // Still recurse so children that might themselves be clipped containers
+            // also get their cache entries invalidated.
+            let children: Vec<u32> = node.children.clone();
+            for child_id in children {
+                scroll_walk(child_id, nodes, resolved, scroll_y, clip_rect, cache);
+            }
+            return;
+        }
+    }
+
+    cache.insert(id, [visible_x, visible_y, rl.width, rl.height]);
 
     let is_clip = node.props.clip.unwrap_or(false);
 
@@ -235,8 +262,17 @@ fn scroll_walk(
         }
     };
 
+    // If this node is a clip container, its screen-space rect becomes the active
+    // clip rect for all descendants.  Use visible_y (not rl.y) because an outer
+    // scroll may already have shifted this container on screen.
+    let child_clip = if is_clip {
+        Some([visible_x, visible_y, rl.width, rl.height])
+    } else {
+        clip_rect
+    };
+
     let children: Vec<u32> = node.children.clone();
     for child_id in children {
-        scroll_walk(child_id, nodes, resolved, child_scroll_y, cache);
+        scroll_walk(child_id, nodes, resolved, child_scroll_y, child_clip, cache);
     }
 }

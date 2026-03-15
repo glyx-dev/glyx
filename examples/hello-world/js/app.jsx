@@ -1,25 +1,24 @@
-// Week 15A milestone — multi-line text + ScrollView nested Pressable hit-test.
+// Week 16 — Responsive layout + window controls demo.
 //
-// What this demo shows:
-//   1. Multi-line text: paragraphs with no explicit `height` prop — Taffy
-//      calls the measure function, Parley shapes and wraps the text, and the
-//      container expands to fit the measured height automatically.
-//   2. ScrollView nested Pressable: each palette row is now a <Pressable>,
-//      verifying that hit-testing works correctly at any scroll position
-//      (scroll-adjusted Y values are now written into the layout cache).
-//   3. All Week 14 features: incremental layout, text cache, TextInput, scroll cap.
+// Features shown:
+//   1. useWindowSize()  — root view fills the actual window; adapts on resize.
+//   2. useMediaQuery()  — single-column below 900 px, two-column above.
+//   3. veloxWindow API  — fullscreen / maximize / minimize buttons.
+//   4. All prior demos: multi-line text, ScrollView, TextInput, Image.
 
 import './polyfills.js';
 import React, { useState } from 'react';
-import { View, Text, Image, Pressable, TextInput, ScrollView, render } from '@velox/react';
+import {
+  View, Text, Image, Pressable, TextInput, ScrollView, render,
+  useWindowSize, useMediaQuery, veloxWindow,
+} from '@velox/react';
 
-// Layout constants for the scrollable list.
+// ── Palette data ──────────────────────────────────────────────────────────────
+
 const ITEM_H   = 44;
 const ITEM_GAP = 8;
 const SV_PAD   = 8;
-const SV_H     = 260;
 
-// Catppuccin Mocha palette — each row is now a Pressable.
 const PALETTE = [
   { name: 'Rosewater', bg: '#dc8a78', fg: '#1e1e2e' },
   { name: 'Flamingo',  bg: '#dd7878', fg: '#1e1e2e' },
@@ -37,221 +36,251 @@ const PALETTE = [
   { name: 'Lavender',  bg: '#7287fd', fg: '#ffffff' },
 ];
 
+// ── Small reusable components ─────────────────────────────────────────────────
+
+function WinBtn({ label, onPress, active = false }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      width={96}
+      height={30}
+      style={{
+        backgroundColor: active ? '#6c63ff' : '#313244',
+        borderRadius: 6,
+      }}
+    >
+      <Text fontSize={12} width={80} height={18} style={{ color: '#cdd6f4' }}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+// ── Main app ─────────────────────────────────────────────────────────────────
+
 function App() {
-  const [name, setName]         = useState('');
-  const [greeted, setGreeted]   = useState(false);
-  const [selected, setSelected] = useState(null);
+  // ── Responsive state ─────────────────────────────────────────────────────
+  const { width: winW, height: winH } = useWindowSize();
+  const isWide = useMediaQuery(900);   // two-column layout above 900 px
+
+  // ── UI state ─────────────────────────────────────────────────────────────
+  const [name, setName]           = useState('');
+  const [greeted, setGreeted]     = useState(false);
+  const [selected, setSelected]   = useState(null);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [maximized, setMaximized]   = useState(false);
 
   const greet = () => setGreeted(true);
   const handleNameChange = (text) => { setName(text); setGreeted(false); };
 
+  const toggleFullscreen = () => {
+    const next = !fullscreen;
+    veloxWindow.setFullscreen(next);
+    setFullscreen(next);
+  };
+  const toggleMaximize = () => {
+    const next = !maximized;
+    veloxWindow.setMaximized(next);
+    setMaximized(next);
+  };
+  const minimize = () => veloxWindow.setMinimized();
+
+  // ── Layout math ──────────────────────────────────────────────────────────
+  const HEADER_H  = 48;
+  const PAD       = 16;
+  const GAP       = 20;
+  const contentW  = winW  - 2 * PAD;
+  const contentH  = winH  - HEADER_H - 2 * PAD;
+
+  // Two-column split: 44% left, rest right, minus gap between them.
+  const leftW  = isWide ? Math.floor(contentW * 0.44) : contentW;
+  const rightW = isWide ? (contentW - leftW - GAP)    : contentW;
+
+  // Inner widths (subtract card padding = 24 each side).
+  const leftInner  = leftW  - 48;
+  const rightInner = rightW - 32;
+
+  // ScrollView height adapts to remaining card space.
+  const svH = Math.max(120, contentH - 220);
+
+  // Content height for single-column stacking.
+  const leftH  = isWide ? contentH : Math.floor(contentH * 0.55);
+  const rightH = isWide ? contentH : Math.floor(contentH * 0.42);
+
   return (
-    <View
-      style={{ backgroundColor: '#1e1e2e' }}
-      width={1280}
-      height={800}
-    >
-      {/* Two-column layout */}
+    <View style={{ backgroundColor: '#1e1e2e' }} width={winW} height={winH}>
+
+      {/* ── Header bar ──────────────────────────────────────────────────── */}
       <View
-        style={{ flexDirection: 'row', gap: 32, backgroundColor: '#1e1e2e' }}
-        width={960}
-        height={700}
+        style={{
+          flexDirection:   'row',
+          backgroundColor: '#181825',
+          borderWidth:     1,
+          borderColor:     '#313244',
+          alignItems:      'flex-start',
+          justifyContent:  'flex-start',
+          gap:             8,
+          padding:         8,
+        }}
+        width={winW}
+        height={HEADER_H}
+      >
+        <Text fontSize={13} width={220} height={28} style={{ color: '#cdd6f4' }}>
+          {`Velox  ${winW} × ${winH} px`}
+        </Text>
+
+        <WinBtn
+          label={fullscreen ? 'Exit Fullscr' : 'Fullscreen'}
+          onPress={toggleFullscreen}
+          active={fullscreen}
+        />
+        <WinBtn
+          label={maximized ? 'Restore' : 'Maximize'}
+          onPress={toggleMaximize}
+          active={maximized}
+        />
+        <WinBtn label="Minimize" onPress={minimize} />
+      </View>
+
+      {/* ── Content area ────────────────────────────────────────────────── */}
+      <View
+        style={{
+          flexDirection:  isWide ? 'row' : 'column',
+          gap:            isWide ? GAP   : 12,
+          padding:        PAD,
+          justifyContent: 'flex-start',
+          alignItems:     'flex-start',
+        }}
+        width={winW}
+        height={winH - HEADER_H}
       >
 
-        {/* ── Left: interaction card ───────────────────────────────────── */}
+        {/* ── Left card: interaction ──────────────────────────────────── */}
         <View
           style={{
             backgroundColor: '#2a2a3e',
-            borderRadius: 16,
-            borderWidth: 1,
-            borderColor: '#44446a',
-            padding: 24,
-            gap: 16,
-            justifyContent: 'flex-start',
-            alignItems: 'flex-start',
+            borderRadius:    16,
+            borderWidth:     1,
+            borderColor:     '#44446a',
+            padding:         24,
+            gap:             14,
+            justifyContent:  'flex-start',
+            alignItems:      'flex-start',
           }}
-          width={420}
-          height={660}
+          width={leftW}
+          height={leftH}
         >
-          {/* Static title — explicit height (single line) */}
-          <Text
-            fontSize={18}
-            width={372}
-            height={28}
-            style={{ color: '#cdd6f4' }}
-          >
-            Week 15A — Multi-line Text + Nested Pressable
+          <Text fontSize={15} width={leftInner} height={24} style={{ color: '#cdd6f4' }}>
+            {isWide ? 'Week 16 — Responsive + Window Controls' : 'Week 16 — Responsive (narrow)'}
           </Text>
 
-          {/* ── Multi-line paragraph — NO explicit height prop ────────────
-               Taffy calls the measure function; Parley shapes and wraps the
-               text at max_width = 372 px; the node grows to fit.         */}
-          <Text
-            fontSize={13}
-            width={372}
-            style={{ color: '#a6adc8' }}
-          >
-            This paragraph has no height prop. The layout engine calls Parley
-            to measure its wrapped height automatically. The surrounding
-            container adapts without any fixed height on this Text node.
+          <Text fontSize={12} width={leftInner} style={{ color: '#a6adc8' }}>
+            {isWide
+              ? 'Wide layout active. Try resizing below 900 px to switch to single-column.'
+              : 'Narrow layout active. Widen the window past 900 px to see two columns.'}
           </Text>
 
-          {/* Divider */}
-          <View
-            style={{ backgroundColor: '#44446a' }}
-            width={372}
-            height={1}
-          />
+          <View style={{ backgroundColor: '#44446a' }} width={leftInner} height={1} />
 
           <TextInput
             value={name}
             onChangeText={handleNameChange}
             placeholder="Type your name..."
-            fontSize={16}
-            width={372}
+            fontSize={15}
+            width={leftInner}
             height={44}
           />
 
           {greeted ? (
-            <Text
-              fontSize={17}
-              width={372}
-              style={{ color: '#a6e3a1' }}
-            >
+            <Text fontSize={16} width={leftInner} style={{ color: '#a6e3a1' }}>
               {name.trim() ? `Hello, ${name}!` : 'Hello, stranger!'}
             </Text>
           ) : (
-            <Text
-              fontSize={13}
-              width={372}
-              style={{ color: '#585b70' }}
-            >
+            <Text fontSize={12} width={leftInner} style={{ color: '#585b70' }}>
               Hover the button, then press it.
             </Text>
           )}
 
           <Pressable
             onPress={greet}
-            width={160}
-            height={44}
+            width={140}
+            height={40}
             style={{ backgroundColor: '#6c63ff', borderRadius: 8 }}
           >
-            <Text fontSize={15} width={140} height={24} style={{ color: '#ffffff' }}>
+            <Text fontSize={14} width={120} height={22} style={{ color: '#ffffff' }}>
               Say Hello
             </Text>
           </Pressable>
 
-          {/* Dynamic multi-line label — updates as user types, no fixed height */}
           {name.length > 0 && (
-            <Text
-              fontSize={12}
-              width={372}
-              style={{ color: '#6c7086' }}
-            >
-              {`You typed ${name.length} character${name.length === 1 ? '' : 's'}. This label also has no fixed height and wraps freely.`}
+            <Text fontSize={12} width={leftInner} style={{ color: '#6c7086' }}>
+              {`${name.length} char${name.length === 1 ? '' : 's'} typed — no fixed height, wraps freely.`}
             </Text>
           )}
 
-          <Text
-            fontSize={13}
-            width={372}
-            height={20}
-            style={{ color: '#a6adc8' }}
-          >
-            Week 15B image demo:
+          <Text fontSize={12} width={leftInner} height={18} style={{ color: '#a6adc8' }}>
+            Image demos (cover / contain / stretch):
           </Text>
 
           <Image
             src="C:/myweb/Apps/velox_project/sample.png"
-            width={372}
-            height={209}
+            width={leftInner}
+            height={Math.min(180, Math.floor(leftInner * 0.5))}
             resizeMode="cover"
             style={{ borderRadius: 8 }}
           />
-
-          <View
-            style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-start', alignItems: 'flex-start' }}
-            width={372}
-            height={84}
-          >
-            <Image
-              src="C:/myweb/Apps/velox_project/sample.png"
-              width={118}
-              height={84}
-              resizeMode="contain"
-              style={{ borderRadius: 6, borderWidth: 1, borderColor: '#45475a' }}
-            />
-            <Image
-              src="C:/myweb/Apps/velox_project/sample.png"
-              width={118}
-              height={84}
-              resizeMode="cover"
-              style={{ borderRadius: 6, borderWidth: 1, borderColor: '#45475a' }}
-            />
-            <Image
-              src="C:/myweb/Apps/velox_project/sample.png"
-              width={118}
-              height={84}
-              resizeMode="stretch"
-              style={{ borderRadius: 6, borderWidth: 1, borderColor: '#45475a' }}
-            />
-          </View>
         </View>
 
-        {/* ── Right: scrollable Pressable list ─────────────────────────── */}
+        {/* ── Right card: scrollable palette ──────────────────────────── */}
         <View
           style={{
             backgroundColor: '#2a2a3e',
-            borderRadius: 16,
-            borderWidth: 1,
-            borderColor: '#44446a',
-            padding: 16,
-            gap: 12,
-            justifyContent: 'flex-start',
-            alignItems: 'flex-start',
+            borderRadius:    16,
+            borderWidth:     1,
+            borderColor:     '#44446a',
+            padding:         16,
+            gap:             10,
+            justifyContent:  'flex-start',
+            alignItems:      'flex-start',
           }}
-          width={476}
-          height={660}
+          width={rightW}
+          height={rightH}
         >
-          <Text
-            fontSize={15}
-            width={444}
-            height={22}
-            style={{ color: '#cdd6f4' }}
-          >
-            Catppuccin palette — scroll and click any colour
+          <Text fontSize={14} width={rightInner} height={20} style={{ color: '#cdd6f4' }}>
+            Catppuccin palette — scroll and click a colour
           </Text>
 
           {selected !== null && (
-            <Text
-              fontSize={13}
-              width={444}
-              height={20}
-              style={{ color: '#a6e3a1' }}
-            >
-              {`Selected: ${PALETTE[selected].name} — nested hit-test works while scrolled`}
+            <Text fontSize={12} width={rightInner} height={18} style={{ color: '#a6e3a1' }}>
+              {`Selected: ${PALETTE[selected].name}`}
             </Text>
           )}
 
-          {/* Each palette row is a Pressable — verifies nested hit-testing */}
           <ScrollView
-            width={444}
-            height={SV_H}
-            contentHeight={PALETTE.length * ITEM_H + (PALETTE.length - 1) * ITEM_GAP + 2 * SV_PAD}
-            style={{ gap: ITEM_GAP, padding: SV_PAD, backgroundColor: '#1a1a2e', borderRadius: 8 }}
+            width={rightInner}
+            height={svH}
+            contentHeight={
+              PALETTE.length * ITEM_H + (PALETTE.length - 1) * ITEM_GAP + 2 * SV_PAD
+            }
+            style={{
+              gap:             ITEM_GAP,
+              padding:         SV_PAD,
+              backgroundColor: '#1a1a2e',
+              borderRadius:    8,
+            }}
           >
             {PALETTE.map((item, i) => (
               <Pressable
                 key={i}
                 onPress={() => setSelected(i)}
-                width={428}
+                width={rightInner - 16}
                 height={ITEM_H}
                 style={{ backgroundColor: item.bg, borderRadius: 6 }}
               >
                 <Text
-                  fontSize={14}
-                  width={392}
-                  height={22}
+                  fontSize={13}
+                  width={rightInner - 48}
+                  height={20}
                   style={{ color: item.fg }}
                 >
                   {item.name}
@@ -260,14 +289,8 @@ function App() {
             ))}
           </ScrollView>
 
-          {/* Auto-sized hint text */}
-          <Text
-            fontSize={12}
-            width={444}
-            style={{ color: '#45475a' }}
-          >
-            Scroll the list, then click a colour while scrolled. The selection
-            label above should update — confirming scroll-adjusted hit-testing.
+          <Text fontSize={11} width={rightInner} style={{ color: '#45475a' }}>
+            Scroll then click to verify hit-test works while scrolled.
           </Text>
         </View>
 
@@ -278,4 +301,4 @@ function App() {
 
 render(<App />);
 
-__velox_log('Week 15B: image support loaded.');
+__velox_log('Week 16: responsive layout + window controls loaded.');

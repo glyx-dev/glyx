@@ -31,8 +31,8 @@ use thiserror::Error;
 pub mod bindings;
 pub mod runtime;
 
-pub use runtime::VeloxRuntime;
-pub use bindings::{NodeProps, NodeType, SceneCommand, InputEvent};
+pub use runtime::{VeloxRuntime, HeapStats};
+pub use bindings::{NodeProps, NodeType, SceneCommand, InputEvent, WindowController};
 
 // ── V8 platform init ──────────────────────────────────────────────────────────
 

@@ -5794,7 +5794,7 @@ No matching component was found for:
   }
 
   // examples/hello-world/js/app.jsx
-  var import_react2 = __toESM(require_react(), 1);
+  var import_react3 = __toESM(require_react(), 1);
 
   // js/packages/@velox/react/src/index.js
   var import_react = __toESM(require_react(), 1);
@@ -6285,8 +6285,60 @@ No matching component was found for:
     getScreenSize: () => typeof __velox_getScreenSize !== "undefined" ? __velox_getScreenSize() : { width: 0, height: 0 }
   };
 
+  // js/packages/@velox/router/src/index.js
+  var import_react2 = __toESM(require_react(), 1);
+  var RouterCtx = import_react2.createContext(null);
+  function Router({ children, initialRoute }) {
+    const routeMap = {};
+    import_react2.Children.forEach(children, (child) => {
+      if (child && child.type === Route) {
+        routeMap[child.props.name] = child.props.component;
+      }
+    });
+    const firstName = initialRoute ?? Object.keys(routeMap)[0] ?? null;
+    const [history, setHistory] = import_react2.useState([{ name: firstName, params: {} }]);
+    const navigate = import_react2.useCallback((name, params = {}, opts = {}) => {
+      if (name === "back") {
+        setHistory((h) => h.length > 1 ? h.slice(0, -1) : h);
+      } else if (opts.replace) {
+        setHistory((h) => [...h.slice(0, -1), { name, params }]);
+      } else {
+        setHistory((h) => [...h, { name, params }]);
+      }
+    }, []);
+    const ctx = import_react2.useMemo(() => {
+      const current = history[history.length - 1] ?? { name: null, params: {} };
+      return {
+        routeName: current.name,
+        params: current.params,
+        navigate,
+        canGoBack: history.length > 1,
+        history
+      };
+    }, [history, navigate]);
+    const Screen = ctx.routeName ? routeMap[ctx.routeName] : null;
+    return import_react2.default.createElement(RouterCtx.Provider, { value: ctx }, Screen ? import_react2.default.createElement(Screen) : null);
+  }
+  function Route(_props) {
+    return null;
+  }
+  function useNavigate() {
+    const ctx = import_react2.useContext(RouterCtx);
+    if (!ctx)
+      throw new Error("useNavigate must be used inside <Router>");
+    return ctx.navigate;
+  }
+  function useRoute() {
+    const ctx = import_react2.useContext(RouterCtx);
+    if (!ctx)
+      throw new Error("useRoute must be used inside <Router>");
+    return { name: ctx.routeName, params: ctx.params, canGoBack: ctx.canGoBack };
+  }
+
   // examples/hello-world/js/app.jsx
   var jsx_runtime = __toESM(require_jsx_runtime(), 1);
+  var HEADER_H = 48;
+  var PAD = 16;
   var ITEM_H = 44;
   var ITEM_GAP = 8;
   var SV_PAD = 8;
@@ -6311,10 +6363,7 @@ No matching component was found for:
       onPress,
       width: 96,
       height: 30,
-      style: {
-        backgroundColor: active ? "#6c63ff" : "#313244",
-        borderRadius: 6
-      },
+      style: { backgroundColor: active ? "#6c63ff" : "#313244", borderRadius: 6 },
       children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
         fontSize: 12,
         width: 80,
@@ -6324,19 +6373,400 @@ No matching component was found for:
       })
     });
   }
-  function App() {
+  function BackBtn({ label = "← Back" }) {
+    const navigate = useNavigate();
+    return /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+      onPress: () => navigate("back"),
+      width: 90,
+      height: 30,
+      style: { backgroundColor: "#313244", borderRadius: 6 },
+      children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+        fontSize: 12,
+        width: 74,
+        height: 18,
+        style: { color: "#cdd6f4" },
+        children: label
+      })
+    });
+  }
+  function HomeScreen() {
     const { width: winW, height: winH } = useWindowSize();
     const isWide = useMediaQuery(900);
-    const [name, setName] = import_react2.useState("");
-    const [greeted, setGreeted] = import_react2.useState(false);
-    const [selected, setSelected] = import_react2.useState(null);
-    const [fullscreen, setFullscreen] = import_react2.useState(false);
-    const [maximized, setMaximized] = import_react2.useState(false);
-    const greet = () => setGreeted(true);
-    const handleNameChange = (text) => {
-      setName(text);
-      setGreeted(false);
-    };
+    const navigate = useNavigate();
+    const [name, setName] = import_react3.useState("");
+    const [greeted, setGreeted] = import_react3.useState(false);
+    const contentW = winW - 2 * PAD;
+    const contentH = winH - HEADER_H - 2 * PAD;
+    const GAP = 20;
+    const leftW = isWide ? Math.floor(contentW * 0.44) : contentW;
+    const rightW = isWide ? contentW - leftW - GAP : contentW;
+    const leftH = isWide ? contentH : Math.floor(contentH * 0.55);
+    const rightH = isWide ? contentH : Math.floor(contentH * 0.42);
+    const leftIn = leftW - 48;
+    const rightIn = rightW - 32;
+    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
+      style: {
+        flexDirection: isWide ? "row" : "column",
+        gap: isWide ? GAP : 12,
+        justifyContent: "flex-start",
+        alignItems: "flex-start"
+      },
+      width: contentW,
+      height: contentH,
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: {
+            backgroundColor: "#2a2a3e",
+            borderRadius: 16,
+            borderWidth: 1,
+            borderColor: "#44446a",
+            padding: 24,
+            gap: 14,
+            justifyContent: "flex-start",
+            alignItems: "flex-start"
+          },
+          width: leftW,
+          height: leftH,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 15,
+              width: leftIn,
+              height: 24,
+              style: { color: "#cdd6f4" },
+              children: "Week 17B — Named-Route Router"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: leftIn,
+              style: { color: "#a6adc8" },
+              children: isWide ? "Three screens: Home → Palette → Colour Detail. Navigate with the button below." : "Narrow layout. Widen past 900 px for two columns."
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(View, {
+              style: { backgroundColor: "#44446a" },
+              width: leftIn,
+              height: 1
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+              value: name,
+              onChangeText: (t) => {
+                setName(t);
+                setGreeted(false);
+              },
+              placeholder: "Type your name...",
+              fontSize: 15,
+              width: leftIn,
+              height: 44
+            }),
+            greeted ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 16,
+              width: leftIn,
+              style: { color: "#a6e3a1" },
+              children: name.trim() ? `Hello, ${name}!` : "Hello, stranger!"
+            }) : /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: leftIn,
+              style: { color: "#585b70" },
+              children: "Hover the button, then press it."
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+              onPress: () => setGreeted(true),
+              width: 140,
+              height: 40,
+              style: { backgroundColor: "#6c63ff", borderRadius: 8 },
+              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 14,
+                width: 120,
+                height: 22,
+                style: { color: "#ffffff" },
+                children: "Say Hello"
+              })
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(View, {
+              style: { backgroundColor: "#44446a" },
+              width: leftIn,
+              height: 1
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+              onPress: () => navigate("palette"),
+              width: leftIn,
+              height: 40,
+              style: {
+                backgroundColor: "#313244",
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: "#44446a"
+              },
+              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 13,
+                width: leftIn - 20,
+                height: 20,
+                style: { color: "#cdd6f4" },
+                children: "View Colour Palette →"
+              })
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Image, {
+              src: "C:/myweb/Apps/velox_project/sample.png",
+              width: leftIn,
+              height: Math.min(160, Math.floor(leftIn * 0.5)),
+              resizeMode: "cover",
+              style: { borderRadius: 8 }
+            })
+          ]
+        }),
+        isWide && /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: {
+            backgroundColor: "#2a2a3e",
+            borderRadius: 16,
+            borderWidth: 1,
+            borderColor: "#44446a",
+            padding: 24,
+            gap: 14,
+            justifyContent: "flex-start",
+            alignItems: "flex-start"
+          },
+          width: rightW,
+          height: rightH,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 14,
+              width: rightIn,
+              height: 20,
+              style: { color: "#cdd6f4" },
+              children: "@velox/router"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: rightIn,
+              style: { color: "#a6adc8" },
+              children: `Named-route history stack — no URL bar needed.
+Pure React state, zero Rust changes.`
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(View, {
+              style: { backgroundColor: "#44446a" },
+              width: rightIn,
+              height: 1
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: rightIn,
+              style: { color: "#6c7086" },
+              children: 'navigate("palette")'
+            }),
+            /* @__PURE__ */ jsx_runtime.jsxs(Text, {
+              fontSize: 12,
+              width: rightIn,
+              style: { color: "#6c7086" },
+              children: [
+                'navigate("colorDetail", ',
+                "{ bg, fg, name }",
+                ")",
+                `
+`
+              ]
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: rightIn,
+              style: { color: "#6c7086" },
+              children: 'navigate("back")'
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(View, {
+              style: { backgroundColor: "#44446a" },
+              width: rightIn,
+              height: 1
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 11,
+              width: rightIn,
+              style: { color: "#45475a" },
+              children: `Router holds history as React state.
+Each navigate() call triggers a
+normal React re-render — no magic.`
+            })
+          ]
+        })
+      ]
+    });
+  }
+  function PaletteScreen() {
+    const { width: winW, height: winH } = useWindowSize();
+    const navigate = useNavigate();
+    const contentW = winW - 2 * PAD;
+    const contentH = winH - HEADER_H - 2 * PAD;
+    const inner = contentW - 32;
+    const svH = Math.max(120, contentH - 90);
+    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
+      style: {
+        backgroundColor: "#2a2a3e",
+        borderRadius: 16,
+        borderWidth: 1,
+        borderColor: "#44446a",
+        padding: 16,
+        gap: 10,
+        justifyContent: "flex-start",
+        alignItems: "flex-start"
+      },
+      width: contentW,
+      height: contentH,
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: {
+            flexDirection: "row",
+            gap: 12,
+            alignItems: "flex-start",
+            justifyContent: "flex-start"
+          },
+          width: inner,
+          height: 30,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(BackBtn, {}),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 14,
+              width: inner - 110,
+              height: 20,
+              style: { color: "#cdd6f4" },
+              children: "Catppuccin Palette"
+            })
+          ]
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
+          width: inner,
+          height: svH,
+          contentHeight: PALETTE.length * ITEM_H + (PALETTE.length - 1) * ITEM_GAP + 2 * SV_PAD,
+          style: {
+            gap: ITEM_GAP,
+            padding: SV_PAD,
+            backgroundColor: "#1a1a2e",
+            borderRadius: 8
+          },
+          children: PALETTE.map((item, i) => /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+            onPress: () => navigate("colorDetail", { name: item.name, bg: item.bg, fg: item.fg }),
+            width: inner - 16,
+            height: ITEM_H,
+            style: { backgroundColor: item.bg, borderRadius: 6 },
+            children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 13,
+              width: inner - 48,
+              height: 20,
+              style: { color: item.fg },
+              children: item.name
+            })
+          }, i))
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 11,
+          width: inner,
+          style: { color: "#45475a" },
+          children: "Tap a colour to navigate to its detail screen (params demo)."
+        })
+      ]
+    });
+  }
+  function ColorDetailScreen() {
+    const { width: winW, height: winH } = useWindowSize();
+    const { params } = useRoute();
+    const navigate = useNavigate();
+    const contentW = winW - 2 * PAD;
+    const contentH = winH - HEADER_H - 2 * PAD;
+    const inner = contentW - 64;
+    const bg = params.bg ?? "#313244";
+    const fg = params.fg ?? "#cdd6f4";
+    const name = params.name ?? "Unknown";
+    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
+      style: {
+        backgroundColor: bg,
+        borderRadius: 16,
+        borderWidth: 2,
+        borderColor: fg + "33",
+        padding: 32,
+        gap: 20,
+        justifyContent: "flex-start",
+        alignItems: "flex-start"
+      },
+      width: contentW,
+      height: contentH,
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 32,
+          width: inner,
+          height: 44,
+          style: { color: fg },
+          children: name
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(View, {
+          style: { backgroundColor: fg + "22" },
+          width: inner,
+          height: 1
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 15,
+          width: inner,
+          height: 24,
+          style: { color: fg },
+          children: `Background  ${bg}`
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 15,
+          width: inner,
+          height: 24,
+          style: { color: fg },
+          children: `Foreground   ${fg}`
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 12,
+          width: inner,
+          style: { color: fg + "aa" },
+          children: `Params were passed via navigate().
+useRoute().params gives them back here.`
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(View, {
+          style: { backgroundColor: fg + "22" },
+          width: inner,
+          height: 1
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+          onPress: () => navigate("back"),
+          width: 130,
+          height: 40,
+          style: {
+            backgroundColor: "#00000033",
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: fg + "55"
+          },
+          children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+            fontSize: 13,
+            width: 110,
+            height: 20,
+            style: { color: fg },
+            children: "← Back to Palette"
+          })
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+          onPress: () => navigate("home"),
+          width: 130,
+          height: 40,
+          style: {
+            backgroundColor: "#00000033",
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: fg + "33"
+          },
+          children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+            fontSize: 13,
+            width: 110,
+            height: 20,
+            style: { color: fg + "aa" },
+            children: "⌂ Go Home"
+          })
+        })
+      ]
+    });
+  }
+  function App() {
+    const { width: winW, height: winH } = useWindowSize();
+    const [fullscreen, setFullscreen] = import_react3.useState(false);
+    const [maximized, setMaximized] = import_react3.useState(false);
     const toggleFullscreen = () => {
       const next = !fullscreen;
       veloxWindow.setFullscreen(next);
@@ -6348,18 +6778,6 @@ No matching component was found for:
       setMaximized(next);
     };
     const minimize = () => veloxWindow.setMinimized();
-    const HEADER_H = 48;
-    const PAD = 16;
-    const GAP = 20;
-    const contentW = winW - 2 * PAD;
-    const contentH = winH - HEADER_H - 2 * PAD;
-    const leftW = isWide ? Math.floor(contentW * 0.44) : contentW;
-    const rightW = isWide ? contentW - leftW - GAP : contentW;
-    const leftInner = leftW - 48;
-    const rightInner = rightW - 32;
-    const svH = Math.max(120, contentH - 220);
-    const leftH = isWide ? contentH : Math.floor(contentH * 0.55);
-    const rightH = isWide ? contentH : Math.floor(contentH * 0.42);
     return /* @__PURE__ */ jsx_runtime.jsxs(View, {
       style: { backgroundColor: "#1e1e2e" },
       width: winW,
@@ -6402,168 +6820,31 @@ No matching component was found for:
             })
           ]
         }),
-        /* @__PURE__ */ jsx_runtime.jsxs(View, {
-          style: {
-            flexDirection: isWide ? "row" : "column",
-            gap: isWide ? GAP : 12,
-            padding: PAD,
-            justifyContent: "flex-start",
-            alignItems: "flex-start"
-          },
+        /* @__PURE__ */ jsx_runtime.jsx(View, {
+          style: { padding: PAD, justifyContent: "flex-start", alignItems: "flex-start" },
           width: winW,
           height: winH - HEADER_H,
-          children: [
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: {
-                backgroundColor: "#2a2a3e",
-                borderRadius: 16,
-                borderWidth: 1,
-                borderColor: "#44446a",
-                padding: 24,
-                gap: 14,
-                justifyContent: "flex-start",
-                alignItems: "flex-start"
-              },
-              width: leftW,
-              height: leftH,
-              children: [
-                /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                  fontSize: 15,
-                  width: leftInner,
-                  height: 24,
-                  style: { color: "#cdd6f4" },
-                  children: isWide ? "Week 16 — Responsive + Window Controls" : "Week 16 — Responsive (narrow)"
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                  fontSize: 12,
-                  width: leftInner,
-                  style: { color: "#a6adc8" },
-                  children: isWide ? "Wide layout active. Try resizing below 900 px to switch to single-column." : "Narrow layout active. Widen the window past 900 px to see two columns."
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(View, {
-                  style: { backgroundColor: "#44446a" },
-                  width: leftInner,
-                  height: 1
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
-                  value: name,
-                  onChangeText: handleNameChange,
-                  placeholder: "Type your name...",
-                  fontSize: 15,
-                  width: leftInner,
-                  height: 44
-                }),
-                greeted ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                  fontSize: 16,
-                  width: leftInner,
-                  style: { color: "#a6e3a1" },
-                  children: name.trim() ? `Hello, ${name}!` : "Hello, stranger!"
-                }) : /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                  fontSize: 12,
-                  width: leftInner,
-                  style: { color: "#585b70" },
-                  children: "Hover the button, then press it."
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-                  onPress: greet,
-                  width: 140,
-                  height: 40,
-                  style: { backgroundColor: "#6c63ff", borderRadius: 8 },
-                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                    fontSize: 14,
-                    width: 120,
-                    height: 22,
-                    style: { color: "#ffffff" },
-                    children: "Say Hello"
-                  })
-                }),
-                name.length > 0 && /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                  fontSize: 12,
-                  width: leftInner,
-                  style: { color: "#6c7086" },
-                  children: `${name.length} char${name.length === 1 ? "" : "s"} typed — no fixed height, wraps freely.`
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                  fontSize: 12,
-                  width: leftInner,
-                  height: 18,
-                  style: { color: "#a6adc8" },
-                  children: "Image demos (cover / contain / stretch):"
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(Image, {
-                  src: "C:/myweb/Apps/velox_project/sample.png",
-                  width: leftInner,
-                  height: Math.min(180, Math.floor(leftInner * 0.5)),
-                  resizeMode: "cover",
-                  style: { borderRadius: 8 }
-                })
-              ]
-            }),
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: {
-                backgroundColor: "#2a2a3e",
-                borderRadius: 16,
-                borderWidth: 1,
-                borderColor: "#44446a",
-                padding: 16,
-                gap: 10,
-                justifyContent: "flex-start",
-                alignItems: "flex-start"
-              },
-              width: rightW,
-              height: rightH,
-              children: [
-                /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                  fontSize: 14,
-                  width: rightInner,
-                  height: 20,
-                  style: { color: "#cdd6f4" },
-                  children: "Catppuccin palette — scroll and click a colour"
-                }),
-                selected !== null && /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                  fontSize: 12,
-                  width: rightInner,
-                  height: 18,
-                  style: { color: "#a6e3a1" },
-                  children: `Selected: ${PALETTE[selected].name}`
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
-                  width: rightInner,
-                  height: svH,
-                  contentHeight: PALETTE.length * ITEM_H + (PALETTE.length - 1) * ITEM_GAP + 2 * SV_PAD,
-                  style: {
-                    gap: ITEM_GAP,
-                    padding: SV_PAD,
-                    backgroundColor: "#1a1a2e",
-                    borderRadius: 8
-                  },
-                  children: PALETTE.map((item, i) => /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-                    onPress: () => setSelected(i),
-                    width: rightInner - 16,
-                    height: ITEM_H,
-                    style: { backgroundColor: item.bg, borderRadius: 6 },
-                    children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                      fontSize: 13,
-                      width: rightInner - 48,
-                      height: 20,
-                      style: { color: item.fg },
-                      children: item.name
-                    })
-                  }, i))
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                  fontSize: 11,
-                  width: rightInner,
-                  style: { color: "#45475a" },
-                  children: "Scroll then click to verify hit-test works while scrolled."
-                })
-              ]
-            })
-          ]
+          children: /* @__PURE__ */ jsx_runtime.jsxs(Router, {
+            initialRoute: "home",
+            children: [
+              /* @__PURE__ */ jsx_runtime.jsx(Route, {
+                name: "home",
+                component: HomeScreen
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Route, {
+                name: "palette",
+                component: PaletteScreen
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Route, {
+                name: "colorDetail",
+                component: ColorDetailScreen
+              })
+            ]
+          })
         })
       ]
     });
   }
   render(/* @__PURE__ */ jsx_runtime.jsx(App, {}));
-  __velox_log("Week 16: responsive layout + window controls loaded.");
+  __velox_log("Week 17B: named-route router loaded.");
 })();

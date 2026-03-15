@@ -72,10 +72,16 @@ velox/
 │
 ├── js/
 │   └── packages/
-│       └── @velox/react/
+│       ├── @velox/react/
+│       │   └── src/
+│       │       ├── hostConfig.js # react-reconciler HostConfig (25 methods)
+│       │       ├── events.js     # Hit-testing, pressable/input/scroll registry
+│       │       ├── index.js      # Reconciler, View, Text, Pressable, ScrollView, TextInput, hooks
+│       │       └── index.d.ts    # TypeScript declarations
+│       └── @velox/router/
 │           └── src/
-│               ├── hostConfig.js # react-reconciler HostConfig (25 methods)
-│               └── index.js      # Reconciler setup, View, Text, render()
+│               ├── index.js      # Router, Route, useNavigate, useRoute
+│               └── index.d.ts    # TypeScript declarations
 │
 └── examples/
     └── hello-world/
@@ -208,6 +214,20 @@ Props: `fontSize`, `width`, `height`
 
 ---
 
+## Compatible npm packages
+
+Velox runs React 18 inside V8 with no DOM. Any package that talks only to
+React internals (hooks, context, state) works without wrappers or polyfills.
+Packages that touch `window`, `document`, or browser APIs will not work.
+
+| Package | Version | Notes |
+|---------|---------|-------|
+| [zustand](https://github.com/pmndrs/zustand) | `^5` | Global state management. Uses `useSyncExternalStore` — fully compatible. `bun add zustand` and import directly. |
+
+More packages will be listed here as they are verified against the runtime.
+
+---
+
 ## How a frame renders
 
 ```
@@ -250,6 +270,13 @@ changes, keeping idle CPU near zero.
 | 9 | Async bridge — `__velox_readFile` resolves a JS Promise via tokio |
 | 10 | JS-driven scene graph — `createNode` / `appendChild` / `updateNode` |
 | 11 | React renders through the full pipeline via react-reconciler HostConfig |
+| 12 | Pressable, TextInput, ScrollView; hit-test event system; style prop |
+| 13 | Text shaping cache; hover/press states; border rendering |
+| 14 | Incremental layout; ScrollView clip + scroll; nested hit-test fix |
+| 15A | Multi-line text via Taffy measure function; scroll hit-test correction |
+| 15B | Image component (cover / contain / stretch); rounded clip layer |
+| 16 | Dev overlay (FPS/heap/nodes, Ctrl+Shift+D); hot reload; `useWindowSize` / `useMediaQuery`; `veloxWindow` imperative API |
+| 17B | `@velox/router` — named-route history stack; 3-screen demo |
 
 ---
 
@@ -257,16 +284,13 @@ changes, keeping idle CPU near zero.
 
 | Week | Goal |
 |------|------|
-| 12 | Component library — Pressable, ScrollView, TextInput; event system; style prop |
-| 13 | Dev mode — HMR via Vite, file watcher, React Fast Refresh, dev overlay |
-| 14 | `velox.config.ts` parsing; capability system enforced in Rust |
-| 15 | V8 snapshots — fast startup, source protection |
-| 16 | Database — sqlx, SQLite, Drizzle ORM adapter |
-| 17 | OS APIs — battery, network, tray, dialogs, keychain |
+| 17 | `velox.config.ts` parsing; capability system enforced in Rust |
 | 18 | 3D — wgpu 3D pass, `@velox/three` minimal API |
 | 19 | Local AI — Candle, model loading, text completion |
 | 20 | CLI — `velox create`, `velox dev`, `velox build` |
-| 21–26 | Reference application built entirely on Velox |
+| 21 | Plugin API — V8 isolate sandbox for untrusted third-party plugins |
+| 22 | TanStack Router adapter (`@velox/router/tanstack`) for web-targeting apps |
+| 23–26 | Reference application built entirely on Velox |
 
 ---
 

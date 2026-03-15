@@ -6,6 +6,7 @@
       "name": "velox",
       "dependencies": {
         "@velox/react": "workspace:*",
+        "@velox/router": "workspace:*",
         "react": "^18.2.0",
         "react-reconciler": "^0.29.0",
       },
@@ -18,9 +19,18 @@
         "react-reconciler": "^0.29.0",
       },
     },
+    "js/packages/@velox/router": {
+      "name": "@velox/router",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "react": "^18.2.0",
+      },
+    },
   },
   "packages": {
     "@velox/react": ["@velox/react@workspace:js/packages/@velox/react"],
+
+    "@velox/router": ["@velox/router@workspace:js/packages/@velox/router"],
 
     "js-tokens": ["js-tokens@4.0.0", "", {}, "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ=="],
 

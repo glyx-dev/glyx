@@ -1,8 +1,10 @@
 {
   "window": {
-    "title":  "Velox — Hello World",
-    "width":  1280,
-    "height": 800
+    "title":      "Velox — Hello World",
+    "width":      1280,
+    "height":     800,
+    "maximized":  false,
+    "fullscreen": false
   },
   "capabilities": {
     "fs": {

@@ -67,39 +67,76 @@ use velox_layout::NodeId;
 
 // ── Config file parsing ───────────────────────────────────────────────────────
 
-/// Subset of `velox.config.json` that velox-core cares about.
-/// The file may contain other keys (window title etc.) which are ignored here
-/// since the window is configured via `AppConfig::window` in the example crate.
 #[derive(serde::Deserialize, Default)]
 struct VeloxConfigFile {
+    window:       Option<WindowCfgJson>,
     capabilities: Option<Capabilities>,
 }
 
-/// Load `velox.config.json` from the current working directory and initialise
-/// the global capability store.  Missing file → permissive warning + defaults.
-fn load_velox_config() {
-    let caps = std::fs::read_to_string("velox.config.json")
+/// Window settings from `velox.config.json`.
+/// All fields are optional — absent fields leave `AppConfig::window` unchanged.
+#[derive(serde::Deserialize)]
+struct WindowCfgJson {
+    title:      Option<String>,
+    /// Explicit width in physical pixels. Omit to start maximised.
+    width:      Option<u32>,
+    /// Explicit height in physical pixels. Omit to start maximised.
+    height:     Option<u32>,
+    /// Start maximised (taskbar remains visible). Default: false.
+    #[serde(default)]
+    maximized:  bool,
+    /// Start borderless fullscreen (covers taskbar). Default: false.
+    #[serde(default)]
+    fullscreen: bool,
+}
+
+/// Load `velox.config.json` from the current working directory.
+///
+/// Applies any `window` overrides to `cfg` and returns the parsed capabilities.
+/// Missing file → warning + all capabilities OFF (fail-closed).
+fn load_velox_config(cfg: &mut WindowConfig) -> Capabilities {
+    let file: Option<VeloxConfigFile> = std::fs::read_to_string("velox.config.json")
         .ok()
         .and_then(|src| {
             serde_json::from_str::<VeloxConfigFile>(&src)
                 .map_err(|e| { log::error!("velox.config.json parse error: {e}"); e })
                 .ok()
-        })
-        .and_then(|cfg| cfg.capabilities);
+        });
 
-    match &caps {
-        Some(c) => log::info!(
-            "velox-security: capabilities loaded (fs_read={}, db={}, network={})",
-            c.can_read_fs(),
-            c.db,
-            c.network.as_ref().map(|n| n.allow.len()).unwrap_or(0),
-        ),
-        None => log::warn!(
-            "velox-security: no velox.config.json found — all capabilities default to OFF"
-        ),
+    // Apply window section if present.
+    if let Some(w) = file.as_ref().and_then(|f| f.window.as_ref()) {
+        if let Some(t) = &w.title { cfg.title = t.clone(); }
+
+        if w.fullscreen {
+            cfg.start_fullscreen = true;
+            cfg.start_maximized  = false;
+        } else if w.maximized || (w.width.is_none() && w.height.is_none()) {
+            // No explicit size → start maximised.
+            cfg.start_maximized  = true;
+            cfg.start_fullscreen = false;
+        } else {
+            if let Some(wd) = w.width  { cfg.width  = wd; }
+            if let Some(ht) = w.height { cfg.height = ht; }
+        }
     }
 
-    velox_security::init(caps.unwrap_or_default());
+    let caps = file.and_then(|f| f.capabilities).unwrap_or_default();
+
+    if caps.can_read_fs() || caps.db || caps.network.is_some() {
+        log::info!(
+            "velox-security: capabilities loaded (fs_read={}, db={}, network_hosts={})",
+            caps.can_read_fs(),
+            caps.db,
+            caps.network.as_ref().map(|n| n.allow.len()).unwrap_or(0),
+        );
+    } else {
+        log::warn!(
+            "velox-security: no velox.config.json found or no capabilities declared \
+             — all capabilities default to OFF"
+        );
+    }
+
+    caps
 }
 
 pub use velox_shell::ShellConfig as WindowConfig;
@@ -507,12 +544,13 @@ fn build_window_controller(window: Arc<winit::window::Window>) -> WindowControll
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub fn run(config: AppConfig) {
+pub fn run(mut config: AppConfig) {
     env_logger::init();
 
-    // Load velox.config.json and lock in the capability set before any
-    // JS bindings are registered.  Must be the first thing after the logger.
-    load_velox_config();
+    // Load velox.config.json, apply window overrides, and lock capabilities —
+    // all before V8 is initialised so no binding can run unchecked.
+    let caps = load_velox_config(&mut config.window);
+    velox_security::init(caps);
 
     // Tokio runtime for async JS bindings.
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()

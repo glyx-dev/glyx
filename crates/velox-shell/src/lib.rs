@@ -61,19 +61,27 @@ pub enum ShellEvent {
 
 pub struct ShellConfig {
     pub title:      String,
+    /// Ignored when `start_maximized` or `start_fullscreen` is true.
     pub width:      u32,
+    /// Ignored when `start_maximized` or `start_fullscreen` is true.
     pub height:     u32,
     /// Use Poll (games/continuous rendering) instead of Wait (UI/battery).
-    pub continuous: bool,
+    pub continuous:       bool,
+    /// Open the window maximised (taskbar remains visible).
+    pub start_maximized:  bool,
+    /// Open the window in borderless fullscreen (covers taskbar).
+    pub start_fullscreen: bool,
 }
 
 impl Default for ShellConfig {
     fn default() -> Self {
         Self {
-            title:      "Velox".into(),
-            width:      1280,
-            height:     800,
-            continuous: false,
+            title:            "Velox".into(),
+            width:            1280,
+            height:           800,
+            continuous:       false,
+            start_maximized:  false,
+            start_fullscreen: false,
         }
     }
 }
@@ -114,10 +122,17 @@ struct ShellApp {
 
 impl ApplicationHandler for ShellApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let attrs = WindowAttributes::default()
+        let mut attrs = WindowAttributes::default()
             .with_title(&self.config.title)
-            .with_inner_size(PhysicalSize::new(self.config.width, self.config.height))
             .with_visible(true);
+
+        if self.config.start_fullscreen {
+            attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+        } else if self.config.start_maximized {
+            attrs = attrs.with_maximized(true);
+        } else {
+            attrs = attrs.with_inner_size(PhysicalSize::new(self.config.width, self.config.height));
+        }
 
         let window = Arc::new(
             event_loop

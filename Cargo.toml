@@ -15,7 +15,9 @@ members = [
     "crates/velox-sysapi",
     "crates/velox-perf",
     "crates/velox-cli",
-    "examples/hello-world", "crates/velox-snapshot",
+    "examples/hello-world",
+    "examples/hello-world-snapshot",
+    "crates/velox-snapshot",
 ]
 
 [workspace.dependencies]

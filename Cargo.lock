@@ -4646,6 +4646,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "velox-snapshot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "log",
+ "rusty_v8",
+ "velox-runtime",
+]
+
+[[package]]
 name = "velox-sysapi"
 version = "0.1.0"
 

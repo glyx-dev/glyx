@@ -1,0 +1,15 @@
+[package]
+name = "velox-snapshot"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "velox-snapshot"
+path = "src/main.rs"
+
+[dependencies]
+v8 = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+velox-runtime = { path = "../velox-runtime" }

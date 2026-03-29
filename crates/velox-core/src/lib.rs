@@ -167,10 +167,16 @@ pub struct AppConfig {
     /// velox_core::run(velox_core::AppConfig {
     ///     window: velox_core::WindowConfig::default(),
     ///     js_src: Some(include_str!("../js/app.js").to_string()),
+    ///     snapshot_blob: None,
     ///     dev_mode: None,
     /// });
     /// ```
     pub js_src: Option<String>,
+    /// Pre-executed V8 snapshot blob (from velox-snapshot tool).
+    ///
+    /// When provided, the isolate is restored from the snapshot (fast startup ~50ms).
+    /// Falls back to eval() if not provided or if in dev mode.
+    pub snapshot_blob: Option<Vec<u8>>,
     pub dev_mode: Option<DevModeConfig>,
 }
 
@@ -598,7 +604,7 @@ pub fn run(mut config: AppConfig) {
 
     init_v8();
 
-    let AppConfig { window, js_src, dev_mode } = config;
+    let AppConfig { window, js_src, snapshot_blob, dev_mode } = config;
 
     let mut state: Option<AppState> = None;
 
@@ -613,7 +619,23 @@ pub fn run(mut config: AppConfig) {
                     .expect("Failed to initialise Vello renderer");
 
                 let window_ctrl = build_window_controller(Arc::clone(&window));
-                let mut rt = VeloxRuntime::new(tokio_handle.clone(), Some(window_ctrl));
+                let mut rt = if let Some(blob) = &snapshot_blob {
+                    // Production mode: restore from pre-executed snapshot
+                    match VeloxRuntime::new_from_snapshot(blob, tokio_handle.clone(), Some(window_ctrl)) {
+                        Ok(rt) => {
+                            log::info!("V8 isolate restored from snapshot (~50ms startup)");
+                            rt
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to restore snapshot: {}; falling back to eval mode", e);
+                            let window_ctrl = build_window_controller(Arc::clone(&window));
+                            VeloxRuntime::new(tokio_handle.clone(), Some(window_ctrl))
+                        }
+                    }
+                } else {
+                    // Dev mode or no snapshot: create fresh isolate
+                    VeloxRuntime::new(tokio_handle.clone(), Some(window_ctrl))
+                };
 
                 if let Some(ref js) = js_src {
                     match rt.eval(js) {

@@ -30,9 +30,11 @@ use thiserror::Error;
 
 pub mod bindings;
 pub mod runtime;
+pub mod snapshot;
 
 pub use runtime::{VeloxRuntime, HeapStats};
 pub use bindings::{NodeProps, NodeType, SceneCommand, InputEvent, WindowController};
+pub use snapshot::{SnapshotBlob, create_stub_bindings_script};
 
 // ── V8 platform init ──────────────────────────────────────────────────────────
 

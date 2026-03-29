@@ -18,6 +18,7 @@ fn main() {
             ..Default::default()
         },
         js_src: Some(include_str!("../js/app.js").to_string()),
+        snapshot_blob: None,
         dev_mode: Some(velox_core::DevModeConfig::new(
             std::path::PathBuf::from("."),
             std::path::PathBuf::from("js/app.jsx"),

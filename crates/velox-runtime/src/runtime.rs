@@ -27,6 +27,7 @@ pub struct HeapStats {
 }
 
 impl VeloxRuntime {
+    /// Create a new VeloxRuntime with a fresh isolate.
     pub fn new(tokio_handle: Handle, window: Option<WindowController>) -> Self {
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
 
@@ -55,6 +56,49 @@ impl VeloxRuntime {
         };
 
         Self { isolate, context, queue, scene, events, layout_cache }
+    }
+
+    /// Create a new VeloxRuntime from a snapshot blob (pre-executed JS heap).
+    ///
+    /// The snapshot is restored and its stub bindings are overridden with real Rust implementations.
+    pub fn new_from_snapshot(
+        snapshot_blob: &[u8],
+        tokio_handle: Handle,
+        window: Option<WindowController>,
+    ) -> Result<Self, RuntimeError> {
+        let create_params = v8::CreateParams::default()
+            .snapshot_blob(snapshot_blob.to_vec());
+
+        let mut isolate = v8::Isolate::new(create_params);
+
+        let events       = new_event_queue();
+        let layout_cache = new_layout_cache();
+
+        let (context, queue, scene) = {
+            let scope  = &mut v8::HandleScope::new(&mut isolate);
+            let queue  = new_completion_queue();
+            let scene  = new_scene_queue();
+
+            // Snapshot contains a default context; use it
+            let ctx    = v8::Context::new(scope);
+            let scope  = &mut v8::ContextScope::new(scope, ctx);
+            let global = ctx.global(scope);
+
+            // Re-register all binding implementations (stubs are already in snapshot)
+            register_all(
+                scope, global,
+                Arc::clone(&queue),
+                tokio_handle,
+                Arc::clone(&scene),
+                Arc::clone(&events),
+                Arc::clone(&layout_cache),
+                window,
+            );
+
+            (v8::Global::new(scope, ctx), queue, scene)
+        };
+
+        Ok(Self { isolate, context, queue, scene, events, layout_cache })
     }
 
     // ── Script execution ──────────────────────────────────────────────────────

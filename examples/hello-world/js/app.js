@@ -31,7 +31,7 @@
   };
   var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
 
-  // ../../node_modules/.bun/react@18.3.1/node_modules/react/cjs/react.production.min.js
+  // node_modules/.bun/react@18.3.1/node_modules/react/cjs/react.production.min.js
   var require_react_production_min = __commonJS((exports) => {
     var l = Symbol.for("react.element");
     var n = Symbol.for("react.portal");
@@ -322,14 +322,14 @@
     exports.version = "18.3.1";
   });
 
-  // ../../node_modules/.bun/react@18.3.1/node_modules/react/index.js
+  // node_modules/.bun/react@18.3.1/node_modules/react/index.js
   var require_react = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_production_min();
     } else {}
   });
 
-  // ../../node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/cjs/scheduler.production.min.js
+  // node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/cjs/scheduler.production.min.js
   var require_scheduler_production_min = __commonJS((exports) => {
     function f(a, b) {
       var c = a.length;
@@ -595,14 +595,14 @@
     };
   });
 
-  // ../../node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/index.js
+  // node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/index.js
   var require_scheduler = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_scheduler_production_min();
     } else {}
   });
 
-  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler.production.min.js
+  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler.production.min.js
   var require_react_reconciler_production_min = __commonJS((exports, module) => {
     module.exports = function $$$reconciler($$$hostConfig) {
       var exports2 = {};
@@ -5700,14 +5700,14 @@ No matching component was found for:
     };
   });
 
-  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/index.js
+  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/index.js
   var require_react_reconciler = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_reconciler_production_min();
     } else {}
   });
 
-  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler-constants.production.min.js
+  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler-constants.production.min.js
   var require_react_reconciler_constants_production_min = __commonJS((exports) => {
     exports.ConcurrentRoot = 1;
     exports.ContinuousEventPriority = 4;
@@ -5717,14 +5717,14 @@ No matching component was found for:
     exports.LegacyRoot = 0;
   });
 
-  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/constants.js
+  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/constants.js
   var require_constants = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_reconciler_constants_production_min();
     } else {}
   });
 
-  // ../../node_modules/.bun/react@18.3.1/node_modules/react/cjs/react-jsx-runtime.production.min.js
+  // node_modules/.bun/react@18.3.1/node_modules/react/cjs/react-jsx-runtime.production.min.js
   var require_react_jsx_runtime_production_min = __commonJS((exports) => {
     var f = require_react();
     var k = Symbol.for("react.element");
@@ -5749,14 +5749,14 @@ No matching component was found for:
     exports.jsxs = q;
   });
 
-  // ../../node_modules/.bun/react@18.3.1/node_modules/react/jsx-runtime.js
+  // node_modules/.bun/react@18.3.1/node_modules/react/jsx-runtime.js
   var require_jsx_runtime = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_jsx_runtime_production_min();
     } else {}
   });
 
-  // js/polyfills.js
+  // examples/hello-world/js/polyfills.js
   if (typeof performance === "undefined") {
     globalThis.performance = {
       now: () => Number(__velox_getTime())
@@ -5793,14 +5793,14 @@ No matching component was found for:
     };
   }
 
-  // js/app.jsx
+  // examples/hello-world/js/app.jsx
   var import_react3 = __toESM(require_react(), 1);
 
-  // ../../js/packages/@velox/react/src/index.js
+  // js/packages/@velox/react/src/index.js
   var import_react = __toESM(require_react(), 1);
   var import_react_reconciler = __toESM(require_react_reconciler(), 1);
 
-  // ../../js/packages/@velox/react/src/hostConfig.js
+  // js/packages/@velox/react/src/hostConfig.js
   var import_constants = __toESM(require_constants(), 1);
   function createInstance(type, props) {
     const { children, style, ref: _ref, _veloxOnMount, ...rest } = props;
@@ -5946,7 +5946,7 @@ No matching component was found for:
   };
   var hostConfig_default = HostConfig;
 
-  // ../../js/packages/@velox/react/src/events.js
+  // js/packages/@velox/react/src/events.js
   var pressableRegistry = new Map;
   var inputRegistry = new Map;
   var scrollRegistry = new Map;
@@ -6086,7 +6086,7 @@ No matching component was found for:
     }
   }
 
-  // ../../js/packages/@velox/react/src/index.js
+  // js/packages/@velox/react/src/index.js
   var VeloxReconciler = import_react_reconciler.default(hostConfig_default);
   var rootContainer = VeloxReconciler.createContainer({ isVeloxRoot: true }, 0, null, false, null, "", (err) => __velox_log("[React] Recoverable error: " + err.message), null);
   globalThis.__velox_frameCallback = function veloxFrameCallback() {
@@ -6282,7 +6282,9 @@ No matching component was found for:
     isFullscreen: () => typeof __velox_isFullscreen !== "undefined" ? __velox_isFullscreen() : false,
     isMaximized: () => typeof __velox_isMaximized !== "undefined" ? __velox_isMaximized() : false,
     getWindowSize: () => typeof __velox_getWindowSize !== "undefined" ? __velox_getWindowSize() : { width: 0, height: 0 },
-    getScreenSize: () => typeof __velox_getScreenSize !== "undefined" ? __velox_getScreenSize() : { width: 0, height: 0 }
+    getScreenSize: () => typeof __velox_getScreenSize !== "undefined" ? __velox_getScreenSize() : { width: 0, height: 0 },
+    setAlwaysOnTop: (on) => typeof __velox_setAlwaysOnTop !== "undefined" && __velox_setAlwaysOnTop(on),
+    setTitle: (title) => typeof __velox_setTitle !== "undefined" && __velox_setTitle(title)
   };
   var _noBinding = (name) => Promise.reject(new Error(`${name}: binding not available`));
   var fs = {
@@ -6361,8 +6363,44 @@ No matching component was found for:
       });
     }
   };
+  var dialog = {
+    openFile({ filters = [], multiple = false } = {}) {
+      if (typeof __velox_dialog_openFile === "undefined")
+        return _noBinding("dialog.openFile");
+      return __velox_dialog_openFile(JSON.stringify(filters), multiple).then(JSON.parse);
+    },
+    saveFile({ defaultName = "", filters = [] } = {}) {
+      if (typeof __velox_dialog_saveFile === "undefined")
+        return _noBinding("dialog.saveFile");
+      return __velox_dialog_saveFile(defaultName, JSON.stringify(filters)).then(JSON.parse);
+    },
+    openFolder() {
+      if (typeof __velox_dialog_openFolder === "undefined")
+        return _noBinding("dialog.openFolder");
+      return __velox_dialog_openFolder().then(JSON.parse);
+    }
+  };
+  var clipboard = {
+    readText() {
+      if (typeof __velox_clipboard_readText === "undefined")
+        return _noBinding("clipboard.readText");
+      return __velox_clipboard_readText();
+    },
+    writeText(text) {
+      if (typeof __velox_clipboard_writeText === "undefined")
+        return _noBinding("clipboard.writeText");
+      return __velox_clipboard_writeText(text);
+    }
+  };
+  var notification = {
+    send({ title, body = "" }) {
+      if (typeof __velox_notification_send === "undefined")
+        return _noBinding("notification.send");
+      return __velox_notification_send(title, body);
+    }
+  };
 
-  // ../../js/packages/@velox/router/src/index.js
+  // js/packages/@velox/router/src/index.js
   var import_react2 = __toESM(require_react(), 1);
   var RouterCtx = import_react2.createContext(null);
   function Router({ children, initialRoute }) {
@@ -6412,7 +6450,7 @@ No matching component was found for:
     return { name: ctx.routeName, params: ctx.params, canGoBack: ctx.canGoBack };
   }
 
-  // js/app.jsx
+  // examples/hello-world/js/app.jsx
   var jsx_runtime = __toESM(require_jsx_runtime(), 1);
   var HEADER_H = 48;
   var PAD = 16;
@@ -7039,6 +7077,24 @@ No matching component was found for:
                 children: "Vector Database Demo →"
               })
             }),
+            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+              onPress: () => navigate("os"),
+              width: leftIn,
+              height: 40,
+              style: {
+                backgroundColor: "#2a1e2a",
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: "#6e2a6e"
+              },
+              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 13,
+                width: leftIn - 20,
+                height: 20,
+                style: { color: "#cba6f7" },
+                children: "OS Integration Demo →"
+              })
+            }),
             /* @__PURE__ */ jsx_runtime.jsx(Image, {
               src: "C:/myweb/Apps/velox_project/sample.png",
               width: leftIn,
@@ -7298,6 +7354,247 @@ useRoute().params gives them back here.`
       ]
     });
   }
+  function OsScreen() {
+    const { width: winW, height: winH } = useWindowSize();
+    const [pickedPath, setPickedPath] = import_react3.useState("");
+    const [savedPath, setSavedPath] = import_react3.useState("");
+    const [folderPath, setFolderPath] = import_react3.useState("");
+    const [clipText, setClipText] = import_react3.useState("Hello from Velox!");
+    const [notifTitle, setNotifTitle] = import_react3.useState("Velox");
+    const [notifBody, setNotifBody] = import_react3.useState("Week 20 — OS integration works!");
+    const [winTitle, setWinTitle] = import_react3.useState("Velox — Hello World");
+    const [alwaysOnTop, setAlwaysOnTop] = import_react3.useState(false);
+    const [status, setStatus] = import_react3.useState("Ready.");
+    const contentW = winW - 2 * PAD;
+    const contentH = winH - HEADER_H - 2 * PAD;
+    const inner = contentW - 32;
+    const svH = contentH - 72;
+    const st = (msg) => setStatus(msg);
+    const openFile = () => dialog.openFile({ filters: [{ name: "All Files", extensions: ["*"] }] }).then((p) => {
+      setPickedPath(p ?? "(cancelled)");
+      st("File dialog closed.");
+    }).catch((e) => st("Dialog error: " + e.message));
+    const saveFile = () => dialog.saveFile({ defaultName: "untitled.txt", filters: [{ name: "Text", extensions: ["txt"] }] }).then((p) => {
+      setSavedPath(p ?? "(cancelled)");
+      st("Save dialog closed.");
+    }).catch((e) => st("Dialog error: " + e.message));
+    const openFolder = () => dialog.openFolder().then((p) => {
+      setFolderPath(p ?? "(cancelled)");
+      st("Folder dialog closed.");
+    }).catch((e) => st("Dialog error: " + e.message));
+    const writeClip = () => clipboard.writeText(clipText).then(() => st("Copied to clipboard.")).catch((e) => st("Clipboard error: " + e.message));
+    const readClip = () => clipboard.readText().then((t) => {
+      setClipText(t);
+      st("Pasted from clipboard.");
+    }).catch((e) => st("Clipboard error: " + e.message));
+    const sendNotif = () => notification.send({ title: notifTitle, body: notifBody }).then(() => st("Notification sent.")).catch((e) => st("Notification error: " + e.message));
+    const applyTitle = () => {
+      veloxWindow.setTitle(winTitle);
+      st("Window title updated.");
+    };
+    const toggleOnTop = () => {
+      const next = !alwaysOnTop;
+      veloxWindow.setAlwaysOnTop(next);
+      setAlwaysOnTop(next);
+      st(next ? "Window pinned on top." : "Normal window level restored.");
+    };
+    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
+      style: {
+        backgroundColor: "#2a2a3e",
+        borderRadius: 16,
+        borderWidth: 1,
+        borderColor: "#44446a",
+        padding: 16,
+        gap: 8,
+        justifyContent: "flex-start",
+        alignItems: "flex-start"
+      },
+      width: contentW,
+      height: contentH,
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: { flexDirection: "row", gap: 12, alignItems: "flex-start" },
+          width: inner,
+          height: 32,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(BackBtn, {}),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 14,
+              width: inner - 110,
+              height: 20,
+              style: { color: "#cdd6f4" },
+              children: "Week 20 — OS Integration"
+            })
+          ]
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 11,
+          width: inner,
+          height: 16,
+          style: { color: "#a6e3a1" },
+          children: status
+        }),
+        /* @__PURE__ */ jsx_runtime.jsxs(ScrollView, {
+          width: inner,
+          height: svH,
+          contentHeight: 700,
+          style: { gap: 10, padding: 4 },
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 13,
+              width: inner,
+              height: 20,
+              style: { color: "#89b4fa" },
+              children: "File Dialogs  (dialog.openFile / saveFile / openFolder)"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
+              width: inner,
+              height: 34,
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+                  label: "Open File",
+                  onPress: openFile
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+                  label: "Save File",
+                  onPress: saveFile
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+                  label: "Open Folder",
+                  onPress: openFolder
+                })
+              ]
+            }),
+            pickedPath ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 11,
+              width: inner,
+              height: 15,
+              style: { color: "#a6adc8" },
+              children: "Open: " + pickedPath
+            }) : null,
+            savedPath ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 11,
+              width: inner,
+              height: 15,
+              style: { color: "#a6adc8" },
+              children: "Save: " + savedPath
+            }) : null,
+            folderPath ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 11,
+              width: inner,
+              height: 15,
+              style: { color: "#a6adc8" },
+              children: "Folder: " + folderPath
+            }) : null,
+            /* @__PURE__ */ jsx_runtime.jsx(View, {
+              style: { backgroundColor: "#44446a" },
+              width: inner,
+              height: 1
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 13,
+              width: inner,
+              height: 20,
+              style: { color: "#89b4fa" },
+              children: "Clipboard  (clipboard.writeText / readText)"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+              value: clipText,
+              onChangeText: setClipText,
+              placeholder: "Text to copy…",
+              fontSize: 13,
+              width: inner,
+              height: 36
+            }),
+            /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
+              width: inner,
+              height: 34,
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+                  label: "Copy",
+                  onPress: writeClip
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+                  label: "Paste",
+                  onPress: readClip
+                })
+              ]
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(View, {
+              style: { backgroundColor: "#44446a" },
+              width: inner,
+              height: 1
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 13,
+              width: inner,
+              height: 20,
+              style: { color: "#89b4fa" },
+              children: "Notifications  (notification.send)"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+              value: notifTitle,
+              onChangeText: setNotifTitle,
+              placeholder: "Title…",
+              fontSize: 13,
+              width: inner,
+              height: 36
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+              value: notifBody,
+              onChangeText: setNotifBody,
+              placeholder: "Body…",
+              fontSize: 13,
+              width: inner,
+              height: 36
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+              label: "Send Notification",
+              onPress: sendNotif,
+              width: 160
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(View, {
+              style: { backgroundColor: "#44446a" },
+              width: inner,
+              height: 1
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 13,
+              width: inner,
+              height: 20,
+              style: { color: "#89b4fa" },
+              children: "Window  (veloxWindow.setTitle / setAlwaysOnTop)"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+              value: winTitle,
+              onChangeText: setWinTitle,
+              placeholder: "Window title…",
+              fontSize: 13,
+              width: inner,
+              height: 36
+            }),
+            /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
+              width: inner,
+              height: 34,
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+                  label: "Set Title",
+                  onPress: applyTitle
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
+                  label: alwaysOnTop ? "Unpin Window" : "Always on Top",
+                  onPress: toggleOnTop
+                })
+              ]
+            })
+          ]
+        })
+      ]
+    });
+  }
   function App() {
     const { width: winW, height: winH } = useWindowSize();
     const [fullscreen, setFullscreen] = import_react3.useState(false);
@@ -7381,6 +7678,10 @@ useRoute().params gives them back here.`
               /* @__PURE__ */ jsx_runtime.jsx(Route, {
                 name: "vectorDb",
                 component: VectorDbScreen
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Route, {
+                name: "os",
+                component: OsScreen
               })
             ]
           })
@@ -7389,5 +7690,5 @@ useRoute().params gives them back here.`
     });
   }
   render(/* @__PURE__ */ jsx_runtime.jsx(App, {}));
-  __velox_log("Week 19: vector database (cosine similarity on SQLite BLOBs) loaded.");
+  __velox_log("Week 20: OS integration (dialogs, clipboard, notifications, window extras) loaded.");
 })();

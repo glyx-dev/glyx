@@ -12,3 +12,8 @@ anyhow         = { workspace = true }
 velox-security = { path = "../velox-security" }
 velox-db       = { path = "../velox-db" }
 serde_json     = { workspace = true }
+rfd                 = { workspace = true }
+arboard             = { workspace = true }
+clipboard-win       = { workspace = true }
+notify-rust         = { workspace = true }
+raw-window-handle   = { workspace = true }

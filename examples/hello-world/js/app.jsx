@@ -1,11 +1,12 @@
-// Week 19 — Vector Database demo (+ Weeks 17B/18 still present).
+// Week 20 — OS Integration demo (+ Weeks 17B/18/19 still present).
 //
 // Screens:
-//   home        — greeting, TextInput, Image, → palette, → data demo, → vector DB demo
+//   home        — greeting, TextInput, Image, → palette, → data demo, → vector DB, → OS demo
 //   palette     — scrollable Catppuccin palette, tap a colour → detail
 //   colorDetail — full-card colour detail, ← Back to palette
 //   data        — Week 18: file system (write/read/list) + SQLite (run/query/transaction)
 //   vectorDb    — Week 19: in-memory vector store, RGB nearest-colour search
+//   os          — Week 20: file dialogs, clipboard, notifications, window extras
 //
 // The header bar (window controls + dimensions) lives outside the router.
 
@@ -14,6 +15,7 @@ import React, { useState, useEffect } from 'react';
 import {
   View, Text, Image, Pressable, TextInput, ScrollView, render,
   useWindowSize, useMediaQuery, veloxWindow, fs, db, vectorDb,
+  dialog, clipboard, notification,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
 
@@ -636,6 +638,23 @@ function HomeScreen() {
           </Text>
         </Pressable>
 
+        {/* Navigate to OS integration demo screen */}
+        <Pressable
+          onPress={() => navigate('os')}
+          width={leftIn}
+          height={40}
+          style={{
+            backgroundColor: '#2a1e2a',
+            borderRadius:    8,
+            borderWidth:     1,
+            borderColor:     '#6e2a6e',
+          }}
+        >
+          <Text fontSize={13} width={leftIn - 20} height={20} style={{ color: '#cba6f7' }}>
+            OS Integration Demo →
+          </Text>
+        </Pressable>
+
         <Image
           src="C:/myweb/Apps/velox_project/sample.png"
           width={leftIn}
@@ -857,6 +876,228 @@ function ColorDetailScreen() {
   );
 }
 
+// ── Screen: OS Integration (Week 20) ─────────────────────────────────────────
+//
+// Demos: file dialogs, clipboard read/write, desktop notifications,
+//        always-on-top toggle, dynamic window title.
+
+function OsScreen() {
+  const { width: winW, height: winH } = useWindowSize();
+
+  const [pickedPath,  setPickedPath]  = useState('');
+  const [savedPath,   setSavedPath]   = useState('');
+  const [folderPath,  setFolderPath]  = useState('');
+  const [clipText,    setClipText]    = useState('Hello from Velox!');
+  const [notifTitle,  setNotifTitle]  = useState('Velox');
+  const [notifBody,   setNotifBody]   = useState('Week 20 — OS integration works!');
+  const [winTitle,    setWinTitle]    = useState('Velox — Hello World');
+  const [alwaysOnTop, setAlwaysOnTop] = useState(false);
+  const [status,      setStatus]      = useState('Ready.');
+
+  const contentW = winW - 2 * PAD;
+  const contentH = winH - HEADER_H - 2 * PAD;
+  const inner    = contentW - 32;
+  const svH      = contentH - 72;
+
+  const st = (msg) => setStatus(msg);
+
+  // ── Dialogs ────────────────────────────────────────────────────────────────
+  const openFile = () =>
+    dialog.openFile({ filters: [{ name: 'All Files', extensions: ['*'] }] })
+      .then((p) => { setPickedPath(p ?? '(cancelled)'); st('File dialog closed.'); })
+      .catch((e) => st('Dialog error: ' + e.message));
+
+  const saveFile = () =>
+    dialog.saveFile({ defaultName: 'untitled.txt', filters: [{ name: 'Text', extensions: ['txt'] }] })
+      .then((p) => { setSavedPath(p ?? '(cancelled)'); st('Save dialog closed.'); })
+      .catch((e) => st('Dialog error: ' + e.message));
+
+  const openFolder = () =>
+    dialog.openFolder()
+      .then((p) => { setFolderPath(p ?? '(cancelled)'); st('Folder dialog closed.'); })
+      .catch((e) => st('Dialog error: ' + e.message));
+
+  // ── Clipboard ──────────────────────────────────────────────────────────────
+  const writeClip = () =>
+    clipboard.writeText(clipText)
+      .then(() => st('Copied to clipboard.'))
+      .catch((e) => st('Clipboard error: ' + e.message));
+
+  const readClip = () =>
+    clipboard.readText()
+      .then((t) => { setClipText(t); st('Pasted from clipboard.'); })
+      .catch((e) => st('Clipboard error: ' + e.message));
+
+  // ── Notifications ──────────────────────────────────────────────────────────
+  const sendNotif = () =>
+    notification.send({ title: notifTitle, body: notifBody })
+      .then(() => st('Notification sent.'))
+      .catch((e) => st('Notification error: ' + e.message));
+
+  // ── Window extras ──────────────────────────────────────────────────────────
+  const applyTitle = () => {
+    veloxWindow.setTitle(winTitle);
+    st('Window title updated.');
+  };
+
+  const toggleOnTop = () => {
+    const next = !alwaysOnTop;
+    veloxWindow.setAlwaysOnTop(next);
+    setAlwaysOnTop(next);
+    st(next ? 'Window pinned on top.' : 'Normal window level restored.');
+  };
+
+  return (
+    <View
+      style={{
+        backgroundColor: '#2a2a3e',
+        borderRadius:    16,
+        borderWidth:     1,
+        borderColor:     '#44446a',
+        padding:         16,
+        gap:             8,
+        justifyContent:  'flex-start',
+        alignItems:      'flex-start',
+      }}
+      width={contentW}
+      height={contentH}
+    >
+      {/* Header */}
+      <View
+        style={{ flexDirection: 'row', gap: 12, alignItems: 'flex-start' }}
+        width={inner}
+        height={32}
+      >
+        <BackBtn />
+        <Text fontSize={14} width={inner - 110} height={20} style={{ color: '#cdd6f4' }}>
+          Week 20 — OS Integration
+        </Text>
+      </View>
+
+      {/* Status */}
+      <Text fontSize={11} width={inner} height={16} style={{ color: '#a6e3a1' }}>
+        {status}
+      </Text>
+
+      <ScrollView
+        width={inner}
+        height={svH}
+        contentHeight={700}
+        style={{ gap: 10, padding: 4 }}
+      >
+        {/* ── File Dialogs ─────────────────────────────────────────────────── */}
+        <Text fontSize={13} width={inner} height={20} style={{ color: '#89b4fa' }}>
+          File Dialogs  (dialog.openFile / saveFile / openFolder)
+        </Text>
+
+        <View
+          style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-start' }}
+          width={inner}
+          height={34}
+        >
+          <SmallBtn label="Open File"   onPress={openFile}   />
+          <SmallBtn label="Save File"   onPress={saveFile}   />
+          <SmallBtn label="Open Folder" onPress={openFolder} />
+        </View>
+
+        {pickedPath ? (
+          <Text fontSize={11} width={inner} height={15} style={{ color: '#a6adc8' }}>
+            {'Open: ' + pickedPath}
+          </Text>
+        ) : null}
+        {savedPath ? (
+          <Text fontSize={11} width={inner} height={15} style={{ color: '#a6adc8' }}>
+            {'Save: ' + savedPath}
+          </Text>
+        ) : null}
+        {folderPath ? (
+          <Text fontSize={11} width={inner} height={15} style={{ color: '#a6adc8' }}>
+            {'Folder: ' + folderPath}
+          </Text>
+        ) : null}
+
+        <View style={{ backgroundColor: '#44446a' }} width={inner} height={1} />
+
+        {/* ── Clipboard ────────────────────────────────────────────────────── */}
+        <Text fontSize={13} width={inner} height={20} style={{ color: '#89b4fa' }}>
+          Clipboard  (clipboard.writeText / readText)
+        </Text>
+
+        <TextInput
+          value={clipText}
+          onChangeText={setClipText}
+          placeholder="Text to copy…"
+          fontSize={13}
+          width={inner}
+          height={36}
+        />
+
+        <View
+          style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-start' }}
+          width={inner}
+          height={34}
+        >
+          <SmallBtn label="Copy"  onPress={writeClip} />
+          <SmallBtn label="Paste" onPress={readClip}  />
+        </View>
+
+        <View style={{ backgroundColor: '#44446a' }} width={inner} height={1} />
+
+        {/* ── Notifications ─────────────────────────────────────────────────── */}
+        <Text fontSize={13} width={inner} height={20} style={{ color: '#89b4fa' }}>
+          Notifications  (notification.send)
+        </Text>
+
+        <TextInput
+          value={notifTitle}
+          onChangeText={setNotifTitle}
+          placeholder="Title…"
+          fontSize={13}
+          width={inner}
+          height={36}
+        />
+        <TextInput
+          value={notifBody}
+          onChangeText={setNotifBody}
+          placeholder="Body…"
+          fontSize={13}
+          width={inner}
+          height={36}
+        />
+        <SmallBtn label="Send Notification" onPress={sendNotif} width={160} />
+
+        <View style={{ backgroundColor: '#44446a' }} width={inner} height={1} />
+
+        {/* ── Window extras ─────────────────────────────────────────────────── */}
+        <Text fontSize={13} width={inner} height={20} style={{ color: '#89b4fa' }}>
+          Window  (veloxWindow.setTitle / setAlwaysOnTop)
+        </Text>
+
+        <TextInput
+          value={winTitle}
+          onChangeText={setWinTitle}
+          placeholder="Window title…"
+          fontSize={13}
+          width={inner}
+          height={36}
+        />
+
+        <View
+          style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-start' }}
+          width={inner}
+          height={34}
+        >
+          <SmallBtn label="Set Title"  onPress={applyTitle} />
+          <SmallBtn
+            label={alwaysOnTop ? 'Unpin Window' : 'Always on Top'}
+            onPress={toggleOnTop}
+          />
+        </View>
+      </ScrollView>
+    </View>
+  );
+}
+
 // ── App shell ─────────────────────────────────────────────────────────────────
 //
 // Header bar (window controls) lives outside the router — persists across
@@ -925,6 +1166,7 @@ function App() {
           <Route name="colorDetail" component={ColorDetailScreen} />
           <Route name="data"        component={DataScreen}       />
           <Route name="vectorDb"    component={VectorDbScreen}   />
+          <Route name="os"          component={OsScreen}         />
         </Router>
       </View>
 
@@ -934,4 +1176,4 @@ function App() {
 
 render(<App />);
 
-__velox_log('Week 19: vector database (cosine similarity on SQLite BLOBs) loaded.');
+__velox_log('Week 20: OS integration (dialogs, clipboard, notifications, window extras) loaded.');

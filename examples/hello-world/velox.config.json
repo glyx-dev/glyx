@@ -16,9 +16,12 @@
     "env": {
       "allow": []
     },
-    "db":      true,
-    "battery": false,
-    "usb":     false,
-    "shell":   false
+    "db":           true,
+    "dialog":       true,
+    "clipboard":    true,
+    "notification": true,
+    "battery":      false,
+    "usb":          false,
+    "shell":        false
   }
 }

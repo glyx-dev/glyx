@@ -362,13 +362,15 @@ export function getEnv(name) {
 }
 
 export const veloxWindow = {
-  setFullscreen: (full)     => typeof __velox_setFullscreen !== 'undefined' && __velox_setFullscreen(full),
-  setMaximized:  (max)      => typeof __velox_setMaximized  !== 'undefined' && __velox_setMaximized(max),
-  setMinimized:  ()         => typeof __velox_setMinimized  !== 'undefined' && __velox_setMinimized(),
-  isFullscreen:  ()         => typeof __velox_isFullscreen  !== 'undefined' ? __velox_isFullscreen()  : false,
-  isMaximized:   ()         => typeof __velox_isMaximized   !== 'undefined' ? __velox_isMaximized()   : false,
-  getWindowSize: ()         => typeof __velox_getWindowSize !== 'undefined' ? __velox_getWindowSize() : { width: 0, height: 0 },
-  getScreenSize: ()         => typeof __velox_getScreenSize !== 'undefined' ? __velox_getScreenSize() : { width: 0, height: 0 },
+  setFullscreen:   (full)  => typeof __velox_setFullscreen   !== 'undefined' && __velox_setFullscreen(full),
+  setMaximized:    (max)   => typeof __velox_setMaximized    !== 'undefined' && __velox_setMaximized(max),
+  setMinimized:    ()      => typeof __velox_setMinimized    !== 'undefined' && __velox_setMinimized(),
+  isFullscreen:    ()      => typeof __velox_isFullscreen    !== 'undefined' ? __velox_isFullscreen()    : false,
+  isMaximized:     ()      => typeof __velox_isMaximized     !== 'undefined' ? __velox_isMaximized()     : false,
+  getWindowSize:   ()      => typeof __velox_getWindowSize   !== 'undefined' ? __velox_getWindowSize()   : { width: 0, height: 0 },
+  getScreenSize:   ()      => typeof __velox_getScreenSize   !== 'undefined' ? __velox_getScreenSize()   : { width: 0, height: 0 },
+  setAlwaysOnTop:  (on)    => typeof __velox_setAlwaysOnTop  !== 'undefined' && __velox_setAlwaysOnTop(on),
+  setTitle:        (title) => typeof __velox_setTitle        !== 'undefined' && __velox_setTitle(title),
 };
 
 // ── File system API ───────────────────────────────────────────────────────────
@@ -592,3 +594,86 @@ export const vectorDb = {
     });
   },
 };
+
+// ── File Dialogs ───────────────────────────────────────────────────────────────
+//
+// Requires `dialog: true` capability in velox.config.json.
+//
+// dialog.openFile({ filters?, multiple? }) → Promise<string[] | null>
+// dialog.saveFile({ defaultName?, filters? }) → Promise<string | null>
+// dialog.openFolder()                         → Promise<string | null>
+//
+// Filter shape: [{ name: string, extensions: string[] }]
+
+export const dialog = {
+  /**
+   * Show a native open-file dialog.
+   * @param {{ filters?: {name:string,extensions:string[]}[], multiple?: boolean }} [opts]
+   * @returns {Promise<string[] | null>} Selected path(s), or null if cancelled.
+   */
+  openFile({ filters = [], multiple = false } = {}) {
+    if (typeof __velox_dialog_openFile === 'undefined') return _noBinding('dialog.openFile');
+    return __velox_dialog_openFile(JSON.stringify(filters), multiple).then(JSON.parse);
+  },
+
+  /**
+   * Show a native save-file dialog.
+   * @param {{ defaultName?: string, filters?: {name:string,extensions:string[]}[] }} [opts]
+   * @returns {Promise<string | null>} Chosen save path, or null if cancelled.
+   */
+  saveFile({ defaultName = '', filters = [] } = {}) {
+    if (typeof __velox_dialog_saveFile === 'undefined') return _noBinding('dialog.saveFile');
+    return __velox_dialog_saveFile(defaultName, JSON.stringify(filters)).then(JSON.parse);
+  },
+
+  /**
+   * Show a native open-folder dialog.
+   * @returns {Promise<string | null>} Selected folder path, or null if cancelled.
+   */
+  openFolder() {
+    if (typeof __velox_dialog_openFolder === 'undefined') return _noBinding('dialog.openFolder');
+    return __velox_dialog_openFolder().then(JSON.parse);
+  },
+};
+
+// ── Clipboard ─────────────────────────────────────────────────────────────────
+//
+// Requires `clipboard: true` capability in velox.config.json.
+
+export const clipboard = {
+  /**
+   * Read plain text from the system clipboard.
+   * @returns {Promise<string>}
+   */
+  readText() {
+    if (typeof __velox_clipboard_readText === 'undefined') return _noBinding('clipboard.readText');
+    return __velox_clipboard_readText();
+  },
+
+  /**
+   * Write plain text to the system clipboard.
+   * @param {string} text
+   * @returns {Promise<void>}
+   */
+  writeText(text) {
+    if (typeof __velox_clipboard_writeText === 'undefined') return _noBinding('clipboard.writeText');
+    return __velox_clipboard_writeText(text);
+  },
+};
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+//
+// Requires `notification: true` capability in velox.config.json.
+
+export const notification = {
+  /**
+   * Send a native desktop notification. Fire-and-forget; never rejects.
+   * @param {{ title: string, body?: string }} opts
+   * @returns {Promise<void>}
+   */
+  send({ title, body = '' }) {
+    if (typeof __velox_notification_send === 'undefined') return _noBinding('notification.send');
+    return __velox_notification_send(title, body);
+  },
+};
+

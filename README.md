@@ -63,7 +63,7 @@ velox/
 │   ├── velox-text/               # Parley + Swash text shaping pipeline
 │   ├── velox-runtime/            # V8 embedding + native JS bindings
 │   ├── velox-security/           # Capability enforcer — OnceLock, fs/network/env gates
-│   ├── velox-db/                 # SQLite via sqlx (stub — Phase 7)
+│   ├── velox-db/                 # SQLite + vector store via sqlx (Phase 7 ✅)
 │   ├── velox-3d/                 # wgpu 3D scene graph (stub — Phase 17)
 │   ├── velox-ai/                 # Candle ML inference (stub — Phase 18)
 │   ├── velox-sysapi/             # OS APIs: battery, network, hardware (stub — Phase 15)
@@ -174,7 +174,27 @@ available in any JS evaluated by the runtime.
 
 | Binding | Signature | Description |
 |---------|-----------|-------------|
-| `__velox_readFile` | `(path: string) => Promise<string>` | Reads a file from disk via tokio — requires `fs.read` capability |
+| `__velox_readFile` | `(path: string) => Promise<string>` | Read file as UTF-8 — requires `fs.read` capability |
+| `__velox_writeFile` | `(path, content) => Promise<void>` | Write/overwrite a file — requires `fs.write` |
+| `__velox_appendFile` | `(path, content) => Promise<void>` | Append to a file — requires `fs.write` |
+| `__velox_listDir` | `(path) => Promise<string>` | JSON array of `{name, isDir}` entries — requires `fs.read` |
+| `__velox_deleteFile` | `(path) => Promise<void>` | Delete a file — requires `fs.write` |
+| `__velox_mkdirp` | `(path) => Promise<void>` | Create directory (and parents) — requires `fs.write` |
+| `__velox_db_open` | `(path) => Promise<string>` | Open/create SQLite DB; returns handle number — requires `db: true` |
+| `__velox_db_query` | `(handle, sql, paramsJson) => Promise<string>` | SELECT → JSON rows array |
+| `__velox_db_run` | `(handle, sql, paramsJson) => Promise<string>` | INSERT/UPDATE/DELETE → JSON `{rowsAffected, lastInsertId}` |
+| `__velox_db_close` | `(handle) => Promise<void>` | Close pool gracefully |
+| `__velox_db_transaction` | `(handle, stmtsJson) => Promise<void>` | Atomic batch of SQL statements |
+| `__velox_vectorDb_open` | `(path) => Promise<string>` | Open/create vector store; returns handle — requires `db: true` |
+| `__velox_vectorDb_upsert` | `(handle, table, id, vectorJson, metaJson) => Promise<void>` | Insert or replace a vector record |
+| `__velox_vectorDb_search` | `(handle, table, queryJson, limit) => Promise<string>` | Cosine similarity search → JSON `{id, score, metadata}[]` |
+| `__velox_vectorDb_close` | `(handle) => Promise<void>` | Close vector store |
+| `__velox_dialog_openFile` | `(filtersJson, multiple) => Promise<string>` | Native open-file dialog — requires `dialog: true` |
+| `__velox_dialog_saveFile` | `(defaultName, filtersJson) => Promise<string>` | Native save-file dialog |
+| `__velox_dialog_openFolder` | `() => Promise<string>` | Native folder picker |
+| `__velox_clipboard_readText` | `() => Promise<string>` | Read clipboard text — requires `clipboard: true` |
+| `__velox_clipboard_writeText` | `(text) => Promise<void>` | Write clipboard text |
+| `__velox_notification_send` | `(title, body) => Promise<void>` | Desktop notification — requires `notification: true` |
 
 ### Node types
 
@@ -221,6 +241,7 @@ import {
   render, getEnv,
   useWindowSize, useScreenSize, useMediaQuery,
   veloxWindow,
+  fs, db, vectorDb,
 } from '@velox/react';
 
 render(<App />);
@@ -256,6 +277,59 @@ veloxWindow.setFullscreen(false)
 veloxWindow.isFullscreen()      // → boolean
 veloxWindow.isMaximized()       // → boolean
 veloxWindow.getSize()           // → { width, height }
+```
+
+### `fs` — file system
+
+Requires `fs.read` / `fs.write` capabilities in `velox.config.json`.
+
+```js
+import { fs } from '@velox/react';
+
+await fs.writeFile('notes.txt', 'hello');          // create / overwrite
+await fs.appendFile('notes.txt', '\nworld');       // append
+const text    = await fs.readFile('notes.txt');    // → string
+const entries = await fs.listDir('.');             // → [{name, isDir}]
+await fs.deleteFile('notes.txt');
+await fs.mkdirp('data/cache/images');
+```
+
+### `db` — SQLite
+
+Requires `db: true` capability. The first `db.open()` call auto-sets a default
+handle so subsequent calls omit the handle argument.
+
+```js
+import { db } from '@velox/react';
+
+await db.open('app.db');                           // sets default handle
+await db.run('CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)');
+await db.run('INSERT INTO items (name) VALUES (?)', ['hello']);
+const rows = await db.query('SELECT * FROM items ORDER BY id DESC');
+await db.transaction([
+  { sql: 'INSERT INTO a (x) VALUES (?)', params: [1] },
+  { sql: 'UPDATE b SET n = n + 1',       params: [] },
+]);
+await db.close();
+```
+
+### `vectorDb` — vector database
+
+Requires `db: true` capability. Vectors stored as f32 BLOB in SQLite; search
+uses brute-force cosine similarity (O(n) — fast for < 100 k vectors).
+
+```js
+import { vectorDb } from '@velox/react';
+
+const store = await vectorDb.open(':memory:');     // or a file path
+
+await store.upsert('embeddings', 'doc-1', [0.1, 0.9, 0.4], { title: 'Hello' });
+await store.upsert('embeddings', 'doc-2', [0.8, 0.2, 0.6], { title: 'World' });
+
+const hits = await store.search('embeddings', [0.15, 0.85, 0.45], 5);
+// → [{ id: 'doc-1', score: 0.998, metadata: { title: 'Hello' } }, …]
+
+await store.close();
 ```
 
 ### `getEnv(name)`
@@ -339,7 +413,10 @@ npm packages are installed.
 | `fs.write` | `string[]` (glob patterns) | Paths the app may write. |
 | `network.allow` | `string[]` (hostnames) | Outbound HTTP/WS hostnames. `["*"]` = all. |
 | `env.allow` | `string[]` (name patterns) | Env var names readable via `getEnv()`. Supports trailing `*` wildcard. |
-| `db` | `boolean` | Enables SQLite API (Phase 7). |
+| `db` | `boolean` | Enables SQLite (`db.*`) and vector database (`vectorDb.*`) APIs. |
+| `dialog` | `boolean` | Enables native file dialogs (`dialog.*`). |
+| `clipboard` | `boolean` | Enables clipboard read/write (`clipboard.*`). |
+| `notification` | `boolean` | Enables desktop notifications (`notification.send`). |
 | `battery` | `boolean` | Enables battery status API (Phase 15). |
 | `usb` | `boolean` | Enables USB/HID API (Phase 15). |
 | `shell` | `boolean` | Enables shell command execution (reserved, not yet implemented). |
@@ -397,6 +474,9 @@ changes, keeping idle CPU near zero.
 | 17 | `velox.config.json` parsing; `velox-security` capability enforcer; `fs.read` gate on `readFile`; `StartupMode` enum (windowed / maximized / fullscreen) |
 | 17B | `@velox/router` — named-route history stack; 3-screen demo |
 | 17C | `getEnv()` binding + `env.allow` capability; build-time vs runtime vs keychain secret guidance |
+| 18 | File system bindings (`writeFile`, `appendFile`, `listDir`, `deleteFile`, `mkdirp`); SQLite via `sqlx` (`db.open`, `db.query`, `db.run`, `db.transaction`) |
+| 19 | Vector database — SQLite-backed brute-force cosine similarity; `vectorDb.open`, `.upsert`, `.search`, `.close`; RGB nearest-colour demo |
+| 20 | OS integration — native file dialogs (`rfd`), clipboard (`arboard`), desktop notifications (`notify-rust`); `veloxWindow.setAlwaysOnTop` / `setTitle` |
 
 ---
 
@@ -404,8 +484,8 @@ changes, keeping idle CPU near zero.
 
 | Phase | Goal |
 |-------|------|
-| 7 (Weeks 18–19) | File system bindings (`writeFile`, `listDir`, …); SQLite via `sqlx`; LanceDB vector store |
-| 8 (Week 20) | OS dialogs, clipboard, system tray, desktop notifications, window management |
+| 7 (Weeks 18–19) | ✅ File system, SQLite, vector database |
+| 8 (Week 20) | ✅ File dialogs, clipboard, notifications, `setAlwaysOnTop`, `setTitle` |
 | 9 (Week 21) | V8 snapshots — startup drops from ~1000 ms to ~50 ms; source code not in binary |
 | 10 (Week 22) | CLI — `velox create`, `velox dev`, `velox build`, cross-platform targets |
 | 11 (Weeks 23–28) | Reference application (SQLite notes app) built entirely on Velox |
@@ -429,6 +509,7 @@ changes, keeping idle CPU near zero.
 | `velox-text` | Parley shaping, Swash rasterisation, label caching |
 | `velox-runtime` | V8 isolate, context, native bindings, async Promise bridge |
 | `velox-security` | `Capabilities` OnceLock, capability helpers, all binding gates |
+| `velox-db` | SQLite pool management (`open`, `query`, `run`, `transaction`); `VectorStore` (cosine similarity over f32 BLOB) |
 | `velox-core` | Wires all crates together, owns the event loop and AppState |
 
 ---

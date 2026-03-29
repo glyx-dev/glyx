@@ -55,13 +55,39 @@ pub enum InputEvent {
 /// Callbacks for window control operations.
 /// Constructed by velox-core from Arc<winit::window::Window> and passed to register_all.
 pub struct WindowController {
-    pub get_window_size: Arc<dyn Fn() -> (u32, u32) + Send + Sync>,
-    pub get_screen_size: Arc<dyn Fn() -> Option<(u32, u32)> + Send + Sync>,
-    pub set_fullscreen:  Arc<dyn Fn(bool) + Send + Sync>,
-    pub set_maximized:   Arc<dyn Fn(bool) + Send + Sync>,
-    pub set_minimized:   Arc<dyn Fn() + Send + Sync>,
-    pub is_fullscreen:   Arc<dyn Fn() -> bool + Send + Sync>,
-    pub is_maximized:    Arc<dyn Fn() -> bool + Send + Sync>,
+    pub get_window_size:   Arc<dyn Fn() -> (u32, u32) + Send + Sync>,
+    pub get_screen_size:   Arc<dyn Fn() -> Option<(u32, u32)> + Send + Sync>,
+    pub set_fullscreen:    Arc<dyn Fn(bool) + Send + Sync>,
+    pub set_maximized:     Arc<dyn Fn(bool) + Send + Sync>,
+    pub set_minimized:     Arc<dyn Fn() + Send + Sync>,
+    pub is_fullscreen:     Arc<dyn Fn() -> bool + Send + Sync>,
+    pub is_maximized:      Arc<dyn Fn() -> bool + Send + Sync>,
+    pub set_always_on_top: Arc<dyn Fn(bool) + Send + Sync>,
+    pub set_title:         Arc<dyn Fn(String) + Send + Sync>,
+    /// Raw platform window handle (HWND on Windows) as a plain integer.
+    /// Used to parent native dialogs so they appear in front of the Velox window.
+    pub hwnd:              Option<isize>,
+}
+
+// ── Dialog parent HWND wrapper ────────────────────────────────────────────────
+//
+// rfd::AsyncFileDialog::set_parent() requires impl HasWindowHandle.
+// We construct a minimal wrapper from the raw isize stored in AsyncState.
+
+#[cfg(target_os = "windows")]
+struct WinParent(isize);
+
+#[cfg(target_os = "windows")]
+impl raw_window_handle::HasWindowHandle for WinParent {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        use raw_window_handle::{RawWindowHandle, Win32WindowHandle, WindowHandle};
+        let nz = std::num::NonZero::new(self.0)
+            .expect("non-null HWND for dialog parent");
+        let win32 = Win32WindowHandle::new(nz);
+        Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(win32)) })
+    }
 }
 
 /// Thread-safe queue of input events for JS to poll each frame.
@@ -188,6 +214,7 @@ pub fn register_all(
 
     // Store all shared state in a heap-allocated struct, hand the raw
     // pointer to V8 via External so callbacks can recover it.
+    let hwnd = window.as_ref().and_then(|w| w.hwnd);
     let state = Box::new(AsyncState {
         queue,
         tokio,
@@ -197,6 +224,7 @@ pub fn register_all(
         next_id:    std::sync::atomic::AtomicU32::new(1),
         next_image_id: std::sync::atomic::AtomicU32::new(1),
         window,
+        hwnd,
         db_pools:      Arc::new(Mutex::new(HashMap::new())),
         next_db_id:    std::sync::atomic::AtomicU32::new(1),
         vector_stores: Arc::new(Mutex::new(HashMap::new())),
@@ -255,6 +283,22 @@ pub fn register_all(
     register!("__velox_vectorDb_upsert", vectordb_upsert_callback);
     register!("__velox_vectorDb_search", vectordb_search_callback);
     register!("__velox_vectorDb_close",  vectordb_close_callback);
+
+    // ── Window extras (sync) ────────────────────────────────────────────────
+    register!("__velox_setAlwaysOnTop", set_always_on_top_callback);
+    register!("__velox_setTitle",       set_title_callback);
+
+    // ── File dialogs ────────────────────────────────────────────────────────
+    register!("__velox_dialog_openFile",   dialog_open_file_callback);
+    register!("__velox_dialog_saveFile",   dialog_save_file_callback);
+    register!("__velox_dialog_openFolder", dialog_open_folder_callback);
+
+    // ── Clipboard ───────────────────────────────────────────────────────────
+    register!("__velox_clipboard_readText",  clipboard_read_text_callback);
+    register!("__velox_clipboard_writeText", clipboard_write_text_callback);
+
+    // ── Notifications ───────────────────────────────────────────────────────
+    register!("__velox_notification_send", notification_send_callback);
 }
 
 struct AsyncState {
@@ -266,6 +310,8 @@ struct AsyncState {
     next_id:      std::sync::atomic::AtomicU32,
     next_image_id: std::sync::atomic::AtomicU32,
     window:       Option<WindowController>,
+    /// Raw window handle (HWND on Windows) for parenting native dialogs.
+    hwnd:         Option<isize>,
     // ── SQLite handles ───────────────────────────────────────────────────────
     db_pools:     Arc<Mutex<HashMap<u32, velox_db::SqlitePool>>>,
     next_db_id:   std::sync::atomic::AtomicU32,
@@ -1252,6 +1298,320 @@ fn db_transaction_callback(
         }
         .await;
         queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+// ── Window extra callbacks (sync) ─────────────────────────────────────────────
+
+/// `__velox_setAlwaysOnTop(on: boolean) -> void`
+fn set_always_on_top_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let on    = args.get(0).boolean_value(scope);
+    if let Some(ctrl) = &state.window {
+        (ctrl.set_always_on_top)(on);
+    }
+}
+
+/// `__velox_setTitle(title: string) -> void`
+fn set_title_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let title = v8_arg_to_string(scope, &args, 0);
+    if let Some(ctrl) = &state.window {
+        (ctrl.set_title)(title);
+    }
+}
+
+// ── File dialog callbacks ──────────────────────────────────────────────────────
+//
+// All async. Gated by `dialog: true` capability.
+// `dialog_openFile`   → Promise<string>   — JSON array of paths, or JSON null.
+// `dialog_saveFile`   → Promise<string>   — JSON path string, or JSON null.
+// `dialog_openFolder` → Promise<string>   — JSON path string, or JSON null.
+//
+// Filter format: JSON array of `{ name: string, extensions: string[] }`.
+
+/// Build filter list from a JSON string `[{ name, extensions: string[] }]`.
+fn parse_dialog_filters(json: &str) -> Vec<(String, Vec<String>)> {
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
+    parsed.into_iter().map(|f| {
+        let name = f["name"].as_str().unwrap_or("All Files").to_string();
+        let exts: Vec<String> = f["extensions"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        (name, exts)
+    }).collect()
+}
+
+/// `__velox_dialog_openFile(filtersJson, multiple) -> Promise<string>` — JSON path[].
+fn dialog_open_file_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().dialog {
+        throw_cap_error(scope, "dialog");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let filters_json = v8_arg_to_string(scope, &args, 0);
+    let multiple     = args.get(1).boolean_value(scope);
+    let hwnd         = state.hwnd;
+    let (resolver, promise, queue) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        log::info!("[dialog_openFile] starting, hwnd={:?}", hwnd);
+        let filters = parse_dialog_filters(&filters_json);
+        let mut dialog = rfd::AsyncFileDialog::new();
+        for (name, exts) in &filters {
+            let refs: Vec<&str> = exts.iter().map(String::as_str).collect();
+            dialog = dialog.add_filter(name, &refs);
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(h) = hwnd {
+            log::info!("[dialog_openFile] setting parent hwnd={}", h);
+            dialog = dialog.set_parent(&WinParent(h));
+        }
+
+        let result: Result<String, String> = if multiple {
+            log::info!("[dialog_openFile] calling pick_files");
+            let handles = dialog.pick_files().await;
+            log::info!("[dialog_openFile] pick_files returned {:?}", handles.as_ref().map(|v| v.len()));
+            let paths: Vec<String> = handles.unwrap_or_default().iter()
+                .map(|h| h.path().to_string_lossy().into_owned())
+                .collect();
+            serde_json::to_string(&paths).map_err(|e| e.to_string())
+        } else {
+            log::info!("[dialog_openFile] calling pick_file");
+            let handle = dialog.pick_file().await;
+            log::info!("[dialog_openFile] pick_file returned {:?}", handle.as_ref().map(|h| h.path()));
+            let path = handle.as_ref().map(|h| h.path().to_string_lossy().into_owned());
+            serde_json::to_string(&path).map_err(|e| e.to_string())
+        };
+        log::info!("[dialog_openFile] result: {:?}", result);
+        queue.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_dialog_saveFile(defaultName, filtersJson) -> Promise<string>` — JSON path | null.
+fn dialog_save_file_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().dialog {
+        throw_cap_error(scope, "dialog");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let default_name = v8_arg_to_string(scope, &args, 0);
+    let filters_json = v8_arg_to_string(scope, &args, 1);
+    let hwnd         = state.hwnd;
+    let (resolver, promise, queue) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let filters = parse_dialog_filters(&filters_json);
+        let mut dialog = rfd::AsyncFileDialog::new().set_file_name(&default_name);
+        for (name, exts) in &filters {
+            let refs: Vec<&str> = exts.iter().map(String::as_str).collect();
+            dialog = dialog.add_filter(name, &refs);
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(h) = hwnd {
+            dialog = dialog.set_parent(&WinParent(h));
+        }
+
+        let handle = dialog.save_file().await;
+        let path = handle.as_ref().map(|h| h.path().to_string_lossy().into_owned());
+        let result = serde_json::to_string(&path).map_err(|e| e.to_string());
+        queue.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_dialog_openFolder() -> Promise<string>` — JSON path | null.
+fn dialog_open_folder_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().dialog {
+        throw_cap_error(scope, "dialog");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let hwnd = state.hwnd;
+    let (resolver, promise, queue) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let mut dialog = rfd::AsyncFileDialog::new();
+        #[cfg(target_os = "windows")]
+        if let Some(h) = hwnd {
+            dialog = dialog.set_parent(&WinParent(h));
+        }
+
+        let handle = dialog.pick_folder().await;
+        let path = handle.as_ref().map(|h| h.path().to_string_lossy().into_owned());
+        let result = serde_json::to_string(&path).map_err(|e| e.to_string());
+        queue.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+// ── Clipboard callbacks ────────────────────────────────────────────────────────
+//
+// Gated by `clipboard: true` capability.
+
+/// `__velox_clipboard_readText() -> Promise<string>` — clipboard text content.
+fn clipboard_read_text_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().clipboard {
+        throw_cap_error(scope, "clipboard");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let (resolver, promise, queue) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        log::info!("[clipboard_readText] starting");
+        let result: Result<String, String> = tokio::task::spawn_blocking(|| {
+            log::info!("[clipboard_readText::spawn_blocking] about to read clipboard");
+            let res = clipboard_win::get_clipboard::<String, _>(clipboard_win::formats::Unicode);
+            log::info!("[clipboard_readText::spawn_blocking] result: {:?}", res);
+            res.map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| {
+            log::error!("[clipboard_readText::await_error] {}", e);
+            e.to_string()
+        })
+        .and_then(|r| r);
+        log::info!("[clipboard_readText] final result: {:?}", result);
+        queue.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_clipboard_writeText(text) -> Promise<void>`
+fn clipboard_write_text_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().clipboard {
+        throw_cap_error(scope, "clipboard");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let text = v8_arg_to_string(scope, &args, 0);
+    let (resolver, promise, queue) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        log::info!("[clipboard_writeText] starting, text.len()={}", text.len());
+        let result: Result<String, String> = tokio::task::spawn_blocking(move || {
+            log::info!("[clipboard_writeText::spawn_blocking] setting clipboard");
+            clipboard_win::set_clipboard(clipboard_win::formats::Unicode, &text)
+                .map_err(|e| {
+                    log::error!("[clipboard_writeText] set_clipboard failed: {}", e);
+                    e.to_string()
+                })
+                .map(|_| String::new())
+        })
+        .await
+        .map_err(|e| {
+            log::error!("[clipboard_writeText] spawn_blocking error: {}", e);
+            e.to_string()
+        })
+        .and_then(|r| r);
+        log::info!("[clipboard_writeText] final result: {:?}", result);
+        queue.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+    });
+}
+
+// ── Notification callback ──────────────────────────────────────────────────────
+
+/// `__velox_notification_send(title, body) -> Promise<void>`
+///
+/// Sends a native desktop notification. Fire-and-forget; errors are logged but
+/// do not reject the Promise (notifications are best-effort).
+fn notification_send_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().notification {
+        throw_cap_error(scope, "notification");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let title = v8_arg_to_string(scope, &args, 0);
+    let body  = v8_arg_to_string(scope, &args, 1);
+    let (resolver, promise, queue) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        log::info!("[notification_send] starting, title='{}', body_len={}", title, body.len());
+        let result: Result<String, String> = tokio::task::spawn_blocking(move || {
+            let mut notif = notify_rust::Notification::new();
+            notif.summary(&title);
+            notif.body(&body);
+            // Windows 10/11 toast notifications require a registered AUMID.
+            // Re-use the PowerShell AUMID which is always present on Windows.
+            #[cfg(target_os = "windows")]
+            {
+                log::info!("[notification_send] setting app_id for Windows");
+                notif.app_id("{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe");
+            }
+            log::info!("[notification_send] calling show()");
+            if let Err(e) = notif.show() {
+                log::error!("[notification_send] show() failed: {}", e);
+            } else {
+                log::info!("[notification_send] show() succeeded");
+            }
+            Ok::<String, String>(String::new())
+        })
+        .await
+        .map_err(|e| {
+            log::error!("[notification_send] spawn_blocking error: {}", e);
+            e.to_string()
+        })
+        .and_then(|r| r);
+        log::info!("[notification_send] final result: {:?}", result);
+        queue.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
     });
 }
 

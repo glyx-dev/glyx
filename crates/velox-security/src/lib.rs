@@ -67,13 +67,19 @@ pub struct Capabilities {
     pub network: Option<NetworkCapability>,
     pub env:     Option<EnvCapability>,
     #[serde(default)]
-    pub db:      bool,
+    pub db:           bool,
     #[serde(default)]
-    pub battery: bool,
+    pub dialog:       bool,
     #[serde(default)]
-    pub usb:     bool,
+    pub clipboard:    bool,
     #[serde(default)]
-    pub shell:   bool,
+    pub notification: bool,
+    #[serde(default)]
+    pub battery:      bool,
+    #[serde(default)]
+    pub usb:          bool,
+    #[serde(default)]
+    pub shell:        bool,
 }
 
 impl Capabilities {

@@ -57,6 +57,11 @@ image     = { version = "0.25", default-features = true }
 notify    = "6.1"
 sqlx            = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 libsqlite3-sys  = { version = "0.30", features = ["bundled"] }
+rfd                 = { version = "0.14", features = ["tokio"] }
+arboard             = "3"
+clipboard-win       = "5"
+notify-rust         = "4"
+raw-window-handle   = "0.6"
 
 [profile.dev]
 opt-level = 1          # faster compiles, decent perf in dev

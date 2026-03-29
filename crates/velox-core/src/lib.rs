@@ -501,6 +501,23 @@ fn draw_dev_overlay(state: &mut AppState, frame: &mut FrameBuilder) {
 fn build_window_controller(window: Arc<winit::window::Window>) -> WindowController {
     use winit::window::Fullscreen;
 
+    // Extract the raw platform HWND (Windows) so dialogs can be parented to
+    // the Velox window and appear in front of it rather than behind it.
+    let hwnd: Option<isize> = {
+        #[cfg(target_os = "windows")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            window.window_handle().ok().and_then(|h| {
+                match h.as_raw() {
+                    RawWindowHandle::Win32(w) => Some(w.hwnd.get()),
+                    _ => None,
+                }
+            })
+        }
+        #[cfg(not(target_os = "windows"))]
+        { None }
+    };
+
     let w1 = Arc::clone(&window);
     let w2 = Arc::clone(&window);
     let w3 = Arc::clone(&window);
@@ -508,6 +525,8 @@ fn build_window_controller(window: Arc<winit::window::Window>) -> WindowControll
     let w5 = Arc::clone(&window);
     let w6 = Arc::clone(&window);
     let w7 = Arc::clone(&window);
+    let w8 = Arc::clone(&window);
+    let w9 = Arc::clone(&window);
 
     WindowController {
         get_window_size: Arc::new(move || {
@@ -538,6 +557,14 @@ fn build_window_controller(window: Arc<winit::window::Window>) -> WindowControll
         is_maximized: Arc::new(move || {
             w7.is_maximized()
         }),
+        set_always_on_top: Arc::new(move |on| {
+            use winit::window::WindowLevel;
+            w8.set_window_level(if on { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal });
+        }),
+        set_title: Arc::new(move |title| {
+            w9.set_title(&title);
+        }),
+        hwnd,
     }
 }
 

@@ -1,0 +1,20 @@
+{
+  "window": {
+    "title":       "cli-test",
+    "width":       1280,
+    "height":      800,
+    "startupMode": "windowed"
+  },
+  "capabilities": {
+    "fs":           { "read": [], "write": [] },
+    "db":           false,
+    "dialog":       false,
+    "clipboard":    false,
+    "notification": false
+  },
+  "dev": {
+    "entry": "js/app.jsx",
+    "output": "js/app.js",
+    "watch": ["js"]
+  }
+}

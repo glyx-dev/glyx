@@ -101,6 +101,21 @@ impl VeloxRuntime {
         Ok(Self { isolate, context, queue, scene, events, layout_cache })
     }
 
+    // ── Extensions ────────────────────────────────────────────────────────────
+
+    /// Call each extension's `register()` so it can add its own __myapp_* bindings.
+    pub fn register_extensions(&mut self, extensions: &[Box<dyn crate::VeloxExtension>]) {
+        if extensions.is_empty() { return; }
+        let scope = &mut v8::HandleScope::new(&mut self.isolate);
+        let ctx   = v8::Local::new(scope, &self.context);
+        let scope = &mut v8::ContextScope::new(scope, ctx);
+        let global = ctx.global(scope);
+        for ext in extensions {
+            log::debug!("Registering extension: {}", ext.name());
+            ext.register(scope, global);
+        }
+    }
+
     // ── Script execution ──────────────────────────────────────────────────────
 
     pub fn eval(&mut self, source: &str) -> Result<String, RuntimeError> {

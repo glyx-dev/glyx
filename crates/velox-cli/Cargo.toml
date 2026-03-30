@@ -6,3 +6,11 @@ edition = "2021"
 [[bin]]
 name = "velox"
 path = "src/main.rs"
+
+[dependencies]
+clap       = { workspace = true }
+anyhow     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+env_logger = { workspace = true }
+log        = { workspace = true }

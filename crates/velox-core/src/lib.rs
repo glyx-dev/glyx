@@ -60,6 +60,8 @@ use velox_gpu::GpuContext;
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
 use velox_renderer::{colors, peniko, VeloxRenderer, FrameBuilder};
 use velox_runtime::{init_v8, InputEvent, NodeProps, NodeType, SceneCommand, VeloxRuntime, WindowController};
+
+pub use velox_runtime::VeloxExtension;
 use velox_security::Capabilities;
 use velox_shell::ShellEvent;
 use velox_text::{TextLayout, TextSystem};
@@ -139,6 +141,47 @@ fn load_velox_config(cfg: &mut WindowConfig) -> Capabilities {
 
 pub use velox_shell::ShellConfig as WindowConfig;
 pub use velox_shell::StartupMode;
+
+/// Read `dev.output` from velox.config.json and return its file contents.
+fn read_output_js() -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Cfg { dev: Option<DevSection> }
+    #[derive(serde::Deserialize)]
+    struct DevSection { output: Option<String> }
+
+    let cfg: Cfg = serde_json::from_str(&std::fs::read_to_string("velox.config.json").ok()?).ok()?;
+    let output = cfg.dev?.output?;
+    match std::fs::read_to_string(&output) {
+        Ok(js) => { log::info!("Loaded JS from {}", output); Some(js) }
+        Err(e) => { log::warn!("Could not read JS from {}: {}", output, e); None }
+    }
+}
+
+/// Build a DevModeConfig from velox.config.json's `dev` section.
+fn build_dev_mode_config() -> Option<DevModeConfig> {
+    #[derive(serde::Deserialize)]
+    struct Cfg { dev: Option<DevSection> }
+    #[derive(serde::Deserialize)]
+    struct DevSection {
+        entry:  Option<String>,
+        output: Option<String>,
+        watch:  Option<Vec<String>>,
+    }
+
+    let src = std::fs::read_to_string("velox.config.json").ok()?;
+    let cfg: Cfg = serde_json::from_str(&src).ok()?;
+    let dev = cfg.dev?;
+    let entry  = dev.entry?;
+    let output = dev.output?;
+    let watch  = dev.watch.unwrap_or_else(|| vec!["js".into()]);
+
+    Some(DevModeConfig {
+        project_root: PathBuf::from("."),
+        entry_jsx:    PathBuf::from(&entry),
+        output_js:    PathBuf::from(&output),
+        watch_paths:  watch.iter().map(PathBuf::from).collect(),
+    })
+}
 mod scene;
 mod layout;
 mod render;
@@ -178,6 +221,32 @@ pub struct AppConfig {
     /// Falls back to eval() if not provided or if in dev mode.
     pub snapshot_blob: Option<Vec<u8>>,
     pub dev_mode: Option<DevModeConfig>,
+    /// Optional native Rust extensions that register custom __velox_* bindings.
+    pub extensions: Vec<Box<dyn VeloxExtension>>,
+}
+
+impl AppConfig {
+    /// Load configuration from `velox.config.json` in the current directory.
+    ///
+    /// JS source is read from the path specified in `velox.config.json`'s `dev.output`
+    /// field (typically `js/app.js`). This is the zero-boilerplate entry point:
+    /// ```no_run
+    /// fn main() {
+    ///     velox_core::run(velox_core::AppConfig::from_config());
+    /// }
+    /// ```
+    pub fn from_config() -> Self {
+        let mut window = WindowConfig::default();
+        let caps = load_velox_config(&mut window);
+        velox_security::init(caps);
+        AppConfig {
+            window,
+            js_src:        read_output_js(),
+            snapshot_blob: None,
+            dev_mode:      build_dev_mode_config(),
+            extensions:    vec![],
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -604,7 +673,7 @@ pub fn run(mut config: AppConfig) {
 
     init_v8();
 
-    let AppConfig { window, js_src, snapshot_blob, dev_mode } = config;
+    let AppConfig { window, js_src, snapshot_blob, dev_mode, extensions } = config;
 
     let mut state: Option<AppState> = None;
 
@@ -636,6 +705,9 @@ pub fn run(mut config: AppConfig) {
                     // Dev mode or no snapshot: create fresh isolate
                     VeloxRuntime::new(tokio_handle.clone(), Some(window_ctrl))
                 };
+
+                // Register native extensions before eval so their bindings are available
+                rt.register_extensions(&extensions);
 
                 if let Some(ref js) = js_src {
                     match rt.eval(js) {

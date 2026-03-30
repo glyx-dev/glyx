@@ -40,6 +40,7 @@ fn main() {
         },
         js_src: Some(include_str!("../../../examples/hello-world/js/app.js").to_string()),
         snapshot_blob,
+        extensions: vec![],
         dev_mode: Some(velox_core::DevModeConfig::new(
             std::path::PathBuf::from("examples/hello-world"),
             std::path::PathBuf::from("examples/hello-world/js/app.jsx"),

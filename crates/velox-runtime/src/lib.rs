@@ -36,6 +36,37 @@ pub use runtime::{VeloxRuntime, HeapStats};
 pub use bindings::{NodeProps, NodeType, SceneCommand, InputEvent, WindowController};
 pub use snapshot::{SnapshotBlob, create_stub_bindings_script};
 
+/// Trait for registering custom native (Rust) bindings from app code.
+///
+/// Implement this trait to expose your own `__myapp_*` functions to JavaScript
+/// without modifying the framework. Extensions are called once at startup,
+/// after all built-in bindings are registered.
+///
+/// # Example
+/// ```no_run
+/// use velox_runtime::VeloxExtension;
+///
+/// struct MyBinding;
+/// impl VeloxExtension for MyBinding {
+///     fn name(&self) -> &str { "my_binding" }
+///     fn register(&self, scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
+///         let key = v8::String::new(scope, "__myapp_hello").unwrap();
+///         let func = v8::Function::new(scope, |_scope: &mut v8::HandleScope,
+///             _args: v8::FunctionCallbackArguments,
+///             mut rv: v8::ReturnValue| {
+///             rv.set_undefined();
+///         }).unwrap();
+///         global.set(scope, key.into(), func.into());
+///     }
+/// }
+/// ```
+pub trait VeloxExtension: Send + Sync {
+    /// Unique name for logging/debugging.
+    fn name(&self) -> &str;
+    /// Register native V8 bindings. Called once after the isolate is created.
+    fn register(&self, scope: &mut v8::HandleScope, global: v8::Local<v8::Object>);
+}
+
 // ── V8 platform init ──────────────────────────────────────────────────────────
 
 static V8_INIT: Once = Once::new();

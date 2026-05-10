@@ -219,6 +219,7 @@ export function TextInput({
   onChangeText,
   placeholder = '',
   fontSize = 16,
+  multiline = false,
   width  = 240,
   height = 44,
   style,
@@ -263,12 +264,16 @@ export function TextInput({
   // only when unfocused and nothing has been typed yet.
   const displayText = (focused || value) ? value : placeholder;
   const textColor   = value ? '#ffffff' : '#888888';
+  const innerPadding = multiline ? 10 : 8;
 
   const inputStyle = {
     backgroundColor: focused ? '#4a4a7e' : '#2a2a3e',
     borderRadius: 6,
     borderWidth: focused ? 2 : 1,
     borderColor: focused ? '#8080ff' : '#44446a',
+    justifyContent: multiline ? 'flex-start' : 'center',
+    alignItems: 'flex-start',
+    padding: innerPadding,
     ...style,
   };
 
@@ -278,8 +283,8 @@ export function TextInput({
     React.createElement('text', {
       text:       displayText,
       fontSize,
-      width:      width - 16,
-      height:     height - 16,
+      width:      width - innerPadding * 2,
+      height:     multiline ? undefined : height - innerPadding * 2,
       style:      { color: textColor },
       showCursor: focused,
       textAlign:  'left',
@@ -676,4 +681,3 @@ export const notification = {
     return __velox_notification_send(title, body);
   },
 };
-

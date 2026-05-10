@@ -6191,6 +6191,7 @@ No matching component was found for:
     onChangeText,
     placeholder = "",
     fontSize = 16,
+    multiline = false,
     width = 240,
     height = 44,
     style,
@@ -6227,18 +6228,22 @@ No matching component was found for:
     }, []);
     const displayText = focused || value ? value : placeholder;
     const textColor = value ? "#ffffff" : "#888888";
+    const innerPadding = multiline ? 10 : 8;
     const inputStyle = {
       backgroundColor: focused ? "#4a4a7e" : "#2a2a3e",
       borderRadius: 6,
       borderWidth: focused ? 2 : 1,
       borderColor: focused ? "#8080ff" : "#44446a",
+      justifyContent: multiline ? "flex-start" : "center",
+      alignItems: "flex-start",
+      padding: innerPadding,
       ...style
     };
     return import_react.default.createElement("view", { _veloxOnMount: onMount, style: inputStyle, width, height, ...props }, import_react.default.createElement("text", {
       text: displayText,
       fontSize,
-      width: width - 16,
-      height: height - 16,
+      width: width - innerPadding * 2,
+      height: multiline ? undefined : height - innerPadding * 2,
       style: { color: textColor },
       showCursor: focused,
       textAlign: "left"
@@ -7237,6 +7242,7 @@ ${body}`;
                 onChangeText: setBody,
                 placeholder: "Start writing…",
                 fontSize: 13,
+                multiline: true,
                 width: editorW - 32,
                 height: bodyH
               })

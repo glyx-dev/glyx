@@ -72,6 +72,7 @@ export interface TextInputProps {
   onChangeText?: (text: string) => void;
   placeholder?:  string;
   fontSize?:     number;
+  multiline?:    boolean;
   width?:        number;
   height?:       number;
   style?:        VeloxStyle;

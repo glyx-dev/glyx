@@ -712,6 +712,7 @@ function NoteEditScreen() {
             onChangeText={setBody}
             placeholder="Start writing…"
             fontSize={13}
+            multiline
             width={editorW - 32}
             height={bodyH}
           />

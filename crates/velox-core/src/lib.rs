@@ -602,6 +602,7 @@ fn build_window_controller(window: Arc<winit::window::Window>) -> WindowControll
     let w7 = Arc::clone(&window);
     let w8 = Arc::clone(&window);
     let w9 = Arc::clone(&window);
+    let w10 = Arc::clone(&window);
 
     WindowController {
         get_window_size: Arc::new(move || {
@@ -612,6 +613,9 @@ fn build_window_controller(window: Arc<winit::window::Window>) -> WindowControll
             let monitor = w2.current_monitor()?;
             let s = monitor.size();
             Some((s.width, s.height))
+        }),
+        request_redraw: Arc::new(move || {
+            w10.request_redraw();
         }),
         set_fullscreen: Arc::new(move |full| {
             if full {

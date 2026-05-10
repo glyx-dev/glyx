@@ -36,6 +36,7 @@ unsafe impl Send for Completion {}
 
 pub type CompletionQueue = Arc<Mutex<VecDeque<Completion>>>;
 pub type SceneQueue      = Arc<Mutex<VecDeque<SceneCommand>>>;
+pub type RedrawRequest   = Arc<dyn Fn() + Send + Sync>;
 
 /// An input event pushed by the Rust side and consumed by JS via __velox_pollEvents.
 #[derive(Debug, Clone)]
@@ -57,6 +58,7 @@ pub enum InputEvent {
 pub struct WindowController {
     pub get_window_size:   Arc<dyn Fn() -> (u32, u32) + Send + Sync>,
     pub get_screen_size:   Arc<dyn Fn() -> Option<(u32, u32)> + Send + Sync>,
+    pub request_redraw:    RedrawRequest,
     pub set_fullscreen:    Arc<dyn Fn(bool) + Send + Sync>,
     pub set_maximized:     Arc<dyn Fn(bool) + Send + Sync>,
     pub set_minimized:     Arc<dyn Fn() + Send + Sync>,
@@ -218,6 +220,7 @@ pub fn register_all(
     let state = Box::new(AsyncState {
         queue,
         tokio,
+        request_redraw: window.as_ref().map(|w| Arc::clone(&w.request_redraw)),
         scene,
         events,
         layout_cache,
@@ -304,6 +307,7 @@ pub fn register_all(
 struct AsyncState {
     queue:        CompletionQueue,
     tokio:        Handle,
+    request_redraw: Option<RedrawRequest>,
     scene:        SceneQueue,
     events:       EventQueue,
     layout_cache: LayoutCache,
@@ -676,22 +680,18 @@ fn read_file_callback(
         .map(|s| s.to_rust_string_lossy(scope))
         .unwrap_or_default();
 
-    let resolver = v8::PromiseResolver::new(scope).unwrap();
-    let promise  = resolver.get_promise(scope);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
-
-    let global_resolver  = v8::Global::new(scope, resolver);
-    let resolver_ptr     = Box::into_raw(Box::new(global_resolver)) as usize;
-    let queue_clone      = Arc::clone(&state.queue);
 
     state.tokio.spawn(async move {
         let result = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| e.to_string());
-        queue_clone
-            .lock()
-            .unwrap()
-            .push_back(Completion { resolver_ptr, result });
+        enqueue_completion(
+            &queue_clone,
+            redraw.as_ref(),
+            Completion { resolver_ptr: resolver, result },
+        );
     });
 }
 
@@ -950,7 +950,7 @@ fn write_file_callback(
     let path    = v8_arg_to_string(scope, &args, 0);
     let content = v8_arg_to_string(scope, &args, 1);
 
-    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -958,7 +958,7 @@ fn write_file_callback(
             .await
             .map(|_| String::new())
             .map_err(|e| e.to_string());
-        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -979,7 +979,7 @@ fn append_file_callback(
     let path    = v8_arg_to_string(scope, &args, 0);
     let content = v8_arg_to_string(scope, &args, 1);
 
-    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -994,7 +994,7 @@ fn append_file_callback(
         .map(|_| String::new())
         .map_err(|e| e.to_string());
 
-        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1014,7 +1014,7 @@ fn list_dir_callback(
 
     let path = v8_arg_to_string(scope, &args, 0);
 
-    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1032,7 +1032,7 @@ fn list_dir_callback(
         }
         .await;
 
-        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1052,7 +1052,7 @@ fn delete_file_callback(
 
     let path = v8_arg_to_string(scope, &args, 0);
 
-    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1060,7 +1060,7 @@ fn delete_file_callback(
             .await
             .map(|_| String::new())
             .map_err(|e| e.to_string());
-        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1080,7 +1080,7 @@ fn mkdirp_callback(
 
     let path = v8_arg_to_string(scope, &args, 0);
 
-    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1088,7 +1088,7 @@ fn mkdirp_callback(
             .await
             .map(|_| String::new())
             .map_err(|e| e.to_string());
-        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1116,7 +1116,7 @@ fn db_open_callback(
     let path      = v8_arg_to_string(scope, &args, 0);
     let handle    = state.next_db_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let pools     = Arc::clone(&state.db_pools);
-    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1126,7 +1126,7 @@ fn db_open_callback(
                 handle.to_string()
             })
             .map_err(|e| e.to_string());
-        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1157,7 +1157,7 @@ fn db_query_callback(
         }
     };
 
-    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1169,7 +1169,7 @@ fn db_query_callback(
             serde_json::to_string(&rows).map_err(|e| e.to_string())
         }
         .await;
-        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1199,7 +1199,7 @@ fn db_run_callback(
         }
     };
 
-    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1215,7 +1215,7 @@ fn db_run_callback(
             .map_err(|e| e.to_string())
         }
         .await;
-        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1240,17 +1240,18 @@ fn db_close_callback(
     // Remove synchronously so no new queries can grab this pool.
     let pool = state.db_pools.lock().unwrap().remove(&handle);
 
-    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
         if let Some(pool) = pool {
             pool.close().await;
         }
-        queue_clone.lock().unwrap().push_back(Completion {
-            resolver_ptr: resolver,
-            result: Ok(String::new()),
-        });
+        enqueue_completion(
+            &queue_clone,
+            redraw.as_ref(),
+            Completion { resolver_ptr: resolver, result: Ok(String::new()) },
+        );
     });
 }
 
@@ -1282,7 +1283,7 @@ fn db_transaction_callback(
         }
     };
 
-    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1297,7 +1298,7 @@ fn db_transaction_callback(
             Ok(String::new())
         }
         .await;
-        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1371,7 +1372,7 @@ fn dialog_open_file_callback(
     let filters_json = v8_arg_to_string(scope, &args, 0);
     let multiple     = args.get(1).boolean_value(scope);
     let hwnd         = state.hwnd;
-    let (resolver, promise, queue) = make_promise(scope, state);
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1404,7 +1405,7 @@ fn dialog_open_file_callback(
             serde_json::to_string(&path).map_err(|e| e.to_string())
         };
         log::info!("[dialog_openFile] result: {:?}", result);
-        queue.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1425,7 +1426,7 @@ fn dialog_save_file_callback(
     let default_name = v8_arg_to_string(scope, &args, 0);
     let filters_json = v8_arg_to_string(scope, &args, 1);
     let hwnd         = state.hwnd;
-    let (resolver, promise, queue) = make_promise(scope, state);
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1443,7 +1444,7 @@ fn dialog_save_file_callback(
         let handle = dialog.save_file().await;
         let path = handle.as_ref().map(|h| h.path().to_string_lossy().into_owned());
         let result = serde_json::to_string(&path).map_err(|e| e.to_string());
-        queue.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1462,7 +1463,7 @@ fn dialog_open_folder_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let hwnd = state.hwnd;
-    let (resolver, promise, queue) = make_promise(scope, state);
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1475,7 +1476,7 @@ fn dialog_open_folder_callback(
         let handle = dialog.pick_folder().await;
         let path = handle.as_ref().map(|h| h.path().to_string_lossy().into_owned());
         let result = serde_json::to_string(&path).map_err(|e| e.to_string());
-        queue.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1497,7 +1498,7 @@ fn clipboard_read_text_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let (resolver, promise, queue) = make_promise(scope, state);
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1515,7 +1516,7 @@ fn clipboard_read_text_callback(
         })
         .and_then(|r| r);
         log::info!("[clipboard_readText] final result: {:?}", result);
-        queue.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1534,7 +1535,7 @@ fn clipboard_write_text_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let text = v8_arg_to_string(scope, &args, 0);
-    let (resolver, promise, queue) = make_promise(scope, state);
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1555,7 +1556,7 @@ fn clipboard_write_text_callback(
         })
         .and_then(|r| r);
         log::info!("[clipboard_writeText] final result: {:?}", result);
-        queue.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1580,7 +1581,7 @@ fn notification_send_callback(
 
     let title = v8_arg_to_string(scope, &args, 0);
     let body  = v8_arg_to_string(scope, &args, 1);
-    let (resolver, promise, queue) = make_promise(scope, state);
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1611,7 +1612,7 @@ fn notification_send_callback(
         })
         .and_then(|r| r);
         log::info!("[notification_send] final result: {:?}", result);
-        queue.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1640,7 +1641,7 @@ fn vectordb_open_callback(
     let path   = v8_arg_to_string(scope, &args, 0);
     let handle = state.next_vdb_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let stores = Arc::clone(&state.vector_stores);
-    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1650,7 +1651,7 @@ fn vectordb_open_callback(
                 handle.to_string()
             })
             .map_err(|e| e.to_string());
-        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1685,7 +1686,7 @@ fn vectordb_upsert_callback(
         }
     };
 
-    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1699,7 +1700,7 @@ fn vectordb_upsert_callback(
                 .map_err(|e| e.to_string())
         }
         .await;
-        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1733,7 +1734,7 @@ fn vectordb_search_callback(
         }
     };
 
-    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
@@ -1753,7 +1754,7 @@ fn vectordb_search_callback(
             serde_json::to_string(&json_hits).map_err(|e| e.to_string())
         }
         .await;
-        queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -1777,17 +1778,18 @@ fn vectordb_close_callback(
     let handle = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
     let store  = state.vector_stores.lock().unwrap().remove(&handle);
 
-    let (resolver, promise, queue_clone) = make_promise(scope, state);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
         if let Some(s) = store {
             s.pool.close().await;
         }
-        queue_clone.lock().unwrap().push_back(Completion {
-            resolver_ptr: resolver,
-            result: Ok(String::new()),
-        });
+        enqueue_completion(
+            &queue_clone,
+            redraw.as_ref(),
+            Completion { resolver_ptr: resolver, result: Ok(String::new()) },
+        );
     });
 }
 
@@ -1809,13 +1811,25 @@ fn v8_arg_to_string(
 fn make_promise<'s>(
     scope: &mut v8::HandleScope<'s>,
     state: &AsyncState,
-) -> (usize, v8::Local<'s, v8::Promise>, CompletionQueue) {
+) -> (usize, v8::Local<'s, v8::Promise>, CompletionQueue, Option<RedrawRequest>) {
     let resolver     = v8::PromiseResolver::new(scope).unwrap();
     let promise      = resolver.get_promise(scope);
     let global_res   = v8::Global::new(scope, resolver);
     let resolver_ptr = Box::into_raw(Box::new(global_res)) as usize;
     let queue_clone  = Arc::clone(&state.queue);
-    (resolver_ptr, promise, queue_clone)
+    let redraw       = state.request_redraw.as_ref().map(Arc::clone);
+    (resolver_ptr, promise, queue_clone, redraw)
+}
+
+fn enqueue_completion(
+    queue: &CompletionQueue,
+    redraw: Option<&RedrawRequest>,
+    completion: Completion,
+) {
+    queue.lock().unwrap().push_back(completion);
+    if let Some(redraw) = redraw {
+        redraw();
+    }
 }
 
 /// Throw a JS Error for a missing capability.

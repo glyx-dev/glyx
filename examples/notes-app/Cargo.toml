@@ -1,0 +1,9 @@
+[package]
+name    = "notes-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+velox-core  = { path = "../../crates/velox-core" }
+velox-shell = { path = "../../crates/velox-shell" }
+env_logger  = { workspace = true }

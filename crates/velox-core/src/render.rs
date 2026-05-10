@@ -23,12 +23,10 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
 
     match node.node_type {
         NodeType::View => {
-            let bg     = node.props.background_color
-                .map(rgba_to_vello)
-                .unwrap_or(colors::BRAND_GREEN);
             let radius = node.props.border_radius.unwrap_or(0.0) as f64;
-
-            ctx.frame.fill_rounded_rect(rx, ry, rw, rh, radius, bg);
+            if let Some(bg) = node.props.background_color.map(rgba_to_vello) {
+                ctx.frame.fill_rounded_rect(rx, ry, rw, rh, radius, bg);
+            }
 
             if let Some(bw) = node.props.border_width {
                 let bc = node.props.border_color.unwrap_or([80, 80, 120, 255]);

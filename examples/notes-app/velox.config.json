@@ -1,0 +1,20 @@
+{
+  "window": {
+    "title":       "Notes",
+    "width":       1100,
+    "height":      780,
+    "startupMode": "windowed"
+  },
+  "capabilities": {
+    "fs":           { "read": ["**"], "write": ["**"] },
+    "db":           true,
+    "dialog":       true,
+    "clipboard":    true,
+    "notification": true
+  },
+  "dev": {
+    "entry": "js/app.jsx",
+    "output": "js/app.js",
+    "watch": ["js"]
+  }
+}

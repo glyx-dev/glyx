@@ -112,7 +112,9 @@ env_logger  = "0.11"
 
     // ── src/main.rs ────────────────────────────────────────────────────────
     write_file(dest.join("src/main.rs"), &format!(
-        r#"fn main() {{
+        r#"#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
+fn main() {{
     velox_core::run(velox_core::AppConfig::from_config());
 }}
 "#
@@ -301,19 +303,7 @@ fn cmd_package(target: Option<&str>) -> Result<()> {
 
     let os = target.unwrap_or(host_os());
     let rust_target = platform_to_rust_target(os)?;
-
-    let bin_src = if target.is_some() {
-        PathBuf::from(format!("target/{}/release/{}", rust_target, binary_name(&project_name)))
-    } else {
-        PathBuf::from(format!("target/release/{}", binary_name(&project_name)))
-    };
-
-    if !bin_src.exists() {
-        bail!(
-            "Binary not found at {}. Run `velox build` first.",
-            bin_src.display()
-        );
-    }
+    let bin_src = resolve_packaged_binary(&project_name, &rust_target, target.is_some())?;
 
     std::fs::create_dir_all("target/velox/dist")?;
 
@@ -327,8 +317,51 @@ fn cmd_package(target: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn resolve_packaged_binary(project_name: &str, rust_target: &str, cross_target: bool) -> Result<PathBuf> {
+    let rel = if cross_target {
+        PathBuf::from(format!("target/{rust_target}/release/{}", binary_name(project_name)))
+    } else {
+        PathBuf::from(format!("target/release/{}", binary_name(project_name)))
+    };
+
+    let mut candidates = vec![std::env::current_dir()?.join(&rel)];
+
+    if let Some(workspace_root) = find_workspace_root()? {
+        let workspace_candidate = workspace_root.join(&rel);
+        if !candidates.iter().any(|p| p == &workspace_candidate) {
+            candidates.push(workspace_candidate);
+        }
+    }
+
+    for candidate in &candidates {
+        if candidate.exists() {
+            return Ok(candidate.clone());
+        }
+    }
+
+    let searched = candidates
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!("Binary not found. Run `velox build` first. Searched: {searched}");
+}
+
 fn package_windows(name: &str, bin: &Path) -> Result<()> {
-    // Create a simple ZIP archive containing the binary
+    let dist_root = PathBuf::from("target/velox/dist");
+    let app_dir = dist_root.join(format!("{name}-windows"));
+    if app_dir.exists() {
+        std::fs::remove_dir_all(&app_dir)
+            .with_context(|| format!("remove {}", app_dir.display()))?;
+    }
+    std::fs::create_dir_all(&app_dir)?;
+
+    let exe_name = binary_name(name);
+    std::fs::copy(bin, app_dir.join(&exe_name))
+        .with_context(|| format!("copy {}", bin.display()))?;
+    copy_runtime_files(&app_dir)?;
+
+    // Create a simple ZIP archive containing the packaged app folder
     let zip_path = format!("target/velox/dist/{name}-windows.zip");
     println!("Packaging for Windows: {zip_path}");
 
@@ -336,8 +369,8 @@ fn package_windows(name: &str, bin: &Path) -> Result<()> {
         .args([
             "-Command",
             &format!(
-                "Compress-Archive -Path '{}' -DestinationPath '{}' -Force",
-                bin.display(), zip_path
+                "Compress-Archive -Path '{}\\*' -DestinationPath '{}' -Force",
+                app_dir.display(), zip_path
             ),
         ])
         .status();
@@ -345,13 +378,11 @@ fn package_windows(name: &str, bin: &Path) -> Result<()> {
     match status {
         Ok(s) if s.success() => {
             println!("✓ Package: {zip_path}");
+            println!("  Unzip and run {exe_name} from the extracted folder");
             println!("  (Full NSIS/WiX installer coming in a future release)");
         }
         _ => {
-            // Fallback: just copy the binary
-            let dest = format!("target/velox/dist/{name}.exe");
-            std::fs::copy(bin, &dest)?;
-            println!("✓ Binary: {dest}");
+            println!("✓ Folder: {}", app_dir.display());
         }
     }
     Ok(())
@@ -559,6 +590,69 @@ fn host_os() -> &'static str {
     else                                 { "linux" }
 }
 
+fn find_workspace_root() -> Result<Option<PathBuf>> {
+    let mut dir = std::env::current_dir()?;
+    loop {
+        let cargo_toml = dir.join("Cargo.toml");
+        if cargo_toml.exists() {
+            let content = std::fs::read_to_string(&cargo_toml).unwrap_or_default();
+            if content.contains("[workspace]") {
+                return Ok(Some(dir));
+            }
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => return Ok(None),
+        }
+    }
+}
+
+fn copy_runtime_files(dest_root: &Path) -> Result<()> {
+    let config = PathBuf::from("velox.config.json");
+    if config.exists() {
+        let dest = dest_root.join("velox.config.json");
+        std::fs::copy(&config, &dest)
+            .with_context(|| format!("copy {}", config.display()))?;
+    }
+
+    let js_dir = PathBuf::from("js");
+    if js_dir.exists() {
+        copy_dir_all(&js_dir, &dest_root.join("js"))?;
+    }
+
+    let assets_dir = PathBuf::from("assets");
+    if assets_dir.exists() {
+        copy_dir_all(&assets_dir, &dest_root.join("assets"))?;
+    }
+
+    let migrations_dir = PathBuf::from("migrations");
+    if migrations_dir.exists() {
+        copy_dir_all(&migrations_dir, &dest_root.join("migrations"))?;
+    }
+
+    Ok(())
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)
+        .with_context(|| format!("create {}", dst.display()))?;
+
+    for entry in std::fs::read_dir(src)
+        .with_context(|| format!("read {}", src.display()))?
+    {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dest_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &dest_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dest_path)
+                .with_context(|| format!("copy {}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
 fn write_file(path: impl AsRef<Path>, content: &str) -> Result<()> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
@@ -610,4 +704,3 @@ if (typeof MessageChannel === 'undefined') {
   };
 }
 "#;
-

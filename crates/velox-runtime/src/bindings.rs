@@ -88,6 +88,8 @@ pub struct WindowController {
     /// Create a secondary window with the given pre-assigned id, title, and size.
     /// Called by the `__velox_window_create` binding.
     pub create_window: Option<Arc<dyn Fn(u32, String, u32, u32) + Send + Sync>>,
+    /// Quit the application — closes all windows and exits the event loop.
+    pub quit: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 // ── Dialog parent HWND wrapper ────────────────────────────────────────────────
@@ -239,6 +241,7 @@ pub fn register_all(
     ipc_bus:      IpcBus,
     my_handle:    u32,
     next_window_id: Arc<std::sync::atomic::AtomicU32>,
+    perf_state:   Arc<Mutex<velox_perf::PerfState>>,
 ) {
     set_func(scope, global, "__velox_getTime", get_time);
     set_func(scope, global, "__velox_log",     js_log);
@@ -266,6 +269,12 @@ pub fn register_all(
         ipc_bus,
         my_handle,
         next_window_id,
+        perf_state,
+        sleep_guards:   std::cell::RefCell::new(HashMap::new()),
+        next_guard_id:  std::sync::atomic::AtomicU32::new(1),
+        gamepad_gilrs:  std::cell::RefCell::new(gilrs::Gilrs::new().ok()),
+        hotkey_state:   std::cell::RefCell::new(None),
+        next_hotkey_id: std::sync::atomic::AtomicU32::new(1),
     });
     let ptr   = Box::into_raw(state) as *mut std::ffi::c_void;
     // Safety: ptr is valid for the lifetime of the isolate.
@@ -353,6 +362,25 @@ pub fn register_all(
     register!("__velox_window_create", window_create_callback);
     register!("__velox_ipc_send",      ipc_send_callback);
     register!("__velox_ipc_poll",      ipc_poll_callback);
+
+    // ── Performance metrics ──────────────────────────────────────────────────
+    register!("__velox_perf_snapshot",         perf_snapshot_callback);
+    register!("__velox_perf_set_budget",       perf_set_budget_callback);
+    register!("__velox_perf_poll_violations",  perf_poll_violations_callback);
+
+    // ── OS system APIs ───────────────────────────────────────────────────────
+    register!("__velox_battery_getStatus",   battery_get_status_callback);
+    register!("__velox_system_getInfo",      system_get_info_callback);
+    register!("__velox_power_preventSleep",  power_prevent_sleep_callback);
+    register!("__velox_power_allowSleep",    power_allow_sleep_callback);
+    register!("__velox_storage_getDrives",   storage_get_drives_callback);
+    register!("__velox_gamepad_poll",        gamepad_poll_callback);
+    register!("__velox_shortcut_register",   shortcut_register_callback);
+    register!("__velox_shortcut_unregister", shortcut_unregister_callback);
+    register!("__velox_shortcut_poll",       shortcut_poll_callback);
+
+    // ── App lifecycle ────────────────────────────────────────────────────────
+    register!("__velox_quit", quit_callback);
 }
 
 struct AsyncState {
@@ -380,11 +408,25 @@ struct AsyncState {
     ipc_bus:       IpcBus,
     my_handle:     u32,
     next_window_id: Arc<std::sync::atomic::AtomicU32>,
+    // ── Performance metrics ──────────────────────────────────────────────────
+    perf_state:    Arc<Mutex<velox_perf::PerfState>>,
+    // ── OS system APIs (single-threaded, RefCell for interior mutability) ───
+    sleep_guards:  std::cell::RefCell<HashMap<u32, velox_sysapi::SleepGuard>>,
+    next_guard_id: std::sync::atomic::AtomicU32,
+    gamepad_gilrs: std::cell::RefCell<Option<gilrs::Gilrs>>,
+    hotkey_state:  std::cell::RefCell<Option<HotkeyState>>,
+    next_hotkey_id: std::sync::atomic::AtomicU32,
 }
 
 struct WsHandle {
     outbox_tx: tokio::sync::mpsc::UnboundedSender<String>,
     inbox:     Arc<Mutex<VecDeque<String>>>,
+}
+
+struct HotkeyState {
+    manager: global_hotkey::GlobalHotKeyManager,
+    /// Maps velox-assigned ID → registered HotKey (needed for unregister).
+    hotkeys: HashMap<u32, global_hotkey::hotkey::HotKey>,
 }
 
 fn set_func(
@@ -2376,6 +2418,410 @@ fn throw_cap_error(scope: &mut v8::HandleScope, cap: &str) {
         "Capability required: {cap} — add it to velox.config.json under \"capabilities\""
     );
     throw_js_error(scope, &msg);
+}
+
+// ── OS system APIs ────────────────────────────────────────────────────────────
+
+/// `__velox_battery_getStatus()` → Promise<JSON | null>
+fn battery_get_status_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !velox_security::get().battery {
+        throw_cap_error(scope, "battery"); return;
+    }
+    let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
+    state.tokio.spawn(async move {
+        let json = tokio::task::spawn_blocking(|| {
+            match velox_sysapi::battery_status() {
+                Some(b) => format!(
+                    "{{\"level\":{:.3},\"charging\":{},\"timeRemainingSecs\":{}}}",
+                    b.level, b.charging,
+                    b.time_remaining_secs.map(|s| s.to_string()).unwrap_or("null".into())
+                ),
+                None => "null".into(),
+            }
+        }).await.unwrap_or_else(|_| "null".into());
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result: Ok(json) });
+    });
+    rv.set(promise.into());
+}
+
+/// `__velox_system_getInfo()` → Promise<JSON>
+fn system_get_info_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !velox_security::get().system {
+        throw_cap_error(scope, "system"); return;
+    }
+    let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
+    state.tokio.spawn(async move {
+        let json = tokio::task::spawn_blocking(|| {
+            let i = velox_sysapi::system_info();
+            format!(
+                "{{\"cpuName\":{:?},\"cpuCores\":{},\"memoryTotalMb\":{},\"memoryUsedMb\":{},\"osName\":{:?},\"osVersion\":{:?}}}",
+                i.cpu_name, i.cpu_cores, i.memory_total_mb, i.memory_used_mb, i.os_name, i.os_version
+            )
+        }).await.unwrap_or_else(|_| "{}".into());
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result: Ok(json) });
+    });
+    rv.set(promise.into());
+}
+
+/// `__velox_power_preventSleep(reason)` → string guard-id (sync)
+fn power_prevent_sleep_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !velox_security::get().power {
+        throw_cap_error(scope, "power"); return;
+    }
+    let reason = {
+        let s = v8_arg_to_string(scope, &args, 0);
+        if s.is_empty() { "Velox app".into() } else { s }
+    };
+    match velox_sysapi::prevent_sleep(&reason) {
+        Some(guard) => {
+            let id = state.next_guard_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            state.sleep_guards.borrow_mut().insert(id, guard);
+            let s = v8::String::new(scope, &id.to_string()).unwrap();
+            rv.set(s.into());
+        }
+        None => {
+            throw_js_error(scope, "power.preventSleep: not supported on this platform");
+        }
+    }
+}
+
+/// `__velox_power_allowSleep(id)` — sync, drops the guard
+fn power_allow_sleep_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let id_str = v8_arg_to_string(scope, &args, 0);
+    if let Ok(id) = id_str.parse::<u32>() {
+        state.sleep_guards.borrow_mut().remove(&id);
+    }
+}
+
+/// `__velox_storage_getDrives()` → Promise<JSON>
+fn storage_get_drives_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !velox_security::get().storage {
+        throw_cap_error(scope, "storage"); return;
+    }
+    let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
+    state.tokio.spawn(async move {
+        let json = tokio::task::spawn_blocking(|| {
+            let drives = velox_sysapi::storage_drives();
+            let entries: Vec<String> = drives.iter().map(|d| format!(
+                "{{\"name\":{:?},\"mountPoint\":{:?},\"totalBytes\":{},\"availableBytes\":{}}}",
+                d.name, d.mount_point, d.total_bytes, d.available_bytes
+            )).collect();
+            format!("[{}]", entries.join(","))
+        }).await.unwrap_or_else(|_| "[]".into());
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result: Ok(json) });
+    });
+    rv.set(promise.into());
+}
+
+/// `__velox_gamepad_poll()` → JSON string (sync, drain gilrs events)
+fn gamepad_poll_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !velox_security::get().gamepads {
+        throw_cap_error(scope, "gamepads"); return;
+    }
+    let mut gilrs_opt = state.gamepad_gilrs.borrow_mut();
+    let json = match gilrs_opt.as_mut() {
+        None => "[]".into(),
+        Some(gilrs) => {
+            let mut events = Vec::new();
+            while let Some(ev) = gilrs.next_event() {
+                let gp = gilrs.gamepad(ev.id);
+                let ev_json = match ev.event {
+                    gilrs::EventType::ButtonPressed(btn, _)  =>
+                        format!(r#"{{"type":"buttonPressed","button":"{:?}"}}"#, btn),
+                    gilrs::EventType::ButtonReleased(btn, _) =>
+                        format!(r#"{{"type":"buttonReleased","button":"{:?}"}}"#, btn),
+                    gilrs::EventType::AxisChanged(axis, val, _) =>
+                        format!(r#"{{"type":"axisChanged","axis":"{:?}","value":{:.4}}}"#, axis, val),
+                    gilrs::EventType::Connected    => r#"{"type":"connected"}"#.into(),
+                    gilrs::EventType::Disconnected => r#"{"type":"disconnected"}"#.into(),
+                    _ => r#"{"type":"other"}"#.into(),
+                };
+                events.push(format!(
+                    r#"{{"id":{},"name":{},"event":{}}}"#,
+                    usize::from(ev.id),
+                    serde_json::to_string(gp.name()).unwrap_or_else(|_| "\"\"".into()),
+                    ev_json
+                ));
+            }
+            if events.is_empty() { "[]".into() }
+            else { format!("[{}]", events.join(",")) }
+        }
+    };
+    let s = v8::String::new(scope, &json).unwrap_or_else(|| v8::String::empty(scope));
+    rv.set(s.into());
+}
+
+/// `__velox_shortcut_register(accelerator)` → string id (sync)
+fn shortcut_register_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !velox_security::get().global_shortcuts {
+        throw_cap_error(scope, "globalShortcuts"); return;
+    }
+    let acc = v8_arg_to_string(scope, &args, 0);
+    if acc.is_empty() {
+        throw_js_error(scope, "shortcut.register: accelerator required"); return;
+    }
+    let hotkey = match parse_accelerator(&acc) {
+        Some(hk) => hk,
+        None     => { throw_js_error(scope, &format!("shortcut.register: invalid accelerator '{acc}'")); return; }
+    };
+
+    let mut hs = state.hotkey_state.borrow_mut();
+    if hs.is_none() {
+        match global_hotkey::GlobalHotKeyManager::new() {
+            Ok(mgr) => *hs = Some(HotkeyState { manager: mgr, hotkeys: HashMap::new() }),
+            Err(e)  => { throw_js_error(scope, &format!("shortcut.register: {e}")); return; }
+        }
+    }
+    let hs = hs.as_mut().unwrap();
+    if let Err(e) = hs.manager.register(hotkey) {
+        throw_js_error(scope, &format!("shortcut.register: {e}")); return;
+    }
+    let id = state.next_hotkey_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    hs.hotkeys.insert(id, hotkey);
+    let s = v8::String::new(scope, &id.to_string()).unwrap();
+    rv.set(s.into());
+}
+
+/// `__velox_shortcut_unregister(id)` — sync
+fn shortcut_unregister_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let id_str = v8_arg_to_string(scope, &args, 0);
+    if let Ok(id) = id_str.parse::<u32>() {
+        if let Some(hs) = state.hotkey_state.borrow_mut().as_mut() {
+            if let Some(hotkey) = hs.hotkeys.remove(&id) {
+                let _ = hs.manager.unregister(hotkey);
+            }
+        }
+    }
+}
+
+/// `__velox_shortcut_poll()` → JSON string array of fired velox IDs (sync)
+fn shortcut_poll_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let hs_opt = state.hotkey_state.borrow();
+    let json = match hs_opt.as_ref() {
+        None => "[]".into(),
+        Some(hs) => {
+            let receiver = global_hotkey::GlobalHotKeyEvent::receiver();
+            let mut ids  = Vec::new();
+            while let Ok(ev) = receiver.try_recv() {
+                if ev.state == global_hotkey::HotKeyState::Pressed {
+                    if let Some((&velox_id, _)) = hs.hotkeys.iter().find(|(_, hk)| hk.id() == ev.id) {
+                        ids.push(velox_id.to_string());
+                    }
+                }
+            }
+            if ids.is_empty() { "[]".into() }
+            else { format!("[{}]", ids.join(",")) }
+        }
+    };
+    let s = v8::String::new(scope, &json).unwrap_or_else(|| v8::String::empty(scope));
+    rv.set(s.into());
+}
+
+/// Parse `"ctrl+shift+v"` into a `global_hotkey::hotkey::HotKey`.
+fn parse_accelerator(acc: &str) -> Option<global_hotkey::hotkey::HotKey> {
+    use global_hotkey::hotkey::{HotKey, Modifiers};
+    let mut mods     = Modifiers::empty();
+    let mut key_code = None;
+    for part in acc.to_lowercase().split('+') {
+        match part.trim() {
+            "ctrl" | "control" => mods |= Modifiers::CONTROL,
+            "shift"            => mods |= Modifiers::SHIFT,
+            "alt"              => mods |= Modifiers::ALT,
+            "meta" | "cmd" | "super" | "win" => mods |= Modifiers::META,
+            key => key_code = str_to_code(key),
+        }
+    }
+    let code = key_code?;
+    Some(HotKey::new(if mods.is_empty() { None } else { Some(mods) }, code))
+}
+
+fn str_to_code(key: &str) -> Option<global_hotkey::hotkey::Code> {
+    use global_hotkey::hotkey::Code;
+    Some(match key {
+        "a" => Code::KeyA,    "b" => Code::KeyB,    "c" => Code::KeyC,
+        "d" => Code::KeyD,    "e" => Code::KeyE,    "f" => Code::KeyF,
+        "g" => Code::KeyG,    "h" => Code::KeyH,    "i" => Code::KeyI,
+        "j" => Code::KeyJ,    "k" => Code::KeyK,    "l" => Code::KeyL,
+        "m" => Code::KeyM,    "n" => Code::KeyN,    "o" => Code::KeyO,
+        "p" => Code::KeyP,    "q" => Code::KeyQ,    "r" => Code::KeyR,
+        "s" => Code::KeyS,    "t" => Code::KeyT,    "u" => Code::KeyU,
+        "v" => Code::KeyV,    "w" => Code::KeyW,    "x" => Code::KeyX,
+        "y" => Code::KeyY,    "z" => Code::KeyZ,
+        "0" => Code::Digit0,  "1" => Code::Digit1,  "2" => Code::Digit2,
+        "3" => Code::Digit3,  "4" => Code::Digit4,  "5" => Code::Digit5,
+        "6" => Code::Digit6,  "7" => Code::Digit7,  "8" => Code::Digit8,
+        "9" => Code::Digit9,
+        "f1"  => Code::F1,  "f2"  => Code::F2,  "f3"  => Code::F3,
+        "f4"  => Code::F4,  "f5"  => Code::F5,  "f6"  => Code::F6,
+        "f7"  => Code::F7,  "f8"  => Code::F8,  "f9"  => Code::F9,
+        "f10" => Code::F10, "f11" => Code::F11, "f12" => Code::F12,
+        "space"                    => Code::Space,
+        "enter" | "return"         => Code::Enter,
+        "escape" | "esc"           => Code::Escape,
+        "tab"                      => Code::Tab,
+        "backspace"                => Code::Backspace,
+        "delete"                   => Code::Delete,
+        "insert"                   => Code::Insert,
+        "home"                     => Code::Home,
+        "end"                      => Code::End,
+        "pageup"                   => Code::PageUp,
+        "pagedown"                 => Code::PageDown,
+        "up"    | "arrowup"        => Code::ArrowUp,
+        "down"  | "arrowdown"      => Code::ArrowDown,
+        "left"  | "arrowleft"      => Code::ArrowLeft,
+        "right" | "arrowright"     => Code::ArrowRight,
+        _ => return None,
+    })
+}
+
+// ── Performance metrics ────────────────────────────────────────────────────────
+
+/// `__velox_perf_snapshot()` → JSON string with current perf metrics.
+fn perf_snapshot_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let perf  = state.perf_state.lock().unwrap();
+    let last  = perf.last_frame();
+    let fps   = perf.fps();
+    let avg   = perf.avg_frame_time();
+    let p99   = perf.p99_frame_time();
+    let js_t  = perf.avg_js_time();
+    let lay_t = perf.avg_layout_time();
+    let heap_mb   = last.heap_used_bytes as f64 / (1024.0 * 1024.0);
+    let node_count = last.node_count;
+    drop(perf);
+
+    let json = format!(
+        "{{\"fps\":{fps:.1},\"frameTime\":{avg:.2},\"frameTimeP99\":{p99:.2},\
+         \"jsTime\":{js_t:.2},\"layoutTime\":{lay_t:.2},\
+         \"memoryJS\":{heap_mb:.2},\"nodeCount\":{node_count}}}"
+    );
+    let s = v8::String::new(scope, &json).unwrap_or_else(|| v8::String::empty(scope));
+    rv.set(s.into());
+}
+
+/// `__velox_perf_set_budget(ms)` — sync, sets the frame-budget threshold.
+fn perf_set_budget_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    if args.length() < 1 { return; }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let ms = args.get(0).number_value(scope).unwrap_or(16.667);
+    state.perf_state.lock().unwrap().budget_ms = ms;
+}
+
+/// `__velox_perf_poll_violations()` → JSON array string; drains the violation queue.
+fn perf_poll_violations_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let violations: Vec<String> = {
+        let mut perf = state.perf_state.lock().unwrap();
+        perf.violations.drain(..).collect()
+    };
+    let json = if violations.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", violations.join(","))
+    };
+    let s = v8::String::new(scope, &json).unwrap_or_else(|| v8::String::empty(scope));
+    rv.set(s.into());
+}
+
+/// `__velox_quit()` — sync, requests application exit.
+///
+/// Calls the quit closure stored in `WindowController`, which sends
+/// `VeloxUserEvent::Quit` to the winit event loop causing it to exit.
+fn quit_callback(
+    _scope: &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if let Some(ref ctrl) = state.window {
+        if let Some(ref quit_fn) = ctrl.quit {
+            (quit_fn)();
+        }
+    }
 }
 
 /// Throw a generic JS Error with the given message.

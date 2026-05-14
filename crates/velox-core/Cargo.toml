@@ -18,6 +18,7 @@ velox-renderer = { path = "../velox-renderer" }
 velox-text     = { path = "../velox-text" }
 velox-layout   = { path = "../velox-layout" }
 velox-runtime  = { path = "../velox-runtime" }
+velox-perf     = { path = "../velox-perf" }
 winit          = { workspace = true }
 tokio          = { workspace = true }
 pollster       = { workspace = true }

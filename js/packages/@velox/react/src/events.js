@@ -34,6 +34,9 @@ const scrollRegistry = new Map();
 // Listeners notified on window resize: Array<(size: {width, height}) => void>
 const windowSizeListeners = [];
 
+// Listeners notified on every key event: Array<(ev: {key, ctrl, shift, pressed}) => void>
+const keyListeners = [];
+
 // Currently focused input node id (or null).
 let focusedNodeId = null;
 
@@ -121,6 +124,23 @@ export function removeWindowSizeListener(fn) {
 }
 
 /**
+ * Subscribe to raw key events (press and release).
+ * @param {(ev: {key: string, ctrl: boolean, shift: boolean, pressed: boolean}) => void} fn
+ */
+export function addKeyListener(fn) {
+  keyListeners.push(fn);
+}
+
+/**
+ * Unsubscribe from raw key events.
+ * @param {(ev: {key: string, ctrl: boolean, shift: boolean, pressed: boolean}) => void} fn
+ */
+export function removeKeyListener(fn) {
+  const idx = keyListeners.indexOf(fn);
+  if (idx >= 0) keyListeners.splice(idx, 1);
+}
+
+/**
  * Explicitly focus a TextInput node from JS (e.g. programmatic focus).
  * @param {number} nodeId
  */
@@ -202,6 +222,12 @@ export function dispatchEvents() {
         if (ev.key === 'ShiftLeft' || ev.key === 'ShiftRight') {
           shiftHeld = ev.pressed;
           break;
+        }
+
+        // Notify global key listeners (used for app-focused shortcuts).
+        if (keyListeners.length > 0) {
+          const kev = { key: ev.key, ctrl: ctrlHeld, shift: shiftHeld, pressed: ev.pressed };
+          for (const fn of keyListeners) try { fn(kev); } catch {}
         }
 
         if (!ev.pressed || focusedNodeId === null) break;

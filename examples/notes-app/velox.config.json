@@ -6,13 +6,19 @@
     "startupMode": "windowed"
   },
   "capabilities": {
-    "fs":           { "read": ["**"], "write": ["**"] },
-    "network":      { "allow": ["*"] },
-    "db":           true,
-    "dialog":       true,
-    "clipboard":    true,
-    "notification": true,
-    "mdns":         true
+    "fs":             { "read": ["**"], "write": ["**"] },
+    "network":        { "allow": ["*"] },
+    "db":             true,
+    "dialog":         true,
+    "clipboard":      true,
+    "notification":   true,
+    "mdns":           true,
+    "battery":        true,
+    "system":         true,
+    "power":          true,
+    "storage":        true,
+    "gamepads":       true,
+    "globalShortcuts": true
   },
   "dev": {
     "entry": "js/app.jsx",

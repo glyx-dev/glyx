@@ -20,6 +20,7 @@ import React, { useState, useEffect, useContext, createContext, useCallback, use
 import {
   View, Text, Pressable, TextInput, ScrollView, render, useWindowSize, useMediaQuery,
   db, vectorDb, fs, dialog, clipboard, notification, veloxWindow, fetch, ws, mdns, ipc,
+  battery, system, power, storage, input, perf,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
 
@@ -405,6 +406,12 @@ function NoteListScreen() {
             onPress={() => navigate('network')}
             width={90}
             color={C.teal}
+          />
+          <Btn
+            label="Sys APIs"
+            onPress={() => navigate('sysapi')}
+            width={90}
+            color={C.yellow}
           />
         </View>
         <Text fontSize={11} width={isWide ? inner - 308 : inner} height={16} style={{ color: C.dim }}>
@@ -985,6 +992,168 @@ function NoteSearchScreen() {
   );
 }
 
+// ── Screen: Sys API Demo ──────────────────────────────────────────────────────
+//
+// Phase 15A — demonstrates battery, system info, power sleep guard, storage
+// drives, gamepad events, and app-focused keyboard shortcuts.
+
+function SysApiScreen() {
+  const { width: winW, height: winH } = useWindowSize();
+  const navigate = useNavigate();
+  const C = useThemeColors();
+  const inner = winW - PAD * 2;
+
+  const [battInfo,    setBattInfo]    = useState(null);
+  const [sysInfo,     setSysInfo]     = useState(null);
+  const [drives,      setDrives]      = useState([]);
+  const [gamepadLog,  setGamepadLog]  = useState([]);
+  const [shortcutLog, setShortcutLog] = useState([]);
+  const [sleepGuard,  setSleepGuard]  = useState(null);
+
+  // perf.snapshot() is synchronous — read it inline each render instead of
+  // using setInterval (which Velox's V8 context does not polyfill).
+  const perfSnap = perf.snapshot();
+
+  // Load OS data once on mount (async).
+  useEffect(() => {
+    battery.getStatus().then(b => setBattInfo(b));
+    system.getInfo().then(s => setSysInfo(s));
+    storage.getDrives().then(d => setDrives(d));
+  }, []);
+
+  // Register a gamepad listener.
+  useEffect(() => {
+    const unsub = input.gamepads.onInput((ev) => {
+      setGamepadLog(prev => [`${ev.event?.type ?? '?'} @ ${ev.name ?? ev.id}`, ...prev].slice(0, 6));
+    });
+    return unsub;
+  }, []);
+
+  // Register an app-focused shortcut: Ctrl+G.
+  useEffect(() => {
+    const id = input.shortcut.register('ctrl+g', () => {
+      setShortcutLog(prev => ['Ctrl+G fired!', ...prev].slice(0, 6));
+    });
+    return () => input.shortcut.unregister(id);
+  }, []);
+
+  function toggleSleepGuard() {
+    if (sleepGuard) {
+      power.allowSleep(sleepGuard);
+      setSleepGuard(null);
+    } else {
+      const g = power.preventSleep('SysApiScreen demo');
+      setSleepGuard(g);
+    }
+  }
+
+  const Row = ({ label, value, tone }) => (
+    <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }} width={inner} height={22}>
+      <Text fontSize={11} width={160} height={16} style={{ color: C.dim }}>{label}</Text>
+      <Text fontSize={12} width={inner - 176} height={16} style={{ color: tone ?? C.text }}>{String(value ?? '—')}</Text>
+    </View>
+  );
+
+  const Section = ({ title, children }) => (
+    <View style={{ gap: 6, justifyContent: 'flex-start', alignItems: 'flex-start' }} width={inner}>
+      <Text fontSize={13} width={inner} height={18} style={{ color: C.accent }}>{title}</Text>
+      {children}
+      <View style={{ backgroundColor: C.border }} width={inner} height={1} />
+    </View>
+  );
+
+  return (
+    <ScrollView
+      width={inner}
+      height={winH - HEADER_H - PAD * 2}
+      contentHeight={900}
+      style={{ gap: 16, justifyContent: 'flex-start', alignItems: 'flex-start' }}
+    >
+      <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }} width={inner} height={32}>
+        <BackBtn />
+        <Text fontSize={16} width={200} height={22} style={{ color: C.yellow }}>OS System APIs</Text>
+      </View>
+
+      <Section title="Battery">
+        {battInfo ? (
+          <>
+            <Row label="Level"          value={`${Math.round(battInfo.level * 100)}%`} tone={battInfo.charging ? C.green : C.accent} />
+            <Row label="Charging"       value={battInfo.charging ? 'Yes' : 'No'} />
+            <Row label="Time remaining" value={battInfo.timeRemainingSecs != null ? `${Math.round(battInfo.timeRemainingSecs / 60)} min` : 'Unknown'} />
+          </>
+        ) : (
+          <Row label="Status" value="No battery detected (desktop?)" tone={C.dim} />
+        )}
+      </Section>
+
+      <Section title="System Info">
+        {sysInfo ? (
+          <>
+            <Row label="CPU"       value={sysInfo.cpuName}    />
+            <Row label="Cores"     value={sysInfo.cpuCores}   />
+            <Row label="RAM total" value={`${sysInfo.memoryTotalMb} MB`} />
+            <Row label="RAM used"  value={`${sysInfo.memoryUsedMb} MB`} tone={C.yellow} />
+            <Row label="OS"        value={`${sysInfo.osName} ${sysInfo.osVersion}`} />
+          </>
+        ) : <Row label="Loading…" value="" />}
+      </Section>
+
+      <Section title="Storage Drives">
+        {drives.length === 0
+          ? <Row label="No drives found" value="" tone={C.dim} />
+          : drives.map((d, i) => (
+              <Row
+                key={i}
+                label={`${d.name} (${d.mountPoint})`}
+                value={`${(d.availableBytes / 1e9).toFixed(1)} GB free / ${(d.totalBytes / 1e9).toFixed(1)} GB`}
+                tone={C.teal}
+              />
+            ))
+        }
+      </Section>
+
+      <Section title="Performance Snapshot">
+        {perfSnap ? (
+          <>
+            <Row label="FPS"          value={perfSnap.fps?.toFixed(1)}       tone={C.green}  />
+            <Row label="Frame time"   value={`${perfSnap.frameTime?.toFixed(2)} ms`}   />
+            <Row label="Frame P99"    value={`${perfSnap.frameTimeP99?.toFixed(2)} ms`} tone={C.yellow} />
+            <Row label="JS time"      value={`${perfSnap.jsTime?.toFixed(2)} ms`}      />
+            <Row label="Layout time"  value={`${perfSnap.layoutTime?.toFixed(2)} ms`}  />
+            <Row label="Heap JS"      value={`${perfSnap.memoryJS?.toFixed(1)} MB`}    />
+            <Row label="Nodes"        value={perfSnap.nodeCount}                        />
+          </>
+        ) : <Row label="Loading…" value="" />}
+      </Section>
+
+      <Section title="Sleep Prevention">
+        <Row label="Guard active" value={sleepGuard ? 'Yes — system will not sleep' : 'No'} tone={sleepGuard ? C.green : C.dim} />
+        <Btn
+          label={sleepGuard ? 'Allow Sleep' : 'Prevent Sleep'}
+          onPress={toggleSleepGuard}
+          width={130}
+          color={sleepGuard ? C.red : C.accent}
+        />
+      </Section>
+
+      <Section title="Gamepad Events (connect a controller)">
+        {gamepadLog.length === 0
+          ? <Row label="No events yet" value="" tone={C.dim} />
+          : gamepadLog.map((e, i) => <Row key={i} label={`Event ${i + 1}`} value={e} tone={C.mauve} />)
+        }
+      </Section>
+
+      <Section title="App-focused Shortcut (Ctrl+G)">
+        <Row label="Press Ctrl+G while this screen is open" value="" tone={C.dim} />
+        {shortcutLog.length === 0
+          ? <Row label="No shortcut fired yet" value="" tone={C.dim} />
+          : shortcutLog.map((e, i) => <Row key={i} label={`Fire ${i + 1}`} value={e} tone={C.green} />)
+        }
+      </Section>
+    </ScrollView>
+  );
+}
+
 // ── Screen: Network Test ──────────────────────────────────────────────────────
 //
 // Demonstrates Phase 12 fetch binding.  Fires a GET and a POST request
@@ -1550,6 +1719,7 @@ function App() {
               <Route name="edit"    component={NoteEditScreen}    />
               <Route name="search"  component={NoteSearchScreen}  />
               <Route name="network" component={NetworkTestScreen} />
+              <Route name="sysapi"  component={SysApiScreen}      />
             </Router>
           </View>
 

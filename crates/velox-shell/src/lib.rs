@@ -42,6 +42,8 @@ pub use winit::event_loop::EventLoopProxy;
 pub enum VeloxUserEvent {
     /// Request creation of a secondary window with a pre-assigned handle.
     CreateWindow { id: u32, title: String, width: u32, height: u32 },
+    /// Quit the application — closes all windows and exits the event loop.
+    Quit,
 }
 
 // ── Public event type ────────────────────────────────────────────────────────
@@ -223,6 +225,9 @@ impl ApplicationHandler<VeloxUserEvent> for ShellApp {
                     .with_inner_size(PhysicalSize::new(width, height))
                     .with_visible(true);
                 self.open_window(event_loop, id, attrs);
+            }
+            VeloxUserEvent::Quit => {
+                event_loop.exit();
             }
         }
     }

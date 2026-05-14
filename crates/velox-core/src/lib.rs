@@ -51,14 +51,12 @@
 
 #[cfg(feature = "dev")]
 use notify::{RecursiveMode, Watcher};
-#[cfg(feature = "dev")]
-use std::collections::VecDeque;
 use std::path::PathBuf;
 #[cfg(feature = "dev")]
 use std::process::Command;
 #[cfg(feature = "dev")]
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use velox_gpu::GpuContext;
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
@@ -379,6 +377,8 @@ struct PerWindowState {
     cursor_blink_on:       bool,
     /// When to flip the blink phase next.
     cursor_blink_deadline: Instant,
+    /// Rolling performance metrics — shared with the JS binding via Arc.
+    perf: Arc<Mutex<velox_perf::PerfState>>,
     #[cfg(feature = "dev")]
     dev_mode: Option<DevModeState>,
 }
@@ -402,10 +402,12 @@ struct DevModeState {
     overlay_visible: bool,
     last_reload: Option<Instant>,
     last_build_message: String,
-    frame_times_ms: VecDeque<f64>,
-    last_frame_at: Option<Instant>,
     ctrl_down: bool,
     shift_down: bool,
+    /// Cached text lines for the overlay — refreshed at most 4× per second
+    /// so the numbers are readable instead of flickering at 120 fps.
+    overlay_lines:        Vec<String>,
+    overlay_next_refresh: Instant,
 }
 
 // ── Colour helpers ─────────────────────────────────────────────────────────────
@@ -585,43 +587,84 @@ fn handle_dev_build_events(state: &mut PerWindowState) {
 #[cfg(feature = "dev")]
 fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
     let Some(dev) = state.dev_mode.as_mut() else { return };
+    if !dev.overlay_visible { return; }
+
     let now = Instant::now();
-    if let Some(prev) = dev.last_frame_at {
-        let ms = (now - prev).as_secs_f64() * 1000.0;
-        dev.frame_times_ms.push_back(ms);
-        while dev.frame_times_ms.len() > 60 {
-            dev.frame_times_ms.pop_front();
-        }
-    }
-    dev.last_frame_at = Some(now);
 
-    if !dev.overlay_visible {
-        return;
+    // Refresh the displayed text at most 4× per second so numbers are readable.
+    if now >= dev.overlay_next_refresh || dev.overlay_lines.is_empty() {
+        let perf_g = state.perf.lock().unwrap();
+        let fps    = perf_g.fps();
+        let avg_ms = perf_g.avg_frame_time();
+        let p99_ms = perf_g.p99_frame_time();
+        let js_ms  = perf_g.avg_js_time();
+        let lay_ms = perf_g.avg_layout_time();
+        let last_f = perf_g.last_frame();
+        let last_ms = last_f.frame_time_ms;
+        let heap_used_mb = last_f.heap_used_bytes / (1024 * 1024);
+        let budget = perf_g.budget_ms;
+        drop(perf_g);
+        let since = dev.last_reload
+            .map(|t| now.saturating_duration_since(t).as_secs())
+            .unwrap_or(0);
+        dev.overlay_lines = vec![
+            format!("Dev overlay (Ctrl+Shift+D)  budget {:.1}ms", budget),
+            format!("FPS {:.0}  last {:.1}ms  avg {:.1}ms  P99 {:.1}ms", fps, last_ms, avg_ms, p99_ms),
+            format!("JS {:.2}ms  layout {:.2}ms  nodes {}  heap {}MB",
+                js_ms, lay_ms, state.js_nodes.len(), heap_used_mb),
+            format!("{}  (reload {}s ago)", dev.last_build_message, since),
+        ];
+        dev.overlay_next_refresh = now + Duration::from_millis(250);
     }
 
-    let frame_ms = dev.frame_times_ms.back().copied().unwrap_or(0.0);
-    let avg_ms = if dev.frame_times_ms.is_empty() {
-        0.0
-    } else {
-        dev.frame_times_ms.iter().sum::<f64>() / dev.frame_times_ms.len() as f64
+    // Sparkline is always re-read (it's visual, not text to read).
+    let sparkline_data: Vec<velox_perf::PerfFrame> = {
+        let perf_g = state.perf.lock().unwrap();
+        let budget = perf_g.budget_ms;
+        let data: Vec<_> = perf_g.ring.iter().copied().collect();
+        drop(perf_g);
+        let _ = budget; // used below via the cached line
+        data
     };
-    let fps = if avg_ms > 0.0 { 1000.0 / avg_ms } else { 0.0 };
-    let heap = state.runtime.heap_stats();
-    let since = dev.last_reload.map(|t| now.saturating_duration_since(t).as_secs()).unwrap_or(0);
+    let budget = {
+        let perf_g = state.perf.lock().unwrap();
+        perf_g.budget_ms
+    };
 
-    frame.fill_rounded_rect(16.0, 16.0, 470.0, 140.0, 8.0, peniko::Color::rgba8(20, 20, 30, 220));
+    // ── Overlay background ────────────────────────────────────────────────
+    let overlay_w = 490.0_f64;
+    let overlay_h = 130.0_f64;
+    frame.fill_rounded_rect(16.0, 16.0, overlay_w, overlay_h, 8.0, peniko::Color::rgba8(15, 15, 25, 225));
 
-    let lines = [
-        "Dev overlay (Ctrl+Shift+D)".to_string(),
-        format!("FPS {:.1} | frame {:.2}ms | avg60 {:.2}ms", fps, frame_ms, avg_ms),
-        format!("Nodes {} | JS heap {} / {} MB", state.js_nodes.len(), heap.used_heap_size / (1024 * 1024), heap.total_heap_size / (1024 * 1024)),
-        format!("Last reload {}s ago", since),
-        dev.last_build_message.clone(),
-    ];
-
+    // ── Text rows ─────────────────────────────────────────────────────────
+    let txt_color = peniko::Color::rgba8(220, 220, 235, 255);
+    let lines = &dev.overlay_lines;
     for (i, line) in lines.iter().enumerate() {
-        let text = state.text_sys.label(line, 13.0, peniko::Color::rgba8(230, 230, 240, 255));
-        frame.draw_text(&text, 26.0, 34.0 + (i as f64 * 22.0), peniko::Color::rgba8(230, 230, 240, 255));
+        let text = state.text_sys.label(line, 12.0, txt_color);
+        frame.draw_text(&text, 26.0, 34.0 + (i as f64 * 20.0), txt_color);
+    }
+
+    // ── Sparkline — last 60 frame times ──────────────────────────────────
+    // 2 px per bar × 60 bars = 120 px wide; 20 px tall; bottom at y=122
+    let spark_x  = 26.0_f64;
+    let spark_y  = 112.0_f64;  // top of sparkline
+    let bar_w    = 2.0_f64;
+    let spark_h  = 18.0_f64;
+    let samples: Vec<f64> = sparkline_data.iter()
+        .rev().take(60).map(|f| f.frame_time_ms).collect::<Vec<_>>()
+        .into_iter().rev().collect();
+    for (i, &ms) in samples.iter().enumerate() {
+        let h   = (ms / (budget * 2.0)).min(1.0) * spark_h;
+        let x   = spark_x + i as f64 * bar_w;
+        let y   = spark_y + (spark_h - h);
+        let col = if ms > budget * 2.0 {
+            peniko::Color::rgba8(255, 80, 80, 220)
+        } else if ms > budget {
+            peniko::Color::rgba8(255, 180, 50, 220)
+        } else {
+            peniko::Color::rgba8(80, 200, 120, 200)
+        };
+        frame.fill_rect(x, y, bar_w - 0.5, h, col);
     }
 }
 
@@ -630,6 +673,7 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
 fn build_window_controller(
     window: Arc<winit::window::Window>,
     create_window_fn: Option<Arc<dyn Fn(u32, String, u32, u32) + Send + Sync>>,
+    quit_fn: Option<Arc<dyn Fn() + Send + Sync>>,
 ) -> WindowController {
     use winit::window::Fullscreen;
 
@@ -702,19 +746,28 @@ fn build_window_controller(
         }),
         hwnd,
         create_window: create_window_fn,
+        quit: quit_fn,
     }
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn run(mut config: AppConfig) {
-    // Suppress wgpu/naga internal INFO logs (shader dumps, submission traces)
-    // while keeping velox and app logs visible.  RUST_LOG still overrides this.
-    env_logger::Builder::from_env(
-        env_logger::Env::default()
-            .default_filter_or("info,wgpu_hal=warn,wgpu_core=warn,naga=warn"),
-    )
-    .init();
+    // Set module-specific log levels first so they take precedence over any
+    // global level set by RUST_LOG (e.g. RUST_LOG=info would otherwise
+    // re-enable the very noisy wgpu_core submission-index spam).
+    let mut log_builder = env_logger::Builder::new();
+    log_builder
+        .filter_module("wgpu_core", log::LevelFilter::Warn)
+        .filter_module("wgpu_hal",  log::LevelFilter::Warn)
+        .filter_module("naga",      log::LevelFilter::Warn)
+        .filter_level(log::LevelFilter::Info);
+    // RUST_LOG can still add more specific directives (e.g. velox_core=debug)
+    // but cannot remove the per-module suppression above.
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        log_builder.parse_filters(&rust_log);
+    }
+    log_builder.init();
 
     // Load .env from the working directory (or any parent) if one exists.
     match dotenvy::dotenv() {
@@ -759,7 +812,7 @@ pub fn run(mut config: AppConfig) {
                 let renderer = VeloxRenderer::new(&gpu_ctx)
                     .expect("Failed to initialise Vello renderer");
 
-                // Build a `create_window` callback that sends events to the shell.
+                // Build callbacks that send events to the shell event loop.
                 let proxy_for_fn = ev_proxy.clone();
                 let create_fn: Arc<dyn Fn(u32, String, u32, u32) + Send + Sync> =
                     Arc::new(move |id, title, width, height| {
@@ -768,18 +821,28 @@ pub fn run(mut config: AppConfig) {
                         );
                     });
 
+                let proxy_quit = ev_proxy.clone();
+                let quit_fn: Arc<dyn Fn() + Send + Sync> =
+                    Arc::new(move || { let _ = proxy_quit.send_event(VeloxUserEvent::Quit); });
+
                 let window_ctrl = build_window_controller(
                     Arc::clone(&window),
                     Some(Arc::clone(&create_fn)),
+                    Some(Arc::clone(&quit_fn)),
                 );
 
-                let ipc_clone = Arc::clone(&ipc_bus);
-                let nwid      = Arc::clone(&next_window_id);
+                let ipc_clone  = Arc::clone(&ipc_bus);
+                let nwid       = Arc::clone(&next_window_id);
+                // Create the shared perf Arc BEFORE the runtime so both
+                // PerWindowState (writer) and AsyncState binding (reader) share it.
+                let shared_perf: Arc<Mutex<velox_perf::PerfState>> =
+                    Arc::new(Mutex::new(velox_perf::PerfState::new()));
 
                 let mut rt = if let Some(ref blob) = *snapshot_blob_arc {
                     match VeloxRuntime::new_from_snapshot_with_ipc(
                         blob, tokio_handle.clone(), Some(window_ctrl),
                         Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
+                        Arc::clone(&shared_perf),
                     ) {
                         Ok(rt) => {
                             log::info!("Window {}: restored from snapshot", window_handle);
@@ -787,7 +850,8 @@ pub fn run(mut config: AppConfig) {
                         }
                         Err(e) => {
                             log::warn!("Window {}: snapshot restore failed ({}); eval mode", window_handle, e);
-                            let proxy_fb = ev_proxy.clone();
+                            let proxy_fb  = ev_proxy.clone();
+                            let proxy_qfb = ev_proxy.clone();
                             let wc = build_window_controller(
                                 Arc::clone(&window),
                                 Some(Arc::new(move |id, title, width, height| {
@@ -795,10 +859,14 @@ pub fn run(mut config: AppConfig) {
                                         VeloxUserEvent::CreateWindow { id, title, width, height }
                                     );
                                 })),
+                                Some(Arc::new(move || {
+                                    let _ = proxy_qfb.send_event(VeloxUserEvent::Quit);
+                                })),
                             );
                             VeloxRuntime::new_with_ipc(
                                 tokio_handle.clone(), Some(wc),
                                 Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
+                                Arc::clone(&shared_perf),
                             )
                         }
                     }
@@ -806,6 +874,7 @@ pub fn run(mut config: AppConfig) {
                     VeloxRuntime::new_with_ipc(
                         tokio_handle.clone(), Some(window_ctrl),
                         Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
+                        Arc::clone(&shared_perf),
                     )
                 };
 
@@ -842,6 +911,7 @@ pub fn run(mut config: AppConfig) {
                     request_redraw: Arc::clone(&request_redraw),
                     cursor_blink_on:       true,
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
+                    perf:          shared_perf,
                     #[cfg(feature = "dev")]
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
@@ -854,10 +924,10 @@ pub fn run(mut config: AppConfig) {
                             overlay_visible: true,
                             last_reload: None,
                             last_build_message: "watching changes".to_string(),
-                            frame_times_ms: VecDeque::new(),
-                            last_frame_at: Some(Instant::now()),
                             ctrl_down: false,
                             shift_down: false,
+                            overlay_lines:        Vec::new(),
+                            overlay_next_refresh: Instant::now(),
                         })
                     } else {
                         None
@@ -935,6 +1005,17 @@ pub fn run(mut config: AppConfig) {
                 #[cfg(feature = "dev")]
                 handle_dev_build_events(s);
 
+                // ── Perf: wall-clock frame time ───────────────────────────
+                let frame_start = Instant::now();
+                let frame_time_ms = {
+                    let perf = s.perf.lock().unwrap();
+                    if let Some(prev) = perf.last_frame_at {
+                        (frame_start - prev).as_secs_f64() * 1000.0
+                    } else {
+                        0.0
+                    }
+                };
+
                 // 1. Resolve async JS Promises.
                 s.runtime.tick();
 
@@ -943,14 +1024,35 @@ pub fn run(mut config: AppConfig) {
                 apply_scene_commands(s, pre_commands);
 
                 // 3. JS frame callback — dispatchEvents, React state updates.
+                let js_start = Instant::now();
                 s.runtime.frame_tick();
+                let js_time_ms = js_start.elapsed().as_secs_f64() * 1000.0;
 
                 // 4. Post-frame commands (React re-renders from step 3 events).
                 let post_commands = s.runtime.drain_scene_commands();
                 apply_scene_commands(s, post_commands);
 
                 // 5. Single layout pass.
+                let layout_start = Instant::now();
                 recompute_layout(s);
+                let layout_time_ms = layout_start.elapsed().as_secs_f64() * 1000.0;
+
+                // Record perf sample (skips the first frame where frame_time_ms = 0).
+                if frame_time_ms > 0.0 {
+                    let heap = s.runtime.heap_stats();
+                    let node_count = s.js_nodes.len();
+                    let mut perf = s.perf.lock().unwrap();
+                    perf.last_frame_at = Some(frame_start);
+                    perf.push(velox_perf::PerfFrame {
+                        frame_time_ms,
+                        js_time_ms,
+                        layout_time_ms,
+                        node_count,
+                        heap_used_bytes: heap.used_heap_size,
+                    });
+                } else {
+                    s.perf.lock().unwrap().last_frame_at = Some(frame_start);
+                }
 
                 // 6. Scroll-adjusted positions for next frame's hit-testing.
                 update_scroll_positions(s);

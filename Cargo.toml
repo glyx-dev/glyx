@@ -73,6 +73,11 @@ reqwest             = { version = "0.12", default-features = false, features = [
 tokio-tungstenite   = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
 futures-util        = "0.3"
 mdns-sd             = "0.11"
+battery             = "0.7"
+sysinfo             = "0.33"
+keepawake           = "0.5"
+gilrs               = "0.11"
+global-hotkey       = "0.6"
 
 [profile.dev]
 opt-level = 1          # faster compiles, decent perf in dev

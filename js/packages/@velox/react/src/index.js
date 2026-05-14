@@ -9,6 +9,7 @@ import {
   registerScrollView, unregisterScrollView,
   dispatchEvents,
   addWindowSizeListener, removeWindowSizeListener,
+  addKeyListener,
 } from './events.js';
 
 // ── Reconciler ────────────────────────────────────────────────────────────────
@@ -33,6 +34,86 @@ const _wsOpenSockets = new Map();
 // Callbacks registered via ipc.on('message', cb).
 const _ipcListeners = [];
 
+// ── Global shortcut polling ───────────────────────────────────────────────────
+//
+// Callbacks registered via input.globalShortcut.register(acc, cb).
+const _globalShortcutCallbacks = new Map();  // id (number) → cb
+
+function _pollGlobalShortcuts() {
+  if (typeof __velox_shortcut_poll === 'undefined') return;
+  if (_globalShortcutCallbacks.size === 0) return;
+  let raw;
+  try { raw = __velox_shortcut_poll(); } catch { return; }
+  if (!raw || raw === '[]') return;
+  let ids;
+  try { ids = JSON.parse(raw); } catch { return; }
+  for (const id of ids) {
+    const cb = _globalShortcutCallbacks.get(id);
+    if (cb) try { cb(); } catch (e) { __velox_log('[shortcut] callback error: ' + e); }
+  }
+}
+
+function _pollGamepads() {
+  if (typeof __velox_gamepad_poll === 'undefined') return;
+  if (!globalThis._gamepadCallbacks || globalThis._gamepadCallbacks.length === 0) return;
+  let raw;
+  try { raw = __velox_gamepad_poll(); } catch { return; }
+  if (!raw || raw === '[]') return;
+  let evs;
+  try { evs = JSON.parse(raw); } catch { return; }
+  for (const ev of evs) {
+    for (const cb of globalThis._gamepadCallbacks) {
+      try { cb(ev); } catch (e) { __velox_log('[gamepad] callback error: ' + e); }
+    }
+  }
+}
+
+// ── App-focused shortcut registry ─────────────────────────────────────────────
+//
+// Keyed by id; entries are { mods: {ctrl,shift,alt,meta}, key: string, cb }.
+// Dispatched via addKeyListener registered below.
+const _localShortcuts = new Map();  // id → { mods, key, cb }
+let   _localShortcutNextId = 1;
+
+// Normalize a winit physical key name to the shortcut token a user would type.
+// winit sends KeyCode::Debug names: 'KeyG' → 'g', 'Digit1' → '1', 'Space' → 'space'.
+function _normalizeKey(winitKey) {
+  if (/^Key[A-Z]$/.test(winitKey))   return winitKey[3].toLowerCase();  // KeyG → g
+  if (/^Digit\d$/.test(winitKey))    return winitKey[5];                 // Digit1 → 1
+  return winitKey.toLowerCase();                                          // Space → space, F1 → f1
+}
+
+// Listen to every key event from events.js and check local shortcuts.
+addKeyListener(function _dispatchLocalShortcuts({ key, ctrl, shift, pressed }) {
+  if (!pressed || _localShortcuts.size === 0) return;
+  const norm = _normalizeKey(key);
+  for (const { mods, key: sKey, cb } of _localShortcuts.values()) {
+    if (sKey === norm && mods.ctrl === ctrl && mods.shift === shift) {
+      try { cb(); } catch (e) { __velox_log('[shortcut] local callback error: ' + e); }
+    }
+  }
+});
+
+// ── Perf violation polling ────────────────────────────────────────────────────
+//
+// Callbacks registered via perf.onBudgetExceeded(cb).
+const _perfBudgetCallbacks = [];
+
+function _pollPerfViolations() {
+  if (typeof __velox_perf_poll_violations === 'undefined') return;
+  if (_perfBudgetCallbacks.length === 0) return;
+  let raw;
+  try { raw = __velox_perf_poll_violations(); } catch { return; }
+  if (!raw || raw === '[]') return;
+  let violations;
+  try { violations = JSON.parse(raw); } catch { return; }
+  for (const v of violations) {
+    for (const cb of _perfBudgetCallbacks) {
+      try { cb(v); } catch (e) { __velox_log('[perf] onBudgetExceeded callback error: ' + e); }
+    }
+  }
+}
+
 // ── Frame callback ────────────────────────────────────────────────────────────
 //
 // Rust calls __velox_frameCallback() once per RedrawRequested (frame_tick),
@@ -44,6 +125,9 @@ globalThis.__velox_frameCallback = function veloxFrameCallback() {
   VeloxReconciler.flushSync(() => {
     _pollWebSockets();
     _pollIpc();
+    _pollGamepads();
+    _pollGlobalShortcuts();
+    _pollPerfViolations();
     dispatchEvents();
   });
 };
@@ -1039,4 +1123,164 @@ veloxWindow.create = function create(opts = {}) {
       send(msg) { ipc.send(id, msg); },
     };
   });
+};
+
+/**
+ * Quit the application — closes all windows and exits the event loop.
+ * Safe to call from any window.
+ */
+veloxWindow.quit = function quit() {
+  if (typeof __velox_quit !== 'undefined') __velox_quit();
+};
+
+// ── Performance monitoring ────────────────────────────────────────────────────
+
+/**
+ * Performance monitoring API.
+ *
+ * @example
+ * const snap = perf.snapshot();
+ * // → { fps: 60.1, frameTime: 14.2, frameTimeP99: 18.5, jsTime: 2.1,
+ * //      layoutTime: 0.8, memoryJS: 12.4, nodeCount: 42 }
+ *
+ * const unsub = perf.onBudgetExceeded((v) => console.log('slow frame:', v), { target: 16.667 });
+ * unsub(); // remove listener
+ */
+export const perf = {
+  /**
+   * Synchronously returns a snapshot of current performance metrics.
+   * @returns {{ fps, frameTime, frameTimeP99, jsTime, layoutTime, memoryJS, nodeCount }}
+   */
+  snapshot() {
+    if (typeof __velox_perf_snapshot === 'undefined') return null;
+    try { return JSON.parse(__velox_perf_snapshot()); } catch { return null; }
+  },
+
+  /**
+   * Register a callback fired whenever a frame exceeds `target` ms.
+   * @param {function} cb  Called with `{ budget, actual, jsTime, layoutTime }`
+   * @param {{ target?: number }} opts  Default target = 16.667 ms (60 fps)
+   * @returns {function} Unsubscribe function
+   */
+  onBudgetExceeded(cb, { target = 16.667 } = {}) {
+    if (typeof __velox_perf_set_budget !== 'undefined') __velox_perf_set_budget(target);
+    _perfBudgetCallbacks.push(cb);
+    return function unsubscribe() {
+      const idx = _perfBudgetCallbacks.indexOf(cb);
+      if (idx !== -1) _perfBudgetCallbacks.splice(idx, 1);
+    };
+  },
+};
+
+// ── OS system APIs ────────────────────────────────────────────────────────────
+
+export const battery = {
+  /** @returns {Promise<{level:number, charging:boolean, timeRemainingSecs:number|null}|null>} */
+  async getStatus() {
+    if (typeof __velox_battery_getStatus === 'undefined') return null;
+    const raw = await __velox_battery_getStatus();
+    return raw === 'null' ? null : JSON.parse(raw);
+  },
+};
+
+export const system = {
+  /** @returns {Promise<{cpuName,cpuCores,memoryTotalMb,memoryUsedMb,osName,osVersion}>} */
+  async getInfo() {
+    if (typeof __velox_system_getInfo === 'undefined') return null;
+    return JSON.parse(await __velox_system_getInfo());
+  },
+};
+
+export const power = {
+  /** Prevent system sleep. Returns a guard handle string. */
+  preventSleep(reason = 'Velox app running') {
+    if (typeof __velox_power_preventSleep === 'undefined') return null;
+    return __velox_power_preventSleep(reason);
+  },
+  /** Release sleep prevention guard by handle string. */
+  allowSleep(handle) {
+    if (typeof __velox_power_allowSleep !== 'undefined') __velox_power_allowSleep(handle);
+  },
+};
+
+export const storage = {
+  /** @returns {Promise<Array<{name,mountPoint,totalBytes,availableBytes}>>} */
+  async getDrives() {
+    if (typeof __velox_storage_getDrives === 'undefined') return [];
+    return JSON.parse(await __velox_storage_getDrives());
+  },
+};
+
+export const input = {
+  gamepads: {
+    /**
+     * Register a callback fired for every gamepad event polled each frame.
+     * @param {function} cb  Called with `{id, name, event: {type, ...}}`
+     * @returns {function} Unsubscribe
+     */
+    onInput(cb) {
+      const key = Symbol();
+      // poll gamepads each frame and fire cb
+      const prev = globalThis.__velox_gamepadCb;
+      if (!globalThis._gamepadCallbacks) globalThis._gamepadCallbacks = [];
+      globalThis._gamepadCallbacks.push(cb);
+      return function unsubscribe() {
+        const arr = globalThis._gamepadCallbacks;
+        if (arr) {
+          const i = arr.indexOf(cb);
+          if (i !== -1) arr.splice(i, 1);
+        }
+      };
+    },
+  },
+
+  /** System-wide shortcuts — fires even when the app is backgrounded. */
+  globalShortcut: {
+    /**
+     * @param {string} accelerator  e.g. "ctrl+shift+v"
+     * @param {function} cb
+     * @returns {string} id — pass to unregister()
+     */
+    register(accelerator, cb) {
+      if (typeof __velox_shortcut_register === 'undefined') return null;
+      try {
+        const id = Number(__velox_shortcut_register(accelerator));
+        _globalShortcutCallbacks.set(id, cb);
+        return String(id);
+      } catch (e) {
+        __velox_log('[shortcut] register error: ' + e);
+        return null;
+      }
+    },
+    unregister(id) {
+      const numId = Number(id);
+      _globalShortcutCallbacks.delete(numId);
+      if (typeof __velox_shortcut_unregister !== 'undefined') __velox_shortcut_unregister(String(numId));
+    },
+  },
+
+  /** App-focused shortcuts — fires when the app window is focused. */
+  shortcut: {
+    /**
+     * @param {string} accelerator  e.g. "ctrl+k"
+     * @param {function} cb
+     * @returns {number} id — pass to unregister()
+     */
+    register(accelerator, cb) {
+      const parts = accelerator.toLowerCase().split('+').map(s => s.trim());
+      const mods = { ctrl: false, shift: false, alt: false, meta: false };
+      let key = null;
+      for (const p of parts) {
+        if (p === 'ctrl' || p === 'control') mods.ctrl = true;
+        else if (p === 'shift') mods.shift = true;
+        else if (p === 'alt') mods.alt = true;
+        else if (p === 'meta' || p === 'cmd' || p === 'win') mods.meta = true;
+        else key = p;
+      }
+      const id = _localShortcutNextId++;
+      _localShortcuts.set(id, { mods, key, cb });
+      return id;
+    },
+    unregister(id) { _localShortcuts.delete(id); },
+  },
 };

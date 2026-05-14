@@ -5951,6 +5951,7 @@ No matching component was found for:
   var inputRegistry = new Map;
   var scrollRegistry = new Map;
   var windowSizeListeners = [];
+  var keyListeners = [];
   var focusedNodeId = null;
   var hoveredPressableId = null;
   var ctrlHeld = false;
@@ -5984,6 +5985,9 @@ No matching component was found for:
     const idx = windowSizeListeners.indexOf(fn);
     if (idx >= 0)
       windowSizeListeners.splice(idx, 1);
+  }
+  function addKeyListener(fn) {
+    keyListeners.push(fn);
   }
   function setFocus(nodeId) {
     if (focusedNodeId !== nodeId) {
@@ -6043,6 +6047,13 @@ No matching component was found for:
             shiftHeld = ev.pressed;
             break;
           }
+          if (keyListeners.length > 0) {
+            const kev = { key: ev.key, ctrl: ctrlHeld, shift: shiftHeld, pressed: ev.pressed };
+            for (const fn of keyListeners)
+              try {
+                fn(kev);
+              } catch {}
+          }
           if (!ev.pressed || focusedNodeId === null)
             break;
           const handlers = inputRegistry.get(focusedNodeId);
@@ -6101,10 +6112,125 @@ No matching component was found for:
   var rootContainer = VeloxReconciler.createContainer({ isVeloxRoot: true }, 0, null, false, null, "", (err) => __velox_log("[React] Recoverable error: " + err.message), null);
   var _wsOpenSockets = new Map;
   var _ipcListeners = [];
+  var _globalShortcutCallbacks = new Map;
+  function _pollGlobalShortcuts() {
+    if (typeof __velox_shortcut_poll === "undefined")
+      return;
+    if (_globalShortcutCallbacks.size === 0)
+      return;
+    let raw;
+    try {
+      raw = __velox_shortcut_poll();
+    } catch {
+      return;
+    }
+    if (!raw || raw === "[]")
+      return;
+    let ids;
+    try {
+      ids = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    for (const id of ids) {
+      const cb = _globalShortcutCallbacks.get(id);
+      if (cb)
+        try {
+          cb();
+        } catch (e) {
+          __velox_log("[shortcut] callback error: " + e);
+        }
+    }
+  }
+  function _pollGamepads() {
+    if (typeof __velox_gamepad_poll === "undefined")
+      return;
+    if (!globalThis._gamepadCallbacks || globalThis._gamepadCallbacks.length === 0)
+      return;
+    let raw;
+    try {
+      raw = __velox_gamepad_poll();
+    } catch {
+      return;
+    }
+    if (!raw || raw === "[]")
+      return;
+    let evs;
+    try {
+      evs = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    for (const ev of evs) {
+      for (const cb of globalThis._gamepadCallbacks) {
+        try {
+          cb(ev);
+        } catch (e) {
+          __velox_log("[gamepad] callback error: " + e);
+        }
+      }
+    }
+  }
+  var _localShortcuts = new Map;
+  var _localShortcutNextId = 1;
+  function _normalizeKey(winitKey) {
+    if (/^Key[A-Z]$/.test(winitKey))
+      return winitKey[3].toLowerCase();
+    if (/^Digit\d$/.test(winitKey))
+      return winitKey[5];
+    return winitKey.toLowerCase();
+  }
+  addKeyListener(function _dispatchLocalShortcuts({ key, ctrl, shift, pressed }) {
+    if (!pressed || _localShortcuts.size === 0)
+      return;
+    const norm = _normalizeKey(key);
+    for (const { mods, key: sKey, cb } of _localShortcuts.values()) {
+      if (sKey === norm && mods.ctrl === ctrl && mods.shift === shift) {
+        try {
+          cb();
+        } catch (e) {
+          __velox_log("[shortcut] local callback error: " + e);
+        }
+      }
+    }
+  });
+  var _perfBudgetCallbacks = [];
+  function _pollPerfViolations() {
+    if (typeof __velox_perf_poll_violations === "undefined")
+      return;
+    if (_perfBudgetCallbacks.length === 0)
+      return;
+    let raw;
+    try {
+      raw = __velox_perf_poll_violations();
+    } catch {
+      return;
+    }
+    if (!raw || raw === "[]")
+      return;
+    let violations;
+    try {
+      violations = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    for (const v of violations) {
+      for (const cb of _perfBudgetCallbacks) {
+        try {
+          cb(v);
+        } catch (e) {
+          __velox_log("[perf] onBudgetExceeded callback error: " + e);
+        }
+      }
+    }
+  }
   globalThis.__velox_frameCallback = function veloxFrameCallback() {
     VeloxReconciler.flushSync(() => {
       _pollWebSockets();
       _pollIpc();
+      _pollGamepads();
+      _pollGlobalShortcuts();
+      _pollPerfViolations();
       dispatchEvents();
     });
   };
@@ -6660,6 +6786,128 @@ No matching component was found for:
       };
     });
   };
+  veloxWindow.quit = function quit() {
+    if (typeof __velox_quit !== "undefined")
+      __velox_quit();
+  };
+  var perf = {
+    snapshot() {
+      if (typeof __velox_perf_snapshot === "undefined")
+        return null;
+      try {
+        return JSON.parse(__velox_perf_snapshot());
+      } catch {
+        return null;
+      }
+    },
+    onBudgetExceeded(cb, { target = 16.667 } = {}) {
+      if (typeof __velox_perf_set_budget !== "undefined")
+        __velox_perf_set_budget(target);
+      _perfBudgetCallbacks.push(cb);
+      return function unsubscribe() {
+        const idx = _perfBudgetCallbacks.indexOf(cb);
+        if (idx !== -1)
+          _perfBudgetCallbacks.splice(idx, 1);
+      };
+    }
+  };
+  var battery = {
+    async getStatus() {
+      if (typeof __velox_battery_getStatus === "undefined")
+        return null;
+      const raw = await __velox_battery_getStatus();
+      return raw === "null" ? null : JSON.parse(raw);
+    }
+  };
+  var system = {
+    async getInfo() {
+      if (typeof __velox_system_getInfo === "undefined")
+        return null;
+      return JSON.parse(await __velox_system_getInfo());
+    }
+  };
+  var power = {
+    preventSleep(reason = "Velox app running") {
+      if (typeof __velox_power_preventSleep === "undefined")
+        return null;
+      return __velox_power_preventSleep(reason);
+    },
+    allowSleep(handle) {
+      if (typeof __velox_power_allowSleep !== "undefined")
+        __velox_power_allowSleep(handle);
+    }
+  };
+  var storage = {
+    async getDrives() {
+      if (typeof __velox_storage_getDrives === "undefined")
+        return [];
+      return JSON.parse(await __velox_storage_getDrives());
+    }
+  };
+  var input = {
+    gamepads: {
+      onInput(cb) {
+        const key = Symbol();
+        const prev = globalThis.__velox_gamepadCb;
+        if (!globalThis._gamepadCallbacks)
+          globalThis._gamepadCallbacks = [];
+        globalThis._gamepadCallbacks.push(cb);
+        return function unsubscribe() {
+          const arr = globalThis._gamepadCallbacks;
+          if (arr) {
+            const i = arr.indexOf(cb);
+            if (i !== -1)
+              arr.splice(i, 1);
+          }
+        };
+      }
+    },
+    globalShortcut: {
+      register(accelerator, cb) {
+        if (typeof __velox_shortcut_register === "undefined")
+          return null;
+        try {
+          const id = Number(__velox_shortcut_register(accelerator));
+          _globalShortcutCallbacks.set(id, cb);
+          return String(id);
+        } catch (e) {
+          __velox_log("[shortcut] register error: " + e);
+          return null;
+        }
+      },
+      unregister(id) {
+        const numId = Number(id);
+        _globalShortcutCallbacks.delete(numId);
+        if (typeof __velox_shortcut_unregister !== "undefined")
+          __velox_shortcut_unregister(String(numId));
+      }
+    },
+    shortcut: {
+      register(accelerator, cb) {
+        const parts = accelerator.toLowerCase().split("+").map((s) => s.trim());
+        const mods = { ctrl: false, shift: false, alt: false, meta: false };
+        let key = null;
+        for (const p of parts) {
+          if (p === "ctrl" || p === "control")
+            mods.ctrl = true;
+          else if (p === "shift")
+            mods.shift = true;
+          else if (p === "alt")
+            mods.alt = true;
+          else if (p === "meta" || p === "cmd" || p === "win")
+            mods.meta = true;
+          else
+            key = p;
+        }
+        const id = _localShortcutNextId++;
+        _localShortcuts.set(id, { mods, key, cb });
+        return id;
+      },
+      unregister(id) {
+        _localShortcuts.delete(id);
+      }
+    }
+  };
 
   // ../../js/packages/@velox/router/src/index.js
   var import_react2 = __toESM(require_react(), 1);
@@ -7158,6 +7406,12 @@ No matching component was found for:
                   onPress: () => navigate("network"),
                   width: 90,
                   color: C2.teal
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "Sys APIs",
+                  onPress: () => navigate("sysapi"),
+                  width: 90,
+                  color: C2.yellow
                 })
               ]
             }),
@@ -7827,6 +8081,262 @@ Ranking: cosine similarity across stored note vectors.`
           })
         ]
       })
+    });
+  }
+  function SysApiScreen() {
+    const { width: winW, height: winH } = useWindowSize();
+    const navigate = useNavigate();
+    const C2 = useThemeColors();
+    const inner = winW - PAD * 2;
+    const [battInfo, setBattInfo] = import_react3.useState(null);
+    const [sysInfo, setSysInfo] = import_react3.useState(null);
+    const [drives, setDrives] = import_react3.useState([]);
+    const [gamepadLog, setGamepadLog] = import_react3.useState([]);
+    const [shortcutLog, setShortcutLog] = import_react3.useState([]);
+    const [sleepGuard, setSleepGuard] = import_react3.useState(null);
+    const perfSnap = perf.snapshot();
+    import_react3.useEffect(() => {
+      battery.getStatus().then((b) => setBattInfo(b));
+      system.getInfo().then((s) => setSysInfo(s));
+      storage.getDrives().then((d) => setDrives(d));
+    }, []);
+    import_react3.useEffect(() => {
+      const unsub = input.gamepads.onInput((ev) => {
+        setGamepadLog((prev) => [`${ev.event?.type ?? "?"} @ ${ev.name ?? ev.id}`, ...prev].slice(0, 6));
+      });
+      return unsub;
+    }, []);
+    import_react3.useEffect(() => {
+      const id = input.shortcut.register("ctrl+g", () => {
+        setShortcutLog((prev) => ["Ctrl+G fired!", ...prev].slice(0, 6));
+      });
+      return () => input.shortcut.unregister(id);
+    }, []);
+    function toggleSleepGuard() {
+      if (sleepGuard) {
+        power.allowSleep(sleepGuard);
+        setSleepGuard(null);
+      } else {
+        const g = power.preventSleep("SysApiScreen demo");
+        setSleepGuard(g);
+      }
+    }
+    const Row = ({ label, value, tone }) => /* @__PURE__ */ jsx_runtime.jsxs(View, {
+      style: { flexDirection: "row", gap: 8, alignItems: "center" },
+      width: inner,
+      height: 22,
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 11,
+          width: 160,
+          height: 16,
+          style: { color: C2.dim },
+          children: label
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 12,
+          width: inner - 176,
+          height: 16,
+          style: { color: tone ?? C2.text },
+          children: String(value ?? "—")
+        })
+      ]
+    });
+    const Section = ({ title, children }) => /* @__PURE__ */ jsx_runtime.jsxs(View, {
+      style: { gap: 6, justifyContent: "flex-start", alignItems: "flex-start" },
+      width: inner,
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 13,
+          width: inner,
+          height: 18,
+          style: { color: C2.accent },
+          children: title
+        }),
+        children,
+        /* @__PURE__ */ jsx_runtime.jsx(View, {
+          style: { backgroundColor: C2.border },
+          width: inner,
+          height: 1
+        })
+      ]
+    });
+    return /* @__PURE__ */ jsx_runtime.jsxs(ScrollView, {
+      width: inner,
+      height: winH - HEADER_H - PAD * 2,
+      contentHeight: 900,
+      style: { gap: 16, justifyContent: "flex-start", alignItems: "flex-start" },
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: { flexDirection: "row", gap: 8, alignItems: "center" },
+          width: inner,
+          height: 32,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(BackBtn, {}),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 16,
+              width: 200,
+              height: 22,
+              style: { color: C2.yellow },
+              children: "OS System APIs"
+            })
+          ]
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Section, {
+          title: "Battery",
+          children: battInfo ? /* @__PURE__ */ jsx_runtime.jsxs(jsx_runtime.Fragment, {
+            children: [
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "Level",
+                value: `${Math.round(battInfo.level * 100)}%`,
+                tone: battInfo.charging ? C2.green : C2.accent
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "Charging",
+                value: battInfo.charging ? "Yes" : "No"
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "Time remaining",
+                value: battInfo.timeRemainingSecs != null ? `${Math.round(battInfo.timeRemainingSecs / 60)} min` : "Unknown"
+              })
+            ]
+          }) : /* @__PURE__ */ jsx_runtime.jsx(Row, {
+            label: "Status",
+            value: "No battery detected (desktop?)",
+            tone: C2.dim
+          })
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Section, {
+          title: "System Info",
+          children: sysInfo ? /* @__PURE__ */ jsx_runtime.jsxs(jsx_runtime.Fragment, {
+            children: [
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "CPU",
+                value: sysInfo.cpuName
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "Cores",
+                value: sysInfo.cpuCores
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "RAM total",
+                value: `${sysInfo.memoryTotalMb} MB`
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "RAM used",
+                value: `${sysInfo.memoryUsedMb} MB`,
+                tone: C2.yellow
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "OS",
+                value: `${sysInfo.osName} ${sysInfo.osVersion}`
+              })
+            ]
+          }) : /* @__PURE__ */ jsx_runtime.jsx(Row, {
+            label: "Loading…",
+            value: ""
+          })
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Section, {
+          title: "Storage Drives",
+          children: drives.length === 0 ? /* @__PURE__ */ jsx_runtime.jsx(Row, {
+            label: "No drives found",
+            value: "",
+            tone: C2.dim
+          }) : drives.map((d, i) => /* @__PURE__ */ jsx_runtime.jsx(Row, {
+            label: `${d.name} (${d.mountPoint})`,
+            value: `${(d.availableBytes / 1e9).toFixed(1)} GB free / ${(d.totalBytes / 1e9).toFixed(1)} GB`,
+            tone: C2.teal
+          }, i))
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Section, {
+          title: "Performance Snapshot",
+          children: perfSnap ? /* @__PURE__ */ jsx_runtime.jsxs(jsx_runtime.Fragment, {
+            children: [
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "FPS",
+                value: perfSnap.fps?.toFixed(1),
+                tone: C2.green
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "Frame time",
+                value: `${perfSnap.frameTime?.toFixed(2)} ms`
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "Frame P99",
+                value: `${perfSnap.frameTimeP99?.toFixed(2)} ms`,
+                tone: C2.yellow
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "JS time",
+                value: `${perfSnap.jsTime?.toFixed(2)} ms`
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "Layout time",
+                value: `${perfSnap.layoutTime?.toFixed(2)} ms`
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "Heap JS",
+                value: `${perfSnap.memoryJS?.toFixed(1)} MB`
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Row, {
+                label: "Nodes",
+                value: perfSnap.nodeCount
+              })
+            ]
+          }) : /* @__PURE__ */ jsx_runtime.jsx(Row, {
+            label: "Loading…",
+            value: ""
+          })
+        }),
+        /* @__PURE__ */ jsx_runtime.jsxs(Section, {
+          title: "Sleep Prevention",
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Row, {
+              label: "Guard active",
+              value: sleepGuard ? "Yes — system will not sleep" : "No",
+              tone: sleepGuard ? C2.green : C2.dim
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+              label: sleepGuard ? "Allow Sleep" : "Prevent Sleep",
+              onPress: toggleSleepGuard,
+              width: 130,
+              color: sleepGuard ? C2.red : C2.accent
+            })
+          ]
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Section, {
+          title: "Gamepad Events (connect a controller)",
+          children: gamepadLog.length === 0 ? /* @__PURE__ */ jsx_runtime.jsx(Row, {
+            label: "No events yet",
+            value: "",
+            tone: C2.dim
+          }) : gamepadLog.map((e, i) => /* @__PURE__ */ jsx_runtime.jsx(Row, {
+            label: `Event ${i + 1}`,
+            value: e,
+            tone: C2.mauve
+          }, i))
+        }),
+        /* @__PURE__ */ jsx_runtime.jsxs(Section, {
+          title: "App-focused Shortcut (Ctrl+G)",
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Row, {
+              label: "Press Ctrl+G while this screen is open",
+              value: "",
+              tone: C2.dim
+            }),
+            shortcutLog.length === 0 ? /* @__PURE__ */ jsx_runtime.jsx(Row, {
+              label: "No shortcut fired yet",
+              value: "",
+              tone: C2.dim
+            }) : shortcutLog.map((e, i) => /* @__PURE__ */ jsx_runtime.jsx(Row, {
+              label: `Fire ${i + 1}`,
+              value: e,
+              tone: C2.green
+            }, i))
+          ]
+        })
+      ]
     });
   }
   function NetworkTestScreen() {
@@ -8507,6 +9017,10 @@ Ranking: cosine similarity across stored note vectors.`
                 /* @__PURE__ */ jsx_runtime.jsx(Route, {
                   name: "network",
                   component: NetworkTestScreen
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Route, {
+                  name: "sysapi",
+                  component: SysApiScreen
                 })
               ]
             })

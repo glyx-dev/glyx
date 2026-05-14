@@ -94,11 +94,28 @@ globalThis.__velox_ws_close = function() {};
 // mDNS binding
 globalThis.__velox_mdns_discover = function() { return stubPromise('[]'); };
 
+// Performance monitoring bindings
+globalThis.__velox_perf_snapshot = function() { return '{"fps":0,"frameTime":0,"frameTimeP99":0,"jsTime":0,"layoutTime":0,"memoryJS":0,"nodeCount":0}'; };
+globalThis.__velox_perf_set_budget = function() {};
+globalThis.__velox_perf_poll_violations = function() { return '[]'; };
+
 // Multi-window + IPC bindings
 let __velox_nextWindowId = 1;
 globalThis.__velox_window_create = function() { return stubPromise(String(__velox_nextWindowId++)); };
 globalThis.__velox_ipc_send = function() {};
 globalThis.__velox_ipc_poll = function() { return '[]'; };
+globalThis.__velox_quit = function() {};
+
+// OS system API bindings
+globalThis.__velox_battery_getStatus   = function() { return stubPromise('null'); };
+globalThis.__velox_system_getInfo      = function() { return stubPromise('{}'); };
+globalThis.__velox_power_preventSleep  = function() { return '0'; };
+globalThis.__velox_power_allowSleep    = function() {};
+globalThis.__velox_storage_getDrives   = function() { return stubPromise('[]'); };
+globalThis.__velox_gamepad_poll        = function() { return '[]'; };
+globalThis.__velox_shortcut_register   = function() { return '0'; };
+globalThis.__velox_shortcut_unregister = function() {};
+globalThis.__velox_shortcut_poll       = function() { return '[]'; };
 "#
     .to_string()
 }

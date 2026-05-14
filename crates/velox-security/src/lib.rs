@@ -75,13 +75,24 @@ pub struct Capabilities {
     #[serde(default)]
     pub notification: bool,
     #[serde(default)]
-    pub battery:      bool,
+    pub battery:          bool,
     #[serde(default)]
-    pub usb:          bool,
+    pub usb:              bool,
     #[serde(default)]
-    pub shell:        bool,
+    pub shell:            bool,
     #[serde(default)]
-    pub mdns:         bool,
+    pub mdns:             bool,
+    #[serde(default)]
+    pub system:           bool,
+    #[serde(default)]
+    pub power:            bool,
+    #[serde(default)]
+    pub storage:          bool,
+    #[serde(default)]
+    pub gamepads:         bool,
+    #[serde(rename = "globalShortcuts")]
+    #[serde(default)]
+    pub global_shortcuts: bool,
 }
 
 impl Capabilities {

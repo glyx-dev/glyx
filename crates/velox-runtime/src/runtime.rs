@@ -40,6 +40,8 @@ pub struct VeloxRuntime {
     scene:        SceneQueue,
     pub events:   EventQueue,
     pub layout_cache: LayoutCache,
+    /// Shared perf ring-buffer — velox-core writes frames; JS bindings read via snapshot.
+    pub perf_state: Arc<std::sync::Mutex<velox_perf::PerfState>>,
 }
 
 pub struct HeapStats {
@@ -55,7 +57,8 @@ impl VeloxRuntime {
     pub fn new(tokio_handle: Handle, window: Option<WindowController>) -> Self {
         let ipc_bus        = new_ipc_bus();
         let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
-        Self::new_with_ipc(tokio_handle, window, ipc_bus, 0, next_window_id)
+        let perf_state     = Arc::new(std::sync::Mutex::new(velox_perf::PerfState::new()));
+        Self::new_with_ipc(tokio_handle, window, ipc_bus, 0, next_window_id, perf_state)
     }
 
     /// Create a new VeloxRuntime and join it to the shared IPC bus.
@@ -68,6 +71,7 @@ impl VeloxRuntime {
         ipc_bus:        IpcBus,
         my_handle:      u32,
         next_window_id: Arc<std::sync::atomic::AtomicU32>,
+        perf_state:     Arc<std::sync::Mutex<velox_perf::PerfState>>,
     ) -> Self {
         // Register this window's inbox in the shared bus.
         ipc_bus.lock().unwrap()
@@ -98,12 +102,13 @@ impl VeloxRuntime {
                 ipc_bus,
                 my_handle,
                 next_window_id,
+                Arc::clone(&perf_state),
             );
 
             (v8::Global::new(scope, ctx), queue, scene)
         };
 
-        Self { isolate, context, queue, scene, events, layout_cache }
+        Self { isolate, context, queue, scene, events, layout_cache, perf_state }
     }
 
     /// Create a new VeloxRuntime from a snapshot blob (pre-executed JS heap).
@@ -117,7 +122,8 @@ impl VeloxRuntime {
     ) -> Result<Self, RuntimeError> {
         let ipc_bus        = new_ipc_bus();
         let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
-        Self::new_from_snapshot_with_ipc(snapshot_blob, tokio_handle, window, ipc_bus, 0, next_window_id)
+        let perf_state     = Arc::new(std::sync::Mutex::new(velox_perf::PerfState::new()));
+        Self::new_from_snapshot_with_ipc(snapshot_blob, tokio_handle, window, ipc_bus, 0, next_window_id, perf_state)
     }
 
     /// Restore from snapshot and join the shared IPC bus.
@@ -128,6 +134,7 @@ impl VeloxRuntime {
         ipc_bus:        IpcBus,
         my_handle:      u32,
         next_window_id: Arc<std::sync::atomic::AtomicU32>,
+        perf_state:     Arc<std::sync::Mutex<velox_perf::PerfState>>,
     ) -> Result<Self, RuntimeError> {
         // Register this window's inbox in the bus.
         ipc_bus.lock().unwrap()
@@ -161,12 +168,13 @@ impl VeloxRuntime {
                 ipc_bus,
                 my_handle,
                 next_window_id,
+                Arc::clone(&perf_state),
             );
 
             (v8::Global::new(scope, ctx), queue, scene)
         };
 
-        Ok(Self { isolate, context, queue, scene, events, layout_cache })
+        Ok(Self { isolate, context, queue, scene, events, layout_cache, perf_state })
     }
 
     // ── Extensions ────────────────────────────────────────────────────────────

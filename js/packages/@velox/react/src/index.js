@@ -23,6 +23,11 @@ const rootContainer = VeloxReconciler.createContainer(
   null
 );
 
+// ── WebSocket inbox polling ───────────────────────────────────────────────────
+//
+// Open sockets: id (number) → { onmessage, onclose, onerror }
+const _wsOpenSockets = new Map();
+
 // ── Frame callback ────────────────────────────────────────────────────────────
 //
 // Rust calls __velox_frameCallback() once per RedrawRequested (frame_tick),
@@ -32,6 +37,7 @@ globalThis.__velox_frameCallback = function veloxFrameCallback() {
   // flushSync forces React to commit all state updates triggered by events
   // synchronously, so scene commands are in the queue before Rust drains them.
   VeloxReconciler.flushSync(() => {
+    _pollWebSockets();
     dispatchEvents();
   });
 };
@@ -229,17 +235,153 @@ export function TextInput({
   const handlersRef = useRef(null);
   const [focused, setFocused] = useState(false);
 
-  // Keep handlersRef current (captures latest value / onChangeText).
+  // anchor: fixed end of selection; focus_: moving cursor end.
+  // When anchor === focus_: no selection, cursor blinks at that position.
+  const [anchor, setAnchor]   = useState(() => value.length);
+  const [focus_,  setFocus_]  = useState(() => value.length);
+
+  // Derived selection range (always ordered).
+  const selStart = Math.min(anchor, focus_);
+  const selEnd   = Math.max(anchor, focus_);
+
+  // Collapse cursor to `pos`, clamped to [0, value.length].
+  const moveCursor = (pos) => {
+    const clamped = Math.max(0, Math.min(pos, value.length));
+    setAnchor(clamped);
+    setFocus_(clamped);
+  };
+
+  // Extend only the moving focus end (shift-selection).
+  const extendTo = (pos) => {
+    setFocus_(Math.max(0, Math.min(pos, value.length)));
+  };
+
+  // Keep handlersRef current so it always captures the latest state/props.
   handlersRef.current = {
-    onFocus: () => setFocused(true),
-    onBlur:  () => setFocused(false),
-    onKeyPress: ({ key, text }) => {
+    onFocus: () => {
+      setFocused(true);
+      // Place cursor at end of text on focus.
+      const end = value.length;
+      setAnchor(end);
+      setFocus_(end);
+    },
+    onBlur: () => {
+      setFocused(false);
+    },
+    onKeyPress: async ({ key, text, ctrl, shift }) => {
+      const ss     = Math.min(anchor, focus_);
+      const se     = Math.max(anchor, focus_);
+      const hasSel = ss < se;
+
+      // ── Ctrl shortcuts ──────────────────────────────────────────────────
+      if (ctrl) {
+        if (key === 'KeyA') {
+          setAnchor(0);
+          setFocus_(value.length);
+        } else if (key === 'KeyC') {
+          if (hasSel) {
+            try { await clipboard.writeText(value.slice(ss, se)); } catch (_) {}
+          }
+        } else if (key === 'KeyX') {
+          if (hasSel) {
+            try { await clipboard.writeText(value.slice(ss, se)); } catch (_) {}
+            const newVal = value.slice(0, ss) + value.slice(se);
+            onChangeText?.(newVal);
+            moveCursor(ss);
+          }
+        } else if (key === 'KeyV') {
+          try {
+            const pasted = await clipboard.readText();
+            if (pasted) {
+              const newVal = value.slice(0, ss) + pasted + value.slice(se);
+              onChangeText?.(newVal);
+              const newPos = ss + pasted.length;
+              setAnchor(newPos);
+              setFocus_(newPos);
+            }
+          } catch (_) {}
+        }
+        return;
+      }
+
+      // ── Arrow / navigation keys ─────────────────────────────────────────
+      if (key === 'ArrowLeft') {
+        if (shift) {
+          extendTo(focus_ - 1);
+        } else if (hasSel) {
+          moveCursor(ss);           // collapse to start of selection
+        } else {
+          moveCursor(anchor - 1);
+        }
+        return;
+      }
+      if (key === 'ArrowRight') {
+        if (shift) {
+          extendTo(focus_ + 1);
+        } else if (hasSel) {
+          moveCursor(se);           // collapse to end of selection
+        } else {
+          moveCursor(anchor + 1);
+        }
+        return;
+      }
+      if (key === 'Home') {
+        if (shift) { extendTo(0); } else { moveCursor(0); }
+        return;
+      }
+      if (key === 'End') {
+        if (shift) { extendTo(value.length); } else { moveCursor(value.length); }
+        return;
+      }
+
+      // ── Delete / Backspace ──────────────────────────────────────────────
       if (key === 'Backspace') {
-        onChangeText?.(value.slice(0, -1));
-      } else if (key === 'Enter' && multiline) {
-        onChangeText?.(value + '\n');
-      } else if (text) {
-        onChangeText?.(value + text);
+        if (hasSel) {
+          onChangeText?.(value.slice(0, ss) + value.slice(se));
+          moveCursor(ss);
+        } else if (anchor > 0) {
+          // Spread to handle multi-byte Unicode correctly.
+          const chars = [...value];
+          chars.splice(anchor - 1, 1);
+          onChangeText?.(chars.join(''));
+          moveCursor(anchor - 1);
+        }
+        return;
+      }
+      if (key === 'Delete') {
+        if (hasSel) {
+          onChangeText?.(value.slice(0, ss) + value.slice(se));
+          moveCursor(ss);
+        } else if (anchor < value.length) {
+          const chars = [...value];
+          chars.splice(anchor, 1);
+          onChangeText?.(chars.join(''));
+          // cursor stays at same position
+        }
+        return;
+      }
+
+      // ── Enter (multiline only) ──────────────────────────────────────────
+      if (key === 'Enter') {
+        if (multiline) {
+          const newVal = value.slice(0, ss) + '\n' + value.slice(se);
+          onChangeText?.(newVal);
+          const newPos = ss + 1;
+          setAnchor(newPos);
+          setFocus_(newPos);
+        }
+        return;
+      }
+
+      // ── Printable character ─────────────────────────────────────────────
+      if (text) {
+        const newVal = value.slice(0, ss) + text + value.slice(se);
+        onChangeText?.(newVal);
+        // Do NOT use moveCursor() here — it clamps to the old value.length,
+        // which is 0 when typing the first character into an empty field.
+        const newPos = ss + text.length;
+        setAnchor(newPos);
+        setFocus_(newPos);
       }
     },
   };
@@ -261,11 +403,9 @@ export function TextInput({
     };
   }, []);
 
-  // When focused, always show the actual value so the cursor lands after
-  // typed characters (position 0 when value is empty). Show placeholder
-  // only when unfocused and nothing has been typed yet.
-  const displayText = (focused || value) ? value : placeholder;
-  const textColor   = value ? '#ffffff' : '#888888';
+  // Show placeholder only when unfocused and value is empty.
+  const displayText  = (focused || value) ? value : placeholder;
+  const textColor    = value ? '#ffffff' : '#888888';
   const innerPadding = multiline ? 10 : 8;
 
   const inputStyle = {
@@ -283,13 +423,16 @@ export function TextInput({
     'view',
     { _veloxOnMount: onMount, style: inputStyle, width, height, ...props },
     React.createElement('text', {
-      text:       displayText,
+      text:           displayText,
       fontSize,
-      width:      width - innerPadding * 2,
-      height:     multiline ? undefined : height - innerPadding * 2,
-      style:      { color: textColor },
-      showCursor: focused,
-      textAlign:  'left',
+      width:          width - innerPadding * 2,
+      height:         multiline ? undefined : height - innerPadding * 2,
+      style:          { color: textColor },
+      showCursor:     focused,
+      cursorPosition: focused ? focus_ : undefined,
+      selectionStart: (focused && selStart < selEnd) ? selStart : undefined,
+      selectionEnd:   (focused && selStart < selEnd) ? selEnd   : undefined,
+      textAlign:      'left',
     })
   );
 }
@@ -681,5 +824,107 @@ export const notification = {
   send({ title, body = '' }) {
     if (typeof __velox_notification_send === 'undefined') return _noBinding('notification.send');
     return __velox_notification_send(title, body);
+  },
+};
+
+// ── fetch ─────────────────────────────────────────────────────────────────────
+//
+// Browser-compatible fetch API backed by the Rust reqwest HTTP client.
+// Requires `network.allow` capability in velox.config.json:
+//   { "capabilities": { "network": { "allow": ["api.example.com"] } } }
+// Use ["*"] to allow all outbound requests.
+//
+// Response shape mirrors the browser Fetch API (subset):
+//   res.status      → number
+//   res.ok          → boolean (true when 200-299)
+//   res.statusText  → string
+//   res.headers     → plain object  { "content-type": "..." }
+//   res.text()      → Promise<string>
+//   res.json()      → Promise<any>
+
+/**
+ * Make an HTTP request.
+ * @param {string} url
+ * @param {{ method?: string, headers?: Record<string,string>, body?: string }} [options]
+ * @returns {Promise<{ status: number, ok: boolean, statusText: string,
+ *                     headers: Record<string,string>,
+ *                     text: () => Promise<string>, json: () => Promise<any> }>}
+ */
+export async function fetch(url, options = {}) {
+  if (typeof __velox_fetch === 'undefined') {
+    throw new Error('fetch: __velox_fetch binding is not available');
+  }
+  const raw  = await __velox_fetch(url, JSON.stringify(options));
+  const data = JSON.parse(raw);
+  return {
+    status:     data.status,
+    ok:         data.ok,
+    statusText: data.statusText,
+    headers:    data.headers ?? {},
+    text:       () => Promise.resolve(data.body),
+    json:       () => Promise.resolve(JSON.parse(data.body)),
+  };
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+//
+// Drains each open socket's inbox once per frame and fires registered handlers.
+// Called from __velox_frameCallback (defined above) inside flushSync so that
+// onmessage callbacks that call setState are batched with the rest of the frame.
+function _pollWebSockets() {
+  for (const [id, handlers] of _wsOpenSockets) {
+    let raw;
+    try { raw = __velox_ws_poll(id); } catch { continue; }
+    if (!raw) continue;
+    let msgs;
+    try { msgs = JSON.parse(raw); } catch { continue; }
+    for (const m of msgs) {
+      if (m === '__VELOX_WS_CLOSED__') {
+        handlers.onclose?.();
+        _wsOpenSockets.delete(id);
+        break;
+      } else {
+        handlers.onmessage?.({ data: m });
+      }
+    }
+  }
+}
+
+/**
+ * WebSocket API.
+ *
+ * @example
+ * const socket = await ws.connect('wss://echo.websocket.org', {
+ *   onmessage: (ev) => console.log('received:', ev.data),
+ *   onclose:   ()   => console.log('closed'),
+ * });
+ * socket.send('Hello!');
+ * // later:
+ * socket.close();
+ */
+export const ws = {
+  /**
+   * Open a WebSocket connection.
+   *
+   * @param {string} url  ws:// or wss:// URL
+   * @param {{ onmessage?: (ev: {data:string}) => void,
+   *            onclose?:  () => void,
+   *            onerror?:  (err: string) => void }} [handlers]
+   * @returns {Promise<{ send: (msg:string)=>void, close: ()=>void, id: number }>}
+   */
+  connect(url, handlers = {}) {
+    return __velox_ws_connect(url).then(idStr => {
+      const id = Number(idStr);
+      _wsOpenSockets.set(id, handlers);
+      return {
+        get id() { return id; },
+        send(msg)  { __velox_ws_send(id, String(msg)); },
+        close()    {
+          __velox_ws_close(id);
+          _wsOpenSockets.delete(id);
+          handlers.onclose?.();
+        },
+      };
+    });
   },
 };

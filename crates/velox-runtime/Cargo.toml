@@ -17,3 +17,6 @@ arboard             = { workspace = true }
 clipboard-win       = { workspace = true }
 notify-rust         = { workspace = true }
 raw-window-handle   = { workspace = true }
+reqwest             = { workspace = true }
+tokio-tungstenite   = { workspace = true }
+futures-util        = { workspace = true }

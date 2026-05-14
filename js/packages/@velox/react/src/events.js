@@ -41,6 +41,10 @@ let focusedNodeId = null;
 // Updated once per frame from the last cursorMoved event's position.
 let hoveredPressableId = null;
 
+// Modifier key state — updated on every keyInput (pressed AND released).
+let ctrlHeld  = false;
+let shiftHeld = false;
+
 // Last cursor position seen this frame (updated by cursorMoved events).
 let cursorX = 0;
 let cursorY = 0;
@@ -190,12 +194,22 @@ export function dispatchEvents() {
       }
 
       case 'keyInput': {
+        // Always track modifier state (on both press and release).
+        if (ev.key === 'ControlLeft' || ev.key === 'ControlRight') {
+          ctrlHeld = ev.pressed;
+          break;
+        }
+        if (ev.key === 'ShiftLeft' || ev.key === 'ShiftRight') {
+          shiftHeld = ev.pressed;
+          break;
+        }
+
         if (!ev.pressed || focusedNodeId === null) break;
 
         const handlers = inputRegistry.get(focusedNodeId);
         if (!handlers) break;
 
-        handlers.onKeyPress?.({ key: ev.key, text: ev.text });
+        handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld });
         break;
       }
 

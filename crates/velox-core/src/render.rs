@@ -134,7 +134,10 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
             let color      = node.props.color.unwrap_or([255, 255, 255, 255]);
             let max_width  = rw.max(1.0) as f32;
             let left_align = node.props.text_align.as_deref() == Some("left");
-            let show_cursor = node.props.show_cursor.unwrap_or(false);
+            let show_cursor     = node.props.show_cursor.unwrap_or(false);
+            let cursor_position = node.props.cursor_position.map(|p| p as usize);
+            let selection_start = node.props.selection_start.map(|p| p as usize);
+            let selection_end   = node.props.selection_end.map(|p| p as usize);
 
             let key: LabelKey = (
                 text.to_owned(),
@@ -161,14 +164,51 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
                 ry + (bh - label.ascent).max(0.0) / 2.0
             };
 
+            let label_width = label.width;
+            // Cursor/selection positioned using font metrics (not the line-box)
+            // so they align with visible glyph strokes rather than floating above
+            // them due to Parley's line leading.
+            let cur_top    = ty + label.cursor_top;
+            let cur_height = label.cursor_height;
+
+            // 1. Selection highlight — drawn before text so text renders on top.
+            if let (Some(ss), Some(se)) = (selection_start, selection_end) {
+                if ss < se {
+                    let char_count = text.chars().count();
+                    let x0 = ctx.text_sys.measure_to_cursor(
+                        text, font_size, max_width, ss.min(char_count),
+                    ) as f64;
+                    let x1 = ctx.text_sys.measure_to_cursor(
+                        text, font_size, max_width, se.min(char_count),
+                    ) as f64;
+                    if x1 > x0 {
+                        ctx.frame.fill_rounded_rect(
+                            tx + x0, cur_top, x1 - x0, cur_height, 0.0,
+                            peniko::Color::rgba8(100, 120, 255, 120),
+                        );
+                    }
+                }
+            }
+
+            // 2. Draw shaped text.
             ctx.frame.draw_text(&label.layout, tx, ty, rgba_to_vello(color));
 
-            let (lw, la) = (label.width, label.ascent);
-
+            // 3. Blinking cursor line — uses same metrics as selection highlight.
             if show_cursor {
                 *ctx.any_cursor_active = true;
                 if ctx.cursor_blink_on {
-                    ctx.frame.fill_rounded_rect(tx + lw + 2.0, ty, 2.0, la, 0.0, rgba_to_vello(color));
+                    let cx = if let Some(cp) = cursor_position {
+                        let char_count = text.chars().count();
+                        ctx.text_sys.measure_to_cursor(
+                            text, font_size, max_width, cp.min(char_count),
+                        ) as f64
+                    } else {
+                        label_width
+                    };
+                    ctx.frame.fill_rounded_rect(
+                        tx + cx, cur_top, 2.0, cur_height, 0.0,
+                        rgba_to_vello(color),
+                    );
                 }
             }
         }

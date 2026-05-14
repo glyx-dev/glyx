@@ -19,7 +19,7 @@ import './polyfills.js';
 import React, { useState, useEffect, useContext, createContext, useCallback, useMemo } from 'react';
 import {
   View, Text, Pressable, TextInput, ScrollView, render, useWindowSize, useMediaQuery,
-  db, vectorDb, fs, dialog, clipboard, notification, veloxWindow,
+  db, vectorDb, fs, dialog, clipboard, notification, veloxWindow, fetch, ws,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
 
@@ -399,6 +399,12 @@ function NoteListScreen() {
             width={90}
             color={C.accent}
             disabled={!dbReady}
+          />
+          <Btn
+            label="Network"
+            onPress={() => navigate('network')}
+            width={90}
+            color={C.teal}
           />
         </View>
         <Text fontSize={11} width={isWide ? inner - 308 : inner} height={16} style={{ color: C.dim }}>
@@ -979,6 +985,201 @@ function NoteSearchScreen() {
   );
 }
 
+// ── Screen: Network Test ──────────────────────────────────────────────────────
+//
+// Demonstrates Phase 12 fetch binding.  Fires a GET and a POST request
+// against the public JSONPlaceholder API and shows the raw response.
+
+function NetworkTestScreen() {
+  const { width: winW, height: winH } = useWindowSize();
+  const navigate = useNavigate();
+  const C = useThemeColors();
+
+  const inner = winW - PAD * 2;
+  const [getResult,  setGetResult]  = useState('');
+  const [postResult, setPostResult] = useState('');
+  const [loading,    setLoading]    = useState(false);
+  const [error,      setError]      = useState('');
+
+  async function runGet() {
+    setLoading(true); setError(''); setGetResult('');
+    try {
+      const res = await fetch('https://jsonplaceholder.typicode.com/todos/1');
+      const data = await res.json();
+      setGetResult(JSON.stringify(data, null, 2));
+    } catch (e) {
+      setError('GET failed: ' + (e?.message ?? String(e)));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function runPost() {
+    setLoading(true); setError(''); setPostResult('');
+    try {
+      const res = await fetch('https://jsonplaceholder.typicode.com/posts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Velox test', body: 'Hello from Velox fetch!', userId: 1 }),
+      });
+      const data = await res.json();
+      setPostResult(JSON.stringify(data, null, 2));
+    } catch (e) {
+      setError('POST failed: ' + (e?.message ?? String(e)));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <View
+      style={{ justifyContent: 'flex-start', alignItems: 'flex-start', gap: 12 }}
+      width={winW}
+      height={winH - HEADER_H - PAD * 2}
+    >
+      <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }} width={inner} height={32}>
+        <BackBtn />
+        <Text fontSize={16} width={180} height={22} style={{ color: C.teal }}>Network Test (fetch)</Text>
+        {loading && <Text fontSize={12} width={80} height={18} style={{ color: C.yellow }}>Loading…</Text>}
+      </View>
+
+      {error !== '' && (
+        <Text fontSize={12} width={inner} height={18} style={{ color: C.red }}>{error}</Text>
+      )}
+
+      <Divider />
+
+      {/* GET test */}
+      <Text fontSize={13} width={inner} height={18} style={{ color: C.subtle }}>
+        GET https://jsonplaceholder.typicode.com/todos/1
+      </Text>
+      <Btn label="Run GET" onPress={runGet} width={100} color={C.accent} disabled={loading} />
+      {getResult !== '' && (
+        <ScrollView width={inner} height={180} contentHeight={Math.max(180, getResult.split('\n').length * 18)}>
+          <Text fontSize={12} width={inner - 12} height={getResult.split('\n').length * 18} style={{ color: C.text }}>
+            {getResult}
+          </Text>
+        </ScrollView>
+      )}
+
+      <Divider />
+
+      {/* POST test */}
+      <Text fontSize={13} width={inner} height={18} style={{ color: C.subtle }}>
+        POST https://jsonplaceholder.typicode.com/posts
+      </Text>
+      <Btn label="Run POST" onPress={runPost} width={110} color={C.mauve} disabled={loading} />
+      {postResult !== '' && (
+        <ScrollView width={inner} height={180} contentHeight={Math.max(180, postResult.split('\n').length * 18)}>
+          <Text fontSize={12} width={inner - 12} height={postResult.split('\n').length * 18} style={{ color: C.text }}>
+            {postResult}
+          </Text>
+        </ScrollView>
+      )}
+
+      {/* WebSocket echo test */}
+      <Divider />
+      <Text fontSize={13} width={inner} height={18} style={{ color: C.subtle }}>
+        WebSocket echo test — wss://echo.websocket.org
+      </Text>
+      <WsTestBox width={inner} />
+
+      {/* TextInput test (Phase 11B) */}
+      <Divider />
+      <Text fontSize={13} width={inner} height={18} style={{ color: C.subtle }}>
+        TextInput selection test (Phase 11B) — try Ctrl+A, Ctrl+C, Ctrl+V, arrows, shift+arrow
+      </Text>
+      <TextInputTestBox width={inner} />
+    </View>
+  );
+}
+
+function WsTestBox({ width }) {
+  const C = useThemeColors();
+  const [socket,   setSocket]   = useState(null);
+  const [log,      setLog]      = useState([]);
+  const [msgInput, setMsgInput] = useState('Hello from Velox WebSocket!');
+  const [status,   setStatus]   = useState('disconnected');
+
+  function addLog(line) {
+    setLog(prev => [...prev.slice(-19), line]); // keep last 20 lines
+  }
+
+  async function connect() {
+    setStatus('connecting…');
+    try {
+      const sock = await ws.connect('wss://echo.websocket.org', {
+        onmessage: (ev) => addLog('← ' + ev.data),
+        onclose:   ()   => { setStatus('disconnected'); setSocket(null); addLog('— connection closed'); },
+      });
+      setSocket(sock);
+      setStatus('connected');
+      addLog('— connected to wss://echo.websocket.org');
+    } catch (e) {
+      setStatus('error: ' + (e?.message ?? String(e)));
+    }
+  }
+
+  function send() {
+    if (!socket) return;
+    socket.send(msgInput);
+    addLog('→ ' + msgInput);
+  }
+
+  function disconnect() {
+    socket?.close();
+  }
+
+  const logText = log.join('\n');
+  const logLines = log.length;
+
+  return (
+    <View style={{ gap: 8, alignItems: 'flex-start' }} width={width} height={230}>
+      <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }} width={width} height={30}>
+        <Text fontSize={12} width={120} height={18} style={{ color: status === 'connected' ? C.green : C.dim }}>
+          {status}
+        </Text>
+        {!socket ? (
+          <Btn label="Connect" onPress={connect} width={90} color={C.teal} />
+        ) : (
+          <Btn label="Disconnect" onPress={disconnect} width={100} color={C.red} />
+        )}
+      </View>
+      <View style={{ flexDirection: 'row', gap: 8 }} width={width} height={36}>
+        <TextInput
+          value={msgInput}
+          onChangeText={setMsgInput}
+          placeholder="Message to send…"
+          fontSize={13}
+          width={width - 110}
+          height={36}
+        />
+        <Btn label="Send" onPress={send} width={90} color={C.accent} disabled={!socket} />
+      </View>
+      <ScrollView width={width} height={140} contentHeight={Math.max(140, logLines * 18)}>
+        <Text fontSize={12} width={width - 12} height={Math.max(140, logLines * 18)} style={{ color: C.text }}>
+          {logText || '(no messages yet)'}
+        </Text>
+      </ScrollView>
+    </View>
+  );
+}
+
+function TextInputTestBox({ width }) {
+  const C = useThemeColors();
+  const [val, setVal] = useState('Hello, Velox! Edit me and try Ctrl+A to select all.');
+  return (
+    <TextInput
+      value={val}
+      onChangeText={setVal}
+      placeholder="Type here to test cursor and selection…"
+      fontSize={14}
+      width={width}
+      height={40}
+    />
+  );
+}
+
 // ── App shell ─────────────────────────────────────────────────────────────────
 //
 // Initialises the DB and vector store once, provides them via context.
@@ -1149,9 +1350,10 @@ function App() {
             height={winH - HEADER_H}
           >
             <Router initialRoute="list">
-              <Route name="list"   component={NoteListScreen}   />
-              <Route name="edit"   component={NoteEditScreen}   />
-              <Route name="search" component={NoteSearchScreen} />
+              <Route name="list"    component={NoteListScreen}    />
+              <Route name="edit"    component={NoteEditScreen}    />
+              <Route name="search"  component={NoteSearchScreen}  />
+              <Route name="network" component={NetworkTestScreen} />
             </Router>
           </View>
 

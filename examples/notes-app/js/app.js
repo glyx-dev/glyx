@@ -5953,6 +5953,8 @@ No matching component was found for:
   var windowSizeListeners = [];
   var focusedNodeId = null;
   var hoveredPressableId = null;
+  var ctrlHeld = false;
+  var shiftHeld = false;
   var cursorX = 0;
   var cursorY = 0;
   function registerPressable(nodeId, handlers) {
@@ -6033,12 +6035,20 @@ No matching component was found for:
           break;
         }
         case "keyInput": {
+          if (ev.key === "ControlLeft" || ev.key === "ControlRight") {
+            ctrlHeld = ev.pressed;
+            break;
+          }
+          if (ev.key === "ShiftLeft" || ev.key === "ShiftRight") {
+            shiftHeld = ev.pressed;
+            break;
+          }
           if (!ev.pressed || focusedNodeId === null)
             break;
           const handlers = inputRegistry.get(focusedNodeId);
           if (!handlers)
             break;
-          handlers.onKeyPress?.({ key: ev.key, text: ev.text });
+          handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld });
           break;
         }
         case "cursorMoved": {
@@ -6089,8 +6099,10 @@ No matching component was found for:
   // ../../js/packages/@velox/react/src/index.js
   var VeloxReconciler = import_react_reconciler.default(hostConfig_default);
   var rootContainer = VeloxReconciler.createContainer({ isVeloxRoot: true }, 0, null, false, null, "", (err) => __velox_log("[React] Recoverable error: " + err.message), null);
+  var _wsOpenSockets = new Map;
   globalThis.__velox_frameCallback = function veloxFrameCallback() {
     VeloxReconciler.flushSync(() => {
+      _pollWebSockets();
       dispatchEvents();
     });
   };
@@ -6200,17 +6212,141 @@ No matching component was found for:
     const nodeIdRef = import_react.useRef(null);
     const handlersRef = import_react.useRef(null);
     const [focused, setFocused] = import_react.useState(false);
+    const [anchor, setAnchor] = import_react.useState(() => value.length);
+    const [focus_, setFocus_] = import_react.useState(() => value.length);
+    const selStart = Math.min(anchor, focus_);
+    const selEnd = Math.max(anchor, focus_);
+    const moveCursor = (pos) => {
+      const clamped = Math.max(0, Math.min(pos, value.length));
+      setAnchor(clamped);
+      setFocus_(clamped);
+    };
+    const extendTo = (pos) => {
+      setFocus_(Math.max(0, Math.min(pos, value.length)));
+    };
     handlersRef.current = {
-      onFocus: () => setFocused(true),
-      onBlur: () => setFocused(false),
-      onKeyPress: ({ key, text }) => {
+      onFocus: () => {
+        setFocused(true);
+        const end = value.length;
+        setAnchor(end);
+        setFocus_(end);
+      },
+      onBlur: () => {
+        setFocused(false);
+      },
+      onKeyPress: async ({ key, text, ctrl, shift }) => {
+        const ss = Math.min(anchor, focus_);
+        const se = Math.max(anchor, focus_);
+        const hasSel = ss < se;
+        if (ctrl) {
+          if (key === "KeyA") {
+            setAnchor(0);
+            setFocus_(value.length);
+          } else if (key === "KeyC") {
+            if (hasSel) {
+              try {
+                await clipboard.writeText(value.slice(ss, se));
+              } catch (_) {}
+            }
+          } else if (key === "KeyX") {
+            if (hasSel) {
+              try {
+                await clipboard.writeText(value.slice(ss, se));
+              } catch (_) {}
+              const newVal = value.slice(0, ss) + value.slice(se);
+              onChangeText?.(newVal);
+              moveCursor(ss);
+            }
+          } else if (key === "KeyV") {
+            try {
+              const pasted = await clipboard.readText();
+              if (pasted) {
+                const newVal = value.slice(0, ss) + pasted + value.slice(se);
+                onChangeText?.(newVal);
+                const newPos = ss + pasted.length;
+                setAnchor(newPos);
+                setFocus_(newPos);
+              }
+            } catch (_) {}
+          }
+          return;
+        }
+        if (key === "ArrowLeft") {
+          if (shift) {
+            extendTo(focus_ - 1);
+          } else if (hasSel) {
+            moveCursor(ss);
+          } else {
+            moveCursor(anchor - 1);
+          }
+          return;
+        }
+        if (key === "ArrowRight") {
+          if (shift) {
+            extendTo(focus_ + 1);
+          } else if (hasSel) {
+            moveCursor(se);
+          } else {
+            moveCursor(anchor + 1);
+          }
+          return;
+        }
+        if (key === "Home") {
+          if (shift) {
+            extendTo(0);
+          } else {
+            moveCursor(0);
+          }
+          return;
+        }
+        if (key === "End") {
+          if (shift) {
+            extendTo(value.length);
+          } else {
+            moveCursor(value.length);
+          }
+          return;
+        }
         if (key === "Backspace") {
-          onChangeText?.(value.slice(0, -1));
-        } else if (key === "Enter" && multiline) {
-          onChangeText?.(value + `
-`);
-        } else if (text) {
-          onChangeText?.(value + text);
+          if (hasSel) {
+            onChangeText?.(value.slice(0, ss) + value.slice(se));
+            moveCursor(ss);
+          } else if (anchor > 0) {
+            const chars = [...value];
+            chars.splice(anchor - 1, 1);
+            onChangeText?.(chars.join(""));
+            moveCursor(anchor - 1);
+          }
+          return;
+        }
+        if (key === "Delete") {
+          if (hasSel) {
+            onChangeText?.(value.slice(0, ss) + value.slice(se));
+            moveCursor(ss);
+          } else if (anchor < value.length) {
+            const chars = [...value];
+            chars.splice(anchor, 1);
+            onChangeText?.(chars.join(""));
+          }
+          return;
+        }
+        if (key === "Enter") {
+          if (multiline) {
+            const newVal = value.slice(0, ss) + `
+` + value.slice(se);
+            onChangeText?.(newVal);
+            const newPos = ss + 1;
+            setAnchor(newPos);
+            setFocus_(newPos);
+          }
+          return;
+        }
+        if (text) {
+          const newVal = value.slice(0, ss) + text + value.slice(se);
+          onChangeText?.(newVal);
+          const newPos = ss + text.length;
+          setAnchor(newPos);
+          setFocus_(newPos);
         }
       }
     };
@@ -6249,6 +6385,9 @@ No matching component was found for:
       height: multiline ? undefined : height - innerPadding * 2,
       style: { color: textColor },
       showCursor: focused,
+      cursorPosition: focused ? focus_ : undefined,
+      selectionStart: focused && selStart < selEnd ? selStart : undefined,
+      selectionEnd: focused && selStart < selEnd ? selEnd : undefined,
       textAlign: "left"
     }));
   }
@@ -6390,6 +6529,69 @@ No matching component was found for:
       if (typeof __velox_notification_send === "undefined")
         return _noBinding("notification.send");
       return __velox_notification_send(title, body);
+    }
+  };
+  async function fetch(url, options = {}) {
+    if (typeof __velox_fetch === "undefined") {
+      throw new Error("fetch: __velox_fetch binding is not available");
+    }
+    const raw = await __velox_fetch(url, JSON.stringify(options));
+    const data = JSON.parse(raw);
+    return {
+      status: data.status,
+      ok: data.ok,
+      statusText: data.statusText,
+      headers: data.headers ?? {},
+      text: () => Promise.resolve(data.body),
+      json: () => Promise.resolve(JSON.parse(data.body))
+    };
+  }
+  function _pollWebSockets() {
+    for (const [id, handlers] of _wsOpenSockets) {
+      let raw;
+      try {
+        raw = __velox_ws_poll(id);
+      } catch {
+        continue;
+      }
+      if (!raw)
+        continue;
+      let msgs;
+      try {
+        msgs = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      for (const m of msgs) {
+        if (m === "__VELOX_WS_CLOSED__") {
+          handlers.onclose?.();
+          _wsOpenSockets.delete(id);
+          break;
+        } else {
+          handlers.onmessage?.({ data: m });
+        }
+      }
+    }
+  }
+  var ws = {
+    connect(url, handlers = {}) {
+      return __velox_ws_connect(url).then((idStr) => {
+        const id = Number(idStr);
+        _wsOpenSockets.set(id, handlers);
+        return {
+          get id() {
+            return id;
+          },
+          send(msg) {
+            __velox_ws_send(id, String(msg));
+          },
+          close() {
+            __velox_ws_close(id);
+            _wsOpenSockets.delete(id);
+            handlers.onclose?.();
+          }
+        };
+      });
     }
   };
 
@@ -6884,6 +7086,12 @@ No matching component was found for:
                   width: 90,
                   color: C2.accent,
                   disabled: !dbReady
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "Network",
+                  onPress: () => navigate("network"),
+                  width: 90,
+                  color: C2.teal
                 })
               ]
             }),
@@ -7555,6 +7763,282 @@ Ranking: cosine similarity across stored note vectors.`
       })
     });
   }
+  function NetworkTestScreen() {
+    const { width: winW, height: winH } = useWindowSize();
+    const navigate = useNavigate();
+    const C2 = useThemeColors();
+    const inner = winW - PAD * 2;
+    const [getResult, setGetResult] = import_react3.useState("");
+    const [postResult, setPostResult] = import_react3.useState("");
+    const [loading, setLoading] = import_react3.useState(false);
+    const [error, setError] = import_react3.useState("");
+    async function runGet() {
+      setLoading(true);
+      setError("");
+      setGetResult("");
+      try {
+        const res = await fetch("https://jsonplaceholder.typicode.com/todos/1");
+        const data = await res.json();
+        setGetResult(JSON.stringify(data, null, 2));
+      } catch (e) {
+        setError("GET failed: " + (e?.message ?? String(e)));
+      } finally {
+        setLoading(false);
+      }
+    }
+    async function runPost() {
+      setLoading(true);
+      setError("");
+      setPostResult("");
+      try {
+        const res = await fetch("https://jsonplaceholder.typicode.com/posts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "Velox test", body: "Hello from Velox fetch!", userId: 1 })
+        });
+        const data = await res.json();
+        setPostResult(JSON.stringify(data, null, 2));
+      } catch (e) {
+        setError("POST failed: " + (e?.message ?? String(e)));
+      } finally {
+        setLoading(false);
+      }
+    }
+    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
+      style: { justifyContent: "flex-start", alignItems: "flex-start", gap: 12 },
+      width: winW,
+      height: winH - HEADER_H - PAD * 2,
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: { flexDirection: "row", gap: 8, alignItems: "center" },
+          width: inner,
+          height: 32,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(BackBtn, {}),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 16,
+              width: 180,
+              height: 22,
+              style: { color: C2.teal },
+              children: "Network Test (fetch)"
+            }),
+            loading && /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: 80,
+              height: 18,
+              style: { color: C2.yellow },
+              children: "Loading…"
+            })
+          ]
+        }),
+        error !== "" && /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 12,
+          width: inner,
+          height: 18,
+          style: { color: C2.red },
+          children: error
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Divider, {}),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 13,
+          width: inner,
+          height: 18,
+          style: { color: C2.subtle },
+          children: "GET https://jsonplaceholder.typicode.com/todos/1"
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+          label: "Run GET",
+          onPress: runGet,
+          width: 100,
+          color: C2.accent,
+          disabled: loading
+        }),
+        getResult !== "" && /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
+          width: inner,
+          height: 180,
+          contentHeight: Math.max(180, getResult.split(`
+`).length * 18),
+          children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+            fontSize: 12,
+            width: inner - 12,
+            height: getResult.split(`
+`).length * 18,
+            style: { color: C2.text },
+            children: getResult
+          })
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Divider, {}),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 13,
+          width: inner,
+          height: 18,
+          style: { color: C2.subtle },
+          children: "POST https://jsonplaceholder.typicode.com/posts"
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+          label: "Run POST",
+          onPress: runPost,
+          width: 110,
+          color: C2.mauve,
+          disabled: loading
+        }),
+        postResult !== "" && /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
+          width: inner,
+          height: 180,
+          contentHeight: Math.max(180, postResult.split(`
+`).length * 18),
+          children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+            fontSize: 12,
+            width: inner - 12,
+            height: postResult.split(`
+`).length * 18,
+            style: { color: C2.text },
+            children: postResult
+          })
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Divider, {}),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 13,
+          width: inner,
+          height: 18,
+          style: { color: C2.subtle },
+          children: "WebSocket echo test — wss://echo.websocket.org"
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(WsTestBox, {
+          width: inner
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Divider, {}),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 13,
+          width: inner,
+          height: 18,
+          style: { color: C2.subtle },
+          children: "TextInput selection test (Phase 11B) — try Ctrl+A, Ctrl+C, Ctrl+V, arrows, shift+arrow"
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(TextInputTestBox, {
+          width: inner
+        })
+      ]
+    });
+  }
+  function WsTestBox({ width }) {
+    const C2 = useThemeColors();
+    const [socket, setSocket] = import_react3.useState(null);
+    const [log, setLog] = import_react3.useState([]);
+    const [msgInput, setMsgInput] = import_react3.useState("Hello from Velox WebSocket!");
+    const [status, setStatus] = import_react3.useState("disconnected");
+    function addLog(line) {
+      setLog((prev) => [...prev.slice(-19), line]);
+    }
+    async function connect() {
+      setStatus("connecting…");
+      try {
+        const sock = await ws.connect("wss://echo.websocket.org", {
+          onmessage: (ev) => addLog("← " + ev.data),
+          onclose: () => {
+            setStatus("disconnected");
+            setSocket(null);
+            addLog("— connection closed");
+          }
+        });
+        setSocket(sock);
+        setStatus("connected");
+        addLog("— connected to wss://echo.websocket.org");
+      } catch (e) {
+        setStatus("error: " + (e?.message ?? String(e)));
+      }
+    }
+    function send() {
+      if (!socket)
+        return;
+      socket.send(msgInput);
+      addLog("→ " + msgInput);
+    }
+    function disconnect() {
+      socket?.close();
+    }
+    const logText = log.join(`
+`);
+    const logLines = log.length;
+    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
+      style: { gap: 8, alignItems: "flex-start" },
+      width,
+      height: 230,
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: { flexDirection: "row", gap: 8, alignItems: "center" },
+          width,
+          height: 30,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: 120,
+              height: 18,
+              style: { color: status === "connected" ? C2.green : C2.dim },
+              children: status
+            }),
+            !socket ? /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+              label: "Connect",
+              onPress: connect,
+              width: 90,
+              color: C2.teal
+            }) : /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+              label: "Disconnect",
+              onPress: disconnect,
+              width: 100,
+              color: C2.red
+            })
+          ]
+        }),
+        /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: { flexDirection: "row", gap: 8 },
+          width,
+          height: 36,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+              value: msgInput,
+              onChangeText: setMsgInput,
+              placeholder: "Message to send…",
+              fontSize: 13,
+              width: width - 110,
+              height: 36
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+              label: "Send",
+              onPress: send,
+              width: 90,
+              color: C2.accent,
+              disabled: !socket
+            })
+          ]
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
+          width,
+          height: 140,
+          contentHeight: Math.max(140, logLines * 18),
+          children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+            fontSize: 12,
+            width: width - 12,
+            height: Math.max(140, logLines * 18),
+            style: { color: C2.text },
+            children: logText || "(no messages yet)"
+          })
+        })
+      ]
+    });
+  }
+  function TextInputTestBox({ width }) {
+    const C2 = useThemeColors();
+    const [val, setVal] = import_react3.useState("Hello, Velox! Edit me and try Ctrl+A to select all.");
+    return /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+      value: val,
+      onChangeText: setVal,
+      placeholder: "Type here to test cursor and selection…",
+      fontSize: 14,
+      width,
+      height: 40
+    });
+  }
   function App() {
     const { width: winW, height: winH } = useWindowSize();
     const [fullscreen, setFullscreen] = import_react3.useState(false);
@@ -7714,6 +8198,10 @@ Ranking: cosine similarity across stored note vectors.`
                 /* @__PURE__ */ jsx_runtime.jsx(Route, {
                   name: "search",
                   component: NoteSearchScreen
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Route, {
+                  name: "network",
+                  component: NetworkTestScreen
                 })
               ]
             })

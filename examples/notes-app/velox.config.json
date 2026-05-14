@@ -7,6 +7,7 @@
   },
   "capabilities": {
     "fs":           { "read": ["**"], "write": ["**"] },
+    "network":      { "allow": ["*"] },
     "db":           true,
     "dialog":       true,
     "clipboard":    true,

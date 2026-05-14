@@ -181,6 +181,31 @@ impl TextSystem {
         self.bold_label(text, font_size, color)
     }
 
+    /// Measure the advance width of `text` up to (not including) `cursor_char` characters.
+    ///
+    /// Used to position the blinking cursor and selection highlight at the correct
+    /// pixel offset for a given character index.  Handles multi-byte Unicode correctly.
+    pub fn measure_to_cursor(&mut self, text: &str, font_size: f32, max_width: f32, cursor_char: usize) -> f32 {
+        let byte_idx = text
+            .char_indices()
+            .nth(cursor_char)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len());
+        let slice = &text[..byte_idx];
+
+        // Parley strips trailing whitespace from layout.width(), so a cursor
+        // placed after a space would render at the same X as before the space.
+        // Fix: append a non-whitespace sentinel, measure both strings, subtract.
+        if slice.ends_with(|c: char| c.is_whitespace()) {
+            let (w_with, _) = self.measure(&format!("{slice}x"), font_size, max_width);
+            let (w_x,    _) = self.measure("x",                  font_size, max_width);
+            (w_with - w_x).max(0.0)
+        } else {
+            let (w, _) = self.measure(slice, font_size, max_width);
+            w
+        }
+    }
+
     /// Measure the natural (width, height) of `text` at `font_size` wrapped to
     /// `max_width` pixels.  Color and weight do not affect metrics.
     ///
@@ -254,6 +279,36 @@ impl TextLayout {
                 })
             })
             .unwrap_or_else(|| self.inner.height() * 0.8)
+    }
+
+    /// Returns `(cursor_top_offset, cursor_height)` relative to the `ty` argument
+    /// passed to `draw_text`.
+    ///
+    /// Parley's line-box includes leading above ascenders and below descenders.
+    /// Drawing the cursor at raw `ty` makes it float above the visible glyphs.
+    /// This method uses the glyph-run's font metrics (`ascent + descent` without
+    /// leading) so the cursor aligns exactly with the visible character strokes.
+    ///
+    /// - `cursor_top_offset` — offset from `ty` to the cursor rect's top edge.
+    /// - `cursor_height` — `font_ascent + font_descent` (glyph region only).
+    pub fn cursor_metrics(&self) -> (f32, f32) {
+        self.inner
+            .lines()
+            .next()
+            .and_then(|line| {
+                line.items().find_map(|item| {
+                    if let parley::layout::PositionedLayoutItem::GlyphRun(gr) = item {
+                        let baseline = gr.baseline();
+                        let metrics  = gr.run().metrics();
+                        let top    = (baseline - metrics.ascent).max(0.0);
+                        let height = metrics.ascent + metrics.descent;
+                        Some((top, height))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_else(|| (0.0, self.inner.height()))
     }
 }
 

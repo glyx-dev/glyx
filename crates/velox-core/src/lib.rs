@@ -309,6 +309,13 @@ struct CachedLabel {
     /// Used to detect whether the layout box was auto-sized to the text —
     /// in which case we top-align rather than center-align vertically.
     text_height: f64,
+    /// Offset from the layout-box top (`ty`) to where the cursor rect starts.
+    /// Skips the leading above the ascenders so the cursor isn't drawn above
+    /// the visible glyphs.
+    cursor_top:    f64,
+    /// Height of the cursor rect — spans from ascenders to descenders only,
+    /// excluding any line leading.
+    cursor_height: f64,
 }
 
 impl CachedLabel {
@@ -319,12 +326,22 @@ impl CachedLabel {
         let text_height = layout.height() as f64;
         // For an empty string Parley produces no glyph runs, so ascent() = 0.
         // Shape a reference "M" at the same size to get the real font ascent.
-        let ascent = if layout.ascent() > 0.1 {
-            layout.ascent() as f64
+        let ref_layout = if layout.ascent() > 0.1 {
+            None
         } else {
-            ts.label_centered("M", font_size, max_width, vello_color).ascent() as f64
+            Some(ts.label_centered("M", font_size, max_width, vello_color))
         };
-        Self { layout, width, ascent, text_height }
+        let src    = ref_layout.as_ref().unwrap_or(&layout);
+        let ascent = src.ascent() as f64;
+        let (cursor_top_raw, cursor_height_raw) = src.cursor_metrics();
+        Self {
+            layout,
+            width,
+            ascent,
+            text_height,
+            cursor_top:    cursor_top_raw    as f64,
+            cursor_height: cursor_height_raw as f64,
+        }
     }
 }
 

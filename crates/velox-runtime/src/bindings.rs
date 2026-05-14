@@ -159,9 +159,16 @@ pub struct NodeProps {
     /// Gap between children in logical pixels.
     pub gap:             Option<f32>,
 
-    // ── Cursor UI ───────────────────────────────────────────────────────────
+    // ── Cursor UI / selection ────────────────────────────────────────────────
     /// When true, draw a text cursor rect after the text.
     pub show_cursor: Option<bool>,
+    /// Character index (0-based) where the blinking cursor is drawn.
+    /// `None` → cursor drawn after the last character (legacy behaviour).
+    pub cursor_position: Option<u32>,
+    /// Selection start character index (inclusive).  `None` → no selection.
+    pub selection_start: Option<u32>,
+    /// Selection end character index (exclusive).  `None` → no selection.
+    pub selection_end: Option<u32>,
 
     // ── Text alignment ───────────────────────────────────────────────────────
     /// `"left"` | `"center"` (default). Controls horizontal text origin.
@@ -232,6 +239,8 @@ pub fn register_all(
         next_db_id:    std::sync::atomic::AtomicU32::new(1),
         vector_stores: Arc::new(Mutex::new(HashMap::new())),
         next_vdb_id:   std::sync::atomic::AtomicU32::new(1),
+        ws_handles:    Arc::new(Mutex::new(HashMap::new())),
+        next_ws_id:    std::sync::atomic::AtomicU32::new(1),
     });
     let ptr   = Box::into_raw(state) as *mut std::ffi::c_void;
     // Safety: ptr is valid for the lifetime of the isolate.
@@ -302,6 +311,15 @@ pub fn register_all(
 
     // ── Notifications ───────────────────────────────────────────────────────
     register!("__velox_notification_send", notification_send_callback);
+
+    // ── Network ─────────────────────────────────────────────────────────────
+    register!("__velox_fetch",      fetch_callback);
+
+    // ── WebSocket ────────────────────────────────────────────────────────────
+    register!("__velox_ws_connect", ws_connect_callback);
+    register!("__velox_ws_send",    ws_send_callback);
+    register!("__velox_ws_poll",    ws_poll_callback);
+    register!("__velox_ws_close",   ws_close_callback);
 }
 
 struct AsyncState {
@@ -322,6 +340,14 @@ struct AsyncState {
     // ── Vector store handles ─────────────────────────────────────────────────
     vector_stores: Arc<Mutex<HashMap<u32, velox_db::VectorStore>>>,
     next_vdb_id:   std::sync::atomic::AtomicU32,
+    // ── WebSocket handles ────────────────────────────────────────────────────
+    ws_handles:    Arc<Mutex<HashMap<u32, WsHandle>>>,
+    next_ws_id:    std::sync::atomic::AtomicU32,
+}
+
+struct WsHandle {
+    outbox_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    inbox:     Arc<Mutex<VecDeque<String>>>,
 }
 
 fn set_func(
@@ -456,7 +482,10 @@ fn parse_props(
     props.background_color = get_color_prop(scope, obj, "backgroundColor");
     props.color            = get_color_prop(scope, obj, "color");
 
-    props.show_cursor   = get_bool_prop(scope, obj, "showCursor");
+    props.show_cursor     = get_bool_prop(scope, obj, "showCursor");
+    props.cursor_position = get_num_prop(scope, obj, "cursorPosition").map(|v| v as u32);
+    props.selection_start = get_num_prop(scope, obj, "selectionStart").map(|v| v as u32);
+    props.selection_end   = get_num_prop(scope, obj, "selectionEnd").map(|v| v as u32);
     props.text_align    = get_str_prop(scope, obj, "textAlign");
     props.border_width  = get_num_prop(scope, obj, "borderWidth");
     props.border_color  = get_color_prop(scope, obj, "borderColor");
@@ -1805,6 +1834,279 @@ fn vectordb_close_callback(
             Completion { resolver_ptr: resolver, result: Ok(String::new()) },
         );
     });
+}
+
+// ── Network: __velox_fetch ────────────────────────────────────────────────────
+
+/// Extract the hostname from a URL string without pulling in the `url` crate.
+/// `"https://api.example.com:8080/path?q=1"` → `"api.example.com"`.
+fn extract_host(url: &str) -> String {
+    let rest = if let Some(pos) = url.find("://") {
+        &url[pos + 3..]
+    } else {
+        url
+    };
+    let host_port = rest.split('/').next().unwrap_or(rest);
+    host_port.split(':').next().unwrap_or(host_port).to_lowercase()
+}
+
+/// `__velox_fetch(url, optionsJson) -> Promise<string>`
+///
+/// Makes an HTTP request and resolves with a JSON-serialised response object:
+/// ```json
+/// { "status": 200, "ok": true, "statusText": "OK",
+///   "headers": { "content-type": "application/json" },
+///   "body": "..." }
+/// ```
+///
+/// `optionsJson` (all fields optional):
+/// ```json
+/// { "method": "GET", "headers": { "Authorization": "Bearer ..." }, "body": "..." }
+/// ```
+///
+/// Requires `network.allow` capability in `velox.config.json`:
+/// ```json
+/// { "capabilities": { "network": { "allow": ["api.example.com"] } } }
+/// ```
+/// Use `"*"` to allow all outbound requests.
+fn fetch_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let url  = v8_arg_to_string(scope, &args, 0);
+    let host = extract_host(&url);
+
+    if !velox_security::get().can_network(&host) {
+        throw_cap_error(
+            scope,
+            &format!("network.allow[\"{host}\"] — add to velox.config.json \
+                      under \"capabilities\": {{ \"network\": {{ \"allow\": [\"{host}\"] }} }}"),
+        );
+        return;
+    }
+
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let options_json = v8_arg_to_string(scope, &args, 1);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result: Result<String, String> = async {
+            // Parse options (tolerates missing / undefined / null).
+            let opts: serde_json::Value = serde_json::from_str(&options_json)
+                .unwrap_or(serde_json::Value::Null);
+
+            let method = opts.get("method")
+                .and_then(|m| m.as_str())
+                .unwrap_or("GET")
+                .to_ascii_uppercase();
+
+            let client = reqwest::Client::new();
+
+            let mut builder = match method.as_str() {
+                "POST"   => client.post(&url),
+                "PUT"    => client.put(&url),
+                "PATCH"  => client.patch(&url),
+                "DELETE" => client.delete(&url),
+                "HEAD"   => client.head(&url),
+                _        => client.get(&url),
+            };
+
+            // Request headers.
+            if let Some(hdrs) = opts.get("headers").and_then(|h| h.as_object()) {
+                for (k, v) in hdrs {
+                    if let Some(val) = v.as_str() {
+                        builder = builder.header(k.as_str(), val);
+                    }
+                }
+            }
+
+            // Request body (string only; binary deferred to Phase 12B).
+            if let Some(body) = opts.get("body").and_then(|b| b.as_str()) {
+                builder = builder.body(body.to_owned());
+            }
+
+            let response = builder.send().await.map_err(|e| e.to_string())?;
+
+            let status      = response.status().as_u16();
+            let ok          = (200u16..300).contains(&status);
+            let status_text = response.status()
+                .canonical_reason()
+                .unwrap_or("")
+                .to_owned();
+
+            // Collect response headers as a plain object.
+            let mut resp_headers = serde_json::Map::new();
+            for (k, v) in response.headers() {
+                if let Ok(val) = v.to_str() {
+                    resp_headers.insert(k.to_string(), serde_json::Value::String(val.to_owned()));
+                }
+            }
+
+            let body = response.text().await.map_err(|e| e.to_string())?;
+
+            serde_json::to_string(&serde_json::json!({
+                "status":     status,
+                "ok":         ok,
+                "statusText": status_text,
+                "headers":    resp_headers,
+                "body":       body,
+            }))
+            .map_err(|e| e.to_string())
+        }
+        .await;
+
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+// ── WebSocket bindings ────────────────────────────────────────────────────────
+
+/// `__velox_ws_connect(url) -> Promise<string>` (resolves with handle id).
+///
+/// Connects via tokio-tungstenite.  Spawns two tasks:
+///   - read task: pushes incoming Text messages into `WsHandle::inbox`.
+///   - write task: forwards messages from `outbox_tx` to the socket sink.
+fn ws_connect_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let url  = v8_arg_to_string(scope, &args, 0);
+    let host = extract_host(&url);
+
+    if !velox_security::get().can_network(&host) {
+        throw_cap_error(
+            scope,
+            &format!("network.allow[\"{host}\"] — add to velox.config.json \
+                      under \"capabilities\": {{ \"network\": {{ \"allow\": [\"{host}\"] }} }}"),
+        );
+        return;
+    }
+
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle      = state.next_ws_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let ws_handles  = Arc::clone(&state.ws_handles);
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result: Result<String, String> = async {
+            use futures_util::{SinkExt, StreamExt};
+            use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+            let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+                .await
+                .map_err(|e| format!("WebSocket connect failed: {e}"))?;
+
+            let (mut sink, mut stream) = ws_stream.split();
+
+            let inbox = Arc::new(Mutex::new(VecDeque::<String>::new()));
+            let (outbox_tx, mut outbox_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+            // Read task: push incoming messages into inbox.
+            let inbox_read = Arc::clone(&inbox);
+            tokio::spawn(async move {
+                while let Some(msg) = stream.next().await {
+                    match msg {
+                        Ok(WsMessage::Text(text)) => {
+                            inbox_read.lock().unwrap().push_back(text.to_string());
+                        }
+                        Ok(WsMessage::Close(_)) | Err(_) => {
+                            inbox_read.lock().unwrap().push_back("__VELOX_WS_CLOSED__".to_string());
+                            break;
+                        }
+                        _ => {} // ping/pong/binary: ignored
+                    }
+                }
+                // Ensure a close sentinel is always pushed (handles clean server closes).
+                inbox_read.lock().unwrap().push_back("__VELOX_WS_CLOSED__".to_string());
+            });
+
+            // Write task: forward outbox messages to the socket.
+            tokio::spawn(async move {
+                while let Some(msg) = outbox_rx.recv().await {
+                    if sink.send(WsMessage::Text(msg)).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = sink.close().await;
+            });
+
+            ws_handles.lock().unwrap().insert(handle, WsHandle { outbox_tx, inbox });
+            Ok(handle.to_string())
+        }
+        .await;
+
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_ws_send(handle, message)` — sync fire-and-forget.
+fn ws_send_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let msg    = v8_arg_to_string(scope, &args, 1);
+
+    if let Some(h) = state.ws_handles.lock().unwrap().get(&handle) {
+        let _ = h.outbox_tx.send(msg);
+    }
+}
+
+/// `__velox_ws_poll(handle) -> string` — sync, drains inbox, returns JSON array.
+///
+/// Returns `"[]"` if no messages or unknown handle.
+/// Returns `["__VELOX_WS_CLOSED__"]` when the server has closed the connection.
+fn ws_poll_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let msgs: Vec<String> = {
+        let guard = state.ws_handles.lock().unwrap();
+        guard
+            .get(&handle)
+            .map(|h| h.inbox.lock().unwrap().drain(..).collect())
+            .unwrap_or_default()
+    };
+
+    let json   = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
+    let v8_str = v8::String::new(scope, &json).unwrap();
+    rv.set(v8_str.into());
+}
+
+/// `__velox_ws_close(handle)` — sync, removes handle (drops outbox tx → write task exits).
+fn ws_close_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    // Dropping WsHandle drops outbox_tx → write task's recv() returns None → exits.
+    state.ws_handles.lock().unwrap().remove(&handle);
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────

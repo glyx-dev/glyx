@@ -18,6 +18,11 @@ pub struct PerfFrame {
     pub js_time_ms:     f64,
     /// Time spent inside `recompute_layout()`.
     pub layout_time_ms: f64,
+    /// Wall-clock time around render_frame() + present() (GPU approximation).
+    /// Note: this is CPU-side timing of GPU submit + presentation, not a true
+    /// hardware timestamp query. Useful for detecting GPU bottlenecks but not
+    /// accurate enough for sub-millisecond GPU profiling.
+    pub gpu_time_ms:    f64,
     /// Number of JS scene nodes at frame time.
     pub node_count:     usize,
     /// JS heap used bytes at frame time.
@@ -32,17 +37,26 @@ pub struct PerfState {
     pub budget_ms:  f64,
     /// JSON-serialised violation objects waiting to be polled by JS.
     pub violations: VecDeque<String>,
+    /// Leak-detection warnings waiting to be polled by JS (dev mode).
+    pub leak_warnings: VecDeque<String>,
     /// Timestamp of the last frame start (for wall-clock measurement).
     pub last_frame_at: Option<std::time::Instant>,
+    /// Node count samples for monotonic-growth leak heuristic (dev mode).
+    pub _node_history: VecDeque<usize>,
+    /// Frames since last node-count decrease (for leak heuristic).
+    pub _monotonic_frames: u32,
 }
 
 impl Default for PerfState {
     fn default() -> Self {
         Self {
-            ring:          VecDeque::with_capacity(RING_SIZE),
-            budget_ms:     16.667,
-            violations:    VecDeque::new(),
-            last_frame_at: None,
+            ring:              VecDeque::with_capacity(RING_SIZE),
+            budget_ms:         16.667,
+            violations:        VecDeque::new(),
+            leak_warnings:     VecDeque::new(),
+            last_frame_at:     None,
+            _node_history:     VecDeque::with_capacity(300),
+            _monotonic_frames: 0,
         }
     }
 }
@@ -94,6 +108,21 @@ impl PerfState {
         if self.ring.is_empty() { return 0.0; }
         let sum: f64 = self.ring.iter().map(|f| f.layout_time_ms).sum();
         sum / self.ring.len() as f64
+    }
+
+    /// Mean GPU time (wall-clock approximation) over all samples (ms).
+    pub fn avg_gpu_time(&self) -> f64 {
+        if self.ring.is_empty() { return 0.0; }
+        let sum: f64 = self.ring.iter().map(|f| f.gpu_time_ms).sum();
+        sum / self.ring.len() as f64
+    }
+
+    /// Push a dev-mode leak warning. Capped at 32 to avoid unbounded growth.
+    pub fn push_leak_warning(&mut self, msg: String) {
+        self.leak_warnings.push_back(msg);
+        if self.leak_warnings.len() > 32 {
+            self.leak_warnings.pop_front();
+        }
     }
 
     /// 99th-percentile frame time over the ring buffer (ms).

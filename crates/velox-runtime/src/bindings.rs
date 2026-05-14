@@ -364,9 +364,10 @@ pub fn register_all(
     register!("__velox_ipc_poll",      ipc_poll_callback);
 
     // ── Performance metrics ──────────────────────────────────────────────────
-    register!("__velox_perf_snapshot",         perf_snapshot_callback);
-    register!("__velox_perf_set_budget",       perf_set_budget_callback);
-    register!("__velox_perf_poll_violations",  perf_poll_violations_callback);
+    register!("__velox_perf_snapshot",            perf_snapshot_callback);
+    register!("__velox_perf_set_budget",          perf_set_budget_callback);
+    register!("__velox_perf_poll_violations",     perf_poll_violations_callback);
+    register!("__velox_perf_poll_leak_warnings",  perf_poll_leak_warnings_callback);
 
     // ── OS system APIs ───────────────────────────────────────────────────────
     register!("__velox_battery_getStatus",   battery_get_status_callback);
@@ -2756,13 +2757,14 @@ fn perf_snapshot_callback(
     let p99   = perf.p99_frame_time();
     let js_t  = perf.avg_js_time();
     let lay_t = perf.avg_layout_time();
-    let heap_mb   = last.heap_used_bytes as f64 / (1024.0 * 1024.0);
+    let heap_mb    = last.heap_used_bytes as f64 / (1024.0 * 1024.0);
     let node_count = last.node_count;
+    let gpu_t      = perf.avg_gpu_time();
     drop(perf);
 
     let json = format!(
         "{{\"fps\":{fps:.1},\"frameTime\":{avg:.2},\"frameTimeP99\":{p99:.2},\
-         \"jsTime\":{js_t:.2},\"layoutTime\":{lay_t:.2},\
+         \"jsTime\":{js_t:.2},\"layoutTime\":{lay_t:.2},\"gpuTime\":{gpu_t:.2},\
          \"memoryJS\":{heap_mb:.2},\"nodeCount\":{node_count}}}"
     );
     let s = v8::String::new(scope, &json).unwrap_or_else(|| v8::String::empty(scope));
@@ -2781,6 +2783,28 @@ fn perf_set_budget_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let ms = args.get(0).number_value(scope).unwrap_or(16.667);
     state.perf_state.lock().unwrap().budget_ms = ms;
+}
+
+/// `__velox_perf_poll_leak_warnings()` → JSON array string; drains leak warnings (dev mode).
+fn perf_poll_leak_warnings_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let warnings: Vec<String> = {
+        let mut perf = state.perf_state.lock().unwrap();
+        perf.leak_warnings.drain(..).collect()
+    };
+    let json = if warnings.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", warnings.join(","))
+    };
+    let s = v8::String::new(scope, &json).unwrap_or_else(|| v8::String::empty(scope));
+    rv.set(s.into());
 }
 
 /// `__velox_perf_poll_violations()` → JSON array string; drains the violation queue.

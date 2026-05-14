@@ -6024,9 +6024,14 @@ No matching component was found for:
               break;
             }
           }
-          for (const [nodeId] of inputRegistry) {
+          for (const [nodeId, handlers] of inputRegistry) {
             if (hitTest(nodeId, ev.x, ev.y)) {
               setFocus(nodeId);
+              if (handlers.onClickAt) {
+                const layout = __velox_getLayout(nodeId);
+                if (layout)
+                  handlers.onClickAt(ev.x - layout.x, ev.y - layout.y);
+              }
               handled = true;
               break;
             }
@@ -6195,6 +6200,7 @@ No matching component was found for:
     }
   });
   var _perfBudgetCallbacks = [];
+  var _perfLeakCallbacks = [];
   function _pollPerfViolations() {
     if (typeof __velox_perf_poll_violations === "undefined")
       return;
@@ -6224,6 +6230,35 @@ No matching component was found for:
       }
     }
   }
+  function _pollLeakWarnings() {
+    if (typeof __velox_perf_poll_leak_warnings === "undefined")
+      return;
+    if (_perfLeakCallbacks.length === 0)
+      return;
+    let raw;
+    try {
+      raw = __velox_perf_poll_leak_warnings();
+    } catch {
+      return;
+    }
+    if (!raw || raw === "[]")
+      return;
+    let warnings;
+    try {
+      warnings = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    for (const w of warnings) {
+      for (const cb of _perfLeakCallbacks) {
+        try {
+          cb(w);
+        } catch (e) {
+          __velox_log("[perf] onLeakDetected callback error: " + e);
+        }
+      }
+    }
+  }
   globalThis.__velox_frameCallback = function veloxFrameCallback() {
     VeloxReconciler.flushSync(() => {
       _pollWebSockets();
@@ -6231,6 +6266,7 @@ No matching component was found for:
       _pollGamepads();
       _pollGlobalShortcuts();
       _pollPerfViolations();
+      _pollLeakWarnings();
       dispatchEvents();
     });
   };
@@ -6399,6 +6435,38 @@ No matching component was found for:
           }
           return;
         }
+        if ((key === "ArrowUp" || key === "ArrowDown") && multiline) {
+          const lines = value.split(`
+`);
+          let lineIdx = 0, lineStart = 0;
+          for (let i = 0;i < lines.length; i++) {
+            const lineEnd = lineStart + lines[i].length;
+            if (anchor <= lineEnd || i === lines.length - 1) {
+              lineIdx = i;
+              break;
+            }
+            lineStart += lines[i].length + 1;
+          }
+          const col = anchor - lineStart;
+          if (key === "ArrowUp" && lineIdx > 0) {
+            const prevLineStart = lineStart - lines[lineIdx - 1].length - 1;
+            const newPos = prevLineStart + Math.min(col, lines[lineIdx - 1].length);
+            if (shift) {
+              extendTo(newPos);
+            } else {
+              moveCursor(newPos);
+            }
+          } else if (key === "ArrowDown" && lineIdx < lines.length - 1) {
+            const nextLineStart = lineStart + lines[lineIdx].length + 1;
+            const newPos = nextLineStart + Math.min(col, lines[lineIdx + 1].length);
+            if (shift) {
+              extendTo(newPos);
+            } else {
+              moveCursor(newPos);
+            }
+          }
+          return;
+        }
         if (key === "ArrowLeft") {
           if (shift) {
             extendTo(focus_ - 1);
@@ -6476,6 +6544,26 @@ No matching component was found for:
           setAnchor(newPos);
           setFocus_(newPos);
         }
+      },
+      onClickAt: (relX, relY) => {
+        const padding = multiline ? 10 : 8;
+        const textX = relX - padding;
+        const avgW = fontSize * 0.55;
+        if (multiline) {
+          const lineHeight = fontSize * 1.4;
+          const lineIdx = Math.max(0, Math.floor((relY - padding) / lineHeight));
+          const lines = value.split(`
+`);
+          const clampedLine = Math.min(lineIdx, lines.length - 1);
+          const col = Math.max(0, Math.min(Math.round(Math.max(0, textX) / avgW), lines[clampedLine].length));
+          let pos = 0;
+          for (let i = 0;i < clampedLine; i++)
+            pos += lines[i].length + 1;
+          moveCursor(pos + col);
+        } else {
+          const col = Math.max(0, Math.min(Math.round(Math.max(0, textX) / avgW), value.length));
+          moveCursor(col);
+        }
       }
     };
     const onMount = import_react.useCallback((id) => {
@@ -6483,7 +6571,8 @@ No matching component was found for:
       registerInput(id, {
         onFocus: () => handlersRef.current.onFocus(),
         onBlur: () => handlersRef.current.onBlur(),
-        onKeyPress: (ev) => handlersRef.current.onKeyPress(ev)
+        onKeyPress: (ev) => handlersRef.current.onKeyPress(ev),
+        onClickAt: (relX, relY) => handlersRef.current.onClickAt(relX, relY)
       });
     }, []);
     import_react.useEffect(() => {
@@ -6808,6 +6897,14 @@ No matching component was found for:
         const idx = _perfBudgetCallbacks.indexOf(cb);
         if (idx !== -1)
           _perfBudgetCallbacks.splice(idx, 1);
+      };
+    },
+    onLeakDetected(cb) {
+      _perfLeakCallbacks.push(cb);
+      return function unsubscribe() {
+        const idx = _perfLeakCallbacks.indexOf(cb);
+        if (idx !== -1)
+          _perfLeakCallbacks.splice(idx, 1);
       };
     }
   };

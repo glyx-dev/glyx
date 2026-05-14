@@ -95,9 +95,10 @@ globalThis.__velox_ws_close = function() {};
 globalThis.__velox_mdns_discover = function() { return stubPromise('[]'); };
 
 // Performance monitoring bindings
-globalThis.__velox_perf_snapshot = function() { return '{"fps":0,"frameTime":0,"frameTimeP99":0,"jsTime":0,"layoutTime":0,"memoryJS":0,"nodeCount":0}'; };
+globalThis.__velox_perf_snapshot = function() { return '{"fps":0,"frameTime":0,"frameTimeP99":0,"jsTime":0,"layoutTime":0,"gpuTime":0,"memoryJS":0,"nodeCount":0}'; };
 globalThis.__velox_perf_set_budget = function() {};
 globalThis.__velox_perf_poll_violations = function() { return '[]'; };
+globalThis.__velox_perf_poll_leak_warnings = function() { return '[]'; };
 
 // Multi-window + IPC bindings
 let __velox_nextWindowId = 1;

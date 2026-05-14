@@ -195,10 +195,15 @@ export function dispatchEvents() {
           }
         }
 
-        // Check inputs (clicking into a TextInput focuses it).
-        for (const [nodeId] of inputRegistry) {
+        // Check inputs (clicking into a TextInput focuses it and positions cursor).
+        for (const [nodeId, handlers] of inputRegistry) {
           if (hitTest(nodeId, ev.x, ev.y)) {
             setFocus(nodeId);
+            // Fire click-to-cursor: pass click position relative to the node.
+            if (handlers.onClickAt) {
+              const layout = __velox_getLayout(nodeId);
+              if (layout) handlers.onClickAt(ev.x - layout.x, ev.y - layout.y);
+            }
             handled = true;
             break;
           }

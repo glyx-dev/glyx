@@ -37,6 +37,17 @@ enum Commands {
         /// portable  — development-style JS alongside binary; readable, largest, easiest to patch
         #[arg(long, default_value = "snapshot")]
         mode: String,
+        /// After building, launch the app and check that it meets the frame-time budget.
+        /// The app runs headlessly for --perf-duration seconds, then prints a perf report.
+        /// Exits with code 1 if any budget violations occurred.
+        #[arg(long)]
+        check_performance: bool,
+        /// Frame-time budget in milliseconds for --check-performance. Default: 16.667 (60 fps).
+        #[arg(long, default_value = "16.667")]
+        perf_budget: f64,
+        /// How many seconds to run the app when --check-performance is used. Default: 10.
+        #[arg(long, default_value = "10")]
+        perf_duration: u64,
     },
     Package { target: Option<String> },
 }
@@ -58,7 +69,8 @@ fn run() -> Result<()> {
     match cli.command {
         Commands::Create { name }   => cmd_create(&name),
         Commands::Dev               => cmd_dev(),
-        Commands::Build { target, mode } => cmd_build(target.as_deref(), &mode),
+        Commands::Build { target, mode, check_performance, perf_budget, perf_duration } =>
+            cmd_build(target.as_deref(), &mode, check_performance, perf_budget, perf_duration),
         Commands::Package { target } => cmd_package(target.as_deref()),
     }
 }
@@ -124,43 +136,49 @@ function App() {{
 
 render(<App />);
 "#))?;
-    write_file(dest.join("velox.config.json"), &format!(
-        r#"{{
-  "window": {{
-    "title":       "{name}",
-    "width":       1280,
-    "height":      800,
-    "startupMode": "windowed"
+    let react_path   = relpath(&dest, &velox_home.join("js/packages/@velox/react"));
+    let router_path  = relpath(&dest, &velox_home.join("js/packages/@velox/router"));
+    let config_path  = relpath(&dest, &velox_home.join("js/packages/@velox/config"));
+    write_file(dest.join("velox.config.ts"), &format!(
+        r#"import {{ defineConfig }} from '@velox/config';
+
+export default defineConfig({{
+  window: {{
+    title:       '{name}',
+    width:       1280,
+    height:      800,
+    startupMode: 'windowed',
   }},
-  "capabilities": {{
-    "fs":           {{ "read": [], "write": [] }},
-    "db":           false,
-    "dialog":       false,
-    "clipboard":    false,
-    "notification": false
+  capabilities: {{
+    fs:           {{ read: [], write: [] }},
+    db:           false,
+    dialog:       false,
+    clipboard:    false,
+    notification: false,
   }},
-  "dev": {{
-    "entry": "js/app.jsx",
-    "output": "js/app.js",
-    "watch": ["js"]
-  }}
-}}
+  dev: {{
+    entry: 'js/app.jsx',
+    output: 'js/app.js',
+    watch: ['js'],
+  }},
+}});
 "#))?;
-    let react_path  = relpath(&dest, &velox_home.join("js/packages/@velox/react"));
-    let router_path = relpath(&dest, &velox_home.join("js/packages/@velox/router"));
     write_file(dest.join("package.json"), &format!(
         r#"{{
   "name": "{name}",
   "version": "0.1.0",
   "private": true,
   "dependencies": {{
-    "react":       "^18",
-    "@velox/react": "file:{react_path}",
+    "react":         "^18",
+    "@velox/react":  "file:{react_path}",
     "@velox/router": "file:{router_path}"
+  }},
+  "devDependencies": {{
+    "@velox/config": "file:{config_path}"
   }}
 }}
 "#))?;
-    write_file(dest.join(".gitignore"), "/target\n/node_modules\n/js/app.js\n")?;
+    write_file(dest.join(".gitignore"), "/target\n/node_modules\n/js/app.js\n/target/velox/velox.config.resolved.json\n")?;
     println!();
     println!("✓ Created project: {name}/");
     println!();
@@ -189,16 +207,69 @@ fn cmd_dev() -> Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-fn cmd_build(target: Option<&str>, mode: &str) -> Result<()> {
+fn cmd_build(
+    target: Option<&str>,
+    mode: &str,
+    check_performance: bool,
+    perf_budget: f64,
+    perf_duration: u64,
+) -> Result<()> {
     let project_name = read_project_name()
         .context("Run `velox build` from the project root (where Cargo.toml lives)")?;
 
-    match mode {
-        "snapshot" => build_snapshot_mode(target, &project_name),
-        "bundle"   => build_bundle_mode(target, &project_name),
-        "portable" => build_portable_mode(target, &project_name),
+    let bin_path = match mode {
+        "snapshot" => build_snapshot_mode(target, &project_name)?,
+        "bundle"   => build_bundle_mode(target, &project_name)?,
+        "portable" => build_portable_mode(target, &project_name)?,
         other => bail!("Unknown build mode '{other}'. Use: snapshot, bundle, portable"),
+    };
+
+    if check_performance {
+        if let Some(bin) = &bin_path {
+            run_perf_check(bin, perf_budget, perf_duration)?;
+        } else {
+            log::warn!("--check-performance: no binary path available, skipping");
+        }
     }
+
+    Ok(())
+}
+
+/// Launch the built binary with VELOX_PERF_CHECK, capture stdout, and report results.
+fn run_perf_check(bin: &Path, budget_ms: f64, duration_secs: u64) -> Result<()> {
+    println!();
+    println!("Running performance check ({duration_secs}s at {budget_ms}ms budget)...");
+    let output = Command::new(bin)
+        .env("VELOX_PERF_CHECK", format!("{duration_secs}:{budget_ms}"))
+        .output()
+        .with_context(|| format!("Failed to launch {}", bin.display()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The app prints a JSON line starting with "VELOX_PERF_RESULT:" before exiting.
+    let result_line = stdout.lines()
+        .find(|l| l.starts_with("VELOX_PERF_RESULT:"))
+        .map(|l| l.trim_start_matches("VELOX_PERF_RESULT:").trim());
+
+    if let Some(json) = result_line {
+        let v: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+        let violations  = v["violations"].as_u64().unwrap_or(0);
+        let avg_ms      = v["avgFrameMs"].as_f64().unwrap_or(0.0);
+        let p99_ms      = v["p99FrameMs"].as_f64().unwrap_or(0.0);
+        let fps         = v["fps"].as_f64().unwrap_or(0.0);
+        println!("  FPS: {fps:.0}  avg: {avg_ms:.1}ms  P99: {p99_ms:.1}ms  violations: {violations}");
+        if violations > 0 || !output.status.success() {
+            println!("✗ Performance check FAILED — {violations} budget violation(s)");
+            std::process::exit(1);
+        } else {
+            println!("✓ Performance check PASSED");
+        }
+    } else if !output.status.success() {
+        println!("✗ Performance check: app exited with error");
+        std::process::exit(1);
+    } else {
+        println!("⚠ Performance check: no result data (app did not emit VELOX_PERF_RESULT)");
+    }
+    Ok(())
 }
 
 /// snapshot mode — self-contained exe with embedded V8 snapshot + embedded app JS
@@ -211,11 +282,11 @@ fn cmd_build(target: Option<&str>, mode: &str) -> Result<()> {
 ///   1. Restore V8 from snapshot (stubs+polyfills already done)
 ///   2. Re-register real Rust bindings
 ///   3. Eval embedded app.js → render(<App />) with real bindings → correct scene
-fn build_snapshot_mode(target: Option<&str>, project_name: &str) -> Result<()> {
+fn build_snapshot_mode(target: Option<&str>, project_name: &str) -> Result<Option<PathBuf>> {
     println!("[snapshot mode] bun bundle → V8 snapshot + embedded app.js → self-contained binary");
 
     let Some((entry, output)) = read_dev_config() else {
-        println!("⚠ No dev.entry in velox.config.json — falling back to portable mode");
+        println!("⚠ No dev.entry in velox config — falling back to portable mode");
         return build_portable_mode(target, project_name);
     };
 
@@ -230,23 +301,27 @@ fn build_snapshot_mode(target: Option<&str>, project_name: &str) -> Result<()> {
     let snap = create_snapshot_for_build(project_name).context("V8 snapshot creation failed")?;
 
     // 3. Cargo build: embed snapshot, app bundle, and config (all baked in — no external files)
+    // Resolve config to JSON first (handles both .ts and .json sources).
     let abs_bundle = std::env::current_dir()?.join(&bundle);
-    let abs_config = std::env::current_dir()?.join("velox.config.json");
+    let config_json = resolve_config_json().context("failed to resolve velox config")?;
+    std::fs::create_dir_all("target/velox")?;
+    let resolved_cfg = PathBuf::from("target/velox/velox.config.resolved.json");
+    std::fs::write(&resolved_cfg, &config_json)?;
+    let abs_config = std::env::current_dir()?.join(&resolved_cfg);
     let bin_path = cargo_build_release(target, project_name, Some(&snap), Some(&abs_bundle), Some(&abs_config))?;
 
     // Write build-mode marker so `velox package` knows to skip JS files
-    let _ = std::fs::create_dir_all("target/velox");
     let _ = std::fs::write("target/velox/build-mode", "snapshot");
 
     println!();
     println!("✓ Build complete [snapshot]: {}", bin_path.display());
     println!("  Binary is self-contained — no external JS files required");
     println!("  Startup: V8 restore ~50ms + app eval ~200ms ≈ 2-5× faster than dev mode");
-    Ok(())
+    Ok(Some(bin_path))
 }
 
 /// bundle mode — bun build → minified bundle alongside binary (easy JS updates, no recompile)
-fn build_bundle_mode(target: Option<&str>, project_name: &str) -> Result<()> {
+fn build_bundle_mode(target: Option<&str>, project_name: &str) -> Result<Option<PathBuf>> {
     println!("[bundle mode] bun bundle → minified JS shipped alongside binary");
 
     if let Some((entry, _output)) = read_dev_config() {
@@ -256,7 +331,7 @@ fn build_bundle_mode(target: Option<&str>, project_name: &str) -> Result<()> {
         std::fs::copy(&bundle_src, &output_js).with_context(|| format!("copy bundle to {output_js}"))?;
         println!("✓ Bundle → {} ({} KB)", output_js, std::fs::metadata(&output_js)?.len() / 1024);
     } else {
-        println!("⚠ No dev.entry in velox.config.json — skipping JS bundle");
+        println!("⚠ No dev.entry in velox config — skipping JS bundle");
     }
 
     let bin_path = cargo_build_release(target, project_name, None, None, None)?;
@@ -264,13 +339,13 @@ fn build_bundle_mode(target: Option<&str>, project_name: &str) -> Result<()> {
     let _ = std::fs::write("target/velox/build-mode", "bundle");
     println!();
     println!("✓ Build complete [bundle]: {}", bin_path.display());
-    println!("  Ship: {} + js/ + velox.config.json", bin_path.display());
+    println!("  Ship: {} + js/ + velox config", bin_path.display());
     println!("  To update JS: replace js/app.js without recompiling Rust");
-    Ok(())
+    Ok(Some(bin_path))
 }
 
 /// portable mode — bun build → JS alongside binary (readable, easiest to patch)
-fn build_portable_mode(target: Option<&str>, project_name: &str) -> Result<()> {
+fn build_portable_mode(target: Option<&str>, project_name: &str) -> Result<Option<PathBuf>> {
     println!("[portable mode] bun build → JS files shipped alongside binary");
 
     if let Some((entry, output)) = read_dev_config() {
@@ -278,7 +353,7 @@ fn build_portable_mode(target: Option<&str>, project_name: &str) -> Result<()> {
         bun_build(&entry, &output).context("bun build failed")?;
         println!("✓ JS built: {}", output);
     } else {
-        println!("⚠ No dev.entry in velox.config.json — skipping JS build");
+        println!("⚠ No dev.entry in velox config — skipping JS build");
     }
 
     let bin_path = cargo_build_release(target, project_name, None, None, None)?;
@@ -286,8 +361,8 @@ fn build_portable_mode(target: Option<&str>, project_name: &str) -> Result<()> {
     let _ = std::fs::write("target/velox/build-mode", "portable");
     println!();
     println!("✓ Build complete [portable]: {}", bin_path.display());
-    println!("  Ship: {} + js/ + velox.config.json", bin_path.display());
-    Ok(())
+    println!("  Ship: {} + js/ + velox config", bin_path.display());
+    Ok(Some(bin_path))
 }
 
 /// Shared cargo build --release helper. Returns the path to the produced binary.
@@ -605,12 +680,34 @@ fn read_project_name() -> Option<String> {
     None
 }
 
+/// Resolve the project config to a JSON string.
+/// Tries `velox.config.ts` first (executed via `bun run`), then `velox.config.json`.
+/// Both formats produce identical JSON consumed by the CLI and velox-core.
+fn resolve_config_json() -> Result<String> {
+    if Path::new("velox.config.ts").exists() {
+        let mut cmd = if cfg!(target_os = "windows") {
+            let mut c = Command::new("cmd"); c.args(["/C", "bun", "run", "velox.config.ts"]); c
+        } else {
+            let mut c = Command::new("bun"); c.args(["run", "velox.config.ts"]); c
+        };
+        let out = cmd.output().context("failed to run `bun run velox.config.ts`")?;
+        if !out.status.success() {
+            bail!("velox.config.ts execution failed:\n{}", String::from_utf8_lossy(&out.stderr));
+        }
+        let json = String::from_utf8(out.stdout)
+            .context("velox.config.ts output is not valid UTF-8")?;
+        return Ok(json.trim().to_string());
+    }
+    std::fs::read_to_string("velox.config.json")
+        .context("neither velox.config.ts nor velox.config.json found")
+}
+
 fn read_dev_config() -> Option<(String, String)> {
     #[derive(serde::Deserialize)]
     struct Cfg { dev: Option<DevSection> }
     #[derive(serde::Deserialize)]
     struct DevSection { entry: Option<String>, output: Option<String> }
-    let src = std::fs::read_to_string("velox.config.json").ok()?;
+    let src = resolve_config_json().ok()?;
     let cfg: Cfg = serde_json::from_str(&src).ok()?;
     let dev = cfg.dev?;
     Some((dev.entry?, dev.output?))

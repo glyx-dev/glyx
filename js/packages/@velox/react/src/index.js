@@ -94,10 +94,10 @@ addKeyListener(function _dispatchLocalShortcuts({ key, ctrl, shift, pressed }) {
   }
 });
 
-// ── Perf violation polling ────────────────────────────────────────────────────
-//
-// Callbacks registered via perf.onBudgetExceeded(cb).
+// ── Perf violation + leak polling ─────────────────────────────────────────────
+
 const _perfBudgetCallbacks = [];
+const _perfLeakCallbacks   = [];
 
 function _pollPerfViolations() {
   if (typeof __velox_perf_poll_violations === 'undefined') return;
@@ -110,6 +110,21 @@ function _pollPerfViolations() {
   for (const v of violations) {
     for (const cb of _perfBudgetCallbacks) {
       try { cb(v); } catch (e) { __velox_log('[perf] onBudgetExceeded callback error: ' + e); }
+    }
+  }
+}
+
+function _pollLeakWarnings() {
+  if (typeof __velox_perf_poll_leak_warnings === 'undefined') return;
+  if (_perfLeakCallbacks.length === 0) return;
+  let raw;
+  try { raw = __velox_perf_poll_leak_warnings(); } catch { return; }
+  if (!raw || raw === '[]') return;
+  let warnings;
+  try { warnings = JSON.parse(raw); } catch { return; }
+  for (const w of warnings) {
+    for (const cb of _perfLeakCallbacks) {
+      try { cb(w); } catch (e) { __velox_log('[perf] onLeakDetected callback error: ' + e); }
     }
   }
 }
@@ -128,6 +143,7 @@ globalThis.__velox_frameCallback = function veloxFrameCallback() {
     _pollGamepads();
     _pollGlobalShortcuts();
     _pollPerfViolations();
+    _pollLeakWarnings();
     dispatchEvents();
   });
 };
@@ -395,6 +411,27 @@ export function TextInput({
       }
 
       // ── Arrow / navigation keys ─────────────────────────────────────────
+      if ((key === 'ArrowUp' || key === 'ArrowDown') && multiline) {
+        // Split at current anchor to find line index + column.
+        const lines = value.split('\n');
+        let lineIdx = 0, lineStart = 0;
+        for (let i = 0; i < lines.length; i++) {
+          const lineEnd = lineStart + lines[i].length;
+          if (anchor <= lineEnd || i === lines.length - 1) { lineIdx = i; break; }
+          lineStart += lines[i].length + 1;
+        }
+        const col = anchor - lineStart;
+        if (key === 'ArrowUp' && lineIdx > 0) {
+          const prevLineStart = lineStart - lines[lineIdx - 1].length - 1;
+          const newPos = prevLineStart + Math.min(col, lines[lineIdx - 1].length);
+          if (shift) { extendTo(newPos); } else { moveCursor(newPos); }
+        } else if (key === 'ArrowDown' && lineIdx < lines.length - 1) {
+          const nextLineStart = lineStart + lines[lineIdx].length + 1;
+          const newPos = nextLineStart + Math.min(col, lines[lineIdx + 1].length);
+          if (shift) { extendTo(newPos); } else { moveCursor(newPos); }
+        }
+        return;
+      }
       if (key === 'ArrowLeft') {
         if (shift) {
           extendTo(focus_ - 1);
@@ -474,6 +511,26 @@ export function TextInput({
         setFocus_(newPos);
       }
     },
+    onClickAt: (relX, relY) => {
+      // Estimate character index from click position using avg char width heuristic.
+      const padding = multiline ? 10 : 8;
+      const textX   = relX - padding;
+      const avgW    = fontSize * 0.55; // rough avg glyph advance for most sans-serif fonts
+
+      if (multiline) {
+        const lineHeight   = fontSize * 1.4;
+        const lineIdx      = Math.max(0, Math.floor((relY - padding) / lineHeight));
+        const lines        = value.split('\n');
+        const clampedLine  = Math.min(lineIdx, lines.length - 1);
+        const col          = Math.max(0, Math.min(Math.round(Math.max(0, textX) / avgW), lines[clampedLine].length));
+        let pos = 0;
+        for (let i = 0; i < clampedLine; i++) pos += lines[i].length + 1;
+        moveCursor(pos + col);
+      } else {
+        const col = Math.max(0, Math.min(Math.round(Math.max(0, textX) / avgW), value.length));
+        moveCursor(col);
+      }
+    },
   };
 
   const onMount = useCallback((id) => {
@@ -482,6 +539,7 @@ export function TextInput({
       onFocus:    () => handlersRef.current.onFocus(),
       onBlur:     () => handlersRef.current.onBlur(),
       onKeyPress: (ev) => handlersRef.current.onKeyPress(ev),
+      onClickAt:  (relX, relY) => handlersRef.current.onClickAt(relX, relY),
     });
   }, []);
 
@@ -1141,7 +1199,7 @@ veloxWindow.quit = function quit() {
  * @example
  * const snap = perf.snapshot();
  * // → { fps: 60.1, frameTime: 14.2, frameTimeP99: 18.5, jsTime: 2.1,
- * //      layoutTime: 0.8, memoryJS: 12.4, nodeCount: 42 }
+ * //      layoutTime: 0.8, gpuTime: 1.3, memoryJS: 12.4, nodeCount: 42 }
  *
  * const unsub = perf.onBudgetExceeded((v) => console.log('slow frame:', v), { target: 16.667 });
  * unsub(); // remove listener
@@ -1149,7 +1207,7 @@ veloxWindow.quit = function quit() {
 export const perf = {
   /**
    * Synchronously returns a snapshot of current performance metrics.
-   * @returns {{ fps, frameTime, frameTimeP99, jsTime, layoutTime, memoryJS, nodeCount }}
+   * @returns {{ fps, frameTime, frameTimeP99, jsTime, layoutTime, gpuTime, memoryJS, nodeCount }}
    */
   snapshot() {
     if (typeof __velox_perf_snapshot === 'undefined') return null;
@@ -1168,6 +1226,20 @@ export const perf = {
     return function unsubscribe() {
       const idx = _perfBudgetCallbacks.indexOf(cb);
       if (idx !== -1) _perfBudgetCallbacks.splice(idx, 1);
+    };
+  },
+  /**
+   * Register a callback for dev-mode memory/node leak warnings.
+   * Fires when the Rust layer detects a sustained monotonic growth in node count.
+   * Only active in dev builds (no-op in production).
+   * @param {(warning: {type: string, count: number, msg: string}) => void} cb
+   * @returns {() => void} unsubscribe function
+   */
+  onLeakDetected(cb) {
+    _perfLeakCallbacks.push(cb);
+    return function unsubscribe() {
+      const idx = _perfLeakCallbacks.indexOf(cb);
+      if (idx !== -1) _perfLeakCallbacks.splice(idx, 1);
     };
   },
 };

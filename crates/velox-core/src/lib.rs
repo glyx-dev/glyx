@@ -98,16 +98,44 @@ struct WindowCfgJson {
     startup_mode: Option<String>,
 }
 
-/// Load `velox.config.json` from the current working directory.
+/// Read the project config as a JSON string.
+/// Priority: embedded (snapshot) → velox.config.ts (via bun) → velox.config.json.
+fn read_config_json() -> Option<String> {
+    if let Some(embedded) = EMBEDDED_CONFIG {
+        return Some(embedded.to_string());
+    }
+    // Try velox.config.ts (dev mode with TypeScript config).
+    if std::path::Path::new("velox.config.ts").exists() {
+        let result = if cfg!(target_os = "windows") {
+            std::process::Command::new("cmd")
+                .args(["/C", "bun", "run", "velox.config.ts"])
+                .output()
+        } else {
+            std::process::Command::new("bun")
+                .args(["run", "velox.config.ts"])
+                .output()
+        };
+        if let Ok(out) = result {
+            if out.status.success() {
+                if let Ok(json) = String::from_utf8(out.stdout) {
+                    let trimmed = json.trim().to_string();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed);
+                    }
+                }
+            }
+        }
+    }
+    // Fall back to velox.config.json.
+    std::fs::read_to_string("velox.config.json").ok()
+}
+
+/// Load the Velox config from the current working directory.
 ///
 /// Applies any `window` overrides to `cfg` and returns the parsed capabilities.
 /// Missing file → warning + all capabilities OFF (fail-closed).
 fn load_velox_config(cfg: &mut WindowConfig) -> Capabilities {
-    // Prefer config embedded at build time (snapshot mode) — tamper-proof.
-    // Fall back to velox.config.json on disk (dev / bundle / portable modes).
-    let src = EMBEDDED_CONFIG
-        .map(|s| s.to_string())
-        .or_else(|| std::fs::read_to_string("velox.config.json").ok());
+    let src = read_config_json();
 
     let file: Option<VeloxConfigFile> = src
         .and_then(|src| {
@@ -144,7 +172,7 @@ fn load_velox_config(cfg: &mut WindowConfig) -> Capabilities {
         );
     } else {
         log::warn!(
-            "velox-security: no velox.config.json found or no capabilities declared \
+            "velox-security: no velox.config.ts / velox.config.json found or no capabilities declared \
              — all capabilities default to OFF"
         );
     }
@@ -162,7 +190,7 @@ fn read_output_js() -> Option<String> {
     #[derive(serde::Deserialize)]
     struct DevSection { output: Option<String> }
 
-    let cfg: Cfg = serde_json::from_str(&std::fs::read_to_string("velox.config.json").ok()?).ok()?;
+    let cfg: Cfg = serde_json::from_str(&read_config_json()?).ok()?;
     let output = cfg.dev?.output?;
     match std::fs::read_to_string(&output) {
         Ok(js) => { log::info!("Loaded JS from {}", output); Some(js) }
@@ -181,7 +209,7 @@ fn build_dev_mode_config() -> Option<DevModeConfig> {
         watch:  Option<Vec<String>>,
     }
 
-    let src = std::fs::read_to_string("velox.config.json").ok()?;
+    let src = read_config_json()?;
     let cfg: Cfg = serde_json::from_str(&src).ok()?;
     let dev = cfg.dev?;
     let entry  = dev.entry?;
@@ -599,6 +627,7 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
         let p99_ms = perf_g.p99_frame_time();
         let js_ms  = perf_g.avg_js_time();
         let lay_ms = perf_g.avg_layout_time();
+        let gpu_ms = perf_g.avg_gpu_time();
         let last_f = perf_g.last_frame();
         let last_ms = last_f.frame_time_ms;
         let heap_used_mb = last_f.heap_used_bytes / (1024 * 1024);
@@ -610,8 +639,8 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
         dev.overlay_lines = vec![
             format!("Dev overlay (Ctrl+Shift+D)  budget {:.1}ms", budget),
             format!("FPS {:.0}  last {:.1}ms  avg {:.1}ms  P99 {:.1}ms", fps, last_ms, avg_ms, p99_ms),
-            format!("JS {:.2}ms  layout {:.2}ms  nodes {}  heap {}MB",
-                js_ms, lay_ms, state.js_nodes.len(), heap_used_mb),
+            format!("JS {:.2}ms  layout {:.2}ms  GPU {:.2}ms  nodes {}  heap {}MB",
+                js_ms, lay_ms, gpu_ms, state.js_nodes.len(), heap_used_mb),
             format!("{}  (reload {}s ago)", dev.last_build_message, since),
         ];
         dev.overlay_next_refresh = now + Duration::from_millis(250);
@@ -779,6 +808,15 @@ pub fn run(mut config: AppConfig) {
     let caps = load_velox_config(&mut config.window);
     velox_security::init(caps);
 
+    // VELOX_PERF_CHECK=<duration_secs>:<budget_ms> — set by `velox build --check-performance`.
+    // After the given duration the app prints a JSON perf summary and exits.
+    let perf_check: Option<(u64, f64)> = std::env::var("VELOX_PERF_CHECK").ok().and_then(|v| {
+        let mut parts = v.splitn(2, ':');
+        let dur  = parts.next()?.parse::<u64>().ok()?;
+        let bud  = parts.next()?.parse::<f64>().ok()?;
+        Some((dur, bud))
+    });
+
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -837,6 +875,26 @@ pub fn run(mut config: AppConfig) {
                 // PerWindowState (writer) and AsyncState binding (reader) share it.
                 let shared_perf: Arc<Mutex<velox_perf::PerfState>> =
                     Arc::new(Mutex::new(velox_perf::PerfState::new()));
+
+                // VELOX_PERF_CHECK: apply budget, then spawn a timer that exits after duration.
+                if let Some((duration_secs, budget_ms)) = perf_check {
+                    shared_perf.lock().unwrap().budget_ms = budget_ms;
+                    let perf_arc  = Arc::clone(&shared_perf);
+                    let proxy_pc  = ev_proxy.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(duration_secs));
+                        // Print perf summary to stdout for CLI to capture.
+                        let p = perf_arc.lock().unwrap();
+                        let violations = p.violations.len();
+                        let avg_ms = p.avg_frame_time();
+                        let p99_ms = p.p99_frame_time();
+                        let fps    = p.fps();
+                        drop(p);
+                        let pass = violations == 0;
+                        println!("VELOX_PERF_RESULT:{{\"violations\":{violations},\"avgFrameMs\":{avg_ms:.2},\"p99FrameMs\":{p99_ms:.2},\"fps\":{fps:.1},\"pass\":{pass}}}");
+                        let _ = proxy_pc.send_event(VeloxUserEvent::Quit);
+                    });
+                }
 
                 let mut rt = if let Some(ref blob) = *snapshot_blob_arc {
                     match VeloxRuntime::new_from_snapshot_with_ipc(
@@ -1037,22 +1095,9 @@ pub fn run(mut config: AppConfig) {
                 recompute_layout(s);
                 let layout_time_ms = layout_start.elapsed().as_secs_f64() * 1000.0;
 
-                // Record perf sample (skips the first frame where frame_time_ms = 0).
-                if frame_time_ms > 0.0 {
-                    let heap = s.runtime.heap_stats();
-                    let node_count = s.js_nodes.len();
-                    let mut perf = s.perf.lock().unwrap();
-                    perf.last_frame_at = Some(frame_start);
-                    perf.push(velox_perf::PerfFrame {
-                        frame_time_ms,
-                        js_time_ms,
-                        layout_time_ms,
-                        node_count,
-                        heap_used_bytes: heap.used_heap_size,
-                    });
-                } else {
-                    s.perf.lock().unwrap().last_frame_at = Some(frame_start);
-                }
+                // Placeholder for gpu_time_ms; set after render_frame+present below.
+                let perf_snapshot_pre = (frame_time_ms, js_time_ms, layout_time_ms);
+                let perf_node_count   = s.js_nodes.len();
 
                 // 6. Scroll-adjusted positions for next frame's hit-testing.
                 update_scroll_positions(s);
@@ -1100,11 +1145,53 @@ pub fn run(mut config: AppConfig) {
                     (s.request_redraw)();
                 }
 
+                let gpu_start = Instant::now();
                 if let Err(e) = s.renderer.render_frame(&s.gpu, &texture, frame) {
                     log::error!("Render error: {}", e);
                     return;
                 }
                 texture.present();
+                let gpu_time_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
+
+                // Record perf sample (skips the first frame where frame_time_ms = 0).
+                let (frame_time_ms, js_time_ms, layout_time_ms) = perf_snapshot_pre;
+                if frame_time_ms > 0.0 {
+                    let heap = s.runtime.heap_stats();
+                    let mut perf = s.perf.lock().unwrap();
+                    perf.last_frame_at = Some(frame_start);
+
+                    // Dev mode: simple node-count leak heuristic.
+                    // If the node count grows monotonically for 600 frames (5s at 120fps),
+                    // emit a warning suggesting a possible render leak.
+                    #[cfg(feature = "dev")]
+                    {
+                        if perf._node_history.len() >= 600 { perf._node_history.pop_front(); }
+                        let prev = perf._node_history.back().copied().unwrap_or(0);
+                        perf._node_history.push_back(perf_node_count);
+                        if perf_node_count > prev {
+                            perf._monotonic_frames += 1;
+                            if perf._monotonic_frames == 600 {
+                                perf.push_leak_warning(format!(
+                                    "{{\"type\":\"nodeCount\",\"count\":{},\"frames\":600,\"msg\":\"Node count has grown monotonically for 600 frames — possible render leak\"}}",
+                                    perf_node_count
+                                ));
+                            }
+                        } else {
+                            perf._monotonic_frames = 0;
+                        }
+                    }
+
+                    perf.push(velox_perf::PerfFrame {
+                        frame_time_ms,
+                        js_time_ms,
+                        layout_time_ms,
+                        gpu_time_ms,
+                        node_count: perf_node_count,
+                        heap_used_bytes: heap.used_heap_size,
+                    });
+                } else {
+                    s.perf.lock().unwrap().last_frame_at = Some(frame_start);
+                }
 
                 if any_cursor_active {
                     let redraw   = Arc::clone(&s.request_redraw);

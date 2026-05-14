@@ -1098,6 +1098,20 @@ fn mkdirp_callback(
 // `db_open`  → Promise<string>  — resolves with the handle number as a string.
 // `db_query` → Promise<string>  — resolves with JSON array of row objects.
 // `db_run`   → Promise<string>  — resolves with JSON `{ rowsAffected, lastInsertId }`.
+//
+// Relative paths are placed under `data/` to keep the app root clean.
+// Absolute paths and `:memory:` pass through unchanged.
+
+fn resolve_db_path(path: String) -> String {
+    if path == ":memory:" || std::path::Path::new(&path).is_absolute() {
+        return path;
+    }
+    let data_dir = std::path::Path::new("data");
+    if !data_dir.exists() {
+        let _ = std::fs::create_dir_all(data_dir);
+    }
+    data_dir.join(&path).to_string_lossy().into_owned()
+}
 
 /// `__velox_db_open(path) -> Promise<string>` — handle number.
 fn db_open_callback(
@@ -1113,7 +1127,7 @@ fn db_open_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let path      = v8_arg_to_string(scope, &args, 0);
+    let path      = resolve_db_path(v8_arg_to_string(scope, &args, 0));
     let handle    = state.next_db_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let pools     = Arc::clone(&state.db_pools);
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
@@ -1638,7 +1652,7 @@ fn vectordb_open_callback(
     let ext    = v8::Local::<v8::External>::try_from(data).unwrap();
     let state  = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let path   = v8_arg_to_string(scope, &args, 0);
+    let path   = resolve_db_path(v8_arg_to_string(scope, &args, 0));
     let handle = state.next_vdb_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let stores = Arc::clone(&state.vector_stores);
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);

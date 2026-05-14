@@ -12,6 +12,26 @@ use crate::{
     RuntimeError,
 };
 
+/// V8 isolate params shared by fresh and snapshot-restore paths.
+///
+/// Heap limits:
+///   initial = 2 MB  — V8 starts small; it will grow on demand up to the max.
+///   maximum = 256 MB — hard cap; prevents V8 from speculatively reserving
+///                       the OS-default ~1.5 GB on 64-bit.
+///
+/// For a React notes app the live heap is typically 20-50 MB, so 256 MB gives
+/// plenty of headroom while keeping the process working-set well below Electron.
+fn velox_create_params(snapshot: Option<Vec<u8>>) -> v8::CreateParams {
+    const MB: usize = 1024 * 1024;
+    let params = v8::CreateParams::default()
+        .heap_limits(2 * MB, 256 * MB);
+    if let Some(blob) = snapshot {
+        params.snapshot_blob(blob)
+    } else {
+        params
+    }
+}
+
 pub struct VeloxRuntime {
     isolate:      v8::OwnedIsolate,
     context:      v8::Global<v8::Context>,
@@ -29,7 +49,7 @@ pub struct HeapStats {
 impl VeloxRuntime {
     /// Create a new VeloxRuntime with a fresh isolate.
     pub fn new(tokio_handle: Handle, window: Option<WindowController>) -> Self {
-        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        let mut isolate = v8::Isolate::new(velox_create_params(None));
 
         let events       = new_event_queue();
         let layout_cache = new_layout_cache();
@@ -66,10 +86,7 @@ impl VeloxRuntime {
         tokio_handle: Handle,
         window: Option<WindowController>,
     ) -> Result<Self, RuntimeError> {
-        let create_params = v8::CreateParams::default()
-            .snapshot_blob(snapshot_blob.to_vec());
-
-        let mut isolate = v8::Isolate::new(create_params);
+        let mut isolate = v8::Isolate::new(velox_create_params(Some(snapshot_blob.to_vec())));
 
         let events       = new_event_queue();
         let layout_cache = new_layout_cache();
@@ -119,42 +136,52 @@ impl VeloxRuntime {
     // ── Script execution ──────────────────────────────────────────────────────
 
     pub fn eval(&mut self, source: &str) -> Result<String, RuntimeError> {
-        let scope = &mut v8::HandleScope::new(&mut self.isolate);
-        let ctx   = v8::Local::new(scope, &self.context);
-        let scope = &mut v8::ContextScope::new(scope, ctx);
+        // All V8 handle-scope work is in a nested block so every borrow of
+        // `self.isolate` is released before `low_memory_notification()` runs.
+        let result = {
+            let scope = &mut v8::HandleScope::new(&mut self.isolate);
+            let ctx   = v8::Local::new(scope, &self.context);
+            let scope = &mut v8::ContextScope::new(scope, ctx);
 
-        let code = v8::String::new(scope, source)
-            .ok_or_else(|| RuntimeError::JsException("Failed to create source string".into()))?;
+            let code = v8::String::new(scope, source)
+                .ok_or_else(|| RuntimeError::JsException("Failed to create source string".into()))?;
 
-        let mut try_catch = v8::TryCatch::new(scope);
+            let mut try_catch = v8::TryCatch::new(scope);
 
-        let script = v8::Script::compile(&mut try_catch, code, None)
-            .ok_or_else(|| {
-                let exc = try_catch.exception().unwrap();
-                let msg = exc
-                    .to_string(&mut try_catch)
-                    .map(|s| s.to_rust_string_lossy(&mut try_catch))
-                    .unwrap_or_else(|| "Compile error".into());
-                RuntimeError::CompileError(msg)
-            })?;
+            let script = v8::Script::compile(&mut try_catch, code, None)
+                .ok_or_else(|| {
+                    let exc = try_catch.exception().unwrap();
+                    let msg = exc
+                        .to_string(&mut try_catch)
+                        .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                        .unwrap_or_else(|| "Compile error".into());
+                    RuntimeError::CompileError(msg)
+                })?;
 
-        match script.run(&mut try_catch) {
-            Some(val) => {
-                let s = val
-                    .to_string(&mut try_catch)
-                    .map(|s| s.to_rust_string_lossy(&mut try_catch))
-                    .unwrap_or_default();
-                Ok(s)
+            match script.run(&mut try_catch) {
+                Some(val) => {
+                    let s = val
+                        .to_string(&mut try_catch)
+                        .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                        .unwrap_or_default();
+                    Ok(s)
+                }
+                None => {
+                    let exc = try_catch.exception().unwrap();
+                    let msg = exc
+                        .to_string(&mut try_catch)
+                        .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                        .unwrap_or_else(|| "Unknown JS exception".into());
+                    Err(RuntimeError::JsException(msg))
+                }
             }
-            None => {
-                let exc = try_catch.exception().unwrap();
-                let msg = exc
-                    .to_string(&mut try_catch)
-                    .map(|s| s.to_rust_string_lossy(&mut try_catch))
-                    .unwrap_or_else(|| "Unknown JS exception".into());
-                Err(RuntimeError::JsException(msg))
-            }
+        };
+        // Release parse-time garbage (AST nodes, bytecode, temp strings) only
+        // on success — on error the isolate state is unchanged.
+        if result.is_ok() {
+            self.isolate.low_memory_notification();
         }
+        result
     }
 
     // ── Async tick ────────────────────────────────────────────────────────────

@@ -6206,6 +6206,9 @@ No matching component was found for:
       onKeyPress: ({ key, text }) => {
         if (key === "Backspace") {
           onChangeText?.(value.slice(0, -1));
+        } else if (key === "Enter" && multiline) {
+          onChangeText?.(value + `
+`);
         } else if (text) {
           onChangeText?.(value + text);
         }

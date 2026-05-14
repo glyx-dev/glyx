@@ -77,6 +77,24 @@ static V8_INIT: Once = Once::new();
 /// Safe to call multiple times — subsequent calls are no-ops.
 pub fn init_v8() {
     V8_INIT.call_once(|| {
+        // Set flags BEFORE platform init — V8 ignores flags set afterwards.
+        //
+        // --lite-mode:
+        //   Skips Turbofan (the expensive optimising JIT) and uses Sparkplug
+        //   (a fast single-pass baseline compiler) instead.  Cuts JIT code-space
+        //   by ~60-80 %.  JS still runs compiled — not interpreted — so the CPU
+        //   cost is modest (~10-20 % slower hot paths).
+        //
+        // --optimize-for-size:
+        //   Tells every tier (parser, bytecode, JIT) to prefer smaller output
+        //   over maximum throughput.  Works in tandem with --lite-mode.
+        //
+        // --no-expose-wasm:
+        //   Disable WebAssembly (unused; saves the Wasm engine's own structures).
+        v8::V8::set_flags_from_string(
+            "--lite-mode --optimize-for-size --no-expose-wasm"
+        );
+
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();

@@ -33,7 +33,7 @@ pub async fn open(path: &str) -> Result<SqlitePool> {
     };
 
     let pool = SqlitePoolOptions::new()
-        .max_connections(4)
+        .max_connections(2)
         .connect(&url)
         .await?;
 

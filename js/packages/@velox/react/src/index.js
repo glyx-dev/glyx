@@ -236,6 +236,8 @@ export function TextInput({
     onKeyPress: ({ key, text }) => {
       if (key === 'Backspace') {
         onChangeText?.(value.slice(0, -1));
+      } else if (key === 'Enter' && multiline) {
+        onChangeText?.(value + '\n');
       } else if (text) {
         onChangeText?.(value + text);
       }

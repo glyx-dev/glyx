@@ -49,10 +49,14 @@
 //! `CachedLabel` holds a shaped result keyed by (text, font_size, max_width,
 //! color).  Cache misses call Parley once; cache hits return instantly.
 
+#[cfg(feature = "dev")]
 use notify::{RecursiveMode, Watcher};
+#[cfg(feature = "dev")]
 use std::collections::VecDeque;
 use std::path::PathBuf;
+#[cfg(feature = "dev")]
 use std::process::Command;
+#[cfg(feature = "dev")]
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -66,6 +70,8 @@ use velox_security::Capabilities;
 use velox_shell::ShellEvent;
 use velox_text::{TextLayout, TextSystem};
 use velox_layout::NodeId;
+
+include!(concat!(env!("OUT_DIR"), "/embedded_snapshot.rs"));
 
 // ── Config file parsing ───────────────────────────────────────────────────────
 
@@ -95,8 +101,13 @@ struct WindowCfgJson {
 /// Applies any `window` overrides to `cfg` and returns the parsed capabilities.
 /// Missing file → warning + all capabilities OFF (fail-closed).
 fn load_velox_config(cfg: &mut WindowConfig) -> Capabilities {
-    let file: Option<VeloxConfigFile> = std::fs::read_to_string("velox.config.json")
-        .ok()
+    // Prefer config embedded at build time (snapshot mode) — tamper-proof.
+    // Fall back to velox.config.json on disk (dev / bundle / portable modes).
+    let src = EMBEDDED_CONFIG
+        .map(|s| s.to_string())
+        .or_else(|| std::fs::read_to_string("velox.config.json").ok());
+
+    let file: Option<VeloxConfigFile> = src
         .and_then(|src| {
             serde_json::from_str::<VeloxConfigFile>(&src)
                 .map_err(|e| { log::error!("velox.config.json parse error: {e}"); e })
@@ -182,6 +193,15 @@ fn build_dev_mode_config() -> Option<DevModeConfig> {
         watch_paths:  watch.iter().map(PathBuf::from).collect(),
     })
 }
+
+fn embedded_snapshot_blob() -> Option<Vec<u8>> {
+    EMBEDDED_SNAPSHOT.map(|blob| blob.to_vec())
+}
+
+/// Return the app JS embedded at build time via `VELOX_APP_JS` env var, if present.
+fn embedded_app_js() -> Option<String> {
+    EMBEDDED_APP_JS.map(|s| s.to_string())
+}
 mod scene;
 mod layout;
 mod render;
@@ -239,10 +259,14 @@ impl AppConfig {
         let mut window = WindowConfig::default();
         let caps = load_velox_config(&mut window);
         velox_security::init(caps);
+        let snapshot_blob = embedded_snapshot_blob();
+        // Prefer build-time embedded app JS (snapshot mode), fall back to reading from disk.
+        // The snapshot contains only stubs+polyfills; the app code is always eval'd at runtime.
+        let js_src = embedded_app_js().or_else(read_output_js);
         AppConfig {
             window,
-            js_src:        read_output_js(),
-            snapshot_blob: None,
+            js_src,
+            snapshot_blob,
             dev_mode:      build_dev_mode_config(),
             extensions:    vec![],
         }
@@ -332,6 +356,7 @@ struct AppState {
     cursor_blink_on:       bool,
     /// When to flip the blink phase next.
     cursor_blink_deadline: Instant,
+    #[cfg(feature = "dev")]
     dev_mode: Option<DevModeState>,
 }
 
@@ -342,11 +367,13 @@ struct JsNode {
     layout_id: Option<NodeId>,
 }
 
+#[cfg(feature = "dev")]
 enum DevBuildEvent {
     BuildOk(String),
     BuildErr(String),
 }
 
+#[cfg(feature = "dev")]
 struct DevModeState {
     rx: Receiver<DevBuildEvent>,
     overlay_visible: bool,
@@ -364,6 +391,7 @@ fn rgba_to_vello(c: [u8; 4]) -> peniko::Color {
     peniko::Color::rgba8(c[0], c[1], c[2], c[3])
 }
 
+#[cfg(feature = "dev")]
 fn dev_mode_config_from_env() -> Option<DevModeConfig> {
     let root = std::env::var("VELOX_DEV_ROOT").ok()
         .map(PathBuf::from)
@@ -381,6 +409,7 @@ fn dev_mode_config_from_env() -> Option<DevModeConfig> {
     }
 }
 
+#[cfg(feature = "dev")]
 fn start_dev_mode_worker(
     redraw: Arc<dyn Fn() + Send + Sync>,
     config: Option<DevModeConfig>,
@@ -493,6 +522,7 @@ fn start_dev_mode_worker(
     Some(out_rx)
 }
 
+#[cfg(feature = "dev")]
 fn handle_dev_build_events(state: &mut AppState) {
     let Some(dev) = state.dev_mode.as_mut() else { return };
     loop {
@@ -529,6 +559,7 @@ fn handle_dev_build_events(state: &mut AppState) {
     }
 }
 
+#[cfg(feature = "dev")]
 fn draw_dev_overlay(state: &mut AppState, frame: &mut FrameBuilder) {
     let Some(dev) = state.dev_mode.as_mut() else { return };
     let now = Instant::now();
@@ -650,7 +681,13 @@ fn build_window_controller(window: Arc<winit::window::Window>) -> WindowControll
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn run(mut config: AppConfig) {
-    env_logger::init();
+    // Suppress wgpu/naga internal INFO logs (shader dumps, submission traces)
+    // while keeping velox and app logs visible.  RUST_LOG still overrides this.
+    env_logger::Builder::from_env(
+        env_logger::Env::default()
+            .default_filter_or("info,wgpu_hal=warn,wgpu_core=warn,naga=warn"),
+    )
+    .init();
 
     // Load .env from the working directory (or any parent) if one exists.
     // Silently ignored when absent — production apps may rely on OS-level env
@@ -668,8 +705,10 @@ pub fn run(mut config: AppConfig) {
     velox_security::init(caps);
 
     // Tokio runtime for async JS bindings.
+    // 1 worker thread is sufficient: all bindings are IO-bound (file, DB, dialog).
+    // Each extra thread adds a 2 MB stack reservation to the working set.
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(1)
         .enable_all()
         .build()
         .expect("Failed to build Tokio runtime");
@@ -677,7 +716,7 @@ pub fn run(mut config: AppConfig) {
 
     init_v8();
 
-    let AppConfig { window, js_src, snapshot_blob, dev_mode, extensions } = config;
+    let AppConfig { window, js_src, snapshot_blob, dev_mode: _dev_mode, extensions } = config;
 
     let mut state: Option<AppState> = None;
 
@@ -745,7 +784,8 @@ pub fn run(mut config: AppConfig) {
                     request_redraw: Arc::clone(&request_redraw),
                     cursor_blink_on:       true,
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
-                    dev_mode: start_dev_mode_worker(Arc::clone(&request_redraw), dev_mode.clone()).map(|rx| DevModeState {
+                    #[cfg(feature = "dev")]
+                    dev_mode: start_dev_mode_worker(Arc::clone(&request_redraw), _dev_mode.clone()).map(|rx| DevModeState {
                         rx,
                         overlay_visible: true,
                         last_reload: None,
@@ -763,9 +803,18 @@ pub fn run(mut config: AppConfig) {
             // ── Resize ────────────────────────────────────────────────────
             ShellEvent::Resized { width, height } => {
                 if let Some(s) = &mut state {
+                    // Capture size before resize so we can detect actual changes.
+                    // winit fires multiple Resized events during startup (window
+                    // creation, maximize, DPI scaling) — only dirty layout when
+                    // the surface dimensions actually change to avoid redundant
+                    // layout passes at startup.
+                    let prev_w = s.gpu.width();
+                    let prev_h = s.gpu.height();
                     s.gpu.resize(width, height);
-                    s.layout_dirty = true;
-                    s.runtime.push_event(InputEvent::Resize { width, height });
+                    if s.gpu.width() != prev_w || s.gpu.height() != prev_h {
+                        s.layout_dirty = true;
+                        s.runtime.push_event(InputEvent::Resize { width, height });
+                    }
                 }
             }
 
@@ -799,6 +848,7 @@ pub fn run(mut config: AppConfig) {
             // ── Keyboard ──────────────────────────────────────────────────
             ShellEvent::KeyInput { key, text, pressed } => {
                 if let Some(s) = &mut state {
+                    #[cfg(feature = "dev")]
                     if let Some(dev) = s.dev_mode.as_mut() {
                         match key.as_str() {
                             "ControlLeft" | "ControlRight" => dev.ctrl_down = pressed,
@@ -824,32 +874,33 @@ pub fn run(mut config: AppConfig) {
             // ── Draw ──────────────────────────────────────────────────────
             ShellEvent::RedrawRequested => {
                 let Some(s) = &mut state else { return };
+                #[cfg(feature = "dev")]
                 handle_dev_build_events(s);
 
                 // 1. Resolve async JS Promises (readFile, etc.).
                 s.runtime.tick();
 
-                // 2. Apply pre-frame scene commands (initial mount, etc.).
+                // 2. Apply pre-frame scene commands (initial mount, async completions).
                 let pre_commands = s.runtime.drain_scene_commands();
                 apply_scene_commands(s, pre_commands);
 
-                // 3. Recompute layout only when layout-affecting props changed.
-                recompute_layout(s);
-
-                // 4. Write scroll-adjusted positions into the layout cache so
-                //    JS hit-testing (step 5) works correctly for Pressables
-                //    inside scrolled ScrollViews.
-                update_scroll_positions(s);
-
-                // 5. Run JS frame callback — dispatchEvents, React state updates.
+                // 3. Run JS frame callback — dispatchEvents, React state updates.
+                //    Hit-testing uses scroll-adjusted positions written at the END
+                //    of the previous frame (step 6 below), which is one frame
+                //    behind. This is imperceptible at 60 fps and avoids the
+                //    previous two-pass layout (pre-layout + post-layout per frame).
                 s.runtime.frame_tick();
 
-                // 6. Apply post-frame commands (React re-renders from events).
+                // 4. Apply post-frame commands (React re-renders from step 3 events).
                 let post_commands = s.runtime.drain_scene_commands();
                 apply_scene_commands(s, post_commands);
 
-                // 7. Re-layout if any post-frame command dirtied layout.
+                // 5. Single layout pass — covers both pre- and post-frame commands.
+                //    Halves layout work vs the former two-pass approach.
                 recompute_layout(s);
+
+                // 6. Write scroll-adjusted positions for the NEXT frame's hit-testing.
+                update_scroll_positions(s);
 
                 // 8. Acquire the next swapchain texture.
                 let texture = match s.gpu.current_texture() {
@@ -885,10 +936,12 @@ pub fn run(mut config: AppConfig) {
                     };
                     render_subtree(root_id, 0.0, &mut render_ctx);
                 }
+                #[cfg(feature = "dev")]
                 draw_dev_overlay(s, &mut frame);
 
                 // Keep the dev overlay live by requesting the next frame
                 // whenever the overlay is visible (dev-only; harmless cost).
+                #[cfg(feature = "dev")]
                 if s.dev_mode.as_ref().map(|d| d.overlay_visible).unwrap_or(false) {
                     (s.request_redraw)();
                 }

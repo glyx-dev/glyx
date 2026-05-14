@@ -28,32 +28,38 @@ pub fn create_snapshot(
     let stubs = velox_runtime::create_stub_bindings_script();
     let combined_source = format!("{}\n{}\n{}\n{}", stubs, polyfills, framework, app_js);
 
-    // Create a SnapshotCreator to capture V8 heap state
+    // Create a SnapshotCreator to capture V8 heap state.
     let mut snapshot_creator = v8::SnapshotCreator::new(None);
 
+    // SAFETY: get_owned_isolate() transfers the internal isolate to an OwnedIsolate.
+    // OwnedIsolate::drop() would call v8::Isolate::Dispose(), which frees the isolate —
+    // but the SnapshotCreator still holds a raw pointer to it and needs it alive for
+    // create_blob(). We therefore forget the OwnedIsolate so the isolate is not disposed;
+    // the SnapshotCreator implicitly owns the isolate's lifetime.
+    let mut isolate = unsafe { snapshot_creator.get_owned_isolate() };
+
     {
-        // Get the isolate from the snapshot creator's default context (unsafe)
-        let mut isolate = unsafe { snapshot_creator.get_owned_isolate() };
+        let scope = &mut v8::HandleScope::new(&mut isolate);
+        let context = v8::Context::new(scope);
+        let scope = &mut v8::ContextScope::new(scope, context);
 
-        {
-            let scope = &mut v8::HandleScope::new(&mut isolate);
-            let context = v8::Context::new(scope);
-            let scope = &mut v8::ContextScope::new(scope, context);
+        // Compile and run the combined script
+        let source = v8::String::new(scope, &combined_source)
+            .ok_or_else(|| SnapshotError::ExecutionFailed("Failed to create source string".into()))?;
 
-            // Compile and run the combined script
-            let source = v8::String::new(scope, &combined_source)
-                .ok_or_else(|| SnapshotError::ExecutionFailed("Failed to create source string".into()))?;
+        let script = v8::Script::compile(scope, source, None)
+            .ok_or_else(|| SnapshotError::ExecutionFailed("Failed to compile snapshot".into()))?;
 
-            let script = v8::Script::compile(scope, source, None)
-                .ok_or_else(|| SnapshotError::ExecutionFailed("Failed to compile snapshot".into()))?;
+        script.run(scope)
+            .ok_or_else(|| SnapshotError::ExecutionFailed("Failed to execute snapshot".into()))?;
 
-            script.run(scope)
-                .ok_or_else(|| SnapshotError::ExecutionFailed("Failed to execute snapshot".into()))?;
-
-            // Flush pending microtasks
-            scope.perform_microtask_checkpoint();
-        }
+        snapshot_creator.set_default_context(context);
     }
+
+    // Prevent OwnedIsolate::drop() from disposing the isolate — the SnapshotCreator
+    // still needs it alive for create_blob(). This is intentional; the process exits
+    // immediately after, so there is no leak in practice.
+    std::mem::forget(isolate);
 
     // Serialize the heap snapshot
     let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)

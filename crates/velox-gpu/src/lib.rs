@@ -30,37 +30,60 @@ pub struct GpuContext {
 }
 
 impl GpuContext {
+    /// Try backend sets in priority order and return the first working
+    /// (surface, adapter) pair.
+    ///
+    /// On Windows we probe DX12 first: the Intel/AMD Vulkan drivers pre-allocate
+    /// large memory pools upfront, which on integrated-GPU hardware (where GPU
+    /// memory IS system RAM) inflates process RSS by 200–300 MB.  DX12 allocates
+    /// on demand and avoids this.  We fall back to all backends if DX12 is
+    /// unavailable (old Windows, VMs, CI runners without DX12 support).
+    async fn pick_adapter(
+        window: Arc<Window>,
+    ) -> Result<(wgpu::Surface<'static>, wgpu::Adapter), GpuError> {
+        #[cfg(target_os = "windows")]
+        let sets: &[wgpu::Backends] = &[wgpu::Backends::DX12, wgpu::Backends::all()];
+        #[cfg(not(target_os = "windows"))]
+        let sets: &[wgpu::Backends] = &[wgpu::Backends::PRIMARY];
+
+        for &backends in sets {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends,
+                ..Default::default()
+            });
+            // Surface borrows Arc<Window> — 'static is satisfied because Arc
+            // keeps the window alive for the lifetime of GpuContext.
+            let Ok(surface) = instance.create_surface(Arc::clone(&window)) else {
+                continue;
+            };
+            let Some(adapter) = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference:       wgpu::PowerPreference::HighPerformance,
+                    compatible_surface:     Some(&surface),
+                    force_fallback_adapter: false,
+                })
+                .await
+            else {
+                continue;
+            };
+            log::info!(
+                "GPU adapter: {} ({:?})",
+                adapter.get_info().name,
+                adapter.get_info().backend,
+            );
+            return Ok((surface, adapter));
+        }
+
+        Err(GpuError::NoAdapter)
+    }
+
     /// Create the GPU context from an existing window.
     ///
     /// `window` must already be visible (call this from `resumed()`).
     pub async fn new(window: Arc<Window>) -> Result<Self, GpuError> {
         let size = window.inner_size();
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            // Prefer Vulkan > Metal > DX12 > GL — wgpu picks best available.
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
-
-        // Safety: `window` is Arc-owned and outlives `surface` because both
-        // are stored together in GpuContext. The 'static bound is satisfied
-        // by the Arc keeping the window alive.
-        let surface = instance.create_surface(window)?;
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference:       wgpu::PowerPreference::HighPerformance,
-                compatible_surface:     Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .ok_or(GpuError::NoAdapter)?;
-
-        log::info!(
-            "GPU adapter: {} ({:?})",
-            adapter.get_info().name,
-            adapter.get_info().backend
-        );
+        let (surface, adapter) = Self::pick_adapter(Arc::clone(&window)).await?;
 
         let (device, queue) = adapter
             .request_device(
@@ -68,7 +91,10 @@ impl GpuContext {
                     label:             Some("velox-device"),
                     required_features: wgpu::Features::empty(),
                     required_limits:   wgpu::Limits::default(),
-                    memory_hints:      wgpu::MemoryHints::default(),
+                    // MemoryUsage: prefer smaller allocations over pre-allocated
+                    // pools. Costs a small amount of GPU throughput but
+                    // meaningfully reduces process RSS for UI-heavy workloads.
+                    memory_hints:      wgpu::MemoryHints::MemoryUsage,
                 },
                 None,
             )
@@ -125,6 +151,7 @@ impl GpuContext {
     pub fn surface_format(&self) -> wgpu::TextureFormat {
         self.config.format
     }
+
 
     pub fn width(&self)  -> u32 { self.config.width  }
     pub fn height(&self) -> u32 { self.config.height }

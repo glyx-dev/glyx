@@ -11,8 +11,6 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// ── CLI definition ────────────────────────────────────────────────────────────
-
 #[derive(Parser)]
 #[command(
     name    = "velox",
@@ -27,31 +25,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Scaffold a new Velox project in a new directory
-    Create {
-        /// Name of the project (also the directory name)
-        name: String,
-    },
-
-    /// Start the development server with hot reload
+    Create { name: String },
     Dev,
-
-    /// Build a production binary
     Build {
-        /// Target OS: windows, macos, linux (defaults to current host)
-        #[arg(long)]
+        /// Target OS (windows, macos, linux)
         target: Option<String>,
+        /// Build mode: snapshot (default), bundle, portable
+        ///
+        /// snapshot  — embeds V8 snapshot in binary; self-contained exe, fastest startup (~50ms)
+        /// bundle    — minified JS bundle shipped alongside binary; smaller binary, easy JS updates
+        /// portable  — development-style JS alongside binary; readable, largest, easiest to patch
+        #[arg(long, default_value = "snapshot")]
+        mode: String,
     },
-
-    /// Create a distributable package for the built binary
-    Package {
-        /// Target OS: windows, macos, linux (defaults to current host)
-        #[arg(long)]
-        target: Option<String>,
-    },
+    Package { target: Option<String> },
 }
-
-// ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -70,60 +58,39 @@ fn run() -> Result<()> {
     match cli.command {
         Commands::Create { name }   => cmd_create(&name),
         Commands::Dev               => cmd_dev(),
-        Commands::Build { target }  => cmd_build(target.as_deref()),
+        Commands::Build { target, mode } => cmd_build(target.as_deref(), &mode),
         Commands::Package { target } => cmd_package(target.as_deref()),
     }
 }
 
-// ── velox create ─────────────────────────────────────────────────────────────
-
 fn cmd_create(name: &str) -> Result<()> {
     let dest = PathBuf::from(name);
-    if dest.exists() {
-        bail!("directory '{}' already exists", name);
-    }
-
-    // Determine where velox crates live (sibling `crates/` next to the binary)
+    if dest.exists() { bail!("directory '{}' already exists", name); }
     let velox_home = velox_home()?;
-
     println!("Creating Velox project: {name}");
-
-    // Directory structure
     std::fs::create_dir_all(dest.join("src"))?;
     std::fs::create_dir_all(dest.join("js"))?;
-
-    // velox-core / velox-shell deps are path-relative from new project dir
     let core_path  = relpath(&dest, &velox_home.join("crates/velox-core"));
     let shell_path = relpath(&dest, &velox_home.join("crates/velox-shell"));
-
-    // ── Cargo.toml ─────────────────────────────────────────────────────────
     write_file(dest.join("Cargo.toml"), &format!(
         r#"[package]
 name    = "{name}"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# "dev" gates hot-reload, bun watcher, and dev overlay in velox-core.
+# Production builds (velox build) use --no-default-features to exclude them.
+default = ["dev"]
+dev     = ["velox-core/dev"]
+
 [dependencies]
-velox-core  = {{ path = "{core_path}" }}
+velox-core  = {{ path = "{core_path}", default-features = false }}
 velox-shell = {{ path = "{shell_path}" }}
 env_logger  = "0.11"
-"#
-    ))?;
-
-    // ── src/main.rs ────────────────────────────────────────────────────────
-    write_file(dest.join("src/main.rs"), &format!(
-        r#"#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
-
-fn main() {{
-    velox_core::run(velox_core::AppConfig::from_config());
-}}
-"#
-    ))?;
-
-    // ── js/polyfills.js ────────────────────────────────────────────────────
+"#))?;
+    write_file(dest.join("src/main.rs"), "#![cfg_attr(all(target_os = \"windows\", not(debug_assertions)), windows_subsystem = \"windows\")]\n\nfn main() {\n    velox_core::run(velox_core::AppConfig::from_config());\n}\n")?;
     write_file(dest.join("js/polyfills.js"), POLYFILLS_JS)?;
-
-    // ── js/app.jsx ─────────────────────────────────────────────────────────
     write_file(dest.join("js/app.jsx"), &format!(
         r#"import './polyfills.js';
 import React, {{ useState }} from 'react';
@@ -156,10 +123,7 @@ function App() {{
 }}
 
 render(<App />);
-"#
-    ))?;
-
-    // ── velox.config.json ──────────────────────────────────────────────────
+"#))?;
     write_file(dest.join("velox.config.json"), &format!(
         r#"{{
   "window": {{
@@ -181,12 +145,9 @@ render(<App />);
     "watch": ["js"]
   }}
 }}
-"#
-    ))?;
-
-    // ── package.json (bun workspace) ───────────────────────────────────────
-    let react_path   = relpath(&dest, &velox_home.join("js/packages/@velox/react"));
-    let router_path  = relpath(&dest, &velox_home.join("js/packages/@velox/router"));
+"#))?;
+    let react_path  = relpath(&dest, &velox_home.join("js/packages/@velox/react"));
+    let router_path = relpath(&dest, &velox_home.join("js/packages/@velox/router"));
     write_file(dest.join("package.json"), &format!(
         r#"{{
   "name": "{name}",
@@ -198,12 +159,8 @@ render(<App />);
     "@velox/router": "file:{router_path}"
   }}
 }}
-"#
-    ))?;
-
-    // ── .gitignore ─────────────────────────────────────────────────────────
+"#))?;
     write_file(dest.join(".gitignore"), "/target\n/node_modules\n/js/app.js\n")?;
-
     println!();
     println!("✓ Created project: {name}/");
     println!();
@@ -211,58 +168,148 @@ render(<App />);
     println!("  cd {name}");
     println!("  bun install");
     println!("  velox dev");
-
     Ok(())
 }
 
-// ── velox dev ─────────────────────────────────────────────────────────────────
-
 fn cmd_dev() -> Result<()> {
-    // Read project name from Cargo.toml
     let project_name = read_project_name()
         .context("Run `velox dev` from the project root (where Cargo.toml lives)")?;
-
-    // Run an initial bun build so app.js exists before cargo starts watching
     let cfg = read_dev_config();
     if let Some((entry, output)) = &cfg {
         println!("Building JS: {} → {}", entry, output);
         bun_build(entry, output).context("Initial bun build failed")?;
         println!("✓ JS built");
     }
-
     println!("Starting dev server for '{project_name}' (hot reload active)...");
-    println!("  Press Ctrl+Shift+D inside the window to toggle the dev overlay");
-
-    // velox-core's built-in dev mode handles the watcher; we just spawn cargo run
     let status = Command::new("cargo")
         .args(["run", "-p", &project_name])
         .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
         .status()
         .context("Failed to run `cargo run`; is Rust installed?")?;
-
     std::process::exit(status.code().unwrap_or(1));
 }
 
-// ── velox build ───────────────────────────────────────────────────────────────
-
-fn cmd_build(target: Option<&str>) -> Result<()> {
+fn cmd_build(target: Option<&str>, mode: &str) -> Result<()> {
     let project_name = read_project_name()
         .context("Run `velox build` from the project root (where Cargo.toml lives)")?;
 
-    // Step 1: bun bundle
-    let cfg = read_dev_config();
-    if let Some((entry, output)) = &cfg {
-        println!("Bundling JS: {} → {}", entry, output);
-        bun_build(entry, output).context("bun build failed")?;
-        println!("✓ JS bundled");
+    match mode {
+        "snapshot" => build_snapshot_mode(target, &project_name),
+        "bundle"   => build_bundle_mode(target, &project_name),
+        "portable" => build_portable_mode(target, &project_name),
+        other => bail!("Unknown build mode '{other}'. Use: snapshot, bundle, portable"),
+    }
+}
+
+/// snapshot mode — self-contained exe with embedded V8 snapshot + embedded app JS
+///
+/// What's embedded:
+///   - V8 snapshot: stubs + polyfills pre-executed (fast V8 init, ~50ms)
+///   - App bundle: minified JS embedded as bytes (no external files needed)
+///
+/// At runtime:
+///   1. Restore V8 from snapshot (stubs+polyfills already done)
+///   2. Re-register real Rust bindings
+///   3. Eval embedded app.js → render(<App />) with real bindings → correct scene
+fn build_snapshot_mode(target: Option<&str>, project_name: &str) -> Result<()> {
+    println!("[snapshot mode] bun bundle → V8 snapshot + embedded app.js → self-contained binary");
+
+    let Some((entry, output)) = read_dev_config() else {
+        println!("⚠ No dev.entry in velox.config.json — falling back to portable mode");
+        return build_portable_mode(target, project_name);
+    };
+
+    // 1. Build the app bundle (embedded in binary, eval'd at runtime)
+    println!("Bundling JS: {} → {}", entry, output);
+    bun_build(&entry, &output).context("bun build failed")?;
+    println!("✓ JS bundled (dev output)");
+    let bundle = build_app_bundle(project_name, &entry).context("app bundle build failed")?;
+    println!("✓ App bundle: {} ({} KB)", bundle.display(), std::fs::metadata(&bundle)?.len() / 1024);
+
+    // 2. Create V8 snapshot (stubs + polyfills ONLY — app is eval'd separately at runtime)
+    let snap = create_snapshot_for_build(project_name).context("V8 snapshot creation failed")?;
+
+    // 3. Cargo build: embed snapshot, app bundle, and config (all baked in — no external files)
+    let abs_bundle = std::env::current_dir()?.join(&bundle);
+    let abs_config = std::env::current_dir()?.join("velox.config.json");
+    let bin_path = cargo_build_release(target, project_name, Some(&snap), Some(&abs_bundle), Some(&abs_config))?;
+
+    // Write build-mode marker so `velox package` knows to skip JS files
+    let _ = std::fs::create_dir_all("target/velox");
+    let _ = std::fs::write("target/velox/build-mode", "snapshot");
+
+    println!();
+    println!("✓ Build complete [snapshot]: {}", bin_path.display());
+    println!("  Binary is self-contained — no external JS files required");
+    println!("  Startup: V8 restore ~50ms + app eval ~200ms ≈ 2-5× faster than dev mode");
+    Ok(())
+}
+
+/// bundle mode — bun build → minified bundle alongside binary (easy JS updates, no recompile)
+fn build_bundle_mode(target: Option<&str>, project_name: &str) -> Result<()> {
+    println!("[bundle mode] bun bundle → minified JS shipped alongside binary");
+
+    if let Some((entry, _output)) = read_dev_config() {
+        let bundle_src = build_app_bundle(project_name, &entry).context("app bundle build failed")?;
+        // Copy minified bundle to the output path so the binary loads it at runtime
+        let output_js = read_dev_config().map(|(_, o)| o).unwrap_or_else(|| "js/app.js".into());
+        std::fs::copy(&bundle_src, &output_js).with_context(|| format!("copy bundle to {output_js}"))?;
+        println!("✓ Bundle → {} ({} KB)", output_js, std::fs::metadata(&output_js)?.len() / 1024);
     } else {
-        println!("⚠ No dev.entry/dev.output in velox.config.json — skipping JS bundle");
+        println!("⚠ No dev.entry in velox.config.json — skipping JS bundle");
     }
 
-    // Step 2: cargo build --release [--target <triple>]
-    let rust_target = target.map(platform_to_rust_target).transpose()?;
+    let bin_path = cargo_build_release(target, project_name, None, None, None)?;
+    let _ = std::fs::create_dir_all("target/velox");
+    let _ = std::fs::write("target/velox/build-mode", "bundle");
+    println!();
+    println!("✓ Build complete [bundle]: {}", bin_path.display());
+    println!("  Ship: {} + js/ + velox.config.json", bin_path.display());
+    println!("  To update JS: replace js/app.js without recompiling Rust");
+    Ok(())
+}
 
-    let mut args = vec!["build", "--release", "-p", &project_name];
+/// portable mode — bun build → JS alongside binary (readable, easiest to patch)
+fn build_portable_mode(target: Option<&str>, project_name: &str) -> Result<()> {
+    println!("[portable mode] bun build → JS files shipped alongside binary");
+
+    if let Some((entry, output)) = read_dev_config() {
+        println!("Bundling JS: {} → {}", entry, output);
+        bun_build(&entry, &output).context("bun build failed")?;
+        println!("✓ JS built: {}", output);
+    } else {
+        println!("⚠ No dev.entry in velox.config.json — skipping JS build");
+    }
+
+    let bin_path = cargo_build_release(target, project_name, None, None, None)?;
+    let _ = std::fs::create_dir_all("target/velox");
+    let _ = std::fs::write("target/velox/build-mode", "portable");
+    println!();
+    println!("✓ Build complete [portable]: {}", bin_path.display());
+    println!("  Ship: {} + js/ + velox.config.json", bin_path.display());
+    Ok(())
+}
+
+/// Shared cargo build --release helper. Returns the path to the produced binary.
+///
+/// `snapshot`   — path to the `.snapshot` blob embedded via `VELOX_APP_SNAPSHOT`
+/// `app_js`     — path to the minified app bundle embedded via `VELOX_APP_JS`
+/// `app_config` — path to `velox.config.json` embedded via `VELOX_APP_CONFIG`
+fn cargo_build_release(
+    target: Option<&str>,
+    project_name: &str,
+    snapshot: Option<&Path>,
+    app_js: Option<&Path>,
+    app_config: Option<&Path>,
+) -> Result<PathBuf> {
+    let rust_target = target.map(platform_to_rust_target).transpose()?;
+    // --no-default-features disables the app's "dev" feature (and transitively
+    // velox-core/dev), excluding notify, hot-reload worker, and dev overlay from
+    // the production binary.  The user's Cargo.toml must follow the pattern:
+    //   [features]
+    //   default = ["dev"]
+    //   dev     = ["velox-core/dev"]
+    let mut args = vec!["build", "--release", "--no-default-features", "-p", project_name];
     let target_str;
     if let Some(ref t) = rust_target {
         target_str = t.to_string();
@@ -274,46 +321,124 @@ fn cmd_build(target: Option<&str>) -> Result<()> {
         println!("Building for host platform");
     }
 
-    let status = Command::new("cargo")
-        .args(&args)
-        .env("RUST_LOG", "warn")
-        .status()
-        .context("Failed to run `cargo build`")?;
-
-    if !status.success() {
-        bail!("cargo build failed");
+    let mut cmd = Command::new("cargo");
+    cmd.args(&args).env("RUST_LOG", "warn");
+    if let Some(snap) = snapshot {
+        cmd.env("VELOX_APP_SNAPSHOT", snap);
+        println!("Embedding snapshot: {}", snap.display());
     }
+    if let Some(js) = app_js {
+        cmd.env("VELOX_APP_JS", js);
+        println!("Embedding app JS:   {}", js.display());
+    }
+    if let Some(cfg) = app_config {
+        cmd.env("VELOX_APP_CONFIG", cfg);
+        println!("Embedding config:   {}", cfg.display());
+    }
+    let status = cmd.status().context("Failed to run `cargo build`")?;
+    if !status.success() { bail!("cargo build failed"); }
 
-    let bin_path = if let Some(ref t) = rust_target {
-        PathBuf::from(format!("target/{}/release/{}", t, binary_name(&project_name)))
+    Ok(if let Some(ref t) = rust_target {
+        PathBuf::from(format!("target/{}/release/{}", t, binary_name(project_name)))
     } else {
-        PathBuf::from(format!("target/release/{}", binary_name(&project_name)))
-    };
-
-    println!();
-    println!("✓ Build complete: {}", bin_path.display());
-    Ok(())
+        PathBuf::from(format!("target/release/{}", binary_name(project_name)))
+    })
 }
 
-// ── velox package ─────────────────────────────────────────────────────────────
+/// Create a V8 snapshot containing ONLY stubs + polyfills.
+///
+/// The app bundle is NOT included in the snapshot — it is embedded separately
+/// (via VELOX_APP_JS) and eval'd at runtime after real bindings are registered.
+/// This ensures render(<App />) runs with real Rust bindings, not stubs.
+///
+/// Snapshot content:
+///   stubs     — __velox_* no-op placeholders (overridden at runtime)
+///   polyfills — setTimeout, performance.now, etc. (pre-initialised)
+///   framework — empty (React is bundled into the app, not snapshotted separately)
+///   app       — empty (eval'd at runtime, after real bindings are available)
+fn create_snapshot_for_build(project_name: &str) -> Result<PathBuf> {
+    std::fs::create_dir_all("target/velox")?;
+
+    // Use project's polyfills.js if it exists; otherwise a no-op placeholder
+    let polyfills_path = PathBuf::from("js/polyfills.js");
+    let polyfills_arg = if polyfills_path.exists() {
+        polyfills_path
+    } else {
+        let empty = PathBuf::from("target/velox/empty.js");
+        std::fs::write(&empty, "// no polyfills\n")?;
+        empty
+    };
+
+    // Framework and app: empty — app is eval'd at runtime via VELOX_APP_JS
+    let empty_js = PathBuf::from("target/velox/empty.js");
+    std::fs::write(&empty_js, "// not snapshotted — eval'd at runtime\n")?;
+
+    // Absolute path so VELOX_APP_SNAPSHOT works from any build.rs working directory
+    let snapshot_out = std::env::current_dir()?
+        .join(format!("target/velox/{project_name}.snapshot"));
+
+    let snapshot_bin = find_or_build_snapshot_binary()?;
+
+    println!("Creating V8 snapshot (stubs + polyfills)...");
+    let status = Command::new(&snapshot_bin)
+        .args([
+            polyfills_arg.as_os_str(),
+            empty_js.as_os_str(),   // framework: empty
+            empty_js.as_os_str(),   // app: empty (eval'd at runtime)
+            snapshot_out.as_os_str(),
+        ])
+        .status()
+        .context("Failed to run velox-snapshot")?;
+
+    if !status.success() { bail!("velox-snapshot failed"); }
+
+    if let Ok(meta) = std::fs::metadata(&snapshot_out) {
+        println!("✓ V8 snapshot: {} ({} KB)", snapshot_out.display(), meta.len() / 1024);
+    }
+    Ok(snapshot_out)
+}
+
+/// Locate the `velox-snapshot` binary, building it from source if necessary.
+fn find_or_build_snapshot_binary() -> Result<PathBuf> {
+    let velox_home = velox_home()?;
+    let bin_name = if cfg!(target_os = "windows") { "velox-snapshot.exe" } else { "velox-snapshot" };
+
+    // Prefer release, fall back to debug
+    for profile in &["release", "debug"] {
+        let path = velox_home.join("target").join(profile).join(bin_name);
+        if path.exists() { return Ok(path); }
+    }
+
+    // Not found — build it (one-time cost)
+    println!("Building velox-snapshot (first run only)...");
+    let status = Command::new("cargo")
+        .args(["build", "-p", "velox-snapshot", "--release"])
+        .current_dir(&velox_home)
+        .status()
+        .context("Failed to build velox-snapshot")?;
+
+    if !status.success() {
+        bail!("Failed to build velox-snapshot; run `cargo build -p velox-snapshot --release` manually");
+    }
+
+    let path = velox_home.join("target/release").join(bin_name);
+    if path.exists() { return Ok(path); }
+    bail!("velox-snapshot binary not found after build at {}", path.display())
+}
 
 fn cmd_package(target: Option<&str>) -> Result<()> {
     let project_name = read_project_name()
         .context("Run `velox package` from the project root")?;
-
     let os = target.unwrap_or(host_os());
     let rust_target = platform_to_rust_target(os)?;
     let bin_src = resolve_packaged_binary(&project_name, &rust_target, target.is_some())?;
-
     std::fs::create_dir_all("target/velox/dist")?;
-
     match os {
         "windows" => package_windows(&project_name, &bin_src)?,
         "macos"   => package_macos(&project_name, &bin_src)?,
         "linux"   => package_linux(&project_name, &bin_src)?,
         other     => bail!("Unknown target OS: {other}. Use: windows, macos, linux"),
     }
-
     Ok(())
 }
 
@@ -323,81 +448,49 @@ fn resolve_packaged_binary(project_name: &str, rust_target: &str, cross_target: 
     } else {
         PathBuf::from(format!("target/release/{}", binary_name(project_name)))
     };
-
     let mut candidates = vec![std::env::current_dir()?.join(&rel)];
-
-    if let Some(workspace_root) = find_workspace_root()? {
-        let workspace_candidate = workspace_root.join(&rel);
-        if !candidates.iter().any(|p| p == &workspace_candidate) {
-            candidates.push(workspace_candidate);
+    if let Some(ws_root) = find_workspace_root()? {
+        let ws_candidate = ws_root.join(&rel);
+        if !candidates.iter().any(|p| p == &ws_candidate) {
+            candidates.push(ws_candidate);
         }
     }
-
     for candidate in &candidates {
-        if candidate.exists() {
-            return Ok(candidate.clone());
-        }
+        if candidate.exists() { return Ok(candidate.clone()); }
     }
-
-    let searched = candidates
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let searched = candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
     bail!("Binary not found. Run `velox build` first. Searched: {searched}");
 }
 
 fn package_windows(name: &str, bin: &Path) -> Result<()> {
     let dist_root = PathBuf::from("target/velox/dist");
     let app_dir = dist_root.join(format!("{name}-windows"));
-    if app_dir.exists() {
-        std::fs::remove_dir_all(&app_dir)
-            .with_context(|| format!("remove {}", app_dir.display()))?;
-    }
+    if app_dir.exists() { std::fs::remove_dir_all(&app_dir).with_context(|| format!("remove {}", app_dir.display()))?; }
     std::fs::create_dir_all(&app_dir)?;
-
     let exe_name = binary_name(name);
-    std::fs::copy(bin, app_dir.join(&exe_name))
-        .with_context(|| format!("copy {}", bin.display()))?;
+    std::fs::copy(bin, app_dir.join(&exe_name)).with_context(|| format!("copy {}", bin.display()))?;
     copy_runtime_files(&app_dir)?;
-
-    // Create a simple ZIP archive containing the packaged app folder
     let zip_path = format!("target/velox/dist/{name}-windows.zip");
     println!("Packaging for Windows: {zip_path}");
-
     let status = Command::new("powershell")
-        .args([
-            "-Command",
-            &format!(
-                "Compress-Archive -Path '{}\\*' -DestinationPath '{}' -Force",
-                app_dir.display(), zip_path
-            ),
-        ])
+        .args(["-Command", &format!("Compress-Archive -Path '{}/*' -DestinationPath '{}' -Force", app_dir.display(), zip_path)])
         .status();
-
     match status {
         Ok(s) if s.success() => {
             println!("✓ Package: {zip_path}");
             println!("  Unzip and run {exe_name} from the extracted folder");
-            println!("  (Full NSIS/WiX installer coming in a future release)");
         }
-        _ => {
-            println!("✓ Folder: {}", app_dir.display());
-        }
+        _ => { println!("✓ Folder: {}", app_dir.display()); }
     }
     Ok(())
 }
 
 fn package_macos(name: &str, bin: &Path) -> Result<()> {
-    // Create a minimal .app bundle
     let app_dir = format!("target/velox/dist/{name}.app/Contents/MacOS");
     std::fs::create_dir_all(&app_dir)?;
     let dest = format!("{app_dir}/{name}");
     std::fs::copy(bin, &dest)?;
-
-    // Minimal Info.plist
-    let plist = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
+    let plist = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -406,32 +499,20 @@ fn package_macos(name: &str, bin: &Path) -> Result<()> {
     <key>CFBundleName</key><string>{name}</string>
     <key>CFBundleVersion</key><string>1.0</string>
 </dict>
-</plist>"#
-    );
-    write_file(
-        format!("target/velox/dist/{name}.app/Contents/Info.plist"),
-        &plist,
-    )?;
-
+</plist>"#);
+    write_file(format!("target/velox/dist/{name}.app/Contents/Info.plist"), &plist)?;
     println!("✓ Package: target/velox/dist/{name}.app");
-    println!("  (DMG creation coming in a future release)");
     Ok(())
 }
 
 fn package_linux(name: &str, bin: &Path) -> Result<()> {
-    // Create a .tar.gz archive
     let archive = format!("target/velox/dist/{name}-linux.tar.gz");
     println!("Packaging for Linux: {archive}");
-
     let status = Command::new("tar")
         .args(["-czf", &archive, "-C", bin.parent().unwrap().to_str().unwrap(), &binary_name(name)])
         .status();
-
     match status {
-        Ok(s) if s.success() => {
-            println!("✓ Package: {archive}");
-            println!("  (deb/rpm packages coming in a future release)");
-        }
+        Ok(s) if s.success() => { println!("✓ Package: {archive}"); }
         _ => {
             let dest = format!("target/velox/dist/{name}");
             std::fs::copy(bin, &dest)?;
@@ -441,13 +522,45 @@ fn package_linux(name: &str, bin: &Path) -> Result<()> {
     Ok(())
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+fn build_app_bundle(project_name: &str, entry: &str) -> Result<PathBuf> {
+    let bundle_out = format!("target/velox/{project_name}.js");
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd"); c.args(["/C", "bun", "build"]); c
+    } else {
+        let mut c = Command::new("bun"); c.arg("build"); c
+    };
+    let status = cmd
+        .arg(entry)
+        .args([
+            "--outfile", &bundle_out,
+            "--target", "browser",
+            "--format", "iife",
+            "--minify",                                   // dead-code elim + name mangling
+            "--define", "process.env.NODE_ENV='production'", // React prod build (no dev warnings)
+        ])
+        .status()
+        .context("Failed to run `bun build`")?;
+    if !status.success() { bail!("bun build failed"); }
+    Ok(PathBuf::from(bundle_out))
+}
 
-/// Find the velox project root from the CLI binary's location.
-/// Expects: <velox_home>/target/[debug|release]/velox(.exe)
-/// Returns: <velox_home>
 fn velox_home() -> Result<PathBuf> {
-    // Walk up from the binary until we find a Cargo.toml with workspace members
+    // Primary: use the path baked in at compile time.
+    // CARGO_MANIFEST_DIR = crates/velox-cli/ → parent = crates/ → parent = workspace root.
+    // This is the only reliable path when the binary is installed via `cargo install`
+    // to ~/.cargo/bin/ (traversing up from there will never find the velox workspace).
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(workspace) = manifest_dir.parent().and_then(|p| p.parent()) {
+        let cargo_toml = workspace.join("Cargo.toml");
+        if cargo_toml.exists() {
+            let content = std::fs::read_to_string(&cargo_toml).unwrap_or_default();
+            if content.contains("[workspace]") && content.contains("velox-core") {
+                return Ok(workspace.to_path_buf());
+            }
+        }
+    }
+
+    // Fallback: traverse up from the executable (works when running from workspace target/).
     let exe = std::env::current_exe().context("Cannot determine executable path")?;
     let mut dir = exe.as_path();
     loop {
@@ -459,37 +572,26 @@ fn velox_home() -> Result<PathBuf> {
                 return Ok(dir.to_path_buf());
             }
         }
-        if dir.parent().is_none() {
-            break;
-        }
+        if dir.parent().is_none() { break; }
     }
-    // Fallback: use cwd
     Ok(std::env::current_dir()?)
 }
 
-/// Return a relative path string from `from_dir` to `to`.
 fn relpath(from_dir: &Path, to: &Path) -> String {
-    // Simple approach: canonicalize or use relative traversal
     let from = from_dir.canonicalize().unwrap_or_else(|_| from_dir.to_path_buf());
     let to   = to.canonicalize().unwrap_or_else(|_| to.to_path_buf());
-
-    // Count how many levels up we need to go
     let from_components: Vec<_> = from.components().collect();
     let to_components:   Vec<_> = to.components().collect();
-
     let common = from_components.iter().zip(to_components.iter())
         .take_while(|(a, b)| a == b)
         .count();
-
     let up = from_components.len() - common;
     let mut rel = PathBuf::new();
     for _ in 0..up { rel.push(".."); }
     for c in &to_components[common..] { rel.push(c); }
-
     rel.to_string_lossy().replace('\\', "/")
 }
 
-/// Read the [package] name from the Cargo.toml in cwd.
 fn read_project_name() -> Option<String> {
     let src = std::fs::read_to_string("Cargo.toml").ok()?;
     for line in src.lines() {
@@ -503,46 +605,33 @@ fn read_project_name() -> Option<String> {
     None
 }
 
-/// Read dev.entry + dev.output from velox.config.json.
 fn read_dev_config() -> Option<(String, String)> {
     #[derive(serde::Deserialize)]
     struct Cfg { dev: Option<DevSection> }
     #[derive(serde::Deserialize)]
     struct DevSection { entry: Option<String>, output: Option<String> }
-
     let src = std::fs::read_to_string("velox.config.json").ok()?;
     let cfg: Cfg = serde_json::from_str(&src).ok()?;
     let dev = cfg.dev?;
     Some((dev.entry?, dev.output?))
 }
 
-/// Run `bun build` to bundle jsx → js.
-/// On Windows, bun is a .cmd shim and requires cmd.exe to resolve.
 fn bun_build(entry: &str, output: &str) -> Result<()> {
     let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.args(["/C", "bun", "build"]);
-        c
+        let mut c = Command::new("cmd"); c.args(["/C", "bun", "build"]); c
     } else {
-        let mut c = Command::new("bun");
-        c.arg("build");
-        c
+        let mut c = Command::new("bun"); c.arg("build"); c
     };
-
     let status = cmd
         .arg(entry)
         .args(["--outfile", output, "--target", "browser", "--format", "iife",
                "--define", "process.env.NODE_ENV='production'"])
         .status()
         .context("Failed to run `bun`; is Bun installed? https://bun.sh")?;
-
-    if !status.success() {
-        bail!("bun build failed");
-    }
+    if !status.success() { bail!("bun build failed"); }
     Ok(())
 }
 
-/// Map a human-readable OS name to a Rust target triple.
 fn platform_to_rust_target(os: &str) -> Result<String> {
     Ok(match os {
         "windows"     => "x86_64-pc-windows-msvc".into(),
@@ -551,19 +640,15 @@ fn platform_to_rust_target(os: &str) -> Result<String> {
         "macos-x64"   => "x86_64-apple-darwin".into(),
         "linux"       => "x86_64-unknown-linux-gnu".into(),
         "linux-arm"   => "aarch64-unknown-linux-gnu".into(),
-        other         => bail!(
-            "Unknown target: '{other}'. Use: windows, macos, linux, linux-arm, macos-x64"
-        ),
+        other         => bail!("Unknown target: '{other}'. Use: windows, macos, linux, linux-arm, macos-x64"),
     })
 }
 
-/// Check that the required Rust target is installed, and offer to install it.
 fn ensure_rust_target(target: &str) -> Result<()> {
     let out = Command::new("rustup")
         .args(["target", "list", "--installed"])
         .output()
         .context("Failed to run rustup")?;
-
     let installed = String::from_utf8_lossy(&out.stdout);
     if !installed.contains(target) {
         println!("Target '{target}' is not installed. Installing via rustup...");
@@ -571,19 +656,15 @@ fn ensure_rust_target(target: &str) -> Result<()> {
             .args(["target", "add", target])
             .status()
             .context("Failed to run rustup target add")?;
-        if !status.success() {
-            bail!("Failed to install target '{target}'. Run: rustup target add {target}");
-        }
+        if !status.success() { bail!("Failed to install target '{target}'. Run: rustup target add {target}"); }
     }
     Ok(())
 }
 
-/// Return the platform binary name (adds .exe on Windows).
 fn binary_name(name: &str) -> String {
     if cfg!(target_os = "windows") { format!("{name}.exe") } else { name.to_string() }
 }
 
-/// Return the host OS string matching our target names.
 fn host_os() -> &'static str {
     if cfg!(target_os = "windows")      { "windows" }
     else if cfg!(target_os = "macos")   { "macos" }
@@ -596,110 +677,71 @@ fn find_workspace_root() -> Result<Option<PathBuf>> {
         let cargo_toml = dir.join("Cargo.toml");
         if cargo_toml.exists() {
             let content = std::fs::read_to_string(&cargo_toml).unwrap_or_default();
-            if content.contains("[workspace]") {
-                return Ok(Some(dir));
-            }
+            if content.contains("[workspace]") { return Ok(Some(dir)); }
         }
-        match dir.parent() {
-            Some(parent) => dir = parent.to_path_buf(),
-            None => return Ok(None),
-        }
+        match dir.parent() { Some(parent) => dir = parent.to_path_buf(), None => return Ok(None), }
     }
 }
 
 fn copy_runtime_files(dest_root: &Path) -> Result<()> {
-    let config = PathBuf::from("velox.config.json");
-    if config.exists() {
-        let dest = dest_root.join("velox.config.json");
-        std::fs::copy(&config, &dest)
-            .with_context(|| format!("copy {}", config.display()))?;
-    }
+    // Read build mode written by `velox build` to decide what to ship
+    let build_mode = std::fs::read_to_string("target/velox/build-mode")
+        .unwrap_or_else(|_| "portable".into());
+    let is_snapshot = build_mode.trim() == "snapshot";
 
-    let js_dir = PathBuf::from("js");
-    if js_dir.exists() {
-        copy_dir_all(&js_dir, &dest_root.join("js"))?;
+    // Snapshot mode: config + JS are baked into the binary — ship nothing external
+    if !is_snapshot {
+        let config = PathBuf::from("velox.config.json");
+        if config.exists() {
+            std::fs::copy(&config, dest_root.join("velox.config.json"))
+                .with_context(|| format!("copy {}", config.display()))?;
+        }
+        let js_dir = PathBuf::from("js");
+        if js_dir.exists() { copy_dir_all(&js_dir, &dest_root.join("js"))?; }
     }
-
     let assets_dir = PathBuf::from("assets");
-    if assets_dir.exists() {
-        copy_dir_all(&assets_dir, &dest_root.join("assets"))?;
-    }
-
+    if assets_dir.exists() { copy_dir_all(&assets_dir, &dest_root.join("assets"))?; }
     let migrations_dir = PathBuf::from("migrations");
-    if migrations_dir.exists() {
-        copy_dir_all(&migrations_dir, &dest_root.join("migrations"))?;
-    }
-
+    if migrations_dir.exists() { copy_dir_all(&migrations_dir, &dest_root.join("migrations"))?; }
     Ok(())
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)
-        .with_context(|| format!("create {}", dst.display()))?;
-
-    for entry in std::fs::read_dir(src)
-        .with_context(|| format!("read {}", src.display()))?
-    {
+    std::fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
+    for entry in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
         let entry = entry?;
         let ty = entry.file_type()?;
         let dest_path = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dest_path)?;
-        } else {
-            std::fs::copy(entry.path(), &dest_path)
-                .with_context(|| format!("copy {}", entry.path().display()))?;
-        }
+        if ty.is_dir() { copy_dir_all(&entry.path(), &dest_path)?; }
+        else { std::fs::copy(entry.path(), &dest_path).with_context(|| format!("copy {}", entry.path().display()))?; }
     }
     Ok(())
 }
 
 fn write_file(path: impl AsRef<Path>, content: &str) -> Result<()> {
     let path = path.as_ref();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
     std::fs::write(path, content).with_context(|| format!("write {}", path.display()))
 }
 
-// ── Polyfills (embedded in the CLI, written into new projects) ────────────────
-
 const POLYFILLS_JS: &str = r#"// V8 environment polyfills
-//
-// rusty_v8 runs a bare V8 isolate — no browser or Node globals.
-// React's scheduler needs performance.now(), setTimeout, clearTimeout,
-// and MessageChannel. We provide minimal stubs here.
-//
-// This file is imported FIRST in app.jsx so these globals exist before
-// react-reconciler initialises its scheduler.
-
 if (typeof performance === 'undefined') {
-  globalThis.performance = {
-    now: () => Number(__velox_getTime()),
-  };
+  globalThis.performance = { now: () => Number(__velox_getTime()) };
 }
-
 if (typeof setTimeout === 'undefined') {
   let _nextId = 1;
   globalThis.setTimeout  = (fn, _ms) => { fn(); return _nextId++; };
   globalThis.clearTimeout = (_id) => {};
 }
-
 if (typeof queueMicrotask === 'undefined') {
   globalThis.queueMicrotask = (fn) => Promise.resolve().then(fn);
 }
-
 if (typeof MessageChannel === 'undefined') {
   globalThis.MessageChannel = class MessageChannel {
     constructor() {
       const ch = this;
-      ch.port1 = {
-        onmessage: null,
-        postMessage(msg) { ch.port2.onmessage?.({ data: msg }); },
-      };
-      ch.port2 = {
-        onmessage: null,
-        postMessage(msg) { ch.port1.onmessage?.({ data: msg }); },
-      };
+      ch.port1 = { onmessage: null, postMessage(msg) { ch.port2.onmessage?.({ data: msg }); } };
+      ch.port2 = { onmessage: null, postMessage(msg) { ch.port1.onmessage?.({ data: msg }); } };
     }
   };
 }

@@ -5,8 +5,9 @@ use tokio::runtime::Handle;
 
 use crate::{
     bindings::{
-        new_completion_queue, new_event_queue, new_layout_cache, new_scene_queue, register_all,
-        CompletionQueue, EventQueue, InputEvent, LayoutCache, SceneCommand, SceneQueue,
+        new_completion_queue, new_event_queue, new_layout_cache, new_scene_queue,
+        new_ipc_bus, register_all,
+        CompletionQueue, EventQueue, InputEvent, IpcBus, LayoutCache, SceneCommand, SceneQueue,
         WindowController,
     },
     RuntimeError,
@@ -48,7 +49,31 @@ pub struct HeapStats {
 
 impl VeloxRuntime {
     /// Create a new VeloxRuntime with a fresh isolate.
+    ///
+    /// Uses a private IPC bus and handle 0 — suitable for single-window apps
+    /// and for the snapshot tool.  For multi-window use `new_with_ipc`.
     pub fn new(tokio_handle: Handle, window: Option<WindowController>) -> Self {
+        let ipc_bus        = new_ipc_bus();
+        let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
+        Self::new_with_ipc(tokio_handle, window, ipc_bus, 0, next_window_id)
+    }
+
+    /// Create a new VeloxRuntime and join it to the shared IPC bus.
+    ///
+    /// `my_handle` is this window's identifier in the bus.
+    /// `next_window_id` is a shared counter for assigning secondary-window IDs.
+    pub fn new_with_ipc(
+        tokio_handle:   Handle,
+        window:         Option<WindowController>,
+        ipc_bus:        IpcBus,
+        my_handle:      u32,
+        next_window_id: Arc<std::sync::atomic::AtomicU32>,
+    ) -> Self {
+        // Register this window's inbox in the shared bus.
+        ipc_bus.lock().unwrap()
+            .entry(my_handle)
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())));
+
         let mut isolate = v8::Isolate::new(velox_create_params(None));
 
         let events       = new_event_queue();
@@ -70,6 +95,9 @@ impl VeloxRuntime {
                 Arc::clone(&events),
                 Arc::clone(&layout_cache),
                 window,
+                ipc_bus,
+                my_handle,
+                next_window_id,
             );
 
             (v8::Global::new(scope, ctx), queue, scene)
@@ -81,11 +109,31 @@ impl VeloxRuntime {
     /// Create a new VeloxRuntime from a snapshot blob (pre-executed JS heap).
     ///
     /// The snapshot is restored and its stub bindings are overridden with real Rust implementations.
+    /// Uses a private IPC bus — for multi-window use `new_from_snapshot_with_ipc`.
     pub fn new_from_snapshot(
         snapshot_blob: &[u8],
-        tokio_handle: Handle,
-        window: Option<WindowController>,
+        tokio_handle:  Handle,
+        window:        Option<WindowController>,
     ) -> Result<Self, RuntimeError> {
+        let ipc_bus        = new_ipc_bus();
+        let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
+        Self::new_from_snapshot_with_ipc(snapshot_blob, tokio_handle, window, ipc_bus, 0, next_window_id)
+    }
+
+    /// Restore from snapshot and join the shared IPC bus.
+    pub fn new_from_snapshot_with_ipc(
+        snapshot_blob:  &[u8],
+        tokio_handle:   Handle,
+        window:         Option<WindowController>,
+        ipc_bus:        IpcBus,
+        my_handle:      u32,
+        next_window_id: Arc<std::sync::atomic::AtomicU32>,
+    ) -> Result<Self, RuntimeError> {
+        // Register this window's inbox in the bus.
+        ipc_bus.lock().unwrap()
+            .entry(my_handle)
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())));
+
         let mut isolate = v8::Isolate::new(velox_create_params(Some(snapshot_blob.to_vec())));
 
         let events       = new_event_queue();
@@ -110,6 +158,9 @@ impl VeloxRuntime {
                 Arc::clone(&events),
                 Arc::clone(&layout_cache),
                 window,
+                ipc_bus,
+                my_handle,
+                next_window_id,
             );
 
             (v8::Global::new(scope, ctx), queue, scene)

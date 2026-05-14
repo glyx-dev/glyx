@@ -83,6 +83,22 @@ globalThis.__velox_notification_send = function() { return stubPromise(undefined
 
 // Environment binding
 globalThis.__velox_getEnv = function() { return null; };
+
+// Network / WebSocket bindings
+globalThis.__velox_fetch = function() { return stubPromise('{"status":0,"ok":false,"body":"","headers":{}}'); };
+globalThis.__velox_ws_connect = function() { return stubPromise('0'); };
+globalThis.__velox_ws_send = function() {};
+globalThis.__velox_ws_poll = function() { return '[]'; };
+globalThis.__velox_ws_close = function() {};
+
+// mDNS binding
+globalThis.__velox_mdns_discover = function() { return stubPromise('[]'); };
+
+// Multi-window + IPC bindings
+let __velox_nextWindowId = 1;
+globalThis.__velox_window_create = function() { return stubPromise(String(__velox_nextWindowId++)); };
+globalThis.__velox_ipc_send = function() {};
+globalThis.__velox_ipc_poll = function() { return '[]'; };
 "#
     .to_string()
 }

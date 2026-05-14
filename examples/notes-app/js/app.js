@@ -6100,9 +6100,11 @@ No matching component was found for:
   var VeloxReconciler = import_react_reconciler.default(hostConfig_default);
   var rootContainer = VeloxReconciler.createContainer({ isVeloxRoot: true }, 0, null, false, null, "", (err) => __velox_log("[React] Recoverable error: " + err.message), null);
   var _wsOpenSockets = new Map;
+  var _ipcListeners = [];
   globalThis.__velox_frameCallback = function veloxFrameCallback() {
     VeloxReconciler.flushSync(() => {
       _pollWebSockets();
+      _pollIpc();
       dispatchEvents();
     });
   };
@@ -6573,6 +6575,13 @@ No matching component was found for:
       }
     }
   }
+  var mdns = {
+    discover(serviceType, { timeout = 5000 } = {}) {
+      if (typeof __velox_mdns_discover === "undefined")
+        return _noBinding("mdns.discover");
+      return __velox_mdns_discover(serviceType, timeout).then(JSON.parse);
+    }
+  };
   var ws = {
     connect(url, handlers = {}) {
       return __velox_ws_connect(url).then((idStr) => {
@@ -6593,6 +6602,63 @@ No matching component was found for:
         };
       });
     }
+  };
+  function _pollIpc() {
+    if (typeof __velox_ipc_poll === "undefined")
+      return;
+    let raw;
+    try {
+      raw = __velox_ipc_poll();
+    } catch {
+      return;
+    }
+    if (!raw)
+      return;
+    let msgs;
+    try {
+      msgs = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    for (const msg of msgs) {
+      for (const cb of _ipcListeners) {
+        try {
+          cb(msg);
+        } catch {}
+      }
+    }
+  }
+  var ipc = {
+    send(targetHandle, message) {
+      if (typeof __velox_ipc_send !== "undefined") {
+        __velox_ipc_send(targetHandle, String(message));
+      }
+    },
+    on(event, callback) {
+      if (event !== "message")
+        return () => {};
+      _ipcListeners.push(callback);
+      return () => {
+        const idx = _ipcListeners.indexOf(callback);
+        if (idx !== -1)
+          _ipcListeners.splice(idx, 1);
+      };
+    }
+  };
+  veloxWindow.create = function create(opts = {}) {
+    if (typeof __velox_window_create === "undefined")
+      return _noBinding("veloxWindow.create");
+    return __velox_window_create(JSON.stringify(opts)).then((idStr) => {
+      const id = Number(idStr);
+      return {
+        get id() {
+          return id;
+        },
+        send(msg) {
+          ipc.send(id, msg);
+        }
+      };
+    });
   };
 
   // ../../js/packages/@velox/router/src/index.js
@@ -7913,6 +7979,28 @@ Ranking: cosine similarity across stored note vectors.`
           width: inner,
           height: 18,
           style: { color: C2.subtle },
+          children: "mDNS service discovery — browse local network services"
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(MdnsTestBox, {
+          width: inner
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Divider, {}),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 13,
+          width: inner,
+          height: 18,
+          style: { color: C2.subtle },
+          children: "Multi-window + IPC — open a child window and exchange messages"
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(MultiWindowTestBox, {
+          width: inner
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Divider, {}),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 13,
+          width: inner,
+          height: 18,
+          style: { color: C2.subtle },
           children: "TextInput selection test (Phase 11B) — try Ctrl+A, Ctrl+C, Ctrl+V, arrows, shift+arrow"
         }),
         /* @__PURE__ */ jsx_runtime.jsx(TextInputTestBox, {
@@ -8023,6 +8111,223 @@ Ranking: cosine similarity across stored note vectors.`
             style: { color: C2.text },
             children: logText || "(no messages yet)"
           })
+        })
+      ]
+    });
+  }
+  function MdnsTestBox({ width }) {
+    const C2 = useThemeColors();
+    const [busy, setBusy] = import_react3.useState(false);
+    const [svcType, setSvcType] = import_react3.useState("_http._tcp.local.");
+    const [timeout, setTimeout_] = import_react3.useState("4000");
+    const [results, setResults] = import_react3.useState(null);
+    const [error, setError] = import_react3.useState("");
+    async function discover() {
+      setBusy(true);
+      setResults(null);
+      setError("");
+      try {
+        const found = await mdns.discover(svcType.trim(), { timeout: Number(timeout) || 4000 });
+        setResults(found);
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setBusy(false);
+      }
+    }
+    const rowStyle = { flexDirection: "row", alignItems: "center", gap: 8 };
+    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
+      style: { gap: 8 },
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: rowStyle,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: 70,
+              height: 20,
+              style: { color: C2.subtle },
+              children: "Service:"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+              value: svcType,
+              onChangeText: setSvcType,
+              width: width - 170,
+              height: 28,
+              fontSize: 12,
+              style: { flex: 1 }
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: 40,
+              height: 20,
+              style: { color: C2.subtle },
+              children: "ms:"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+              value: timeout,
+              onChangeText: setTimeout_,
+              width: 60,
+              height: 28,
+              fontSize: 12
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+              onPress: discover,
+              style: {
+                backgroundColor: busy ? C2.dim : C2.accent,
+                borderRadius: 5,
+                padding: 6
+              },
+              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 12,
+                height: 16,
+                style: { color: "#fff" },
+                children: busy ? "Scanning…" : "Browse"
+              })
+            })
+          ]
+        }),
+        error ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 11,
+          width,
+          height: 16,
+          style: { color: "#ff6b6b" },
+          children: error
+        }) : null,
+        results !== null && (results.length === 0 ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 12,
+          width,
+          height: 18,
+          style: { color: C2.dim },
+          children: "No services found"
+        }) : /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
+          width,
+          height: 120,
+          style: { backgroundColor: C2.overlay, borderRadius: 6 },
+          children: results.map((s, i) => /* @__PURE__ */ jsx_runtime.jsxs(View, {
+            style: { padding: 6, gap: 2 },
+            children: [
+              /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 12,
+                width: width - 20,
+                height: 16,
+                style: { color: C2.text },
+                children: s.name
+              }),
+              /* @__PURE__ */ jsx_runtime.jsxs(Text, {
+                fontSize: 11,
+                width: width - 20,
+                height: 14,
+                style: { color: C2.subtle },
+                children: [
+                  s.hostname,
+                  ":",
+                  s.port,
+                  " — ",
+                  s.addresses.join(", ")
+                ]
+              })
+            ]
+          }, i))
+        }))
+      ]
+    });
+  }
+  function MultiWindowTestBox({ width }) {
+    const C2 = useThemeColors();
+    const [winHandle, setWinHandle] = import_react3.useState(null);
+    const [status, setStatus] = import_react3.useState("not created");
+    const [log, setLog] = import_react3.useState([]);
+    const [msgText, setMsgText] = import_react3.useState("Hello from main window!");
+    import_react3.useEffect(() => {
+      const unsub = ipc.on("message", (raw) => {
+        let msg;
+        try {
+          msg = JSON.parse(raw);
+        } catch {
+          msg = null;
+        }
+        if (msg && msg.type === "ping") {
+          setLog((l) => [...l, `← ping from ${msg.from}: "${msg.data}"`]);
+          ipc.send(msg.from, JSON.stringify({ type: "pong", from: "child", data: "Pong from child window!" }));
+        } else {
+          setLog((l) => [...l, `← ${raw}`]);
+        }
+      });
+      return unsub;
+    }, []);
+    async function openWindow() {
+      setStatus("opening…");
+      setLog([]);
+      try {
+        const win = await veloxWindow.create({ title: "Velox IPC Child", width: 520, height: 460 });
+        setWinHandle(win);
+        setStatus(`opened (handle ${win.id})`);
+        setLog((l) => [...l, `Window opened (id=${win.id}). Sending ping…`]);
+        win.send(JSON.stringify({ type: "ping", from: 0, data: "Hello from main window!" }));
+      } catch (e) {
+        setStatus("error: " + String(e));
+      }
+    }
+    function sendMsg() {
+      if (!winHandle)
+        return;
+      winHandle.send(msgText);
+      setLog((l) => [...l, `→ ${msgText}`]);
+    }
+    const rowStyle = { flexDirection: "row", alignItems: "center", gap: 8 };
+    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
+      style: { gap: 8 },
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: rowStyle,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+              label: winHandle ? "Window open" : "Open Child Window",
+              onPress: openWindow,
+              width: 160,
+              color: winHandle ? C2.dim : C2.mauve,
+              disabled: !!winHandle
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: width - 176,
+              height: 20,
+              style: { color: C2.subtle },
+              children: status
+            })
+          ]
+        }),
+        winHandle && /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: rowStyle,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+              value: msgText,
+              onChangeText: setMsgText,
+              width: width - 96,
+              height: 28,
+              fontSize: 12
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+              label: "Send",
+              onPress: sendMsg,
+              width: 80,
+              color: C2.accent
+            })
+          ]
+        }),
+        log.length > 0 && /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
+          width,
+          height: Math.min(120, log.length * 18 + 12),
+          contentHeight: log.length * 18 + 12,
+          style: { backgroundColor: C2.overlay, borderRadius: 6, padding: 6 },
+          children: log.map((line, i) => /* @__PURE__ */ jsx_runtime.jsx(Text, {
+            fontSize: 11,
+            width: width - 24,
+            height: 18,
+            style: { color: C2.text },
+            children: line
+          }, i))
         })
       ]
     });

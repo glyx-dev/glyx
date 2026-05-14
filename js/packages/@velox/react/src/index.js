@@ -28,6 +28,11 @@ const rootContainer = VeloxReconciler.createContainer(
 // Open sockets: id (number) → { onmessage, onclose, onerror }
 const _wsOpenSockets = new Map();
 
+// ── IPC inbox polling ─────────────────────────────────────────────────────────
+//
+// Callbacks registered via ipc.on('message', cb).
+const _ipcListeners = [];
+
 // ── Frame callback ────────────────────────────────────────────────────────────
 //
 // Rust calls __velox_frameCallback() once per RedrawRequested (frame_tick),
@@ -38,6 +43,7 @@ globalThis.__velox_frameCallback = function veloxFrameCallback() {
   // synchronously, so scene commands are in the queue before Rust drains them.
   VeloxReconciler.flushSync(() => {
     _pollWebSockets();
+    _pollIpc();
     dispatchEvents();
   });
 };
@@ -902,6 +908,28 @@ function _pollWebSockets() {
  * // later:
  * socket.close();
  */
+// ── mDNS service discovery ────────────────────────────────────────────────────
+//
+// Requires `mdns: true` capability in velox.config.json.
+//
+// Usage:
+//   import { mdns } from '@velox/react';
+//   const services = await mdns.discover('_http._tcp.local.', { timeout: 4000 });
+//   // [{ name, hostname, port, addresses: string[] }, ...]
+
+export const mdns = {
+  /**
+   * Browse for mDNS/Bonjour services of the given type.
+   * @param {string} serviceType  e.g. "_http._tcp.local."
+   * @param {{ timeout?: number }} [opts]  timeout in ms (default 5000)
+   * @returns {Promise<{name:string, hostname:string, port:number, addresses:string[]}[]>}
+   */
+  discover(serviceType, { timeout = 5000 } = {}) {
+    if (typeof __velox_mdns_discover === 'undefined') return _noBinding('mdns.discover');
+    return __velox_mdns_discover(serviceType, timeout).then(JSON.parse);
+  },
+};
+
 export const ws = {
   /**
    * Open a WebSocket connection.
@@ -927,4 +955,88 @@ export const ws = {
       };
     });
   },
+};
+
+// ── IPC (inter-window messaging) ──────────────────────────────────────────────
+//
+// Drain this window's IPC inbox each frame and fire registered listeners.
+function _pollIpc() {
+  if (typeof __velox_ipc_poll === 'undefined') return;
+  let raw;
+  try { raw = __velox_ipc_poll(); } catch { return; }
+  if (!raw) return;
+  let msgs;
+  try { msgs = JSON.parse(raw); } catch { return; }
+  for (const msg of msgs) {
+    for (const cb of _ipcListeners) {
+      try { cb(msg); } catch {}
+    }
+  }
+}
+
+/**
+ * Inter-window process communication.
+ *
+ * @example
+ * // In window 0 (main):
+ * const child = await veloxWindow.create({ title: 'Inspector', width: 400, height: 600 });
+ * ipc.send(child.id, JSON.stringify({ type: 'init', data: 42 }));
+ *
+ * // In window N (secondary):
+ * ipc.on('message', (msg) => console.log('received:', msg));
+ */
+export const ipc = {
+  /**
+   * Send a string message to another window by its handle.
+   * @param {number} targetHandle
+   * @param {string} message
+   */
+  send(targetHandle, message) {
+    if (typeof __velox_ipc_send !== 'undefined') {
+      __velox_ipc_send(targetHandle, String(message));
+    }
+  },
+
+  /**
+   * Register a callback for messages received by this window.
+   * @param {'message'} event  — currently only 'message' is supported
+   * @param {(msg: string) => void} callback
+   * @returns {() => void}  unsubscribe function
+   */
+  on(event, callback) {
+    if (event !== 'message') return () => {};
+    _ipcListeners.push(callback);
+    return () => {
+      const idx = _ipcListeners.indexOf(callback);
+      if (idx !== -1) _ipcListeners.splice(idx, 1);
+    };
+  },
+};
+
+// ── Multi-window ──────────────────────────────────────────────────────────────
+//
+// Extends veloxWindow with a create() method for opening secondary windows.
+// This export adds to the existing veloxWindow object (defined earlier in the
+// file) — import veloxWindow to use all window control methods.
+
+/**
+ * Open a secondary window running an independent instance of the app.
+ * Returns a handle object usable with the `ipc` API.
+ *
+ * @param {{ title?: string, width?: number, height?: number }} opts
+ * @returns {Promise<{ id: number, send: (msg: string) => void }>}
+ *
+ * @example
+ * const win = await veloxWindow.create({ title: 'Inspector', width: 400, height: 600 });
+ * win.send(JSON.stringify({ type: 'hello' }));
+ */
+veloxWindow.create = function create(opts = {}) {
+  if (typeof __velox_window_create === 'undefined') return _noBinding('veloxWindow.create');
+  return __velox_window_create(JSON.stringify(opts)).then(idStr => {
+    const id = Number(idStr);
+    return {
+      get id() { return id; },
+      send(msg) { ipc.send(id, msg); },
+    };
+  });
 };

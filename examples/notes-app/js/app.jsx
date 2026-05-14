@@ -19,7 +19,7 @@ import './polyfills.js';
 import React, { useState, useEffect, useContext, createContext, useCallback, useMemo } from 'react';
 import {
   View, Text, Pressable, TextInput, ScrollView, render, useWindowSize, useMediaQuery,
-  db, vectorDb, fs, dialog, clipboard, notification, veloxWindow, fetch, ws,
+  db, vectorDb, fs, dialog, clipboard, notification, veloxWindow, fetch, ws, mdns, ipc,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
 
@@ -1084,6 +1084,20 @@ function NetworkTestScreen() {
       </Text>
       <WsTestBox width={inner} />
 
+      {/* mDNS discovery test */}
+      <Divider />
+      <Text fontSize={13} width={inner} height={18} style={{ color: C.subtle }}>
+        mDNS service discovery — browse local network services
+      </Text>
+      <MdnsTestBox width={inner} />
+
+      {/* Multi-window + IPC test (Phase 13) */}
+      <Divider />
+      <Text fontSize={13} width={inner} height={18} style={{ color: C.subtle }}>
+        Multi-window + IPC — open a child window and exchange messages
+      </Text>
+      <MultiWindowTestBox width={inner} />
+
       {/* TextInput test (Phase 11B) */}
       <Divider />
       <Text fontSize={13} width={inner} height={18} style={{ color: C.subtle }}>
@@ -1161,6 +1175,188 @@ function WsTestBox({ width }) {
           {logText || '(no messages yet)'}
         </Text>
       </ScrollView>
+    </View>
+  );
+}
+
+function MdnsTestBox({ width }) {
+  const C          = useThemeColors();
+  const [busy,     setBusy]     = useState(false);
+  const [svcType,  setSvcType]  = useState('_http._tcp.local.');
+  const [timeout,  setTimeout_] = useState('4000');
+  const [results,  setResults]  = useState(null);
+  const [error,    setError]    = useState('');
+
+  async function discover() {
+    setBusy(true);
+    setResults(null);
+    setError('');
+    try {
+      const found = await mdns.discover(svcType.trim(), { timeout: Number(timeout) || 4000 });
+      setResults(found);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const rowStyle = { flexDirection: 'row', alignItems: 'center', gap: 8 };
+
+  return (
+    <View style={{ gap: 8 }}>
+      <View style={rowStyle}>
+        <Text fontSize={12} width={70} height={20} style={{ color: C.subtle }}>Service:</Text>
+        <TextInput
+          value={svcType}
+          onChangeText={setSvcType}
+          width={width - 170}
+          height={28}
+          fontSize={12}
+          style={{ flex: 1 }}
+        />
+        <Text fontSize={12} width={40} height={20} style={{ color: C.subtle }}>ms:</Text>
+        <TextInput
+          value={timeout}
+          onChangeText={setTimeout_}
+          width={60}
+          height={28}
+          fontSize={12}
+        />
+        <Pressable
+          onPress={discover}
+          style={{
+            backgroundColor: busy ? C.dim : C.accent,
+            borderRadius: 5,
+            padding: 6,
+          }}
+        >
+          <Text fontSize={12} height={16} style={{ color: '#fff' }}>
+            {busy ? 'Scanning…' : 'Browse'}
+          </Text>
+        </Pressable>
+      </View>
+
+      {error ? (
+        <Text fontSize={11} width={width} height={16} style={{ color: '#ff6b6b' }}>{error}</Text>
+      ) : null}
+
+      {results !== null && (
+        results.length === 0 ? (
+          <Text fontSize={12} width={width} height={18} style={{ color: C.dim }}>
+            No services found
+          </Text>
+        ) : (
+          <ScrollView width={width} height={120} style={{ backgroundColor: C.overlay, borderRadius: 6 }}>
+            {results.map((s, i) => (
+              <View key={i} style={{ padding: 6, gap: 2 }}>
+                <Text fontSize={12} width={width - 20} height={16} style={{ color: C.text }}>
+                  {s.name}
+                </Text>
+                <Text fontSize={11} width={width - 20} height={14} style={{ color: C.subtle }}>
+                  {s.hostname}:{s.port} — {s.addresses.join(', ')}
+                </Text>
+              </View>
+            ))}
+          </ScrollView>
+        )
+      )}
+    </View>
+  );
+}
+
+// Multi-window IPC demo (Phase 13)
+//
+// Opens a child window running the same app. The main window sends a 'ping'
+// IPC message to the child; the child's own MultiWindowTestBox auto-pongs
+// back to handle 0, demonstrating bidirectional IPC.
+
+function MultiWindowTestBox({ width }) {
+  const C = useThemeColors();
+  const [winHandle, setWinHandle] = useState(null);
+  const [status,    setStatus]    = useState('not created');
+  const [log,       setLog]       = useState([]);
+  const [msgText,   setMsgText]   = useState('Hello from main window!');
+
+  // Register IPC listener for the lifetime of this component.
+  useEffect(() => {
+    const unsub = ipc.on('message', (raw) => {
+      let msg;
+      try { msg = JSON.parse(raw); } catch { msg = null; }
+
+      if (msg && msg.type === 'ping') {
+        // Auto-pong back to whichever window sent the ping.
+        setLog(l => [...l, `← ping from ${msg.from}: "${msg.data}"`]);
+        ipc.send(msg.from, JSON.stringify({ type: 'pong', from: 'child', data: 'Pong from child window!' }));
+      } else {
+        setLog(l => [...l, `← ${raw}`]);
+      }
+    });
+    return unsub;
+  }, []);
+
+  async function openWindow() {
+    setStatus('opening…');
+    setLog([]);
+    try {
+      const win = await veloxWindow.create({ title: 'Velox IPC Child', width: 520, height: 460 });
+      setWinHandle(win);
+      setStatus(`opened (handle ${win.id})`);
+      setLog(l => [...l, `Window opened (id=${win.id}). Sending ping…`]);
+      win.send(JSON.stringify({ type: 'ping', from: 0, data: 'Hello from main window!' }));
+    } catch (e) {
+      setStatus('error: ' + String(e));
+    }
+  }
+
+  function sendMsg() {
+    if (!winHandle) return;
+    winHandle.send(msgText);
+    setLog(l => [...l, `→ ${msgText}`]);
+  }
+
+  const rowStyle = { flexDirection: 'row', alignItems: 'center', gap: 8 };
+
+  return (
+    <View style={{ gap: 8 }}>
+      <View style={rowStyle}>
+        <Btn
+          label={winHandle ? 'Window open' : 'Open Child Window'}
+          onPress={openWindow}
+          width={160}
+          color={winHandle ? C.dim : C.mauve}
+          disabled={!!winHandle}
+        />
+        <Text fontSize={12} width={width - 176} height={20} style={{ color: C.subtle }}>{status}</Text>
+      </View>
+
+      {winHandle && (
+        <View style={rowStyle}>
+          <TextInput
+            value={msgText}
+            onChangeText={setMsgText}
+            width={width - 96}
+            height={28}
+            fontSize={12}
+          />
+          <Btn label="Send" onPress={sendMsg} width={80} color={C.accent} />
+        </View>
+      )}
+
+      {log.length > 0 && (
+        <ScrollView
+          width={width}
+          height={Math.min(120, log.length * 18 + 12)}
+          contentHeight={log.length * 18 + 12}
+          style={{ backgroundColor: C.overlay, borderRadius: 6, padding: 6 }}
+        >
+          {log.map((line, i) => (
+            <Text key={i} fontSize={11} width={width - 24} height={18} style={{ color: C.text }}>
+              {line}
+            </Text>
+          ))}
+        </ScrollView>
+      )}
     </View>
   );
 }

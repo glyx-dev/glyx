@@ -33,7 +33,10 @@ pub mod runtime;
 pub mod snapshot;
 
 pub use runtime::{VeloxRuntime, HeapStats};
-pub use bindings::{NodeProps, NodeType, SceneCommand, InputEvent, WindowController};
+pub use bindings::{
+    NodeProps, NodeType, SceneCommand, InputEvent, WindowController,
+    IpcBus, IpcInbox, new_ipc_bus,
+};
 pub use snapshot::{SnapshotBlob, create_stub_bindings_script};
 
 /// Trait for registering custom native (Rust) bindings from app code.

@@ -11,7 +11,8 @@
     "db":           true,
     "dialog":       true,
     "clipboard":    true,
-    "notification": true
+    "notification": true,
+    "mdns":         true
   },
   "dev": {
     "entry": "js/app.jsx",

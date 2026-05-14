@@ -28,7 +28,7 @@ fn load_image_from_path(path: &str) -> Option<peniko::Image> {
     Some(peniko::Image::new(bytes.into(), peniko::Format::Rgba8, w, h))
 }
 
-pub(crate) fn apply_scene_commands(state: &mut AppState, commands: Vec<SceneCommand>) -> bool {
+pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<SceneCommand>) -> bool {
     if commands.is_empty() {
         return false;
     }

@@ -63,11 +63,15 @@ use std::time::{Duration, Instant};
 use velox_gpu::GpuContext;
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
 use velox_renderer::{colors, peniko, VeloxRenderer, FrameBuilder};
-use velox_runtime::{init_v8, InputEvent, NodeProps, NodeType, SceneCommand, VeloxRuntime, WindowController};
+use velox_runtime::{
+    init_v8, new_ipc_bus,
+    InputEvent, NodeProps, NodeType, SceneCommand,
+    VeloxRuntime, WindowController,
+};
 
 pub use velox_runtime::VeloxExtension;
 use velox_security::Capabilities;
-use velox_shell::ShellEvent;
+use velox_shell::{ShellEvent, VeloxUserEvent};
 use velox_text::{TextLayout, TextSystem};
 use velox_layout::NodeId;
 
@@ -347,7 +351,9 @@ impl CachedLabel {
 
 // ── Application state ─────────────────────────────────────────────────────────
 
-struct AppState {
+/// Per-window rendering + runtime state.
+/// One instance per open window; keyed by `window_handle` (0 = main window).
+struct PerWindowState {
     gpu:          GpuContext,
     renderer:     VeloxRenderer,
     text_sys:     TextSystem,
@@ -540,7 +546,7 @@ fn start_dev_mode_worker(
 }
 
 #[cfg(feature = "dev")]
-fn handle_dev_build_events(state: &mut AppState) {
+fn handle_dev_build_events(state: &mut PerWindowState) {
     let Some(dev) = state.dev_mode.as_mut() else { return };
     loop {
         match dev.rx.try_recv() {
@@ -577,7 +583,7 @@ fn handle_dev_build_events(state: &mut AppState) {
 }
 
 #[cfg(feature = "dev")]
-fn draw_dev_overlay(state: &mut AppState, frame: &mut FrameBuilder) {
+fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
     let Some(dev) = state.dev_mode.as_mut() else { return };
     let now = Instant::now();
     if let Some(prev) = dev.last_frame_at {
@@ -621,7 +627,10 @@ fn draw_dev_overlay(state: &mut AppState, frame: &mut FrameBuilder) {
 
 // ── Window controller builder ─────────────────────────────────────────────────
 
-fn build_window_controller(window: Arc<winit::window::Window>) -> WindowController {
+fn build_window_controller(
+    window: Arc<winit::window::Window>,
+    create_window_fn: Option<Arc<dyn Fn(u32, String, u32, u32) + Send + Sync>>,
+) -> WindowController {
     use winit::window::Fullscreen;
 
     // Extract the raw platform HWND (Windows) so dialogs can be parented to
@@ -692,6 +701,7 @@ fn build_window_controller(window: Arc<winit::window::Window>) -> WindowControll
             w9.set_title(&title);
         }),
         hwnd,
+        create_window: create_window_fn,
     }
 }
 
@@ -707,23 +717,15 @@ pub fn run(mut config: AppConfig) {
     .init();
 
     // Load .env from the working directory (or any parent) if one exists.
-    // Silently ignored when absent — production apps may rely on OS-level env
-    // vars set by the installer instead of a bundled file.
-    // dotenvy does NOT override vars that are already set in the environment.
     match dotenvy::dotenv() {
         Ok(path) => log::info!("velox: loaded env from {}", path.display()),
-        Err(dotenvy::Error::Io(_)) => {} // no .env file — normal in production
+        Err(dotenvy::Error::Io(_)) => {}
         Err(e) => log::warn!("velox: .env parse error: {e}"),
     }
 
-    // Load velox.config.json, apply window overrides, and lock capabilities —
-    // all before V8 is initialised so no binding can run unchecked.
     let caps = load_velox_config(&mut config.window);
     velox_security::init(caps);
 
-    // Tokio runtime for async JS bindings.
-    // 1 worker thread is sufficient: all bindings are IO-bound (file, DB, dialog).
-    // Each extra thread adds a 2 MB stack reservation to the working set.
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -735,53 +737,92 @@ pub fn run(mut config: AppConfig) {
 
     let AppConfig { window, js_src, snapshot_blob, dev_mode: _dev_mode, extensions } = config;
 
-    let mut state: Option<AppState> = None;
+    // Shared across all windows.
+    let ipc_bus        = new_ipc_bus();
+    let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
+
+    // Wrap in Arc so secondary-window creation can reuse them.
+    let js_src_arc        = Arc::new(js_src);
+    let snapshot_blob_arc = Arc::new(snapshot_blob);
+    let extensions_arc    = Arc::new(extensions);
+
+    // Per-window state: handle → PerWindowState.
+    let mut windows: std::collections::HashMap<u32, PerWindowState> =
+        std::collections::HashMap::new();
 
     velox_shell::run(window, move |event| {
         match event {
-            // ── Window ready — initialise all subsystems ──────────────────
-            ShellEvent::WindowReady { window } => {
+            // ── Window ready — initialise per-window subsystems ──────────
+            ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy } => {
                 let gpu_ctx = pollster::block_on(GpuContext::new(window.clone()))
                     .expect("Failed to initialise GPU");
-
                 let renderer = VeloxRenderer::new(&gpu_ctx)
                     .expect("Failed to initialise Vello renderer");
 
-                let window_ctrl = build_window_controller(Arc::clone(&window));
-                let mut rt = if let Some(blob) = &snapshot_blob {
-                    // Production mode: restore from pre-executed snapshot
-                    match VeloxRuntime::new_from_snapshot(blob, tokio_handle.clone(), Some(window_ctrl)) {
+                // Build a `create_window` callback that sends events to the shell.
+                let proxy_for_fn = ev_proxy.clone();
+                let create_fn: Arc<dyn Fn(u32, String, u32, u32) + Send + Sync> =
+                    Arc::new(move |id, title, width, height| {
+                        let _ = proxy_for_fn.send_event(
+                            VeloxUserEvent::CreateWindow { id, title, width, height }
+                        );
+                    });
+
+                let window_ctrl = build_window_controller(
+                    Arc::clone(&window),
+                    Some(Arc::clone(&create_fn)),
+                );
+
+                let ipc_clone = Arc::clone(&ipc_bus);
+                let nwid      = Arc::clone(&next_window_id);
+
+                let mut rt = if let Some(ref blob) = *snapshot_blob_arc {
+                    match VeloxRuntime::new_from_snapshot_with_ipc(
+                        blob, tokio_handle.clone(), Some(window_ctrl),
+                        Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
+                    ) {
                         Ok(rt) => {
-                            log::info!("V8 isolate restored from snapshot (~50ms startup)");
+                            log::info!("Window {}: restored from snapshot", window_handle);
                             rt
                         }
                         Err(e) => {
-                            log::warn!("Failed to restore snapshot: {}; falling back to eval mode", e);
-                            let window_ctrl = build_window_controller(Arc::clone(&window));
-                            VeloxRuntime::new(tokio_handle.clone(), Some(window_ctrl))
+                            log::warn!("Window {}: snapshot restore failed ({}); eval mode", window_handle, e);
+                            let proxy_fb = ev_proxy.clone();
+                            let wc = build_window_controller(
+                                Arc::clone(&window),
+                                Some(Arc::new(move |id, title, width, height| {
+                                    let _ = proxy_fb.send_event(
+                                        VeloxUserEvent::CreateWindow { id, title, width, height }
+                                    );
+                                })),
+                            );
+                            VeloxRuntime::new_with_ipc(
+                                tokio_handle.clone(), Some(wc),
+                                Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
+                            )
                         }
                     }
                 } else {
-                    // Dev mode or no snapshot: create fresh isolate
-                    VeloxRuntime::new(tokio_handle.clone(), Some(window_ctrl))
+                    VeloxRuntime::new_with_ipc(
+                        tokio_handle.clone(), Some(window_ctrl),
+                        Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
+                    )
                 };
 
-                // Register native extensions before eval so their bindings are available
-                rt.register_extensions(&extensions);
+                rt.register_extensions(&*extensions_arc);
 
-                if let Some(ref js) = js_src {
+                if let Some(ref js) = *js_src_arc {
                     match rt.eval(js) {
-                        Ok(_)  => log::info!("JS startup eval complete."),
-                        Err(e) => log::error!("JS startup error: {}", e),
+                        Ok(_)  => log::info!("Window {}: JS eval complete.", window_handle),
+                        Err(e) => log::error!("Window {}: JS eval error: {}", window_handle, e),
                     }
                 }
-
-                log::info!("All subsystems initialised.");
 
                 let win = window.clone();
                 let request_redraw: Arc<dyn Fn() + Send + Sync> =
                     Arc::new(move || win.request_redraw());
-                state = Some(AppState {
+
+                let ws = PerWindowState {
                     gpu:          gpu_ctx,
                     renderer,
                     text_sys:     TextSystem::new(),
@@ -802,29 +843,33 @@ pub fn run(mut config: AppConfig) {
                     cursor_blink_on:       true,
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
                     #[cfg(feature = "dev")]
-                    dev_mode: start_dev_mode_worker(Arc::clone(&request_redraw), _dev_mode.clone()).map(|rx| DevModeState {
-                        rx,
-                        overlay_visible: true,
-                        last_reload: None,
-                        last_build_message: "watching changes".to_string(),
-                        frame_times_ms: VecDeque::new(),
-                        last_frame_at: Some(Instant::now()),
-                        ctrl_down: false,
-                        shift_down: false,
-                    }),
-                });
-
+                    dev_mode: if window_handle == 0 {
+                        // Hot-reload dev overlay is only wired to the main window.
+                        start_dev_mode_worker(
+                            Arc::clone(&request_redraw),
+                            _dev_mode.clone(),
+                        )
+                        .map(|rx| DevModeState {
+                            rx,
+                            overlay_visible: true,
+                            last_reload: None,
+                            last_build_message: "watching changes".to_string(),
+                            frame_times_ms: VecDeque::new(),
+                            last_frame_at: Some(Instant::now()),
+                            ctrl_down: false,
+                            shift_down: false,
+                        })
+                    } else {
+                        None
+                    },
+                };
+                windows.insert(window_handle, ws);
                 window.request_redraw();
             }
 
             // ── Resize ────────────────────────────────────────────────────
-            ShellEvent::Resized { width, height } => {
-                if let Some(s) = &mut state {
-                    // Capture size before resize so we can detect actual changes.
-                    // winit fires multiple Resized events during startup (window
-                    // creation, maximize, DPI scaling) — only dirty layout when
-                    // the surface dimensions actually change to avoid redundant
-                    // layout passes at startup.
+            ShellEvent::Resized { window_handle, width, height } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
                     let prev_w = s.gpu.width();
                     let prev_h = s.gpu.height();
                     s.gpu.resize(width, height);
@@ -836,40 +881,35 @@ pub fn run(mut config: AppConfig) {
             }
 
             // ── Cursor movement ───────────────────────────────────────────
-            ShellEvent::CursorMoved { x, y } => {
-                if let Some(s) = &mut state {
+            ShellEvent::CursorMoved { window_handle, x, y } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
                     s.cursor_x = x as f32;
                     s.cursor_y = y as f32;
                     s.runtime.push_event(InputEvent::CursorMoved {
                         x: s.cursor_x,
                         y: s.cursor_y,
                     });
-                    // Request a redraw so hover states (Pressable onHoverIn/Out)
-                    // are reflected this frame.
                     (s.request_redraw)();
                 }
             }
 
             // ── Mouse button ──────────────────────────────────────────────
-            ShellEvent::MouseInput { button, pressed } => {
-                if let Some(s) = &mut state {
+            ShellEvent::MouseInput { window_handle, button, pressed } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
                     s.runtime.push_event(InputEvent::MouseButton {
-                        x:       s.cursor_x,
-                        y:       s.cursor_y,
-                        button,
-                        pressed,
+                        x: s.cursor_x, y: s.cursor_y, button, pressed,
                     });
                 }
             }
 
             // ── Keyboard ──────────────────────────────────────────────────
-            ShellEvent::KeyInput { key, text, pressed } => {
-                if let Some(s) = &mut state {
+            ShellEvent::KeyInput { window_handle, key, text, pressed } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
                     #[cfg(feature = "dev")]
                     if let Some(dev) = s.dev_mode.as_mut() {
                         match key.as_str() {
                             "ControlLeft" | "ControlRight" => dev.ctrl_down = pressed,
-                            "ShiftLeft" | "ShiftRight" => dev.shift_down = pressed,
+                            "ShiftLeft" | "ShiftRight"     => dev.shift_down = pressed,
                             "KeyD" if pressed && dev.ctrl_down && dev.shift_down => {
                                 dev.overlay_visible = !dev.overlay_visible;
                                 (s.request_redraw)();
@@ -882,44 +922,40 @@ pub fn run(mut config: AppConfig) {
             }
 
             // ── Scroll ────────────────────────────────────────────────────
-            ShellEvent::Scroll { delta_y } => {
-                if let Some(s) = &mut state {
+            ShellEvent::Scroll { window_handle, delta_y } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
                     s.runtime.push_event(InputEvent::Scroll { delta_y });
                 }
             }
 
             // ── Draw ──────────────────────────────────────────────────────
-            ShellEvent::RedrawRequested => {
-                let Some(s) = &mut state else { return };
+            ShellEvent::RedrawRequested { window_handle } => {
+                let Some(s) = windows.get_mut(&window_handle) else { return };
+
                 #[cfg(feature = "dev")]
                 handle_dev_build_events(s);
 
-                // 1. Resolve async JS Promises (readFile, etc.).
+                // 1. Resolve async JS Promises.
                 s.runtime.tick();
 
-                // 2. Apply pre-frame scene commands (initial mount, async completions).
+                // 2. Pre-frame scene commands (initial mount, async completions).
                 let pre_commands = s.runtime.drain_scene_commands();
                 apply_scene_commands(s, pre_commands);
 
-                // 3. Run JS frame callback — dispatchEvents, React state updates.
-                //    Hit-testing uses scroll-adjusted positions written at the END
-                //    of the previous frame (step 6 below), which is one frame
-                //    behind. This is imperceptible at 60 fps and avoids the
-                //    previous two-pass layout (pre-layout + post-layout per frame).
+                // 3. JS frame callback — dispatchEvents, React state updates.
                 s.runtime.frame_tick();
 
-                // 4. Apply post-frame commands (React re-renders from step 3 events).
+                // 4. Post-frame commands (React re-renders from step 3 events).
                 let post_commands = s.runtime.drain_scene_commands();
                 apply_scene_commands(s, post_commands);
 
-                // 5. Single layout pass — covers both pre- and post-frame commands.
-                //    Halves layout work vs the former two-pass approach.
+                // 5. Single layout pass.
                 recompute_layout(s);
 
-                // 6. Write scroll-adjusted positions for the NEXT frame's hit-testing.
+                // 6. Scroll-adjusted positions for next frame's hit-testing.
                 update_scroll_positions(s);
 
-                // 8. Acquire the next swapchain texture.
+                // 7. Acquire swapchain texture.
                 let texture = match s.gpu.current_texture() {
                     Ok(t)  => t,
                     Err(e) => {
@@ -929,35 +965,34 @@ pub fn run(mut config: AppConfig) {
                     }
                 };
 
-                // 9. Advance cursor blink phase if the deadline has passed.
+                // 8. Cursor blink phase.
                 let now = Instant::now();
                 if now >= s.cursor_blink_deadline {
                     s.cursor_blink_on       = !s.cursor_blink_on;
                     s.cursor_blink_deadline = now + Duration::from_millis(500);
                 }
 
-                // 10. Render the JS scene graph (depth-first, scroll-aware).
+                // 9. Render JS scene graph.
                 let mut frame = s.renderer.begin_frame();
                 let mut any_cursor_active = false;
 
                 if let Some(root_id) = s.js_root {
                     let mut render_ctx = RenderCtx {
-                        nodes: &s.js_nodes,
-                        images: &s.images,
-                        resolved: &s.resolved,
-                        frame: &mut frame,
-                        text_sys: &mut s.text_sys,
-                        label_cache: &mut s.label_cache,
-                        cursor_blink_on: s.cursor_blink_on,
+                        nodes:             &s.js_nodes,
+                        images:            &s.images,
+                        resolved:          &s.resolved,
+                        frame:             &mut frame,
+                        text_sys:          &mut s.text_sys,
+                        label_cache:       &mut s.label_cache,
+                        cursor_blink_on:   s.cursor_blink_on,
                         any_cursor_active: &mut any_cursor_active,
                     };
                     render_subtree(root_id, 0.0, &mut render_ctx);
                 }
+
                 #[cfg(feature = "dev")]
                 draw_dev_overlay(s, &mut frame);
 
-                // Keep the dev overlay live by requesting the next frame
-                // whenever the overlay is visible (dev-only; harmless cost).
                 #[cfg(feature = "dev")]
                 if s.dev_mode.as_ref().map(|d| d.overlay_visible).unwrap_or(false) {
                     (s.request_redraw)();
@@ -969,22 +1004,21 @@ pub fn run(mut config: AppConfig) {
                 }
                 texture.present();
 
-                // Schedule the next blink redraw without busy-looping.
                 if any_cursor_active {
                     let redraw   = Arc::clone(&s.request_redraw);
                     let deadline = s.cursor_blink_deadline;
                     std::thread::spawn(move || {
                         let now = Instant::now();
-                        if deadline > now {
-                            std::thread::sleep(deadline - now);
-                        }
+                        if deadline > now { std::thread::sleep(deadline - now); }
                         redraw();
                     });
                 }
             }
 
-            ShellEvent::CloseRequested => {
-                log::info!("Window close requested — shutting down.");
+            // ── Close ─────────────────────────────────────────────────────
+            ShellEvent::CloseRequested { window_handle } => {
+                log::info!("Window {} closed.", window_handle);
+                windows.remove(&window_handle);
             }
         }
     });

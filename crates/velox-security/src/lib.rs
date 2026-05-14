@@ -80,6 +80,8 @@ pub struct Capabilities {
     pub usb:          bool,
     #[serde(default)]
     pub shell:        bool,
+    #[serde(default)]
+    pub mdns:         bool,
 }
 
 impl Capabilities {
@@ -100,6 +102,9 @@ impl Capabilities {
             .map(|n| n.allow.iter().any(|h| h == "*" || h == host))
             .unwrap_or(false)
     }
+
+    /// True if the app declared `mdns: true`.
+    pub fn can_mdns(&self) -> bool { self.mdns }
 
     /// True if `name` matches any pattern in the `env.allow` list.
     /// Returns `false` (silently) when no `env` capability is declared.

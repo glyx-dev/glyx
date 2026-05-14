@@ -8,6 +8,22 @@ use std::{
 
 use tokio::runtime::Handle;
 
+// ── IPC bus ───────────────────────────────────────────────────────────────────
+//
+// Shared across all windows in the process.  Each window registers its inbox
+// under its handle when it starts.  Any window can push a message to any other
+// window by looking up the target's inbox in the bus.
+
+/// Per-window IPC inbox (a thread-safe string queue).
+pub type IpcInbox = Arc<Mutex<VecDeque<String>>>;
+
+/// Shared IPC bus: window_handle → inbox.
+pub type IpcBus = Arc<Mutex<HashMap<u32, IpcInbox>>>;
+
+pub fn new_ipc_bus() -> IpcBus {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
 // ── Completion queue ──────────────────────────────────────────────────────────
 //
 // We must not put v8::Global in the queue because v8::Global is !Send,
@@ -69,6 +85,9 @@ pub struct WindowController {
     /// Raw platform window handle (HWND on Windows) as a plain integer.
     /// Used to parent native dialogs so they appear in front of the Velox window.
     pub hwnd:              Option<isize>,
+    /// Create a secondary window with the given pre-assigned id, title, and size.
+    /// Called by the `__velox_window_create` binding.
+    pub create_window: Option<Arc<dyn Fn(u32, String, u32, u32) + Send + Sync>>,
 }
 
 // ── Dialog parent HWND wrapper ────────────────────────────────────────────────
@@ -217,6 +236,9 @@ pub fn register_all(
     events:       EventQueue,
     layout_cache: LayoutCache,
     window:       Option<WindowController>,
+    ipc_bus:      IpcBus,
+    my_handle:    u32,
+    next_window_id: Arc<std::sync::atomic::AtomicU32>,
 ) {
     set_func(scope, global, "__velox_getTime", get_time);
     set_func(scope, global, "__velox_log",     js_log);
@@ -241,6 +263,9 @@ pub fn register_all(
         next_vdb_id:   std::sync::atomic::AtomicU32::new(1),
         ws_handles:    Arc::new(Mutex::new(HashMap::new())),
         next_ws_id:    std::sync::atomic::AtomicU32::new(1),
+        ipc_bus,
+        my_handle,
+        next_window_id,
     });
     let ptr   = Box::into_raw(state) as *mut std::ffi::c_void;
     // Safety: ptr is valid for the lifetime of the isolate.
@@ -320,6 +345,14 @@ pub fn register_all(
     register!("__velox_ws_send",    ws_send_callback);
     register!("__velox_ws_poll",    ws_poll_callback);
     register!("__velox_ws_close",   ws_close_callback);
+
+    // ── mDNS service discovery ───────────────────────────────────────────────
+    register!("__velox_mdns_discover", mdns_discover_callback);
+
+    // ── Multi-window + IPC ───────────────────────────────────────────────────
+    register!("__velox_window_create", window_create_callback);
+    register!("__velox_ipc_send",      ipc_send_callback);
+    register!("__velox_ipc_poll",      ipc_poll_callback);
 }
 
 struct AsyncState {
@@ -343,6 +376,10 @@ struct AsyncState {
     // ── WebSocket handles ────────────────────────────────────────────────────
     ws_handles:    Arc<Mutex<HashMap<u32, WsHandle>>>,
     next_ws_id:    std::sync::atomic::AtomicU32,
+    // ── Multi-window / IPC ───────────────────────────────────────────────────
+    ipc_bus:       IpcBus,
+    my_handle:     u32,
+    next_window_id: Arc<std::sync::atomic::AtomicU32>,
 }
 
 struct WsHandle {
@@ -2107,6 +2144,191 @@ fn ws_close_callback(
     let handle = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
     // Dropping WsHandle drops outbox_tx → write task's recv() returns None → exits.
     state.ws_handles.lock().unwrap().remove(&handle);
+}
+
+// ── Multi-window + IPC bindings ───────────────────────────────────────────────
+
+/// `__velox_window_create(optsJson) -> Promise<string>` — handle as string.
+///
+/// Creates a secondary window.  `optsJson` is a JSON object:
+///   `{ title?: string, width?: number, height?: number }`
+///
+/// The promise resolves immediately with the pre-assigned window handle.
+/// The window itself appears asynchronously once the event loop processes the
+/// create request.  JS can begin sending IPC messages before the window is
+/// fully initialised — they queue in the inbox and are consumed once the
+/// secondary runtime starts polling.
+fn window_create_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    // Cap total open windows (main + all secondaries) to prevent runaway creation.
+    const MAX_WINDOWS: usize = 10;
+    let open_count = state.ipc_bus.lock().unwrap().len();
+    if open_count >= MAX_WINDOWS {
+        throw_js_error(scope, &format!(
+            "veloxWindow.create: window limit reached ({} open, max {})",
+            open_count, MAX_WINDOWS,
+        ));
+        return;
+    }
+
+    let opts_str = v8_arg_to_string(scope, &args, 0);
+    let opts: serde_json::Value = serde_json::from_str(&opts_str).unwrap_or_default();
+    let title  = opts.get("title") .and_then(|v| v.as_str()).unwrap_or("Window").to_string();
+    let width  = opts.get("width") .and_then(|v| v.as_u64()).unwrap_or(800) as u32;
+    let height = opts.get("height").and_then(|v| v.as_u64()).unwrap_or(600) as u32;
+
+    // Allocate a globally-unique handle (shared across all windows' runtimes).
+    let new_id = state.next_window_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    // Pre-register an inbox in the IPC bus so messages can be queued before
+    // the secondary window's runtime starts polling.
+    state.ipc_bus.lock().unwrap()
+        .entry(new_id)
+        .or_insert_with(|| Arc::new(Mutex::new(VecDeque::new())));
+
+    // Ask the event loop to create the window.
+    if let Some(ref ctrl) = state.window {
+        if let Some(ref create_fn) = ctrl.create_window {
+            (create_fn)(new_id, title, width, height);
+        }
+    }
+
+    // Resolve the promise immediately with the handle — window appears async.
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+    enqueue_completion(&queue_clone, redraw.as_ref(), Completion {
+        resolver_ptr: resolver,
+        result:       Ok(new_id.to_string()),
+    });
+}
+
+/// `__velox_ipc_send(targetHandle, message)` — sync, fire-and-forget.
+///
+/// Pushes a string message into the target window's IPC inbox.
+/// The target window drains its inbox each frame via `__velox_ipc_poll`.
+fn ipc_send_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let target = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let msg    = v8_arg_to_string(scope, &args, 1);
+
+    let guard = state.ipc_bus.lock().unwrap();
+    if let Some(inbox) = guard.get(&target) {
+        inbox.lock().unwrap().push_back(msg);
+    }
+}
+
+/// `__velox_ipc_poll() -> string` — sync, returns JSON array of pending messages.
+///
+/// Drains this window's own IPC inbox.  Returns `"[]"` when empty.
+/// Called each frame from the JS frame callback alongside WS polling.
+fn ipc_poll_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let msgs: Vec<String> = {
+        let guard = state.ipc_bus.lock().unwrap();
+        guard
+            .get(&state.my_handle)
+            .map(|inbox| inbox.lock().unwrap().drain(..).collect())
+            .unwrap_or_default()
+    };
+
+    let json   = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
+    let v8_str = v8::String::new(scope, &json).unwrap();
+    rv.set(v8_str.into());
+}
+
+// ── mDNS service discovery binding ───────────────────────────────────────────
+
+/// `__velox_mdns_discover(serviceType, timeoutMs) -> Promise<string>`
+///
+/// Browses for mDNS services of the given type (e.g. `"_http._tcp.local."`)
+/// for up to `timeoutMs` milliseconds.  Resolves with a JSON array of:
+///   `[{ name, hostname, port, addresses }]`
+///
+/// Requires `mdns: true` in velox.config.json capabilities.
+fn mdns_discover_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().can_mdns() {
+        throw_cap_error(scope, "mdns");
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let service_type = v8_arg_to_string(scope, &args, 0);
+    let timeout_ms   = args.get(1).number_value(scope).unwrap_or(5000.0) as u64;
+
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result: Result<String, String> = tokio::task::spawn_blocking(move || {
+            use mdns_sd::{ServiceDaemon, ServiceEvent};
+            use std::time::{Duration, Instant};
+
+            let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
+            let receiver = daemon.browse(&service_type).map_err(|e| e.to_string())?;
+
+            let deadline  = Instant::now() + Duration::from_millis(timeout_ms);
+            let poll_step = Duration::from_millis(250);
+            let mut results: Vec<serde_json::Value> = Vec::new();
+
+            loop {
+                let now = Instant::now();
+                if now >= deadline { break; }
+                let remaining = deadline - now;
+                match receiver.recv_timeout(remaining.min(poll_step)) {
+                    Ok(ServiceEvent::ServiceResolved(info)) => {
+                        let addresses: Vec<String> =
+                            info.get_addresses().iter().map(|a| a.to_string()).collect();
+                        results.push(serde_json::json!({
+                            "name":      info.get_fullname(),
+                            "hostname":  info.get_hostname(),
+                            "port":      info.get_port(),
+                            "addresses": addresses,
+                        }));
+                    }
+                    Ok(ServiceEvent::SearchStopped(_)) => break,
+                    Ok(_) => {}
+                    Err(_)  => {} // recv_timeout expired — check deadline at top of loop
+                }
+            }
+
+            let _ = daemon.stop_browse(&service_type);
+            let _ = daemon.shutdown();
+
+            serde_json::to_string(&results).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────

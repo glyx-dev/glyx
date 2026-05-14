@@ -20,3 +20,4 @@ raw-window-handle   = { workspace = true }
 reqwest             = { workspace = true }
 tokio-tungstenite   = { workspace = true }
 futures-util        = { workspace = true }
+mdns-sd             = { workspace = true }

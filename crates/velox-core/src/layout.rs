@@ -135,7 +135,7 @@ pub(crate) fn layout_props_changed(new: &NodeProps, old: &NodeProps) -> bool {
     || new.font_size        != old.font_size
 }
 
-pub(crate) fn recompute_layout(state: &mut AppState) {
+pub(crate) fn recompute_layout(state: &mut PerWindowState) {
     if !state.layout_dirty { return; }
     log::info!("Layout dirty, recomputing...");
     let Some(root_id) = state.js_root else {
@@ -187,7 +187,7 @@ pub(crate) fn recompute_layout(state: &mut AppState) {
     state.layout_dirty = false;
 }
 
-pub(crate) fn update_scroll_positions(state: &AppState) {
+pub(crate) fn update_scroll_positions(state: &PerWindowState) {
     if let Some(root_id) = state.js_root {
         let mut cache = state.runtime.layout_cache.lock().unwrap();
         scroll_walk(root_id, &state.js_nodes, &state.resolved, 0.0, None, &mut cache);

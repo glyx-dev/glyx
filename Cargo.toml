@@ -68,7 +68,7 @@ sqlx            = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 libsqlite3-sys  = { version = "0.30", features = ["bundled"] }
 rfd                 = { version = "0.14", features = ["tokio"] }
 arboard             = "3"
-keyring             = { version = "3", features = ["windows-native", "apple-native", "linux-secret-service-rt-tokio-crypto-openssl"] }
+keyring             = "3"
 clipboard-win       = "5"
 notify-rust         = "4"
 raw-window-handle   = "0.6"

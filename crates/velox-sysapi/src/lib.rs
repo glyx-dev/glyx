@@ -1,10 +1,13 @@
 //! velox-sysapi — system / OS API helpers for Velox.
 //!
 //! Provides stateless query functions for battery status, system info,
-//! storage drives, and a sleep-prevention guard.
+//! storage drives, a sleep-prevention guard, and OS credential store access.
 //!
 //! Gamepad and global-shortcut state (which require long-lived objects) live
 //! directly in `velox-runtime`'s `AsyncState` for simplicity.
+
+pub mod credentials;
+pub use credentials::{credentials_set, credentials_get, credentials_delete};
 
 // ── Battery ───────────────────────────────────────────────────────────────────
 

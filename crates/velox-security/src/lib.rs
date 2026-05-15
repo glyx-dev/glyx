@@ -107,6 +107,10 @@ pub struct Capabilities {
     #[serde(rename = "globalShortcuts")]
     #[serde(default)]
     pub global_shortcuts: bool,
+    /// OS credential store (Windows Credential Manager, macOS Keychain, Linux Secret Service).
+    /// Allows storing/retrieving secrets encrypted by the OS, tied to the logged-in user.
+    #[serde(default)]
+    pub credentials: bool,
     /// Deep-link URL scheme registration.  `None` = no deep-link support.
     pub deeplink: Option<DeeplinkCapability>,
 }

@@ -384,6 +384,11 @@ pub fn register_all(
     register!("__velox_shortcut_unregister", shortcut_unregister_callback);
     register!("__velox_shortcut_poll",       shortcut_poll_callback);
 
+    // ── Credentials (OS keychain) ────────────────────────────────────────────
+    register!("__velox_credentials_set",    credentials_set_callback);
+    register!("__velox_credentials_get",    credentials_get_callback);
+    register!("__velox_credentials_delete", credentials_delete_callback);
+
     // ── App lifecycle ────────────────────────────────────────────────────────
     register!("__velox_quit", quit_callback);
 
@@ -2745,6 +2750,91 @@ fn shortcut_poll_callback(
     };
     let s = v8::String::new(scope, &json).unwrap_or_else(|| v8::String::empty(scope));
     rv.set(s.into());
+}
+
+// ── Credentials (OS keychain) ─────────────────────────────────────────────────
+
+/// `__velox_credentials_set(service, key, value)` → Promise<void>
+///
+/// Stores `value` in the OS credential store under `service`+`key`.
+/// Encrypted by the OS, tied to the logged-in user account.
+fn credentials_set_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !velox_security::get().credentials {
+        rv.set(reject_cap_promise(scope, "credentials").into()); return;
+    }
+    let service = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let key     = args.get(1).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let value   = args.get(2).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            velox_sysapi::credentials_set(&service, &key, &value)
+                .map(|_| "null".into())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result });
+    });
+    rv.set(promise.into());
+}
+
+/// `__velox_credentials_get(service, key)` → Promise<string | null>
+///
+/// Returns the stored secret, or JSON `null` if no entry exists.
+fn credentials_get_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !velox_security::get().credentials {
+        rv.set(reject_cap_promise(scope, "credentials").into()); return;
+    }
+    let service = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let key     = args.get(1).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            velox_sysapi::credentials_get(&service, &key).map(|opt| match opt {
+                Some(val) => format!("{:?}", val), // JSON-escaped string
+                None      => "null".into(),
+            })
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result });
+    });
+    rv.set(promise.into());
+}
+
+/// `__velox_credentials_delete(service, key)` → Promise<void>
+fn credentials_delete_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !velox_security::get().credentials {
+        rv.set(reject_cap_promise(scope, "credentials").into()); return;
+    }
+    let service = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let key     = args.get(1).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            velox_sysapi::credentials_delete(&service, &key)
+                .map(|_| "null".into())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result });
+    });
+    rv.set(promise.into());
 }
 
 /// Parse `"ctrl+shift+v"` into a `global_hotkey::hotkey::HotKey`.

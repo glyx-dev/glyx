@@ -123,6 +123,9 @@ globalThis.__velox_gamepad_poll        = function() { return '[]'; };
 globalThis.__velox_shortcut_register   = function() { return '0'; };
 globalThis.__velox_shortcut_unregister = function() {};
 globalThis.__velox_shortcut_poll       = function() { return '[]'; };
+globalThis.__velox_credentials_set    = function() { return stubPromise('null'); };
+globalThis.__velox_credentials_get    = function() { return stubPromise('null'); };
+globalThis.__velox_credentials_delete = function() { return stubPromise('null'); };
 "#
     .to_string()
 }

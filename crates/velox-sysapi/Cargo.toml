@@ -8,3 +8,4 @@ battery    = { workspace = true }
 sysinfo    = { workspace = true }
 keepawake  = { workspace = true }
 dark-light = { workspace = true }
+keyring    = { workspace = true }

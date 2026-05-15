@@ -5954,6 +5954,7 @@ No matching component was found for:
   var activeDragId = null;
   var windowSizeListeners = [];
   var keyListeners = [];
+  var globalClickListeners = [];
   var focusedNodeId = null;
   var hoveredPressableId = null;
   var ctrlHeld = false;
@@ -5999,6 +6000,14 @@ No matching component was found for:
   function addKeyListener(fn) {
     keyListeners.push(fn);
   }
+  function addGlobalClickListener(fn) {
+    globalClickListeners.push(fn);
+  }
+  function removeGlobalClickListener(fn) {
+    const idx = globalClickListeners.indexOf(fn);
+    if (idx >= 0)
+      globalClickListeners.splice(idx, 1);
+  }
   function setFocus(nodeId) {
     if (focusedNodeId !== nodeId) {
       if (focusedNodeId !== null) {
@@ -6026,6 +6035,13 @@ No matching component was found for:
         case "mouseButton": {
           if (!ev.pressed)
             break;
+          if (globalClickListeners.length > 0) {
+            const gev = { x: ev.x, y: ev.y };
+            for (const fn of globalClickListeners)
+              try {
+                fn(gev);
+              } catch {}
+          }
           let handled = false;
           for (const [nodeId, handlers] of pressableRegistry) {
             if (hitTest(nodeId, ev.x, ev.y)) {
@@ -6758,6 +6774,7 @@ No matching component was found for:
   var _noBinding = (name) => Promise.reject(new Error(`${name}: binding not available`));
   var fs = {
     readFile: (path) => typeof __velox_readFile !== "undefined" ? __velox_readFile(path) : _noBinding("readFile"),
+    readFileBytes: (path) => typeof __velox_readFileBytes !== "undefined" ? __velox_readFileBytes(path) : _noBinding("readFileBytes"),
     writeFile: (path, content) => typeof __velox_writeFile !== "undefined" ? __velox_writeFile(path, content) : _noBinding("writeFile"),
     appendFile: (path, content) => typeof __velox_appendFile !== "undefined" ? __velox_appendFile(path, content) : _noBinding("appendFile"),
     listDir: (path) => typeof __velox_listDir !== "undefined" ? __velox_listDir(path).then(JSON.parse) : _noBinding("listDir"),
@@ -7143,7 +7160,9 @@ No matching component was found for:
         justifyContent: "center",
         alignItems: "center"
       }
-    }, active ? import_react.default.createElement(Text, { style: { color: "#171923", fontSize: 13 }, width: SIZE, height: SIZE }, "✓") : null);
+    }, active ? import_react.default.createElement(View, {
+      style: { width: 10, height: 10, backgroundColor: "#171923", borderRadius: 2 }
+    }) : null);
     const lbl = label != null ? import_react.default.createElement(Text, { style: { color: disabled ? "#555" : "#e7ecff", fontSize: 14 } }, String(label)) : null;
     return import_react.default.createElement(Pressable, {
       onPress: () => {
@@ -7328,9 +7347,6 @@ No matching component was found for:
   }) {
     const pct = max === min ? 0 : Math.max(0, Math.min(1, (Math.min(max, Math.max(min, value)) - min) / (max - min)));
     const trackNodeId = import_react.useRef(null);
-    const thumbNodeId = import_react.useRef(null);
-    const valueRef = import_react.useRef(value);
-    valueRef.current = value;
     const minRef = import_react.useRef(min);
     minRef.current = min;
     const maxRef = import_react.useRef(max);
@@ -7341,33 +7357,35 @@ No matching component was found for:
     disabledRef.current = disabled;
     const onChangeRef = import_react.useRef(onValueChange);
     onChangeRef.current = onValueChange;
+    const updateFromX = import_react.useCallback((x) => {
+      if (disabledRef.current || !onChangeRef.current)
+        return;
+      const layout = __velox_getLayout(trackNodeId.current);
+      if (!layout || layout.width <= 0)
+        return;
+      const range = maxRef.current - minRef.current;
+      const frac = Math.max(0, Math.min(1, (x - layout.x) / layout.width));
+      let v = minRef.current + frac * range;
+      const s = stepRef.current;
+      if (s > 0)
+        v = Math.round(v / s) * s;
+      onChangeRef.current(v);
+    }, []);
     const onTrackMount = import_react.useCallback((id) => {
       trackNodeId.current = id;
-    }, []);
-    const onThumbMount = import_react.useCallback((id) => {
-      thumbNodeId.current = id;
       registerDraggable(id, {
-        onDragMove({ dx }) {
-          if (disabledRef.current || !onChangeRef.current)
-            return;
-          const layout = __velox_getLayout(trackNodeId.current);
-          if (!layout || layout.width <= 0)
-            return;
-          const range = maxRef.current - minRef.current;
-          const delta = dx / layout.width * range;
-          const clampFn = (v2) => Math.min(maxRef.current, Math.max(minRef.current, v2));
-          let v = clampFn(valueRef.current + delta);
-          const s = stepRef.current;
-          if (s > 0)
-            v = Math.round(v / s) * s;
-          onChangeRef.current(v);
+        onDragStart({ x }) {
+          updateFromX(x);
+        },
+        onDragMove({ x }) {
+          updateFromX(x);
         }
       });
     }, []);
     import_react.useEffect(() => {
       return () => {
-        if (thumbNodeId.current !== null)
-          unregisterDraggable(thumbNodeId.current);
+        if (trackNodeId.current !== null)
+          unregisterDraggable(trackNodeId.current);
       };
     }, []);
     const THUMB = 20;
@@ -7378,7 +7396,6 @@ No matching component was found for:
       style: { flexDirection: "row", alignItems: "center", height: THUMB, ...style },
       ...rest
     }, import_react.default.createElement(View, { style: { flex: pct, height: TRACK, backgroundColor: accent } }), import_react.default.createElement(View, {
-      _veloxOnMount: onThumbMount,
       style: { width: THUMB, height: THUMB, borderRadius: THUMB / 2, backgroundColor: accent }
     }), import_react.default.createElement(View, { style: { flex: 1 - pct, height: TRACK, backgroundColor: "#3c4464" } }));
   }
@@ -7393,7 +7410,33 @@ No matching component was found for:
   }) {
     const [open, setOpen] = import_react.default.useState(false);
     const selected = options.find((o) => o.value === value);
-    return import_react.default.createElement(View, { style, ...rest }, import_react.default.createElement(Pressable, {
+    const containerNodeId = import_react.useRef(null);
+    const onContainerMount = import_react.useCallback((id) => {
+      containerNodeId.current = id;
+    }, []);
+    import_react.useEffect(() => {
+      if (!open)
+        return;
+      const onGlobalClick = ({ x, y }) => {
+        const layout = typeof __velox_getLayout !== "undefined" ? __velox_getLayout(containerNodeId.current) : null;
+        if (!layout) {
+          setOpen(false);
+          return;
+        }
+        const inside = x >= layout.x && x < layout.x + layout.width && y >= layout.y && y < layout.y + layout.height;
+        if (!inside)
+          setOpen(false);
+      };
+      addGlobalClickListener(onGlobalClick);
+      return () => removeGlobalClickListener(onGlobalClick);
+    }, [open]);
+    const OPTION_H = 40;
+    const dropH = options.length * OPTION_H;
+    return import_react.default.createElement(View, {
+      _veloxOnMount: onContainerMount,
+      style,
+      ...rest
+    }, import_react.default.createElement(Pressable, {
       onPress: () => {
         if (!disabled)
           setOpen((o) => !o);
@@ -7402,25 +7445,30 @@ No matching component was found for:
         flexDirection: "row",
         justifyContent: "space-between",
         alignItems: "center",
-        padding: 10,
+        paddingLeft: 12,
+        paddingRight: 10,
+        height: 40,
         borderRadius: 8,
         backgroundColor: disabled ? "#1a1d2e" : "#262b3f",
         borderWidth: 1,
-        borderColor: open ? "#7aa2f7" : "#3c4464"
+        borderColor: open ? "#7aa2f7" : "#3c4464",
+        clip: true
       }
-    }, import_react.default.createElement(Text, {
+    }, import_react.default.createElement(View, { style: { flex: 1, clip: true }, height: 20 }, import_react.default.createElement(Text, {
       style: { color: selected ? "#e7ecff" : "#666", fontSize: 14 }
-    }, selected ? selected.label : placeholder), import_react.default.createElement(Text, {
-      style: { color: "#7aa2f7", fontSize: 11 }
+    }, selected ? selected.label : placeholder)), import_react.default.createElement(Text, {
+      style: { color: "#7aa2f7", fontSize: 11 },
+      width: 16,
+      height: 16
     }, open ? "▲" : "▼")), open && import_react.default.createElement(View, {
       style: {
         backgroundColor: "#1e2235",
         borderRadius: 8,
         marginTop: 4,
         borderWidth: 1,
-        borderColor: "#3c4464",
-        zIndex: 10
-      }
+        borderColor: "#3c4464"
+      },
+      height: dropH
     }, ...options.map((opt, i) => import_react.default.createElement(Pressable, {
       key: String(i),
       onPress: () => {
@@ -7428,7 +7476,10 @@ No matching component was found for:
         setOpen(false);
       },
       style: {
-        padding: 10,
+        paddingLeft: 12,
+        paddingRight: 12,
+        height: OPTION_H,
+        justifyContent: "center",
         backgroundColor: opt.value === value ? "#2e3555" : "transparent",
         borderRadius: 6
       }
@@ -7441,7 +7492,6 @@ No matching component was found for:
     const [open, setOpen] = import_react.default.useState(false);
     const [viewYear, setViewYear] = import_react.default.useState(today.getFullYear());
     const [viewMonth, setViewMonth] = import_react.default.useState(today.getMonth());
-    const displayStr = value ? `${new Date(value).getFullYear()}-${String(new Date(value).getMonth() + 1).padStart(2, "0")}-${String(new Date(value).getDate()).padStart(2, "0")}` : "Select date…";
     const monthNames = [
       "January",
       "February",
@@ -7483,26 +7533,39 @@ No matching component was found for:
     const CELL_W = 36;
     const CELL_H = 32;
     const CAL_W = CELL_W * 7;
-    return import_react.default.createElement(View, { style, ...rest }, import_react.default.createElement(Pressable, {
-      onPress: () => {
-        if (!disabled)
-          setOpen((o) => !o);
-      },
-      style: {
-        padding: 10,
-        borderRadius: 8,
-        backgroundColor: disabled ? "#1a1d2e" : "#262b3f",
-        borderWidth: 1,
-        borderColor: open ? "#7aa2f7" : "#3c4464"
-      }
-    }, import_react.default.createElement(Text, {
-      style: { color: value ? "#e7ecff" : "#666", fontSize: 14 }
-    }, displayStr)), open && import_react.default.createElement(View, {
+    const containerNodeId = import_react.useRef(null);
+    const onContainerMount = import_react.useCallback((id) => {
+      containerNodeId.current = id;
+    }, []);
+    import_react.useEffect(() => {
+      if (!open)
+        return;
+      const onGlobalClick = ({ x, y }) => {
+        const layout = typeof __velox_getLayout !== "undefined" ? __velox_getLayout(containerNodeId.current) : null;
+        if (!layout) {
+          setOpen(false);
+          return;
+        }
+        const inside = x >= layout.x && x < layout.x + layout.width && y >= layout.y && y < layout.y + layout.height;
+        if (!inside)
+          setOpen(false);
+      };
+      addGlobalClickListener(onGlobalClick);
+      return () => removeGlobalClickListener(onGlobalClick);
+    }, [open]);
+    const CAL_ROWS_H = Math.ceil(cells.length / 7) * CELL_H;
+    const CAL_TOTAL_H = 8 + 32 + 22 + CAL_ROWS_H + 8;
+    return import_react.default.createElement(View, {
+      _veloxOnMount: onContainerMount,
+      style,
+      ...rest
+    }, open && import_react.default.createElement(View, {
       width: CAL_W + 16,
+      height: CAL_TOTAL_H,
       style: {
         backgroundColor: "#1e2235",
         borderRadius: 8,
-        marginTop: 4,
+        marginBottom: 4,
         padding: 8,
         borderWidth: 1,
         borderColor: "#3c4464"
@@ -7546,7 +7609,30 @@ No matching component was found for:
         width: CELL_W,
         height: 18
       }, String(day)));
-    })))));
+    })))), import_react.default.createElement(Pressable, {
+      onPress: () => {
+        if (!disabled)
+          setOpen((o) => !o);
+      },
+      style: {
+        flexDirection: "row",
+        justifyContent: "space-between",
+        alignItems: "center",
+        paddingLeft: 12,
+        paddingRight: 10,
+        height: 40,
+        borderRadius: 8,
+        backgroundColor: disabled ? "#1a1d2e" : "#262b3f",
+        borderWidth: 1,
+        borderColor: open ? "#7aa2f7" : "#3c4464"
+      }
+    }, import_react.default.createElement(Text, {
+      style: { color: value ? "#e7ecff" : "#666", fontSize: 14 }
+    }, value ? `${new Date(value).getFullYear()}-${String(new Date(value).getMonth() + 1).padStart(2, "0")}-${String(new Date(value).getDate()).padStart(2, "0")}` : "Select date…"), import_react.default.createElement(Text, {
+      style: { color: "#7aa2f7", fontSize: 11 },
+      width: 16,
+      height: 16
+    }, open ? "▲" : "▼")));
   }
 
   // ../../js/packages/@velox/router/src/index.js
@@ -9020,7 +9106,7 @@ Ranking: cosine similarity across stored note vectors.`
     const [dateVal, setDateVal] = import_react3.useState(null);
     function Section({ title, children }) {
       return /* @__PURE__ */ jsx_runtime.jsxs(View, {
-        style: { gap: 10 },
+        style: { gap: 10, alignItems: "flex-start" },
         width: inner,
         children: [
           /* @__PURE__ */ jsx_runtime.jsx(Text, {
@@ -9052,7 +9138,7 @@ Ranking: cosine similarity across stored note vectors.`
     return /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
       width: winW,
       height: winH - HEADER_H - PAD,
-      contentHeight: 1300,
+      contentHeight: 1400,
       children: /* @__PURE__ */ jsx_runtime.jsxs(View, {
         style: { gap: 20, padding: PAD, alignItems: "flex-start", justifyContent: "flex-start" },
         width: inner,

@@ -1195,7 +1195,7 @@ function FormDemoScreen() {
 
   function Section({ title, children }) {
     return (
-      <View style={{ gap: 10 }} width={inner}>
+      <View style={{ gap: 10, alignItems: 'flex-start' }} width={inner}>
         <Text fontSize={11} width={inner} height={16} style={{ color: C.dim }}>{title}</Text>
         {children}
         <View style={{ backgroundColor: C.border }} width={inner} height={1} />
@@ -1215,7 +1215,7 @@ function FormDemoScreen() {
   }
 
   return (
-    <ScrollView width={winW} height={winH - HEADER_H - PAD} contentHeight={1300}>
+    <ScrollView width={winW} height={winH - HEADER_H - PAD} contentHeight={1400}>
       <View style={{ gap: 20, padding: PAD, alignItems: 'flex-start', justifyContent: 'flex-start' }} width={inner}>
 
         <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }} width={inner} height={34}>

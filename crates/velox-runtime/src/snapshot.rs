@@ -26,7 +26,8 @@ globalThis.__velox_getTime = function() { return Date.now(); };
 globalThis.__velox_log = function() {};
 
 // File system bindings
-globalThis.__velox_readFile = function() { return stubPromise(''); };
+globalThis.__velox_readFile      = function() { return stubPromise(''); };
+globalThis.__velox_readFileBytes = function() { return stubPromise(''); };
 globalThis.__velox_writeFile = function() { return stubPromise(undefined); };
 globalThis.__velox_appendFile = function() { return stubPromise(undefined); };
 globalThis.__velox_listDir = function() { return stubPromise('[]'); };

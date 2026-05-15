@@ -441,10 +441,9 @@ struct PerWindowState {
     cursor_blink_deadline: Instant,
     /// Rolling performance metrics — shared with the JS binding via Arc.
     perf: Arc<Mutex<velox_perf::PerfState>>,
-    /// sysinfo System for sampling process RSS each frame.
-    sys_info: sysinfo::System,
-    /// PID cached to avoid repeated lookups.
-    sys_pid: sysinfo::Pid,
+    /// Process RSS bytes — written by a background tokio task every 2 s.
+    /// Reading is always lock-free (Relaxed load) so it never stalls the frame loop.
+    rss_bytes: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(feature = "dev")]
     dev_mode: Option<DevModeState>,
 }
@@ -1136,13 +1135,28 @@ pub fn run(mut config: AppConfig) {
                     cursor_blink_on:       true,
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
                     perf:          shared_perf,
-                    sys_info:      {
-                        let mut s = sysinfo::System::new();
-                        let pid = sysinfo::Pid::from_u32(std::process::id());
-                        s.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), false);
-                        s
+                    rss_bytes:     {
+                        // Spawn a background task that polls RSS every 2 s via sysinfo.
+                        // This keeps the heavy OS syscall off the render thread entirely,
+                        // eliminating the P99 spikes that the previous per-30-frame poll caused.
+                        let rss_atomic = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                        let rss_clone  = Arc::clone(&rss_atomic);
+                        let pid        = sysinfo::Pid::from_u32(std::process::id());
+                        tokio_handle.spawn(async move {
+                            let mut sys = sysinfo::System::new();
+                            loop {
+                                sys.refresh_processes(
+                                    sysinfo::ProcessesToUpdate::Some(&[pid]), false,
+                                );
+                                let rss = sys.process(pid)
+                                    .map(|p| p.memory())
+                                    .unwrap_or(0);
+                                rss_clone.store(rss, std::sync::atomic::Ordering::Relaxed);
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            }
+                        });
+                        rss_atomic
                     },
-                    sys_pid:       sysinfo::Pid::from_u32(std::process::id()),
                     #[cfg(feature = "dev")]
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
@@ -1356,10 +1370,8 @@ pub fn run(mut config: AppConfig) {
                 let (frame_time_ms, js_time_ms, layout_time_ms) = perf_snapshot_pre;
                 if frame_time_ms > 0.0 {
                     let heap = s.runtime.heap_stats();
-                    s.sys_info.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[s.sys_pid]), false);
-                    let process_rss = s.sys_info.process(s.sys_pid)
-                        .map(|p| p.memory())
-                        .unwrap_or(0);
+                    // RSS is updated by a background tokio task every 2 s — zero OS cost here.
+                    let process_rss = s.rss_bytes.load(std::sync::atomic::Ordering::Relaxed);
                     let mut perf = s.perf.lock().unwrap();
                     perf.last_frame_at = Some(frame_start);
 

@@ -114,9 +114,13 @@ impl GpuContext {
             format,
             width:                         size.width.max(1),
             height:                        size.height.max(1),
-            present_mode:                  wgpu::PresentMode::Fifo,
+            // AutoVsync: picks the best available vsync mode for the platform.
+            // On Windows this avoids the DWM Fifo stall that costs ~5–15ms/frame.
+            present_mode:                  wgpu::PresentMode::AutoVsync,
             alpha_mode:                    caps.alpha_modes[0],
             view_formats:                  vec![],
+            // 2 = allows CPU to encode frame N+1 while GPU renders frame N.
+            // Setting this to 1 serialises CPU+GPU and halves throughput on iGPU.
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);

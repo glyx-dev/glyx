@@ -6,6 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use base64::Engine as _;
 use tokio::runtime::Handle;
 
 // ── IPC bus ───────────────────────────────────────────────────────────────────
@@ -320,8 +321,9 @@ pub fn register_all(
     }
 
     register!("__velox_getEnv",      get_env_callback);
-    register!("__velox_readFile",    read_file_callback);
-    register!("__velox_createImage", create_image_callback);
+    register!("__velox_readFile",      read_file_callback);
+    register!("__velox_readFileBytes", read_file_bytes_callback);
+    register!("__velox_createImage",   create_image_callback);
     register!("__velox_createNode",  create_node_callback);
     register!("__velox_appendChild", append_child_callback);
     register!("__velox_updateNode",  update_node_callback);
@@ -884,6 +886,47 @@ fn read_file_callback(
             redraw.as_ref(),
             Completion { resolver_ptr: resolver, result },
         );
+    });
+}
+
+// ── Async binding: __velox_readFileBytes ──────────────────────────────────────
+//
+// Reads a file as raw bytes and returns a base64-encoded string.
+// Used for binary files (images, PDFs, etc.) before uploading via fetch multipart.
+//
+// `__velox_readFileBytes(path) -> Promise<string>`   (base64)
+
+fn read_file_bytes_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().can_read_fs() {
+        let msg = v8::String::new(scope,
+            "Capability required: fs.read — add it to velox.config.json").unwrap();
+        let ex = v8::Exception::error(scope, msg);
+        scope.throw_exception(ex);
+        return;
+    }
+
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let path = args.get(0).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::fs::read(&path)
+            .await
+            .map(|bytes| base64::engine::general_purpose::STANDARD.encode(&bytes))
+            .map_err(|e| e.to_string());
+        enqueue_completion(&queue_clone, redraw.as_ref(),
+            Completion { resolver_ptr: resolver, result });
     });
 }
 
@@ -2024,7 +2067,14 @@ fn extract_host(url: &str) -> String {
 ///
 /// `optionsJson` (all fields optional):
 /// ```json
-/// { "method": "GET", "headers": { "Authorization": "Bearer ..." }, "body": "..." }
+/// { "method": "POST",
+///   "headers": { "Authorization": "Bearer ..." },
+///   "body": "plain string body",
+///   "multipart": [
+///     { "name": "field", "value": "text value" },
+///     { "name": "file", "filename": "photo.jpg",
+///       "base64": "<base64 bytes>", "contentType": "image/jpeg" }
+///   ] }
 /// ```
 ///
 /// Requires `network.allow` capability in `velox.config.json`:
@@ -2087,8 +2137,56 @@ fn fetch_callback(
                 }
             }
 
-            // Request body (string only; binary deferred to Phase 12B).
-            if let Some(body) = opts.get("body").and_then(|b| b.as_str()) {
+            // ── Multipart body ────────────────────────────────────────────
+            // `multipart` option: array of part descriptors.
+            // Each part: { name, value?, filename?, base64?, contentType? }
+            //   - text part:   { name: "field", value: "hello" }
+            //   - binary part: { name: "file", filename: "photo.jpg",
+            //                    base64: "<b64>", contentType: "image/jpeg" }
+            if let Some(parts) = opts.get("multipart").and_then(|m| m.as_array()) {
+                let mut form = reqwest::multipart::Form::new();
+                for part_val in parts {
+                    let name = part_val.get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("field")
+                        .to_owned();
+
+                    if let Some(b64) = part_val.get("base64").and_then(|b| b.as_str()) {
+                        // Binary part — decode from base64.
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(b64)
+                            .map_err(|e| format!("multipart base64 decode: {e}"))?;
+                        let mime = part_val.get("contentType")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("application/octet-stream")
+                            .to_owned();
+                        let filename = part_val.get("filename")
+                            .and_then(|f| f.as_str())
+                            .unwrap_or("file")
+                            .to_owned();
+                        let mut part = reqwest::multipart::Part::bytes(bytes)
+                            .file_name(filename);
+                        part = part.mime_str(&mime).map_err(|e| e.to_string())?;
+                        form = form.part(name, part);
+                    } else {
+                        // Text part.
+                        let value = part_val.get("value")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_owned();
+                        let mut part = reqwest::multipart::Part::text(value);
+                        if let Some(fname) = part_val.get("filename").and_then(|f| f.as_str()) {
+                            part = part.file_name(fname.to_owned());
+                        }
+                        if let Some(ct) = part_val.get("contentType").and_then(|c| c.as_str()) {
+                            part = part.mime_str(ct).map_err(|e| e.to_string())?;
+                        }
+                        form = form.part(name, part);
+                    }
+                }
+                builder = builder.multipart(form);
+            } else if let Some(body) = opts.get("body").and_then(|b| b.as_str()) {
+                // Plain string body (JSON, form-urlencoded, etc.).
                 builder = builder.body(body.to_owned());
             }
 

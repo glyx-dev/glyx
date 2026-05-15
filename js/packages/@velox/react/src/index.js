@@ -11,6 +11,7 @@ import {
   dispatchEvents,
   addWindowSizeListener, removeWindowSizeListener,
   addKeyListener,
+  addGlobalClickListener, removeGlobalClickListener,
 } from './events.js';
 
 // ── Reconciler ────────────────────────────────────────────────────────────────
@@ -756,7 +757,13 @@ const _noBinding = (name) => Promise.reject(new Error(`${name}: binding not avai
 
 export const fs = {
   /** Read the entire file as a UTF-8 string. Requires `fs.read`. */
-  readFile:   (path)          => typeof __velox_readFile   !== 'undefined' ? __velox_readFile(path)          : _noBinding('readFile'),
+  readFile:   (path)          => typeof __velox_readFile      !== 'undefined' ? __velox_readFile(path)          : _noBinding('readFile'),
+  /**
+   * Read the entire file as raw bytes, returned as a base64-encoded string.
+   * Use this for binary files (images, PDFs, etc.) before uploading via fetch multipart.
+   * Requires `fs.read`.
+   */
+  readFileBytes: (path)       => typeof __velox_readFileBytes !== 'undefined' ? __velox_readFileBytes(path)     : _noBinding('readFileBytes'),
   /** Write (overwrite) a file with the given string content. Requires `fs.write`. */
   writeFile:  (path, content) => typeof __velox_writeFile  !== 'undefined' ? __velox_writeFile(path, content) : _noBinding('writeFile'),
   /** Append string content to a file (creates it if missing). Requires `fs.write`. */
@@ -1068,8 +1075,26 @@ export const notification = {
 
 /**
  * Make an HTTP request.
+ *
+ * Supports plain string bodies and multipart/form-data uploads:
+ * ```js
+ * // JSON POST
+ * fetch(url, { method: 'POST', headers: {'Content-Type':'application/json'},
+ *              body: JSON.stringify(payload) });
+ *
+ * // Multipart upload (text field + binary file)
+ * const bytes = await fs.readFileBytes(filePath);          // base64 string
+ * fetch(url, { method: 'POST', multipart: [
+ *   { name: 'description', value: 'my upload' },
+ *   { name: 'file', filename: 'photo.jpg', base64: bytes, contentType: 'image/jpeg' },
+ * ]});
+ * ```
+ *
  * @param {string} url
- * @param {{ method?: string, headers?: Record<string,string>, body?: string }} [options]
+ * @param {{ method?: string, headers?: Record<string,string>,
+ *           body?: string,
+ *           multipart?: Array<{name:string, value?:string, filename?:string,
+ *                              base64?:string, contentType?:string}> }} [options]
  * @returns {Promise<{ status: number, ok: boolean, statusText: string,
  *                     headers: Record<string,string>,
  *                     text: () => Promise<string>, json: () => Promise<any> }>}
@@ -1486,7 +1511,12 @@ export function Checkbox({ checked = false, onChange, disabled = false, label, s
       justifyContent: 'center',
       alignItems: 'center',
     },
-  }, active ? React.createElement(Text, { style: { color: '#171923', fontSize: 13 }, width: SIZE, height: SIZE }, '\u2713') : null);
+  },
+    // Draw the check indicator as a small inner View (no font dependency).
+    active ? React.createElement(View, {
+      style: { width: 10, height: 10, backgroundColor: '#171923', borderRadius: 2 },
+    }) : null,
+  );
 
   const lbl = label != null
     ? React.createElement(Text, { style: { color: disabled ? '#555' : '#e7ecff', fontSize: 14 } }, String(label))
@@ -1751,45 +1781,44 @@ export function Slider({
 }) {
   const pct = max === min ? 0 : Math.max(0, Math.min(1, (Math.min(max, Math.max(min, value)) - min) / (max - min)));
 
-  // Plain useRefs for native node IDs — NOT React refs (which give {id} objects).
+  // Native node ID for the track container — draggable is registered on it.
   const trackNodeId = useRef(null);
-  const thumbNodeId = useRef(null);
 
   // Always-current refs so the stable drag handler never has stale closures.
-  const valueRef      = useRef(value);      valueRef.current      = value;
-  const minRef        = useRef(min);        minRef.current        = min;
-  const maxRef        = useRef(max);        maxRef.current        = max;
-  const stepRef       = useRef(step);       stepRef.current       = step;
-  const disabledRef   = useRef(disabled);   disabledRef.current   = disabled;
-  const onChangeRef   = useRef(onValueChange); onChangeRef.current = onValueChange;
+  const minRef      = useRef(min);   minRef.current      = min;
+  const maxRef      = useRef(max);   maxRef.current      = max;
+  const stepRef     = useRef(step);  stepRef.current     = step;
+  const disabledRef = useRef(disabled); disabledRef.current = disabled;
+  const onChangeRef = useRef(onValueChange); onChangeRef.current = onValueChange;
 
-  // _veloxOnMount fires synchronously from createInstance with the bare node ID (number).
-  // This is the correct way to capture native IDs in Velox — React `ref` gives {id} objects.
-  const onTrackMount = useCallback((id) => {
-    trackNodeId.current = id;
+  // Shared update logic: compute value from absolute cursor x position.
+  // Using absolute x (not delta) means each dragMove is independent — no
+  // accumulation issue with stepped sliders, and clicking the rail works too.
+  const updateFromX = useCallback((x) => {
+    if (disabledRef.current || !onChangeRef.current) return;
+    const layout = __velox_getLayout(trackNodeId.current);
+    if (!layout || layout.width <= 0) return;
+    const range = maxRef.current - minRef.current;
+    const frac = Math.max(0, Math.min(1, (x - layout.x) / layout.width));
+    let v = minRef.current + frac * range;
+    const s = stepRef.current;
+    if (s > 0) v = Math.round(v / s) * s;
+    onChangeRef.current(v);
   }, []);
 
-  const onThumbMount = useCallback((id) => {
-    thumbNodeId.current = id;
+  // Register the track container as draggable so the full width is interactive.
+  // onDragStart handles rail-click; onDragMove handles continuous drag.
+  const onTrackMount = useCallback((id) => {
+    trackNodeId.current = id;
     registerDraggable(id, {
-      onDragMove({ dx }) {
-        if (disabledRef.current || !onChangeRef.current) return;
-        const layout = __velox_getLayout(trackNodeId.current);
-        if (!layout || layout.width <= 0) return;
-        const range = maxRef.current - minRef.current;
-        const delta = (dx / layout.width) * range;
-        const clampFn = v => Math.min(maxRef.current, Math.max(minRef.current, v));
-        let v = clampFn(valueRef.current + delta);
-        const s = stepRef.current;
-        if (s > 0) v = Math.round(v / s) * s;
-        onChangeRef.current(v);
-      },
+      onDragStart({ x }) { updateFromX(x); },
+      onDragMove({ x })  { updateFromX(x); },
     });
-  }, []); // stable — all values read via refs at call time
+  }, []); // stable — updateFromX and all refs are stable
 
   useEffect(() => {
     return () => {
-      if (thumbNodeId.current !== null) unregisterDraggable(thumbNodeId.current);
+      if (trackNodeId.current !== null) unregisterDraggable(trackNodeId.current);
     };
   }, []);
 
@@ -1804,7 +1833,6 @@ export function Slider({
   },
     React.createElement(View, { style: { flex: pct, height: TRACK, backgroundColor: accent } }),
     React.createElement(View, {
-      _veloxOnMount: onThumbMount,
       style: { width: THUMB, height: THUMB, borderRadius: THUMB / 2, backgroundColor: accent },
     }),
     React.createElement(View, { style: { flex: 1 - pct, height: TRACK, backgroundColor: '#3c4464' } }),
@@ -1826,27 +1854,66 @@ export function Select({
   const [open, setOpen] = React.useState(false);
   const selected = options.find(o => o.value === value);
 
-  return React.createElement(View, { style, ...rest },
+  // Native node ID of the outer container — used to check if a global click is
+  // inside or outside the Select, so we can close the dropdown on outside clicks.
+  const containerNodeId = useRef(null);
+  const onContainerMount = useCallback((id) => { containerNodeId.current = id; }, []);
+
+  // When open, register a global click listener that closes the dropdown if the
+  // user clicks outside the Select's bounding box.
+  useEffect(() => {
+    if (!open) return;
+    const onGlobalClick = ({ x, y }) => {
+      const layout = typeof __velox_getLayout !== 'undefined'
+        ? __velox_getLayout(containerNodeId.current)
+        : null;
+      if (!layout) { setOpen(false); return; }
+      const inside = x >= layout.x && x < layout.x + layout.width &&
+                     y >= layout.y && y < layout.y + layout.height;
+      if (!inside) setOpen(false);
+    };
+    addGlobalClickListener(onGlobalClick);
+    return () => removeGlobalClickListener(onGlobalClick);
+  }, [open]);
+
+  // Height of one option row — used to give the dropdown an explicit height.
+  const OPTION_H = 40;
+  const dropH = options.length * OPTION_H;
+
+  return React.createElement(View, {
+    _veloxOnMount: onContainerMount,
+    style,
+    ...rest,
+  },
+    // Trigger button — fixed height so text never overflows.
     React.createElement(Pressable, {
       onPress: () => { if (!disabled) setOpen(o => !o); },
       style: {
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
-        padding: 10,
+        paddingLeft: 12,
+        paddingRight: 10,
+        height: 40,
         borderRadius: 8,
         backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
         borderWidth: 1,
         borderColor: open ? '#7aa2f7' : '#3c4464',
+        clip: true,
       },
     },
-      React.createElement(Text, {
-        style: { color: selected ? '#e7ecff' : '#666', fontSize: 14 },
-      }, selected ? selected.label : placeholder),
+      // Label — clip to prevent overflow; leave 24px for the arrow.
+      React.createElement(View, { style: { flex: 1, clip: true }, height: 20 },
+        React.createElement(Text, {
+          style: { color: selected ? '#e7ecff' : '#666', fontSize: 14 },
+        }, selected ? selected.label : placeholder),
+      ),
       React.createElement(Text, {
         style: { color: '#7aa2f7', fontSize: 11 },
+        width: 16, height: 16,
       }, open ? '\u25b2' : '\u25bc'),
     ),
+    // Dropdown list — shown inline below the trigger when open.
     open && React.createElement(View, {
       style: {
         backgroundColor: '#1e2235',
@@ -1854,15 +1921,18 @@ export function Select({
         marginTop: 4,
         borderWidth: 1,
         borderColor: '#3c4464',
-        zIndex: 10,
       },
+      height: dropH,
     },
       ...options.map((opt, i) =>
         React.createElement(Pressable, {
           key: String(i),
           onPress: () => { onValueChange?.(opt.value); setOpen(false); },
           style: {
-            padding: 10,
+            paddingLeft: 12,
+            paddingRight: 12,
+            height: OPTION_H,
+            justifyContent: 'center',
             backgroundColor: opt.value === value ? '#2e3555' : 'transparent',
             borderRadius: 6,
           },
@@ -1887,10 +1957,6 @@ export function DatePicker({ value = null, onValueChange, disabled = false, styl
   const [open, setOpen]           = React.useState(false);
   const [viewYear, setViewYear]   = React.useState(today.getFullYear());
   const [viewMonth, setViewMonth] = React.useState(today.getMonth());
-
-  const displayStr = value
-    ? `${new Date(value).getFullYear()}-${String(new Date(value).getMonth() + 1).padStart(2, '0')}-${String(new Date(value).getDate()).padStart(2, '0')}`
-    : 'Select date\u2026';
 
   const monthNames = ['January','February','March','April','May','June',
                       'July','August','September','October','November','December'];
@@ -1922,29 +1988,42 @@ export function DatePicker({ value = null, onValueChange, disabled = false, styl
   const CELL_H = 32;
   const CAL_W  = CELL_W * 7; // 252px content; +16 for 8px padding each side
 
-  return React.createElement(View, { style, ...rest },
-    // Trigger button
-    React.createElement(Pressable, {
-      onPress: () => { if (!disabled) setOpen(o => !o); },
-      style: {
-        padding: 10,
-        borderRadius: 8,
-        backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
-        borderWidth: 1,
-        borderColor: open ? '#7aa2f7' : '#3c4464',
-      },
-    },
-      React.createElement(Text, {
-        style: { color: value ? '#e7ecff' : '#666', fontSize: 14 },
-      }, displayStr),
-    ),
+  // Native node ID for outside-click detection (same pattern as Select).
+  const containerNodeId = useRef(null);
+  const onContainerMount = useCallback((id) => { containerNodeId.current = id; }, []);
 
+  useEffect(() => {
+    if (!open) return;
+    const onGlobalClick = ({ x, y }) => {
+      const layout = typeof __velox_getLayout !== 'undefined'
+        ? __velox_getLayout(containerNodeId.current)
+        : null;
+      if (!layout) { setOpen(false); return; }
+      const inside = x >= layout.x && x < layout.x + layout.width &&
+                     y >= layout.y && y < layout.y + layout.height;
+      if (!inside) setOpen(false);
+    };
+    addGlobalClickListener(onGlobalClick);
+    return () => removeGlobalClickListener(onGlobalClick);
+  }, [open]);
+
+  // Calendar height used to reserve space above the trigger.
+  const CAL_ROWS_H = Math.ceil(cells.length / 7) * CELL_H;
+  const CAL_TOTAL_H = 8 + 32 + 22 + CAL_ROWS_H + 8; // pad + header + dow + rows + pad
+
+  return React.createElement(View, {
+    _veloxOnMount: onContainerMount,
+    style,
+    ...rest,
+  },
+    // Calendar opens ABOVE the trigger so it's never clipped by the bottom of a ScrollView.
     open && React.createElement(View, {
       width: CAL_W + 16,
+      height: CAL_TOTAL_H,
       style: {
         backgroundColor: '#1e2235',
         borderRadius: 8,
-        marginTop: 4,
+        marginBottom: 4,
         padding: 8,
         borderWidth: 1,
         borderColor: '#3c4464',
@@ -2012,6 +2091,33 @@ export function DatePicker({ value = null, onValueChange, disabled = false, styl
           }),
         )
       ),
+    ),
+
+    // Trigger button — always at the bottom; calendar renders above it when open.
+    React.createElement(Pressable, {
+      onPress: () => { if (!disabled) setOpen(o => !o); },
+      style: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        paddingLeft: 12,
+        paddingRight: 10,
+        height: 40,
+        borderRadius: 8,
+        backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
+        borderWidth: 1,
+        borderColor: open ? '#7aa2f7' : '#3c4464',
+      },
+    },
+      React.createElement(Text, {
+        style: { color: value ? '#e7ecff' : '#666', fontSize: 14 },
+      }, value
+        ? `${new Date(value).getFullYear()}-${String(new Date(value).getMonth() + 1).padStart(2, '0')}-${String(new Date(value).getDate()).padStart(2, '0')}`
+        : 'Select date\u2026'),
+      React.createElement(Text, {
+        style: { color: '#7aa2f7', fontSize: 11 },
+        width: 16, height: 16,
+      }, open ? '\u25b2' : '\u25bc'),
     ),
   );
 }

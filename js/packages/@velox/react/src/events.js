@@ -44,6 +44,11 @@ const windowSizeListeners = [];
 // Listeners notified on every key event: Array<(ev: {key, ctrl, shift, pressed}) => void>
 const keyListeners = [];
 
+// Listeners called on every mouse-button press, regardless of which node was hit.
+// Used by dropdowns / overlays to close on outside click.
+// Array<(ev: {x, y, pressed}) => void>
+const globalClickListeners = [];
+
 // Currently focused input node id (or null).
 let focusedNodeId = null;
 
@@ -166,6 +171,24 @@ export function removeKeyListener(fn) {
 }
 
 /**
+ * Subscribe to every mouse-button press event (regardless of which node was hit).
+ * Useful for dropdowns/overlays that need to close on outside click.
+ * @param {(ev: {x: number, y: number}) => void} fn
+ */
+export function addGlobalClickListener(fn) {
+  globalClickListeners.push(fn);
+}
+
+/**
+ * Unsubscribe from global click events.
+ * @param {(ev: {x: number, y: number}) => void} fn
+ */
+export function removeGlobalClickListener(fn) {
+  const idx = globalClickListeners.indexOf(fn);
+  if (idx >= 0) globalClickListeners.splice(idx, 1);
+}
+
+/**
  * Explicitly focus a TextInput node from JS (e.g. programmatic focus).
  * @param {number} nodeId
  */
@@ -209,6 +232,12 @@ export function dispatchEvents() {
 
       case 'mouseButton': {
         if (!ev.pressed) break; // react only to press-down for now
+
+        // Notify global click listeners first (e.g. to close open dropdowns).
+        if (globalClickListeners.length > 0) {
+          const gev = { x: ev.x, y: ev.y };
+          for (const fn of globalClickListeners) try { fn(gev); } catch {}
+        }
 
         // Check pressables (front-to-back, stop at first hit).
         let handled = false;

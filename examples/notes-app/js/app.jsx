@@ -20,7 +20,7 @@ import React, { useState, useEffect, useContext, createContext, useCallback, use
 import {
   View, Text, Pressable, TextInput, ScrollView, render, useWindowSize, useMediaQuery,
   db, vectorDb, fs, dialog, clipboard, notification, veloxWindow, fetch, ws, mdns, ipc,
-  battery, system, power, storage, input, perf,
+  battery, system, power, storage, input, perf, deeplink,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
 
@@ -1010,6 +1010,10 @@ function SysApiScreen() {
   const [shortcutLog, setShortcutLog] = useState([]);
   const [sleepGuard,  setSleepGuard]  = useState(null);
 
+  // Sync reads — cheap enough to call on every render.
+  const darkMode      = system.getDarkMode();
+  const batterySaver  = system.isBatterySaverActive();
+
   // perf.snapshot() is synchronous — read it inline each render instead of
   // using setInterval (which Velox's V8 context does not polyfill).
   const perfSnap = perf.snapshot();
@@ -1087,6 +1091,8 @@ function SysApiScreen() {
       </Section>
 
       <Section title="System Info">
+        <Row label="Color scheme"   value={darkMode}     tone={darkMode === 'dark' ? C.mauve : C.yellow} />
+        <Row label="Battery saver"  value={batterySaver ? 'Active' : 'Off'} tone={batterySaver ? C.green : C.dim} />
         {sysInfo ? (
           <>
             <Row label="CPU"       value={sysInfo.cpuName}    />
@@ -1550,11 +1556,35 @@ function TextInputTestBox({ width }) {
 // Initialises the DB and vector store once, provides them via context.
 // The persistent header bar (window controls) lives outside the router.
 
+// ── Deep-link handler (must live inside Router to call useNavigate) ───────────
+function DeeplinkHandler({ url }) {
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (!url) return;
+    // notes://note/42  → edit screen for note 42
+    // notes://new      → new note
+    // notes://search   → search screen
+    const m = url.match(/^notes:\/\/note\/(\d+)/);
+    if (m) {
+      navigate('edit', { noteId: Number(m[1]) });
+    } else if (url.startsWith('notes://new')) {
+      navigate('edit', { noteId: null });
+    } else if (url.startsWith('notes://search')) {
+      navigate('search');
+    }
+  }, [url]);
+  return null;
+}
+
 function App() {
   const { width: winW, height: winH } = useWindowSize();
   const [fullscreen, setFullscreen] = useState(false);
   const [maximized,  setMaximized] = useState(false);
   const C = useThemeColors();
+
+  // Track the latest deep-link URL so DeeplinkHandler (inside Router) can navigate.
+  const [pendingDeeplink, setPendingDeeplink] = useState(null);
+  useEffect(() => deeplink.onOpen((url) => setPendingDeeplink(url)), []);
 
   // ── Notes context state ────────────────────────────────────────────────────
   const [vdb,        setVdb]        = useState(null);
@@ -1715,6 +1745,7 @@ function App() {
             height={winH - HEADER_H}
           >
             <Router initialRoute="list">
+              <DeeplinkHandler url={pendingDeeplink} />
               <Route name="list"    component={NoteListScreen}    />
               <Route name="edit"    component={NoteEditScreen}    />
               <Route name="search"  component={NoteSearchScreen}  />

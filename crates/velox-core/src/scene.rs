@@ -54,7 +54,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 } else {
                     state.image_cache_misses += 1;
                     if let Some(image) = load_image_from_path(&path) {
-                        state.images_by_path.insert(path.clone(), image.clone());
+                        state.images_by_path.put(path.clone(), image.clone());
                         state.images.insert(id, image);
                     } else {
                         log::error!("Failed to load image at path: {}", path);
@@ -98,6 +98,12 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     }
                 }
                 state.js_nodes.remove(&id);
+                // Unlink from any parent's children list so stale ghost IDs don't
+                // accumulate in the renderer's traversal.  O(n × avg_children) but
+                // n < 1000 in practice so this is negligible.
+                for node in state.js_nodes.values_mut() {
+                    node.children.retain(|&c| c != id);
+                }
                 layout_changed = true;
             }
             SceneCommand::SetRoot { id } => {

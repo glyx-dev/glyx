@@ -27,6 +27,10 @@ pub struct PerfFrame {
     pub node_count:     usize,
     /// JS heap used bytes at frame time.
     pub heap_used_bytes: usize,
+    /// Process working-set / RSS in bytes (from sysinfo).
+    /// Includes V8 heap, wgpu allocations, and all native memory.
+    /// On iGPU systems this is inflated because GPU memory is shared with RAM.
+    pub process_rss_bytes: u64,
 }
 
 /// Rolling performance state kept in each `PerWindowState`.

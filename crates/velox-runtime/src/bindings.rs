@@ -242,6 +242,7 @@ pub fn register_all(
     my_handle:    u32,
     next_window_id: Arc<std::sync::atomic::AtomicU32>,
     perf_state:   Arc<Mutex<velox_perf::PerfState>>,
+    deeplink_url_queue: Arc<Mutex<VecDeque<String>>>,
 ) {
     set_func(scope, global, "__velox_getTime", get_time);
     set_func(scope, global, "__velox_log",     js_log);
@@ -275,6 +276,7 @@ pub fn register_all(
         gamepad_gilrs:  std::cell::RefCell::new(gilrs::Gilrs::new().ok()),
         hotkey_state:   std::cell::RefCell::new(None),
         next_hotkey_id: std::sync::atomic::AtomicU32::new(1),
+        deeplink_url_queue,
     });
     let ptr   = Box::into_raw(state) as *mut std::ffi::c_void;
     // Safety: ptr is valid for the lifetime of the isolate.
@@ -370,9 +372,11 @@ pub fn register_all(
     register!("__velox_perf_poll_leak_warnings",  perf_poll_leak_warnings_callback);
 
     // ── OS system APIs ───────────────────────────────────────────────────────
-    register!("__velox_battery_getStatus",   battery_get_status_callback);
-    register!("__velox_system_getInfo",      system_get_info_callback);
-    register!("__velox_power_preventSleep",  power_prevent_sleep_callback);
+    register!("__velox_battery_getStatus",      battery_get_status_callback);
+    register!("__velox_system_getInfo",         system_get_info_callback);
+    register!("__velox_system_getDarkMode",     system_get_dark_mode_callback);
+    register!("__velox_system_getBatterySaver", system_get_battery_saver_callback);
+    register!("__velox_power_preventSleep",     power_prevent_sleep_callback);
     register!("__velox_power_allowSleep",    power_allow_sleep_callback);
     register!("__velox_storage_getDrives",   storage_get_drives_callback);
     register!("__velox_gamepad_poll",        gamepad_poll_callback);
@@ -382,6 +386,10 @@ pub fn register_all(
 
     // ── App lifecycle ────────────────────────────────────────────────────────
     register!("__velox_quit", quit_callback);
+
+    // ── Deep links ───────────────────────────────────────────────────────────
+    register!("__velox_deeplink_getInitialUrl", deeplink_get_initial_url_callback);
+    register!("__velox_deeplink_poll",          deeplink_poll_callback);
 }
 
 struct AsyncState {
@@ -417,6 +425,10 @@ struct AsyncState {
     gamepad_gilrs: std::cell::RefCell<Option<gilrs::Gilrs>>,
     hotkey_state:  std::cell::RefCell<Option<HotkeyState>>,
     next_hotkey_id: std::sync::atomic::AtomicU32,
+    // ── Deep links ───────────────────────────────────────────────────────────
+    /// Forwarded deep-link URLs from single-instance pipe listener.
+    /// Drained by `__velox_deeplink_poll` each frame.
+    deeplink_url_queue: Arc<Mutex<VecDeque<String>>>,
 }
 
 struct WsHandle {
@@ -1049,7 +1061,7 @@ fn write_file_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().can_write_fs() {
-        throw_cap_error(scope, "fs.write");
+        rv.set(reject_cap_promise(scope, "fs.write").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1078,7 +1090,7 @@ fn append_file_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().can_write_fs() {
-        throw_cap_error(scope, "fs.write");
+        rv.set(reject_cap_promise(scope, "fs.write").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1114,7 +1126,7 @@ fn list_dir_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().can_read_fs() {
-        throw_cap_error(scope, "fs.read");
+        rv.set(reject_cap_promise(scope, "fs.read").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1152,7 +1164,7 @@ fn delete_file_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().can_write_fs() {
-        throw_cap_error(scope, "fs.write");
+        rv.set(reject_cap_promise(scope, "fs.write").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1180,7 +1192,7 @@ fn mkdirp_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().can_write_fs() {
-        throw_cap_error(scope, "fs.write");
+        rv.set(reject_cap_promise(scope, "fs.write").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1229,7 +1241,7 @@ fn db_open_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().db {
-        throw_cap_error(scope, "db");
+        rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1260,7 +1272,7 @@ fn db_query_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().db {
-        throw_cap_error(scope, "db");
+        rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1303,7 +1315,7 @@ fn db_run_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().db {
-        throw_cap_error(scope, "db");
+        rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1352,7 +1364,7 @@ fn db_close_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().db {
-        throw_cap_error(scope, "db");
+        rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1388,7 +1400,7 @@ fn db_transaction_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().db {
-        throw_cap_error(scope, "db");
+        rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1485,7 +1497,7 @@ fn dialog_open_file_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().dialog {
-        throw_cap_error(scope, "dialog");
+        rv.set(reject_cap_promise(scope, "dialog").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1539,7 +1551,7 @@ fn dialog_save_file_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().dialog {
-        throw_cap_error(scope, "dialog");
+        rv.set(reject_cap_promise(scope, "dialog").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1578,7 +1590,7 @@ fn dialog_open_folder_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().dialog {
-        throw_cap_error(scope, "dialog");
+        rv.set(reject_cap_promise(scope, "dialog").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1614,7 +1626,7 @@ fn clipboard_read_text_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().clipboard {
-        throw_cap_error(scope, "clipboard");
+        rv.set(reject_cap_promise(scope, "clipboard").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1650,7 +1662,7 @@ fn clipboard_write_text_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().clipboard {
-        throw_cap_error(scope, "clipboard");
+        rv.set(reject_cap_promise(scope, "clipboard").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1695,7 +1707,7 @@ fn notification_send_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().notification {
-        throw_cap_error(scope, "notification");
+        rv.set(reject_cap_promise(scope, "notification").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1754,7 +1766,7 @@ fn vectordb_open_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().db {
-        throw_cap_error(scope, "db");
+        rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
     let data   = args.data().unwrap();
@@ -1788,7 +1800,7 @@ fn vectordb_upsert_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().db {
-        throw_cap_error(scope, "db");
+        rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1837,7 +1849,7 @@ fn vectordb_search_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().db {
-        throw_cap_error(scope, "db");
+        rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1891,7 +1903,7 @@ fn vectordb_close_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().db {
-        throw_cap_error(scope, "db");
+        rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -1958,11 +1970,10 @@ fn fetch_callback(
     let host = extract_host(&url);
 
     if !velox_security::get().can_network(&host) {
-        throw_cap_error(
-            scope,
-            &format!("network.allow[\"{host}\"] — add to velox.config.json \
-                      under \"capabilities\": {{ \"network\": {{ \"allow\": [\"{host}\"] }} }}"),
-        );
+        rv.set(reject_promise_with_error(scope, &format!(
+            "network.allow[\"{host}\"] — add to velox.config.json \
+             under \"capabilities\": {{ \"network\": {{ \"allow\": [\"{host}\"] }} }}"
+        )).into());
         return;
     }
 
@@ -2060,11 +2071,10 @@ fn ws_connect_callback(
     let host = extract_host(&url);
 
     if !velox_security::get().can_network(&host) {
-        throw_cap_error(
-            scope,
-            &format!("network.allow[\"{host}\"] — add to velox.config.json \
-                      under \"capabilities\": {{ \"network\": {{ \"allow\": [\"{host}\"] }} }}"),
-        );
+        rv.set(reject_promise_with_error(scope, &format!(
+            "network.allow[\"{host}\"] — add to velox.config.json \
+             under \"capabilities\": {{ \"network\": {{ \"allow\": [\"{host}\"] }} }}"
+        )).into());
         return;
     }
 
@@ -2315,7 +2325,7 @@ fn mdns_discover_callback(
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().can_mdns() {
-        throw_cap_error(scope, "mdns");
+        rv.set(reject_cap_promise(scope, "mdns").into());
         return;
     }
     let data  = args.data().unwrap();
@@ -2413,12 +2423,30 @@ fn enqueue_completion(
     }
 }
 
-/// Throw a JS Error for a missing capability.
+/// Throw a JS Error for a missing capability (sync bindings only).
 fn throw_cap_error(scope: &mut v8::HandleScope, cap: &str) {
     let msg = format!(
         "Capability required: {cap} — add it to velox.config.json under \"capabilities\""
     );
     throw_js_error(scope, &msg);
+}
+
+/// Return a pre-rejected Promise with a JS Error — use this in **async** bindings
+/// so the caller always gets a settled Promise instead of a synchronous exception.
+fn reject_promise_with_error<'s>(scope: &mut v8::HandleScope<'s>, msg: &str) -> v8::Local<'s, v8::Promise> {
+    let s        = v8::String::new(scope, msg).unwrap_or_else(|| v8::String::empty(scope));
+    let exc      = v8::Exception::error(scope, s);
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    resolver.reject(scope, exc);
+    resolver.get_promise(scope)
+}
+
+/// Convenience wrapper for capability-gate rejections in async bindings.
+fn reject_cap_promise<'s>(scope: &mut v8::HandleScope<'s>, cap: &str) -> v8::Local<'s, v8::Promise> {
+    let msg = format!(
+        "Capability required: {cap} — add it to velox.config.json under \"capabilities\""
+    );
+    reject_promise_with_error(scope, &msg)
 }
 
 // ── OS system APIs ────────────────────────────────────────────────────────────
@@ -2433,7 +2461,7 @@ fn battery_get_status_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !velox_security::get().battery {
-        throw_cap_error(scope, "battery"); return;
+        rv.set(reject_cap_promise(scope, "battery").into()); return;
     }
     let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
     state.tokio.spawn(async move {
@@ -2462,7 +2490,7 @@ fn system_get_info_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !velox_security::get().system {
-        throw_cap_error(scope, "system"); return;
+        rv.set(reject_cap_promise(scope, "system").into()); return;
     }
     let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
     state.tokio.spawn(async move {
@@ -2476,6 +2504,44 @@ fn system_get_info_callback(
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result: Ok(json) });
     });
     rv.set(promise.into());
+}
+
+/// `__velox_system_getDarkMode()` → `"dark" | "light" | "unknown"` (sync, ~1 µs)
+///
+/// Reads the OS appearance preference directly — Windows registry key, macOS
+/// NSUserDefaults, Linux gsettings.  No blocking I/O; safe to call every frame
+/// if needed (though polling once per second is sufficient for most apps).
+fn system_get_dark_mode_callback(
+    scope: &mut v8::HandleScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().system {
+        let s = v8::String::new(scope, "unknown").unwrap();
+        rv.set(s.into());
+        return;
+    }
+    let mode = velox_sysapi::dark_mode();
+    let s = v8::String::new(scope, mode).unwrap();
+    rv.set(s.into());
+}
+
+/// `__velox_system_getBatterySaver()` → boolean (sync, ~1 µs on Windows)
+///
+/// Returns `true` if battery-saver / power-saver mode is active.
+/// Uses `GetSystemPowerStatus()` on Windows (one kernel call, no extra crate).
+/// Returns `false` on macOS/Linux until native support lands.
+fn system_get_battery_saver_callback(
+    scope: &mut v8::HandleScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !velox_security::get().system {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    }
+    let active = velox_sysapi::battery_saver_active();
+    rv.set(v8::Boolean::new(scope, active).into());
 }
 
 /// `__velox_power_preventSleep(reason)` → string guard-id (sync)
@@ -2532,7 +2598,7 @@ fn storage_get_drives_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !velox_security::get().storage {
-        throw_cap_error(scope, "storage"); return;
+        rv.set(reject_cap_promise(scope, "storage").into()); return;
     }
     let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
     state.tokio.spawn(async move {
@@ -2604,7 +2670,7 @@ fn shortcut_register_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !velox_security::get().global_shortcuts {
-        throw_cap_error(scope, "globalShortcuts"); return;
+        rv.set(reject_cap_promise(scope, "globalShortcuts").into()); return;
     }
     let acc = v8_arg_to_string(scope, &args, 0);
     if acc.is_empty() {
@@ -2758,6 +2824,7 @@ fn perf_snapshot_callback(
     let js_t  = perf.avg_js_time();
     let lay_t = perf.avg_layout_time();
     let heap_mb    = last.heap_used_bytes as f64 / (1024.0 * 1024.0);
+    let rss_mb     = last.process_rss_bytes as f64 / (1024.0 * 1024.0);
     let node_count = last.node_count;
     let gpu_t      = perf.avg_gpu_time();
     drop(perf);
@@ -2765,7 +2832,7 @@ fn perf_snapshot_callback(
     let json = format!(
         "{{\"fps\":{fps:.1},\"frameTime\":{avg:.2},\"frameTimeP99\":{p99:.2},\
          \"jsTime\":{js_t:.2},\"layoutTime\":{lay_t:.2},\"gpuTime\":{gpu_t:.2},\
-         \"memoryJS\":{heap_mb:.2},\"nodeCount\":{node_count}}}"
+         \"memoryJS\":{heap_mb:.2},\"memoryTotal\":{rss_mb:.1},\"nodeCount\":{node_count}}}"
     );
     let s = v8::String::new(scope, &json).unwrap_or_else(|| v8::String::empty(scope));
     rv.set(s.into());
@@ -2846,6 +2913,51 @@ fn quit_callback(
             (quit_fn)();
         }
     }
+}
+
+// ── Deep link bindings ────────────────────────────────────────────────────────
+
+/// `__velox_deeplink_getInitialUrl()` → string
+///
+/// Returns the URL that launched the app (e.g. `"notes://note/42"`), or `""`
+/// if the app was opened normally.  The value is set by velox-core at startup
+/// via the `VELOX_LAUNCH_URL` environment variable before the runtime starts.
+fn deeplink_get_initial_url_callback(
+    scope: &mut v8::HandleScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let url = std::env::var("VELOX_LAUNCH_URL").unwrap_or_default();
+    let s = v8::String::new(scope, &url).unwrap();
+    rv.set(s.into());
+}
+
+/// `__velox_deeplink_poll()` → JSON string (array of URL strings)
+///
+/// Drains the forwarded URL queue (populated by the single-instance listener
+/// when a second process connects and sends a URL).  Called each frame inside
+/// `__velox_frameCallback`; JS fires `deeplink.onOpen` for each URL.
+fn deeplink_poll_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let urls: Vec<String> = {
+        let mut q = state.deeplink_url_queue.lock().unwrap();
+        q.drain(..).collect()
+    };
+
+    let json = if urls.is_empty() {
+        "[]".to_string()
+    } else {
+        serde_json::to_string(&urls).unwrap_or_else(|_| "[]".to_string())
+    };
+    let s = v8::String::new(scope, &json).unwrap();
+    rv.set(s.into());
 }
 
 /// Throw a generic JS Error with the given message.

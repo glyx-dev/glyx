@@ -15,6 +15,7 @@ members = [
     "crates/velox-sysapi",
     "crates/velox-perf",
     "crates/velox-cli",
+    "crates/velox-runner",
     "examples/hello-world",
     "examples/hello-world-snapshot",
     "examples/cli-test",
@@ -52,8 +53,9 @@ serde_json = "1"
 clap      = { version = "4", features = ["derive"] }
 
 # Utils
-log       = "0.4"
+log        = "0.4"
 env_logger = "0.11"
+crc32fast  = "1"
 dotenvy   = "0.15"
 thiserror = "1"
 anyhow    = "1"
@@ -66,6 +68,7 @@ sqlx            = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 libsqlite3-sys  = { version = "0.30", features = ["bundled"] }
 rfd                 = { version = "0.14", features = ["tokio"] }
 arboard             = "3"
+keyring             = { version = "3", features = ["windows-native", "apple-native", "linux-secret-service-rt-tokio-crypto-openssl"] }
 clipboard-win       = "5"
 notify-rust         = "4"
 raw-window-handle   = "0.6"
@@ -78,6 +81,8 @@ sysinfo             = "0.33"
 keepawake           = "0.5"
 gilrs               = "0.11"
 global-hotkey       = "0.6"
+lru                 = "0.12"
+dark-light          = "1"
 
 [profile.dev]
 opt-level = 1          # faster compiles, decent perf in dev

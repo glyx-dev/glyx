@@ -18,7 +18,8 @@
     "power":          true,
     "storage":        true,
     "gamepads":       true,
-    "globalShortcuts": true
+    "globalShortcuts": true,
+    "deeplink": { "scheme": "notes", "singleInstance": true }
   },
   "dev": {
     "entry": "js/app.jsx",

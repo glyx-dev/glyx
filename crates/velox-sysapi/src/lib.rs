@@ -78,6 +78,54 @@ pub fn storage_drives() -> Vec<DriveInfo> {
         .collect()
 }
 
+// ── Appearance (dark / light mode) ────────────────────────────────────────────
+
+/// Returns `"dark"`, `"light"`, or `"unknown"`.
+///
+/// Reads the OS-level preference synchronously:
+/// - Windows: `HKCU\...\Themes\Personalize\AppsUseLightTheme` registry value.
+/// - macOS:   `NSUserDefaults` via `CFPreferences`.
+/// - Linux:   `gsettings org.gnome.desktop.interface color-scheme` (GNOME) or
+///            XDG portals when `dark-light` detects another DE.
+pub fn dark_mode() -> &'static str {
+    match dark_light::detect() {
+        dark_light::Mode::Dark    => "dark",
+        dark_light::Mode::Light   => "light",
+        dark_light::Mode::Default => "unknown",
+    }
+}
+
+// ── Battery saver ─────────────────────────────────────────────────────────────
+
+/// Returns `true` if the OS battery-saver / power-saver mode is active.
+///
+/// - Windows: `GetSystemPowerStatus().SystemStatusFlag & 1` (no extra crate —
+///   raw Win32 FFI; one kernel call, ~1 µs).
+/// - macOS/Linux: returns `false` until native support is added.
+pub fn battery_saver_active() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use std::mem;
+        // SYSTEM_POWER_STATUS layout (winbase.h)
+        #[repr(C)]
+        struct SystemPowerStatus {
+            ac_line_status:       u8,
+            battery_flag:         u8,
+            battery_life_percent: u8,
+            system_status_flag:   u8,  // bit 0 = battery saver active
+            battery_life_time:    u32,
+            battery_full_life_time: u32,
+        }
+        extern "system" {
+            fn GetSystemPowerStatus(lp_system_power_status: *mut SystemPowerStatus) -> i32;
+        }
+        let mut status: SystemPowerStatus = unsafe { mem::zeroed() };
+        unsafe { GetSystemPowerStatus(&mut status) != 0 && status.system_status_flag & 1 != 0 }
+    }
+    #[cfg(not(target_os = "windows"))]
+    { false }
+}
+
 // ── Sleep prevention ──────────────────────────────────────────────────────────
 
 /// Opaque handle that keeps system sleep prevention active.

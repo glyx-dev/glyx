@@ -130,28 +130,18 @@ fn read_config_json() -> Option<String> {
     std::fs::read_to_string("velox.config.json").ok()
 }
 
-/// Load the Velox config from the current working directory.
-///
-/// Applies any `window` overrides to `cfg` and returns the parsed capabilities.
-/// Missing file → warning + all capabilities OFF (fail-closed).
-fn load_velox_config(cfg: &mut WindowConfig) -> Capabilities {
-    let src = read_config_json();
+/// Parse a velox config JSON string, apply window overrides, and return capabilities.
+fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> Capabilities {
+    let file: Option<VeloxConfigFile> = serde_json::from_str::<VeloxConfigFile>(json)
+        .map_err(|e| { log::error!("velox config parse error: {e}"); e })
+        .ok();
 
-    let file: Option<VeloxConfigFile> = src
-        .and_then(|src| {
-            serde_json::from_str::<VeloxConfigFile>(&src)
-                .map_err(|e| { log::error!("velox.config.json parse error: {e}"); e })
-                .ok()
-        });
-
-    // Apply window section if present.
     if let Some(w) = file.as_ref().and_then(|f| f.window.as_ref()) {
         if let Some(t) = &w.title { cfg.title = t.clone(); }
 
         cfg.startup_mode = match w.startup_mode.as_deref() {
             Some("fullscreen") => StartupMode::Fullscreen,
             Some("maximized")  => StartupMode::Maximized,
-            // Omitting width+height with no explicit mode implies maximized.
             None if w.width.is_none() && w.height.is_none() => StartupMode::Maximized,
             _ => {
                 if let Some(wd) = w.width  { cfg.width  = wd; }
@@ -161,7 +151,26 @@ fn load_velox_config(cfg: &mut WindowConfig) -> Capabilities {
         };
     }
 
-    let caps = file.and_then(|f| f.capabilities).unwrap_or_default();
+    file.and_then(|f| f.capabilities).unwrap_or_default()
+}
+
+/// Load the Velox config from the current working directory.
+///
+/// Applies any `window` overrides to `cfg` and returns the parsed capabilities.
+/// Missing file → warning + all capabilities OFF (fail-closed).
+fn load_velox_config(cfg: &mut WindowConfig) -> Capabilities {
+    let json = match read_config_json() {
+        Some(j) => j,
+        None => {
+            log::warn!(
+                "velox-security: no velox.config.ts / velox.config.json found or no capabilities declared \
+                 — all capabilities default to OFF"
+            );
+            return Capabilities::default();
+        }
+    };
+
+    let caps = apply_config_json(&json, cfg);
 
     if caps.can_read_fs() || caps.db || caps.network.is_some() {
         log::info!(
@@ -301,6 +310,24 @@ impl AppConfig {
             extensions:    vec![],
         }
     }
+
+    /// Create an AppConfig from a binary trailer payload appended to the runner executable.
+    ///
+    /// Called by velox-runner when it detects embedded payload in its own bytes.
+    /// The trailer is written by `velox build --mode snapshot` for JS-only projects
+    /// without invoking cargo.
+    pub fn from_trailer(snapshot_blob: Vec<u8>, js_src: String, config_json: &str) -> Self {
+        let mut window = WindowConfig::default();
+        let caps = apply_config_json(config_json, &mut window);
+        velox_security::init(caps);
+        AppConfig {
+            window,
+            js_src: Some(js_src),
+            snapshot_blob: Some(snapshot_blob),
+            dev_mode: None,
+            extensions: vec![],
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -390,11 +417,14 @@ struct PerWindowState {
     js_nodes:     std::collections::HashMap<u32, JsNode>,
     js_root:      Option<u32>,
     images:       std::collections::HashMap<u32, peniko::Image>,
-    images_by_path: std::collections::HashMap<String, peniko::Image>,
+    /// Path-keyed image cache — decoded images reused across remounts without re-decoding.
+    /// Capped at 64 entries (LRU eviction) so long sessions don't accumulate stale decoded bitmaps.
+    images_by_path: lru::LruCache<String, peniko::Image>,
     image_cache_hits: u64,
     image_cache_misses: u64,
     /// Shaped text cache — keyed by (text, font_size_bits, max_width_bits, color).
-    label_cache: std::collections::HashMap<LabelKey, CachedLabel>,
+    /// Capped at 256 entries (LRU eviction) to prevent unbounded growth during long sessions.
+    label_cache: lru::LruCache<LabelKey, CachedLabel>,
     /// Current cursor position in physical pixels.
     cursor_x:     f32,
     cursor_y:     f32,
@@ -407,6 +437,10 @@ struct PerWindowState {
     cursor_blink_deadline: Instant,
     /// Rolling performance metrics — shared with the JS binding via Arc.
     perf: Arc<Mutex<velox_perf::PerfState>>,
+    /// sysinfo System for sampling process RSS each frame.
+    sys_info: sysinfo::System,
+    /// PID cached to avoid repeated lookups.
+    sys_pid: sysinfo::Pid,
     #[cfg(feature = "dev")]
     dev_mode: Option<DevModeState>,
 }
@@ -631,6 +665,7 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
         let last_f = perf_g.last_frame();
         let last_ms = last_f.frame_time_ms;
         let heap_used_mb = last_f.heap_used_bytes / (1024 * 1024);
+        let rss_mb = last_f.process_rss_bytes / (1024 * 1024);
         let budget = perf_g.budget_ms;
         drop(perf_g);
         let since = dev.last_reload
@@ -639,8 +674,8 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
         dev.overlay_lines = vec![
             format!("Dev overlay (Ctrl+Shift+D)  budget {:.1}ms", budget),
             format!("FPS {:.0}  last {:.1}ms  avg {:.1}ms  P99 {:.1}ms", fps, last_ms, avg_ms, p99_ms),
-            format!("JS {:.2}ms  layout {:.2}ms  GPU {:.2}ms  nodes {}  heap {}MB",
-                js_ms, lay_ms, gpu_ms, state.js_nodes.len(), heap_used_mb),
+            format!("JS {:.2}ms  layout {:.2}ms  GPU {:.2}ms  nodes {}  heap {}MB  RSS {}MB",
+                js_ms, lay_ms, gpu_ms, state.js_nodes.len(), heap_used_mb, rss_mb),
             format!("{}  (reload {}s ago)", dev.last_build_message, since),
         ];
         dev.overlay_next_refresh = now + Duration::from_millis(250);
@@ -808,6 +843,85 @@ pub fn run(mut config: AppConfig) {
     let caps = load_velox_config(&mut config.window);
     velox_security::init(caps);
 
+    // ── Deep link: check launch args for a URL matching the configured scheme ──
+    //
+    // If the app registered `"deeplink": { "scheme": "notes" }` and was launched
+    // with `notes://note/42` as an argument, we capture it in `VELOX_LAUNCH_URL`
+    // so the `__velox_deeplink_getInitialUrl()` binding can retrieve it.
+    //
+    // Single-instance mode (opt-in):
+    //   First instance  — binds a TCP socket on localhost, writes port to a temp
+    //                     file so second instances know where to forward URLs.
+    //   Second instance — connects to that socket, sends the URL, exits.
+    //
+    // The TCP listener is started after the runtime is ready (inside WindowReady)
+    // using the Tokio handle and the runtime's `deeplink_url_queue`.
+    let mut single_instance_tcp: Option<std::net::TcpListener> = {
+        if let Some(ref dl) = velox_security::get().deeplink {
+            let scheme_prefix = format!("{}://", dl.scheme);
+            let launch_url: Option<String> = std::env::args()
+                .skip(1)
+                .find(|a| a.starts_with(&scheme_prefix));
+
+            if let Some(ref url) = launch_url {
+                // Safety: this is the only write; bindings read it after runtime starts.
+                #[allow(unused_unsafe)]
+                unsafe { std::env::set_var("VELOX_LAUNCH_URL", url); }
+                log::info!("velox: deep-link launch URL: {}", url);
+            }
+
+            if dl.single_instance {
+                let app_name = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| "velox-app".to_string());
+                let port_file = std::env::temp_dir().join(format!("velox-{}.port", app_name));
+
+                // Try to connect as a second instance.
+                let is_second = port_file.exists() && {
+                    let connected = std::fs::read_to_string(&port_file)
+                        .ok()
+                        .and_then(|s| s.trim().parse::<u16>().ok())
+                        .and_then(|port| {
+                            use std::io::Write;
+                            std::net::TcpStream::connect(("127.0.0.1", port))
+                                .ok()
+                                .and_then(|mut s| {
+                                    let payload = launch_url.as_deref().unwrap_or("").to_string() + "\n";
+                                    s.write_all(payload.as_bytes()).ok()
+                                })
+                        })
+                        .is_some();
+                    connected
+                };
+
+                if is_second {
+                    log::info!("velox: second instance detected — forwarded URL and exiting");
+                    std::process::exit(0);
+                }
+
+                // First instance: bind TCP listener.
+                match std::net::TcpListener::bind("127.0.0.1:0") {
+                    Ok(listener) => {
+                        listener.set_nonblocking(true).ok();
+                        let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+                        std::fs::write(&port_file, port.to_string()).ok();
+                        log::info!("velox: single-instance listener on port {}", port);
+                        Some(listener)
+                    }
+                    Err(e) => {
+                        log::warn!("velox: could not bind single-instance socket: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
     // VELOX_PERF_CHECK=<duration_secs>:<budget_ms> — set by `velox build --check-performance`.
     // After the given duration the app prints a JSON perf summary and exits.
     let perf_check: Option<(u64, f64)> = std::env::var("VELOX_PERF_CHECK").ok().and_then(|v| {
@@ -938,6 +1052,51 @@ pub fn run(mut config: AppConfig) {
 
                 rt.register_extensions(&*extensions_arc);
 
+                // ── Single-instance deep-link listener (main window only) ──
+                // If a TCP listener was created before the event loop started, hand it
+                // to a Tokio task that forwards URLs from second instances into the
+                // runtime's deeplink_url_queue.
+                if window_handle == 0 {
+                    if let Some(listener) = single_instance_tcp.take() {
+                        let queue_clone = Arc::clone(&rt.deeplink_url_queue);
+                        // Push URLs to the queue; the next frame will pick them up.
+                        tokio_handle.spawn(async move {
+                            use tokio::io::AsyncBufReadExt;
+                            // Convert the std listener to a tokio listener.
+                            let async_listener = match tokio::net::TcpListener::from_std(listener) {
+                                Ok(l)  => l,
+                                Err(e) => {
+                                    log::warn!("velox: deep-link listener error: {}", e);
+                                    return;
+                                }
+                            };
+                            loop {
+                                match async_listener.accept().await {
+                                    Ok((stream, _addr)) => {
+                                        let queue = Arc::clone(&queue_clone);
+                                        tokio::spawn(async move {
+                                            let reader = tokio::io::BufReader::new(stream);
+                                            let mut lines = reader.lines();
+                                            while let Ok(Some(line)) = lines.next_line().await {
+                                                let url = line.trim().to_string();
+                                                if !url.is_empty() {
+                                                    log::info!("velox: deep-link forwarded URL: {}", url);
+                                                    queue.lock().unwrap().push_back(url);
+                                                    // Note: no request_redraw here — the frame loop will
+                                                    // pick up the URL on the next scheduled frame.
+                                                }
+                                            }
+                                        });
+                                    }
+                                    Err(e) => {
+                                        log::warn!("velox: deep-link listener accept error: {}", e);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+
                 if let Some(ref js) = *js_src_arc {
                     match rt.eval(js) {
                         Ok(_)  => log::info!("Window {}: JS eval complete.", window_handle),
@@ -960,16 +1119,23 @@ pub fn run(mut config: AppConfig) {
                     js_nodes:     std::collections::HashMap::new(),
                     js_root:      None,
                     images:       std::collections::HashMap::new(),
-                    images_by_path: std::collections::HashMap::new(),
+                    images_by_path: lru::LruCache::new(std::num::NonZeroUsize::new(64).unwrap()),
                     image_cache_hits: 0,
                     image_cache_misses: 0,
-                    label_cache:  std::collections::HashMap::new(),
+                    label_cache:  lru::LruCache::new(std::num::NonZeroUsize::new(256).unwrap()),
                     cursor_x:     0.0,
                     cursor_y:     0.0,
                     request_redraw: Arc::clone(&request_redraw),
                     cursor_blink_on:       true,
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
                     perf:          shared_perf,
+                    sys_info:      {
+                        let mut s = sysinfo::System::new();
+                        let pid = sysinfo::Pid::from_u32(std::process::id());
+                        s.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), false);
+                        s
+                    },
+                    sys_pid:       sysinfo::Pid::from_u32(std::process::id()),
                     #[cfg(feature = "dev")]
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
@@ -1157,6 +1323,10 @@ pub fn run(mut config: AppConfig) {
                 let (frame_time_ms, js_time_ms, layout_time_ms) = perf_snapshot_pre;
                 if frame_time_ms > 0.0 {
                     let heap = s.runtime.heap_stats();
+                    s.sys_info.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[s.sys_pid]), false);
+                    let process_rss = s.sys_info.process(s.sys_pid)
+                        .map(|p| p.memory())
+                        .unwrap_or(0);
                     let mut perf = s.perf.lock().unwrap();
                     perf.last_frame_at = Some(frame_start);
 
@@ -1188,6 +1358,7 @@ pub fn run(mut config: AppConfig) {
                         gpu_time_ms,
                         node_count: perf_node_count,
                         heap_used_bytes: heap.used_heap_size,
+                        process_rss_bytes: process_rss,
                     });
                 } else {
                     s.perf.lock().unwrap().last_frame_at = Some(frame_start);

@@ -1,10 +1,11 @@
 //! velox — CLI for the Velox desktop app framework.
 //!
 //! Commands:
-//!   velox create <name>              Scaffold a new project
-//!   velox dev                        Start dev server with hot reload
-//!   velox build [--target <os>]      Production build (bun → cargo)
-//!   velox package [--target <os>]    Create distributable installer/archive
+//!   velox create <name> [--native]       Scaffold a new project
+//!   velox dev                            Start dev server with hot reload
+//!   velox build [--target <os>]          Production build (bun → runner/cargo)
+//!   velox package [--target <os>]        Create distributable installer/archive
+//!   velox runtime list|build|install     Manage cached velox-runner binaries
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -25,7 +26,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Create { name: String },
+    /// Scaffold a new Velox project.
+    /// Default: JS-only project (no Rust toolchain required).
+    /// Use --native to generate a full Rust workspace for custom native extensions.
+    Create {
+        name: String,
+        /// Generate a full Rust workspace with Cargo.toml and src/main.rs.
+        /// Required if you want to add custom VeloxExtension implementations.
+        #[arg(long)]
+        native: bool,
+    },
     Dev,
     Build {
         /// Target OS (windows, macos, linux)
@@ -38,8 +48,6 @@ enum Commands {
         #[arg(long, default_value = "snapshot")]
         mode: String,
         /// After building, launch the app and check that it meets the frame-time budget.
-        /// The app runs headlessly for --perf-duration seconds, then prints a perf report.
-        /// Exits with code 1 if any budget violations occurred.
         #[arg(long)]
         check_performance: bool,
         /// Frame-time budget in milliseconds for --check-performance. Default: 16.667 (60 fps).
@@ -50,6 +58,21 @@ enum Commands {
         perf_duration: u64,
     },
     Package { target: Option<String> },
+    /// Manage cached velox-runner binaries.
+    Runtime {
+        #[command(subcommand)]
+        cmd: RuntimeCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum RuntimeCommands {
+    /// List cached velox-runner binaries.
+    List,
+    /// Build velox-runner from source and cache locally.
+    Build,
+    /// Install a specific velox-runner version (builds from source if not cached).
+    Install { version: Option<String> },
 }
 
 fn main() {
@@ -67,23 +90,85 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Create { name }   => cmd_create(&name),
-        Commands::Dev               => cmd_dev(),
+        Commands::Create { name, native } => cmd_create(&name, native),
+        Commands::Dev                     => cmd_dev(),
         Commands::Build { target, mode, check_performance, perf_budget, perf_duration } =>
             cmd_build(target.as_deref(), &mode, check_performance, perf_budget, perf_duration),
-        Commands::Package { target } => cmd_package(target.as_deref()),
+        Commands::Package { target }      => cmd_package(target.as_deref()),
+        Commands::Runtime { cmd }         => cmd_runtime(cmd),
     }
 }
 
-fn cmd_create(name: &str) -> Result<()> {
+// ── velox create ─────────────────────────────────────────────────────────────
+
+fn cmd_create(name: &str, native: bool) -> Result<()> {
     let dest = PathBuf::from(name);
     if dest.exists() { bail!("directory '{}' already exists", name); }
     let velox_home = velox_home()?;
-    println!("Creating Velox project: {name}");
+
+    if native {
+        println!("Creating Velox project (native): {name}/");
+        println!("  Includes Cargo.toml + src/main.rs for custom VeloxExtension support.");
+        cmd_create_native(name, &dest, &velox_home)?;
+    } else {
+        println!("Creating Velox project: {name}/");
+        println!("  JS-only mode — no Rust toolchain required.");
+        cmd_create_js(name, &dest, &velox_home)?;
+    }
+
+    println!();
+    println!("✓ Created project: {name}/");
+    println!();
+    println!("Next steps:");
+    println!("  cd {name}");
+    println!("  bun install");
+    if native {
+        println!("  velox dev      # hot-reload dev server (requires Rust toolchain)");
+    } else {
+        println!("  velox dev      # hot-reload dev server (no Rust required)");
+    }
+    Ok(())
+}
+
+fn cmd_create_js(name: &str, dest: &Path, velox_home: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest.join("js"))?;
+
+    let react_path  = relpath(dest, &velox_home.join("js/packages/@velox/react"));
+    let router_path = relpath(dest, &velox_home.join("js/packages/@velox/router"));
+    let config_path = relpath(dest, &velox_home.join("js/packages/@velox/config"));
+
+    write_file(dest.join("js/polyfills.js"), POLYFILLS_JS)?;
+    write_file(dest.join("js/app.jsx"), &app_jsx_template(name))?;
+    write_file(dest.join("velox.config.ts"), &velox_config_ts_template(name))?;
+    write_file(dest.join("package.json"), &format!(
+        r#"{{
+  "name": "{name}",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {{
+    "react":         "^18",
+    "@velox/react":  "file:{react_path}",
+    "@velox/router": "file:{router_path}"
+  }},
+  "devDependencies": {{
+    "@velox/config": "file:{config_path}"
+  }}
+}}
+"#))?;
+    write_file(dest.join(".gitignore"), "/node_modules\n/js/app.js\n/target/velox/velox.config.resolved.json\n")?;
+    Ok(())
+}
+
+fn cmd_create_native(name: &str, dest: &Path, velox_home: &Path) -> Result<()> {
     std::fs::create_dir_all(dest.join("src"))?;
     std::fs::create_dir_all(dest.join("js"))?;
-    let core_path  = relpath(&dest, &velox_home.join("crates/velox-core"));
-    let shell_path = relpath(&dest, &velox_home.join("crates/velox-shell"));
+
+    let core_path  = relpath(dest, &velox_home.join("crates/velox-core"));
+    let shell_path = relpath(dest, &velox_home.join("crates/velox-shell"));
+    let react_path  = relpath(dest, &velox_home.join("js/packages/@velox/react"));
+    let router_path = relpath(dest, &velox_home.join("js/packages/@velox/router"));
+    let config_path = relpath(dest, &velox_home.join("js/packages/@velox/config"));
+
     write_file(dest.join("Cargo.toml"), &format!(
         r#"[package]
 name    = "{name}"
@@ -101,10 +186,31 @@ velox-core  = {{ path = "{core_path}", default-features = false }}
 velox-shell = {{ path = "{shell_path}" }}
 env_logger  = "0.11"
 "#))?;
-    write_file(dest.join("src/main.rs"), "#![cfg_attr(all(target_os = \"windows\", not(debug_assertions)), windows_subsystem = \"windows\")]\n\nfn main() {\n    velox_core::run(velox_core::AppConfig::from_config());\n}\n")?;
+    write_file(dest.join("src/main.rs"), "#![cfg_attr(all(target_os = \"windows\", not(debug_assertions)), windows_subsystem = \"windows\")]\n\nfn main() {\n    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(\"info\"))\n        .format_timestamp(None)\n        .format_module_path(false)\n        .init();\n    velox_core::run(velox_core::AppConfig::from_config());\n}\n")?;
     write_file(dest.join("js/polyfills.js"), POLYFILLS_JS)?;
-    write_file(dest.join("js/app.jsx"), &format!(
-        r#"import './polyfills.js';
+    write_file(dest.join("js/app.jsx"), &app_jsx_template(name))?;
+    write_file(dest.join("velox.config.ts"), &velox_config_ts_template(name))?;
+    write_file(dest.join("package.json"), &format!(
+        r#"{{
+  "name": "{name}",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {{
+    "react":         "^18",
+    "@velox/react":  "file:{react_path}",
+    "@velox/router": "file:{router_path}"
+  }},
+  "devDependencies": {{
+    "@velox/config": "file:{config_path}"
+  }}
+}}
+"#))?;
+    write_file(dest.join(".gitignore"), "/target\n/node_modules\n/js/app.js\n/target/velox/velox.config.resolved.json\n")?;
+    Ok(())
+}
+
+fn app_jsx_template(name: &str) -> String {
+    format!(r#"import './polyfills.js';
 import React, {{ useState }} from 'react';
 import {{ View, Text, Pressable, render, useWindowSize }} from '@velox/react';
 
@@ -135,12 +241,11 @@ function App() {{
 }}
 
 render(<App />);
-"#))?;
-    let react_path   = relpath(&dest, &velox_home.join("js/packages/@velox/react"));
-    let router_path  = relpath(&dest, &velox_home.join("js/packages/@velox/router"));
-    let config_path  = relpath(&dest, &velox_home.join("js/packages/@velox/config"));
-    write_file(dest.join("velox.config.ts"), &format!(
-        r#"import {{ defineConfig }} from '@velox/config';
+"#)
+}
+
+fn velox_config_ts_template(name: &str) -> String {
+    format!(r#"import {{ defineConfig }} from '@velox/config';
 
 export default defineConfig({{
   window: {{
@@ -162,36 +267,14 @@ export default defineConfig({{
     watch: ['js'],
   }},
 }});
-"#))?;
-    write_file(dest.join("package.json"), &format!(
-        r#"{{
-  "name": "{name}",
-  "version": "0.1.0",
-  "private": true,
-  "dependencies": {{
-    "react":         "^18",
-    "@velox/react":  "file:{react_path}",
-    "@velox/router": "file:{router_path}"
-  }},
-  "devDependencies": {{
-    "@velox/config": "file:{config_path}"
-  }}
-}}
-"#))?;
-    write_file(dest.join(".gitignore"), "/target\n/node_modules\n/js/app.js\n/target/velox/velox.config.resolved.json\n")?;
-    println!();
-    println!("✓ Created project: {name}/");
-    println!();
-    println!("Next steps:");
-    println!("  cd {name}");
-    println!("  bun install");
-    println!("  velox dev");
-    Ok(())
+"#)
 }
+
+// ── velox dev ─────────────────────────────────────────────────────────────────
 
 fn cmd_dev() -> Result<()> {
     let project_name = read_project_name()
-        .context("Run `velox dev` from the project root (where Cargo.toml lives)")?;
+        .context("Run `velox dev` from the project root (where velox.config.ts or package.json lives)")?;
     let cfg = read_dev_config();
     if let Some((entry, output)) = &cfg {
         println!("Building JS: {} → {}", entry, output);
@@ -199,13 +282,29 @@ fn cmd_dev() -> Result<()> {
         println!("✓ JS built");
     }
     println!("Starting dev server for '{project_name}' (hot reload active)...");
-    let status = Command::new("cargo")
-        .args(["run", "-p", &project_name])
-        .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
-        .status()
-        .context("Failed to run `cargo run`; is Rust installed?")?;
-    std::process::exit(status.code().unwrap_or(1));
+
+    if is_native_project() {
+        // Native project: custom Rust extensions compiled in — use cargo run
+        let status = Command::new("cargo")
+            .args(["run", "-p", &project_name])
+            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
+            .status()
+            .context("Failed to run `cargo run`; is Rust installed?")?;
+        std::process::exit(status.code().unwrap_or(1));
+    } else {
+        // JS-only project: spawn the prebuilt velox-runner (dev build with hot-reload)
+        let runner = find_or_build_runner(true)
+            .context("Could not find or build velox-runner. Run `velox runtime build`.")?;
+        log::info!("Using runner: {}", runner.display());
+        let status = Command::new(&runner)
+            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
+            .status()
+            .with_context(|| format!("Failed to launch {}", runner.display()))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }
+
+// ── velox build ───────────────────────────────────────────────────────────────
 
 fn cmd_build(
     target: Option<&str>,
@@ -215,7 +314,7 @@ fn cmd_build(
     perf_duration: u64,
 ) -> Result<()> {
     let project_name = read_project_name()
-        .context("Run `velox build` from the project root (where Cargo.toml lives)")?;
+        .context("Run `velox build` from the project root (where velox.config.ts or package.json lives)")?;
 
     let bin_path = match mode {
         "snapshot" => build_snapshot_mode(target, &project_name)?,
@@ -245,7 +344,6 @@ fn run_perf_check(bin: &Path, budget_ms: f64, duration_secs: u64) -> Result<()> 
         .with_context(|| format!("Failed to launch {}", bin.display()))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // The app prints a JSON line starting with "VELOX_PERF_RESULT:" before exiting.
     let result_line = stdout.lines()
         .find(|l| l.starts_with("VELOX_PERF_RESULT:"))
         .map(|l| l.trim_start_matches("VELOX_PERF_RESULT:").trim());
@@ -272,16 +370,11 @@ fn run_perf_check(bin: &Path, budget_ms: f64, duration_secs: u64) -> Result<()> 
     Ok(())
 }
 
-/// snapshot mode — self-contained exe with embedded V8 snapshot + embedded app JS
+/// snapshot mode — self-contained exe with embedded V8 snapshot + embedded app JS.
 ///
-/// What's embedded:
-///   - V8 snapshot: stubs + polyfills pre-executed (fast V8 init, ~50ms)
-///   - App bundle: minified JS embedded as bytes (no external files needed)
-///
-/// At runtime:
-///   1. Restore V8 from snapshot (stubs+polyfills already done)
-///   2. Re-register real Rust bindings
-///   3. Eval embedded app.js → render(<App />) with real bindings → correct scene
+/// For native projects: `cargo build --release -p <project_name>`
+/// For JS-only projects: `cargo build --release --no-default-features -p velox-runner`
+///                        then rename the output binary to <project_name>[.exe]
 fn build_snapshot_mode(target: Option<&str>, project_name: &str) -> Result<Option<PathBuf>> {
     println!("[snapshot mode] bun bundle → V8 snapshot + embedded app.js → self-contained binary");
 
@@ -300,17 +393,22 @@ fn build_snapshot_mode(target: Option<&str>, project_name: &str) -> Result<Optio
     // 2. Create V8 snapshot (stubs + polyfills ONLY — app is eval'd separately at runtime)
     let snap = create_snapshot_for_build(project_name).context("V8 snapshot creation failed")?;
 
-    // 3. Cargo build: embed snapshot, app bundle, and config (all baked in — no external files)
-    // Resolve config to JSON first (handles both .ts and .json sources).
+    // 3. Resolve config to JSON and embed it
     let abs_bundle = std::env::current_dir()?.join(&bundle);
     let config_json = resolve_config_json().context("failed to resolve velox config")?;
     std::fs::create_dir_all("target/velox")?;
     let resolved_cfg = PathBuf::from("target/velox/velox.config.resolved.json");
     std::fs::write(&resolved_cfg, &config_json)?;
     let abs_config = std::env::current_dir()?.join(&resolved_cfg);
-    let bin_path = cargo_build_release(target, project_name, Some(&snap), Some(&abs_bundle), Some(&abs_config))?;
 
-    // Write build-mode marker so `velox package` knows to skip JS files
+    let bin_path = if is_native_project() {
+        // Native: build the app's own binary (compile-time embedding via build.rs)
+        cargo_build_release(target, project_name, Some(&snap), Some(&abs_bundle), Some(&abs_config))?
+    } else {
+        // JS-only: copy cached prod runner and append payload as binary trailer — no cargo needed
+        append_trailer_snapshot(target, project_name, &snap, &abs_bundle, &abs_config)?
+    };
+
     let _ = std::fs::write("target/velox/build-mode", "snapshot");
 
     println!();
@@ -326,7 +424,6 @@ fn build_bundle_mode(target: Option<&str>, project_name: &str) -> Result<Option<
 
     if let Some((entry, _output)) = read_dev_config() {
         let bundle_src = build_app_bundle(project_name, &entry).context("app bundle build failed")?;
-        // Copy minified bundle to the output path so the binary loads it at runtime
         let output_js = read_dev_config().map(|(_, o)| o).unwrap_or_else(|| "js/app.js".into());
         std::fs::copy(&bundle_src, &output_js).with_context(|| format!("copy bundle to {output_js}"))?;
         println!("✓ Bundle → {} ({} KB)", output_js, std::fs::metadata(&output_js)?.len() / 1024);
@@ -334,7 +431,12 @@ fn build_bundle_mode(target: Option<&str>, project_name: &str) -> Result<Option<
         println!("⚠ No dev.entry in velox config — skipping JS bundle");
     }
 
-    let bin_path = cargo_build_release(target, project_name, None, None, None)?;
+    let bin_path = if is_native_project() {
+        cargo_build_release(target, project_name, None, None, None)?
+    } else {
+        copy_prod_runner_as(target, project_name)?
+    };
+
     let _ = std::fs::create_dir_all("target/velox");
     let _ = std::fs::write("target/velox/build-mode", "bundle");
     println!();
@@ -356,7 +458,12 @@ fn build_portable_mode(target: Option<&str>, project_name: &str) -> Result<Optio
         println!("⚠ No dev.entry in velox config — skipping JS build");
     }
 
-    let bin_path = cargo_build_release(target, project_name, None, None, None)?;
+    let bin_path = if is_native_project() {
+        cargo_build_release(target, project_name, None, None, None)?
+    } else {
+        copy_prod_runner_as(target, project_name)?
+    };
+
     let _ = std::fs::create_dir_all("target/velox");
     let _ = std::fs::write("target/velox/build-mode", "portable");
     println!();
@@ -365,11 +472,120 @@ fn build_portable_mode(target: Option<&str>, project_name: &str) -> Result<Optio
     Ok(Some(bin_path))
 }
 
-/// Shared cargo build --release helper. Returns the path to the produced binary.
+/// For JS-only snapshot builds: copy the cached prod runner and append the payload
+/// (snapshot blob + app JS + config) as a binary trailer.  No cargo invocation needed.
 ///
-/// `snapshot`   — path to the `.snapshot` blob embedded via `VELOX_APP_SNAPSHOT`
-/// `app_js`     — path to the minified app bundle embedded via `VELOX_APP_JS`
-/// `app_config` — path to `velox.config.json` embedded via `VELOX_APP_CONFIG`
+/// Footer v1 layout (last 72 bytes):
+///   Offset  Size  Field
+///    0       8    snap_offset  u64 LE
+///    8       8    snap_len     u64 LE
+///   16       8    js_offset    u64 LE
+///   24       8    js_len       u64 LE
+///   32       8    cfg_offset   u64 LE
+///   40       8    cfg_len      u64 LE
+///   48       4    version      u32 LE  = 1
+///   52       4    flags        u32 LE  = 0  (reserved: compression, encryption…)
+///   56       4    crc32        u32 LE  CRC32 of snap+js+cfg payload bytes
+///   60       4    reserved     u32 LE  = 0
+///   64       8    magic        u64 LE  = b"VELOXTRL"
+///
+/// Cross-compilation note: the runner binary must match the target OS/arch.
+/// For cross-targets, run `velox runtime build` on the target machine first,
+/// then copy the runner to `~/.velox/runners/prod/` on the build machine.
+fn append_trailer_snapshot(
+    target:       Option<&str>,
+    project_name: &str,
+    snapshot:     &Path,
+    app_js:       &Path,
+    app_config:   &Path,
+) -> Result<PathBuf> {
+    use std::io::Write;
+
+    const MAGIC:   u64 = 0x4C52_5458_4F4C_4556; // b"VELOXTRL" little-endian
+    const VERSION: u32 = 1;
+    const FLAGS:   u32 = 0; // reserved for future feature bits
+
+    if target.is_some() {
+        println!("⚠ Cross-compilation for JS-only snapshot: the cached runner must be built for the target platform.");
+        println!("  On the target machine: run `velox runtime build` then copy the prod runner to");
+        println!("  ~/.velox/runners/prod/velox-runner on your build machine.");
+    }
+
+    let runner = find_or_build_runner(false)
+        .context("Could not find or build prod velox-runner. Run `velox runtime build`.")?;
+
+    std::fs::create_dir_all("target/release")?;
+    let dest = PathBuf::from("target/release").join(binary_name(project_name));
+    std::fs::copy(&runner, &dest)
+        .with_context(|| format!("copy runner → {}", dest.display()))?;
+
+    let snap_bytes   = std::fs::read(snapshot) .with_context(|| format!("read {}", snapshot.display()))?;
+    let js_bytes     = std::fs::read(app_js)   .with_context(|| format!("read {}", app_js.display()))?;
+    let config_bytes = std::fs::read(app_config).with_context(|| format!("read {}", app_config.display()))?;
+
+    // CRC32 over the entire payload for integrity checking at runtime.
+    let mut digest = crc32fast::Hasher::new();
+    digest.update(&snap_bytes);
+    digest.update(&js_bytes);
+    digest.update(&config_bytes);
+    let crc32 = digest.finalize();
+
+    let runner_len  = std::fs::metadata(&dest)?.len();
+    let snap_offset = runner_len;
+    let js_offset   = snap_offset + snap_bytes.len()   as u64;
+    let cfg_offset  = js_offset   + js_bytes.len()     as u64;
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&dest)
+        .with_context(|| format!("open {} for append", dest.display()))?;
+
+    file.write_all(&snap_bytes)  .context("write snapshot")?;
+    file.write_all(&js_bytes)    .context("write app JS")?;
+    file.write_all(&config_bytes).context("write config")?;
+
+    // Footer v1 (72 bytes): 6 × u64 offsets/lengths, 4 × u32 metadata, 1 × u64 magic.
+    file.write_all(&snap_offset.to_le_bytes())               .context("write footer")?;
+    file.write_all(&(snap_bytes.len() as u64).to_le_bytes()) .context("write footer")?;
+    file.write_all(&js_offset.to_le_bytes())                 .context("write footer")?;
+    file.write_all(&(js_bytes.len() as u64).to_le_bytes())   .context("write footer")?;
+    file.write_all(&cfg_offset.to_le_bytes())                .context("write footer")?;
+    file.write_all(&(config_bytes.len() as u64).to_le_bytes()).context("write footer")?;
+    file.write_all(&VERSION.to_le_bytes())                   .context("write footer")?;
+    file.write_all(&FLAGS.to_le_bytes())                     .context("write footer")?;
+    file.write_all(&crc32.to_le_bytes())                     .context("write footer")?;
+    file.write_all(&0u32.to_le_bytes())                      .context("write footer")?; // reserved
+    file.write_all(&MAGIC.to_le_bytes())                     .context("write footer")?;
+
+    println!("✓ Trailer: snapshot={} KB  js={} KB  config={} B  crc32={:#010x}",
+        snap_bytes.len() / 1024, js_bytes.len() / 1024, config_bytes.len(), crc32);
+    println!("✓ Binary: {} (no cargo recompile)", dest.display());
+
+    Ok(std::env::current_dir()?.join(dest))
+}
+
+/// For JS-only bundle/portable builds: find the cached prod runner and copy it
+/// to target/release/<project_name>[.exe], simulating a cargo build output.
+fn copy_prod_runner_as(target: Option<&str>, project_name: &str) -> Result<PathBuf> {
+    if target.is_some() {
+        println!("⚠ Cross-compilation for JS-only projects uses velox-runner from velox workspace.");
+        println!("  Run `velox runtime build` first to build the runner for the host platform,");
+        println!("  then use `velox build --mode snapshot` for embedded cross-target binaries.");
+    }
+
+    let runner = find_or_build_runner(false)
+        .context("Could not find or build prod velox-runner. Run `velox runtime build`.")?;
+
+    std::fs::create_dir_all("target/release")?;
+    let dest = PathBuf::from("target/release").join(binary_name(project_name));
+    std::fs::copy(&runner, &dest)
+        .with_context(|| format!("copy runner → {}", dest.display()))?;
+
+    println!("✓ Runtime: {} → {}", runner.display(), dest.display());
+    Ok(std::env::current_dir()?.join(dest))
+}
+
+/// Shared cargo build --release helper. Returns the path to the produced binary.
 fn cargo_build_release(
     target: Option<&str>,
     project_name: &str,
@@ -378,12 +594,6 @@ fn cargo_build_release(
     app_config: Option<&Path>,
 ) -> Result<PathBuf> {
     let rust_target = target.map(platform_to_rust_target).transpose()?;
-    // --no-default-features disables the app's "dev" feature (and transitively
-    // velox-core/dev), excluding notify, hot-reload worker, and dev overlay from
-    // the production binary.  The user's Cargo.toml must follow the pattern:
-    //   [features]
-    //   default = ["dev"]
-    //   dev     = ["velox-core/dev"]
     let mut args = vec!["build", "--release", "--no-default-features", "-p", project_name];
     let target_str;
     if let Some(ref t) = rust_target {
@@ -421,20 +631,9 @@ fn cargo_build_release(
 }
 
 /// Create a V8 snapshot containing ONLY stubs + polyfills.
-///
-/// The app bundle is NOT included in the snapshot — it is embedded separately
-/// (via VELOX_APP_JS) and eval'd at runtime after real bindings are registered.
-/// This ensures render(<App />) runs with real Rust bindings, not stubs.
-///
-/// Snapshot content:
-///   stubs     — __velox_* no-op placeholders (overridden at runtime)
-///   polyfills — setTimeout, performance.now, etc. (pre-initialised)
-///   framework — empty (React is bundled into the app, not snapshotted separately)
-///   app       — empty (eval'd at runtime, after real bindings are available)
 fn create_snapshot_for_build(project_name: &str) -> Result<PathBuf> {
     std::fs::create_dir_all("target/velox")?;
 
-    // Use project's polyfills.js if it exists; otherwise a no-op placeholder
     let polyfills_path = PathBuf::from("js/polyfills.js");
     let polyfills_arg = if polyfills_path.exists() {
         polyfills_path
@@ -444,11 +643,9 @@ fn create_snapshot_for_build(project_name: &str) -> Result<PathBuf> {
         empty
     };
 
-    // Framework and app: empty — app is eval'd at runtime via VELOX_APP_JS
     let empty_js = PathBuf::from("target/velox/empty.js");
     std::fs::write(&empty_js, "// not snapshotted — eval'd at runtime\n")?;
 
-    // Absolute path so VELOX_APP_SNAPSHOT works from any build.rs working directory
     let snapshot_out = std::env::current_dir()?
         .join(format!("target/velox/{project_name}.snapshot"));
 
@@ -458,8 +655,8 @@ fn create_snapshot_for_build(project_name: &str) -> Result<PathBuf> {
     let status = Command::new(&snapshot_bin)
         .args([
             polyfills_arg.as_os_str(),
-            empty_js.as_os_str(),   // framework: empty
-            empty_js.as_os_str(),   // app: empty (eval'd at runtime)
+            empty_js.as_os_str(),
+            empty_js.as_os_str(),
             snapshot_out.as_os_str(),
         ])
         .status()
@@ -473,18 +670,15 @@ fn create_snapshot_for_build(project_name: &str) -> Result<PathBuf> {
     Ok(snapshot_out)
 }
 
-/// Locate the `velox-snapshot` binary, building it from source if necessary.
 fn find_or_build_snapshot_binary() -> Result<PathBuf> {
     let velox_home = velox_home()?;
     let bin_name = if cfg!(target_os = "windows") { "velox-snapshot.exe" } else { "velox-snapshot" };
 
-    // Prefer release, fall back to debug
     for profile in &["release", "debug"] {
         let path = velox_home.join("target").join(profile).join(bin_name);
         if path.exists() { return Ok(path); }
     }
 
-    // Not found — build it (one-time cost)
     println!("Building velox-snapshot (first run only)...");
     let status = Command::new("cargo")
         .args(["build", "-p", "velox-snapshot", "--release"])
@@ -500,6 +694,65 @@ fn find_or_build_snapshot_binary() -> Result<PathBuf> {
     if path.exists() { return Ok(path); }
     bail!("velox-snapshot binary not found after build at {}", path.display())
 }
+
+// ── velox runtime ─────────────────────────────────────────────────────────────
+
+fn cmd_runtime(cmd: RuntimeCommands) -> Result<()> {
+    match cmd {
+        RuntimeCommands::List => {
+            let dir = velox_runners_dir();
+            println!("Cached velox-runner binaries:");
+            let mut found = false;
+            for profile in ["dev", "prod"] {
+                let path = dir.join(profile).join(runner_bin_name());
+                if path.exists() {
+                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    println!("  [{profile}] {} ({:.1} MB)", path.display(), size as f64 / (1024.0 * 1024.0));
+                    found = true;
+                }
+            }
+            // Also show workspace target/ if present
+            if let Ok(home) = velox_home() {
+                for profile in ["debug", "release"] {
+                    let path = home.join("target").join(profile).join(runner_bin_name());
+                    if path.exists() {
+                        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        println!("  [workspace/{profile}] {} ({:.1} MB)", path.display(), size as f64 / (1024.0 * 1024.0));
+                        found = true;
+                    }
+                }
+            }
+            if !found {
+                println!("  (none cached — run `velox runtime build` to build from source)");
+            }
+            Ok(())
+        }
+        RuntimeCommands::Build => {
+            println!("Building velox-runner from source...");
+            let dev  = find_or_build_runner(true)?;
+            let prod = find_or_build_runner(false)?;
+            println!();
+            println!("✓ Dev runner (hot-reload):  {}", dev.display());
+            println!("✓ Prod runner (lean):       {}", prod.display());
+            Ok(())
+        }
+        RuntimeCommands::Install { version } => {
+            // Future: download prebuilt binary from GitHub releases
+            // For now: build from source (same as `velox runtime build`)
+            let v = version.as_deref().unwrap_or("local");
+            println!("Installing velox-runner v{v} (building from source)...");
+            println!("  (Prebuilt binary download is planned for a future release)");
+            let dev  = find_or_build_runner(true)?;
+            let prod = find_or_build_runner(false)?;
+            println!();
+            println!("✓ Dev runner:  {}", dev.display());
+            println!("✓ Prod runner: {}", prod.display());
+            Ok(())
+        }
+    }
+}
+
+// ── velox package ─────────────────────────────────────────────────────────────
 
 fn cmd_package(target: Option<&str>) -> Result<()> {
     let project_name = read_project_name()
@@ -543,8 +796,30 @@ fn package_windows(name: &str, bin: &Path) -> Result<()> {
     if app_dir.exists() { std::fs::remove_dir_all(&app_dir).with_context(|| format!("remove {}", app_dir.display()))?; }
     std::fs::create_dir_all(&app_dir)?;
     let exe_name = binary_name(name);
-    std::fs::copy(bin, app_dir.join(&exe_name)).with_context(|| format!("copy {}", bin.display()))?;
+    let exe_dest = app_dir.join(&exe_name);
+    std::fs::copy(bin, &exe_dest).with_context(|| format!("copy {}", bin.display()))?;
     copy_runtime_files(&app_dir)?;
+
+    if let Some(scheme) = read_deeplink_scheme() {
+        let exe_abs = exe_dest.canonicalize()
+            .unwrap_or(exe_dest.clone())
+            .to_string_lossy()
+            .replace('/', "\\");
+        let reg_key = format!("HKCU\\Software\\Classes\\{scheme}");
+        let open_key = format!("{reg_key}\\shell\\open\\command");
+        let reg_content = format!(
+            "Windows Registry Editor Version 5.00\r\n\r\n\
+             [{reg_key}]\r\n\
+             @=\"URL:{scheme} Protocol\"\r\n\
+             \"URL Protocol\"=\"\"\r\n\r\n\
+             [{open_key}]\r\n\
+             @=\"\\\"{exe_abs}\\\" \\\"%1\\\"\"\r\n"
+        );
+        let reg_path = app_dir.join("register-scheme.reg");
+        std::fs::write(&reg_path, reg_content)?;
+        println!("  Deep-link scheme '{scheme}://' → register-scheme.reg (run once to activate)");
+    }
+
     let zip_path = format!("target/velox/dist/{name}-windows.zip");
     println!("Packaging for Windows: {zip_path}");
     let status = Command::new("powershell")
@@ -565,6 +840,22 @@ fn package_macos(name: &str, bin: &Path) -> Result<()> {
     std::fs::create_dir_all(&app_dir)?;
     let dest = format!("{app_dir}/{name}");
     std::fs::copy(bin, &dest)?;
+
+    let scheme_xml = if let Some(scheme) = read_deeplink_scheme() {
+        println!("  Deep-link scheme '{scheme}://' → CFBundleURLTypes in Info.plist");
+        format!(r#"
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>com.velox.{name}.{scheme}</string>
+            <key>CFBundleURLSchemes</key>
+            <array><string>{scheme}</string></array>
+        </dict>
+    </array>"#)
+    } else {
+        String::new()
+    };
+
     let plist = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -572,7 +863,7 @@ fn package_macos(name: &str, bin: &Path) -> Result<()> {
     <key>CFBundleExecutable</key><string>{name}</string>
     <key>CFBundleIdentifier</key><string>com.velox.{name}</string>
     <key>CFBundleName</key><string>{name}</string>
-    <key>CFBundleVersion</key><string>1.0</string>
+    <key>CFBundleVersion</key><string>1.0</string>{scheme_xml}
 </dict>
 </plist>"#);
     write_file(format!("target/velox/dist/{name}.app/Contents/Info.plist"), &plist)?;
@@ -581,6 +872,20 @@ fn package_macos(name: &str, bin: &Path) -> Result<()> {
 }
 
 fn package_linux(name: &str, bin: &Path) -> Result<()> {
+    if let Some(scheme) = read_deeplink_scheme() {
+        let mime_type = format!("x-scheme-handler/{scheme}");
+        let desktop = format!(
+            "[Desktop Entry]\nType=Application\nName={name}\n\
+             Exec={name} %u\nMimeType={mime_type};\n\
+             NoDisplay=false\nCategories=Application;\n"
+        );
+        let desktop_path = format!("target/velox/dist/{name}.desktop");
+        std::fs::create_dir_all("target/velox/dist")?;
+        std::fs::write(&desktop_path, desktop)?;
+        println!("  Deep-link scheme '{scheme}://' → {desktop_path}");
+        println!("  To activate: xdg-desktop-menu install --novendor {name}.desktop");
+    }
+
     let archive = format!("target/velox/dist/{name}-linux.tar.gz");
     println!("Packaging for Linux: {archive}");
     let status = Command::new("tar")
@@ -597,6 +902,83 @@ fn package_linux(name: &str, bin: &Path) -> Result<()> {
     Ok(())
 }
 
+// ── Runner management ─────────────────────────────────────────────────────────
+
+/// Find or build the velox-runner binary.
+///
+/// `dev_mode = true`  → runner with "dev" feature (hot-reload + overlay); debug build
+/// `dev_mode = false` → runner without "dev" feature (lean production binary); release build
+///
+/// Search order:
+///   1. ~/.velox/runners/{dev|prod}/velox-runner[.exe]  (cached)
+///   2. velox_home/target/{debug|release}/velox-runner[.exe]  (workspace)
+///   3. Build from source → copy to cache
+fn find_or_build_runner(dev_mode: bool) -> Result<PathBuf> {
+    let profile = if dev_mode { "dev" } else { "prod" };
+    let bin_name = runner_bin_name();
+
+    // 1. Check user cache
+    let cache_dir = velox_runners_dir().join(profile);
+    let cached    = cache_dir.join(bin_name);
+    if cached.exists() { return Ok(cached); }
+
+    // 2. Check velox workspace target/ (fastest for developers inside the workspace)
+    if let Ok(home) = velox_home() {
+        let ws_profile = if dev_mode { "debug" } else { "release" };
+        let ws_bin = home.join("target").join(ws_profile).join(bin_name);
+        if ws_bin.exists() { return Ok(ws_bin); }
+    }
+
+    // 3. Build from source
+    let home = velox_home().context("Cannot locate velox workspace — needed to build velox-runner")?;
+    let label = if dev_mode { "dev (with hot-reload)" } else { "prod (lean)" };
+    println!("Building velox-runner [{label}] from source (first-run, one-time cost)...");
+
+    let mut args = vec!["build", "-p", "velox-runner"];
+    if !dev_mode { args.push("--release"); args.push("--no-default-features"); }
+
+    let status = Command::new("cargo")
+        .args(&args)
+        .current_dir(&home)
+        .status()
+        .context("Failed to run `cargo build -p velox-runner`")?;
+    if !status.success() { bail!("Failed to build velox-runner"); }
+
+    let built = if dev_mode {
+        home.join("target/debug").join(bin_name)
+    } else {
+        home.join("target/release").join(bin_name)
+    };
+
+    if !built.exists() {
+        bail!("velox-runner binary not found at {} after build", built.display());
+    }
+
+    // Cache it for future use
+    std::fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("create cache dir {}", cache_dir.display()))?;
+    std::fs::copy(&built, &cached)
+        .with_context(|| format!("cache runner to {}", cached.display()))?;
+
+    println!("✓ velox-runner [{profile}] cached at {}", cached.display());
+    Ok(cached)
+}
+
+fn velox_runners_dir() -> PathBuf {
+    // Cross-platform home directory
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    home.join(".velox").join("runners")
+}
+
+fn runner_bin_name() -> &'static str {
+    if cfg!(target_os = "windows") { "velox-runner.exe" } else { "velox-runner" }
+}
+
+// ── Build helpers ─────────────────────────────────────────────────────────────
+
 fn build_app_bundle(project_name: &str, entry: &str) -> Result<PathBuf> {
     let bundle_out = format!("target/velox/{project_name}.js");
     let mut cmd = if cfg!(target_os = "windows") {
@@ -610,8 +992,8 @@ fn build_app_bundle(project_name: &str, entry: &str) -> Result<PathBuf> {
             "--outfile", &bundle_out,
             "--target", "browser",
             "--format", "iife",
-            "--minify",                                   // dead-code elim + name mangling
-            "--define", "process.env.NODE_ENV='production'", // React prod build (no dev warnings)
+            "--minify",
+            "--define", "process.env.NODE_ENV='production'",
         ])
         .status()
         .context("Failed to run `bun build`")?;
@@ -619,11 +1001,16 @@ fn build_app_bundle(project_name: &str, entry: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(bundle_out))
 }
 
+// ── Project detection ─────────────────────────────────────────────────────────
+
+/// Returns true if the current directory is a native Velox project (has Cargo.toml).
+fn is_native_project() -> bool {
+    Path::new("Cargo.toml").exists()
+}
+
+// ── Helper utilities ──────────────────────────────────────────────────────────
+
 fn velox_home() -> Result<PathBuf> {
-    // Primary: use the path baked in at compile time.
-    // CARGO_MANIFEST_DIR = crates/velox-cli/ → parent = crates/ → parent = workspace root.
-    // This is the only reliable path when the binary is installed via `cargo install`
-    // to ~/.cargo/bin/ (traversing up from there will never find the velox workspace).
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     if let Some(workspace) = manifest_dir.parent().and_then(|p| p.parent()) {
         let cargo_toml = workspace.join("Cargo.toml");
@@ -635,7 +1022,6 @@ fn velox_home() -> Result<PathBuf> {
         }
     }
 
-    // Fallback: traverse up from the executable (works when running from workspace target/).
     let exe = std::env::current_exe().context("Cannot determine executable path")?;
     let mut dir = exe.as_path();
     loop {
@@ -667,13 +1053,26 @@ fn relpath(from_dir: &Path, to: &Path) -> String {
     rel.to_string_lossy().replace('\\', "/")
 }
 
+/// Read the project name.
+/// Tries Cargo.toml first (native projects), then package.json (JS-only projects).
 fn read_project_name() -> Option<String> {
-    let src = std::fs::read_to_string("Cargo.toml").ok()?;
-    for line in src.lines() {
-        let line = line.trim();
-        if line.starts_with("name") {
-            if let Some(val) = line.splitn(2, '=').nth(1) {
-                return Some(val.trim().trim_matches('"').to_string());
+    // 1. Cargo.toml (native projects)
+    if let Ok(src) = std::fs::read_to_string("Cargo.toml") {
+        for line in src.lines() {
+            let line = line.trim();
+            if line.starts_with("name") {
+                if let Some(val) = line.splitn(2, '=').nth(1) {
+                    let name = val.trim().trim_matches('"').to_string();
+                    if !name.is_empty() { return Some(name); }
+                }
+            }
+        }
+    }
+    // 2. package.json (JS-only projects)
+    if let Ok(src) = std::fs::read_to_string("package.json") {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&src) {
+            if let Some(name) = v["name"].as_str() {
+                if !name.is_empty() { return Some(name.to_string()); }
             }
         }
     }
@@ -681,8 +1080,6 @@ fn read_project_name() -> Option<String> {
 }
 
 /// Resolve the project config to a JSON string.
-/// Tries `velox.config.ts` first (executed via `bun run`), then `velox.config.json`.
-/// Both formats produce identical JSON consumed by the CLI and velox-core.
 fn resolve_config_json() -> Result<String> {
     if Path::new("velox.config.ts").exists() {
         let mut cmd = if cfg!(target_os = "windows") {
@@ -700,6 +1097,19 @@ fn resolve_config_json() -> Result<String> {
     }
     std::fs::read_to_string("velox.config.json")
         .context("neither velox.config.ts nor velox.config.json found")
+}
+
+/// Read the deep-link scheme from velox config, if declared.
+fn read_deeplink_scheme() -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Cfg { capabilities: Option<Caps> }
+    #[derive(serde::Deserialize)]
+    struct Caps { deeplink: Option<Dl> }
+    #[derive(serde::Deserialize)]
+    struct Dl { scheme: Option<String> }
+    let src = resolve_config_json().ok()?;
+    let cfg: Cfg = serde_json::from_str(&src).ok()?;
+    cfg.capabilities?.deeplink?.scheme
 }
 
 fn read_dev_config() -> Option<(String, String)> {
@@ -781,12 +1191,10 @@ fn find_workspace_root() -> Result<Option<PathBuf>> {
 }
 
 fn copy_runtime_files(dest_root: &Path) -> Result<()> {
-    // Read build mode written by `velox build` to decide what to ship
     let build_mode = std::fs::read_to_string("target/velox/build-mode")
         .unwrap_or_else(|_| "portable".into());
     let is_snapshot = build_mode.trim() == "snapshot";
 
-    // Snapshot mode: config + JS are baked into the binary — ship nothing external
     if !is_snapshot {
         let config = PathBuf::from("velox.config.json");
         if config.exists() {

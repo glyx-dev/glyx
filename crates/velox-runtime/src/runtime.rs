@@ -13,6 +13,8 @@ use crate::{
     RuntimeError,
 };
 
+use std::collections::VecDeque;
+
 /// V8 isolate params shared by fresh and snapshot-restore paths.
 ///
 /// Heap limits:
@@ -42,6 +44,9 @@ pub struct VeloxRuntime {
     pub layout_cache: LayoutCache,
     /// Shared perf ring-buffer — velox-core writes frames; JS bindings read via snapshot.
     pub perf_state: Arc<std::sync::Mutex<velox_perf::PerfState>>,
+    /// Forwarded deep-link URL queue.
+    /// velox-core's single-instance listener pushes URLs here; `__velox_deeplink_poll` drains them.
+    pub deeplink_url_queue: Arc<std::sync::Mutex<VecDeque<String>>>,
 }
 
 pub struct HeapStats {
@@ -80,8 +85,9 @@ impl VeloxRuntime {
 
         let mut isolate = v8::Isolate::new(velox_create_params(None));
 
-        let events       = new_event_queue();
-        let layout_cache = new_layout_cache();
+        let events             = new_event_queue();
+        let layout_cache       = new_layout_cache();
+        let deeplink_url_queue = Arc::new(std::sync::Mutex::new(VecDeque::new()));
 
         let (context, queue, scene) = {
             let scope  = &mut v8::HandleScope::new(&mut isolate);
@@ -103,12 +109,13 @@ impl VeloxRuntime {
                 my_handle,
                 next_window_id,
                 Arc::clone(&perf_state),
+                Arc::clone(&deeplink_url_queue),
             );
 
             (v8::Global::new(scope, ctx), queue, scene)
         };
 
-        Self { isolate, context, queue, scene, events, layout_cache, perf_state }
+        Self { isolate, context, queue, scene, events, layout_cache, perf_state, deeplink_url_queue }
     }
 
     /// Create a new VeloxRuntime from a snapshot blob (pre-executed JS heap).
@@ -143,8 +150,9 @@ impl VeloxRuntime {
 
         let mut isolate = v8::Isolate::new(velox_create_params(Some(snapshot_blob.to_vec())));
 
-        let events       = new_event_queue();
-        let layout_cache = new_layout_cache();
+        let events             = new_event_queue();
+        let layout_cache       = new_layout_cache();
+        let deeplink_url_queue = Arc::new(std::sync::Mutex::new(VecDeque::new()));
 
         let (context, queue, scene) = {
             let scope  = &mut v8::HandleScope::new(&mut isolate);
@@ -169,12 +177,13 @@ impl VeloxRuntime {
                 my_handle,
                 next_window_id,
                 Arc::clone(&perf_state),
+                Arc::clone(&deeplink_url_queue),
             );
 
             (v8::Global::new(scope, ctx), queue, scene)
         };
 
-        Ok(Self { isolate, context, queue, scene, events, layout_cache, perf_state })
+        Ok(Self { isolate, context, queue, scene, events, layout_cache, perf_state, deeplink_url_queue })
     }
 
     // ── Extensions ────────────────────────────────────────────────────────────

@@ -34,6 +34,44 @@ const _wsOpenSockets = new Map();
 // Callbacks registered via ipc.on('message', cb).
 const _ipcListeners = [];
 
+// ── Deep link polling ─────────────────────────────────────────────────────────
+//
+// Forwarded URLs arrive each frame via __velox_deeplink_poll().
+// The initial launch URL is retrieved once on startup via __velox_deeplink_getInitialUrl().
+
+const _deeplinkCallbacks = [];
+let   _deeplinkInitialFired = false;
+
+function _pollDeeplinks() {
+  // Fire initial URL once (the URL that launched this instance of the app).
+  if (!_deeplinkInitialFired && _deeplinkCallbacks.length > 0) {
+    _deeplinkInitialFired = true;
+    if (typeof __velox_deeplink_getInitialUrl !== 'undefined') {
+      try {
+        const url = __velox_deeplink_getInitialUrl();
+        if (url) {
+          for (const cb of _deeplinkCallbacks) {
+            try { cb(url); } catch (e) { __velox_log('[deeplink] callback error: ' + e); }
+          }
+        }
+      } catch {}
+    }
+  }
+
+  // Drain forwarded URLs from the single-instance listener queue.
+  if (typeof __velox_deeplink_poll === 'undefined') return;
+  let raw;
+  try { raw = __velox_deeplink_poll(); } catch { return; }
+  if (!raw || raw === '[]') return;
+  let urls;
+  try { urls = JSON.parse(raw); } catch { return; }
+  for (const url of urls) {
+    for (const cb of _deeplinkCallbacks) {
+      try { cb(url); } catch (e) { __velox_log('[deeplink] callback error: ' + e); }
+    }
+  }
+}
+
 // ── Global shortcut polling ───────────────────────────────────────────────────
 //
 // Callbacks registered via input.globalShortcut.register(acc, cb).
@@ -140,6 +178,7 @@ globalThis.__velox_frameCallback = function veloxFrameCallback() {
   VeloxReconciler.flushSync(() => {
     _pollWebSockets();
     _pollIpc();
+    _pollDeeplinks();
     _pollGamepads();
     _pollGlobalShortcuts();
     _pollPerfViolations();
@@ -1261,6 +1300,23 @@ export const system = {
     if (typeof __velox_system_getInfo === 'undefined') return null;
     return JSON.parse(await __velox_system_getInfo());
   },
+  /**
+   * Returns the OS-level color scheme preference synchronously (~1 µs).
+   * @returns {"dark"|"light"|"unknown"}
+   */
+  getDarkMode() {
+    if (typeof __velox_system_getDarkMode === 'undefined') return 'unknown';
+    return __velox_system_getDarkMode();
+  },
+  /**
+   * Returns whether battery-saver / power-saver mode is active synchronously (~1 µs).
+   * Windows: reads GetSystemPowerStatus(). macOS/Linux: always false until native support lands.
+   * @returns {boolean}
+   */
+  isBatterySaverActive() {
+    if (typeof __velox_system_getBatterySaver === 'undefined') return false;
+    return __velox_system_getBatterySaver();
+  },
 };
 
 export const power = {
@@ -1331,7 +1387,7 @@ export const input = {
     },
   },
 
-  /** App-focused shortcuts — fires when the app window is focused. */
+  /** App-focused shortcuts — fires when the app window is focused (no OS registration). */
   shortcut: {
     /**
      * @param {string} accelerator  e.g. "ctrl+k"
@@ -1354,5 +1410,35 @@ export const input = {
       return id;
     },
     unregister(id) { _localShortcuts.delete(id); },
+  },
+};
+
+// ── Deep links ────────────────────────────────────────────────────────────────
+
+/**
+ * Deep-link URL handling.
+ *
+ * Fires for both the initial launch URL (the URL that opened the app) and
+ * any URLs forwarded by a second instance (when `singleInstance: true`).
+ *
+ * @example
+ * import { deeplink } from '@velox/react';
+ * deeplink.onOpen((url) => {
+ *   // url = "notes://note/42"
+ *   navigate('noteDetail', { id: url.split('/').pop() });
+ * });
+ */
+export const deeplink = {
+  /**
+   * Register a callback fired for every deep-link URL, including the initial launch URL.
+   * @param {function(string): void} cb  Called with the full URL string.
+   * @returns {function} Unsubscribe function.
+   */
+  onOpen(cb) {
+    _deeplinkCallbacks.push(cb);
+    return function unsubscribe() {
+      const i = _deeplinkCallbacks.indexOf(cb);
+      if (i !== -1) _deeplinkCallbacks.splice(i, 1);
+    };
   },
 };

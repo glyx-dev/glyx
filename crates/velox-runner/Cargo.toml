@@ -1,0 +1,18 @@
+[package]
+name    = "velox-runner"
+version = "0.1.0"
+edition = "2021"
+description = "Prebuilt runtime binary for Velox apps (no Rust toolchain required by app developers)"
+
+[features]
+# "dev" gates hot-reload watcher, bun subprocess, and dev overlay in velox-core.
+# `velox dev`   → runs runner with default (dev) features.
+# `velox build` → builds runner with --no-default-features for a lean prod binary.
+default = ["dev"]
+dev     = ["velox-core/dev"]
+
+[dependencies]
+velox-core  = { path = "../velox-core", default-features = false }
+velox-shell = { path = "../velox-shell" }
+env_logger  = { workspace = true }
+crc32fast   = { workspace = true }

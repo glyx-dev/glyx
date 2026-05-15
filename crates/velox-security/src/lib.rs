@@ -58,6 +58,20 @@ fn env_pattern_matches(pattern: &str, name: &str) -> bool {
     }
 }
 
+/// Deep-link capability declaration.
+///
+/// Enables custom URL scheme handling so the OS can launch or focus the app
+/// when a link like `myapp://note/42` is activated from a browser or another app.
+#[derive(Debug, Deserialize, Clone)]
+pub struct DeeplinkCapability {
+    /// The URL scheme to register (without `://`), e.g. `"notes"`.
+    pub scheme: String,
+    /// If `true`, only one instance of the app may run at a time.
+    /// A second launch with a URL forwards the URL to the first instance and exits.
+    #[serde(rename = "singleInstance", default)]
+    pub single_instance: bool,
+}
+
 /// The full capability set for one Velox application.
 ///
 /// Deserialises from the `"capabilities"` key in `velox.config.json`.
@@ -93,6 +107,8 @@ pub struct Capabilities {
     #[serde(rename = "globalShortcuts")]
     #[serde(default)]
     pub global_shortcuts: bool,
+    /// Deep-link URL scheme registration.  `None` = no deep-link support.
+    pub deeplink: Option<DeeplinkCapability>,
 }
 
 impl Capabilities {

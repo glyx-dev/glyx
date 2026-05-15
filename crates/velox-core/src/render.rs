@@ -6,7 +6,7 @@ pub(crate) struct RenderCtx<'a> {
     pub resolved: &'a [(NodeId, ResolvedLayout)],
     pub frame: &'a mut FrameBuilder,
     pub text_sys: &'a mut TextSystem,
-    pub label_cache: &'a mut std::collections::HashMap<LabelKey, CachedLabel>,
+    pub label_cache: &'a mut lru::LruCache<LabelKey, CachedLabel>,
     pub cursor_blink_on: bool,
     pub any_cursor_active: &'a mut bool,
 }
@@ -145,9 +145,9 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
                 max_width.to_bits(),
                 color,
             );
-            if !ctx.label_cache.contains_key(&key) {
+            if !ctx.label_cache.contains(&key) {
                 let lbl = CachedLabel::new(ctx.text_sys, text, font_size, max_width, color);
-                ctx.label_cache.insert(key.clone(), lbl);
+                ctx.label_cache.put(key.clone(), lbl);
             }
             let label = ctx.label_cache.get(&key).unwrap();
 

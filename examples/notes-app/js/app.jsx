@@ -20,7 +20,9 @@ import React, { useState, useEffect, useContext, createContext, useCallback, use
 import {
   View, Text, Pressable, TextInput, ScrollView, render, useWindowSize, useMediaQuery,
   db, vectorDb, fs, dialog, clipboard, notification, veloxWindow, fetch, ws, mdns, ipc,
-  battery, system, power, storage, input, perf, deeplink,
+  battery, system, power, storage, input, perf, deeplink, credentials,
+  Checkbox, Switch, RadioGroup, Radio, FileInput, audio,
+  Slider, Select, DatePicker,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
 
@@ -412,6 +414,18 @@ function NoteListScreen() {
             onPress={() => navigate('sysapi')}
             width={90}
             color={C.yellow}
+          />
+          <Btn
+            label="Forms"
+            onPress={() => navigate('forms')}
+            width={74}
+            color={C.mauve}
+          />
+          <Btn
+            label="Audio"
+            onPress={() => navigate('audio')}
+            width={74}
+            color={C.teal}
           />
         </View>
         <Text fontSize={11} width={isWide ? inner - 308 : inner} height={16} style={{ color: C.dim }}>
@@ -1160,6 +1174,282 @@ function SysApiScreen() {
   );
 }
 
+// ── Screen: Form Fields Demo ──────────────────────────────────────────────────
+//
+// Phase 16E + 16F — Checkbox, Switch, RadioGroup/Radio, FileInput, Slider, Select, DatePicker.
+
+function FormDemoScreen() {
+  const { width: winW, height: winH } = useWindowSize();
+  const navigate = useNavigate();
+  const C = useThemeColors();
+  const inner = winW - PAD * 2;
+
+  const [checked,    setChecked]    = useState(false);
+  const [switched,   setSwitched]   = useState(false);
+  const [radioVal,   setRadioVal]   = useState('option_a');
+  const [pickedFile, setPickedFile] = useState(null);
+  const [credStatus, setCredStatus] = useState('');
+  const [sliderVal,  setSliderVal]  = useState(0.4);
+  const [selectVal,  setSelectVal]  = useState(null);
+  const [dateVal,    setDateVal]    = useState(null);
+
+  function Section({ title, children }) {
+    return (
+      <View style={{ gap: 10 }} width={inner}>
+        <Text fontSize={11} width={inner} height={16} style={{ color: C.dim }}>{title}</Text>
+        {children}
+        <View style={{ backgroundColor: C.border }} width={inner} height={1} />
+      </View>
+    );
+  }
+
+  async function testCredentials() {
+    try {
+      await credentials.set('demo-token', 'velox-secret-1234');
+      const val = await credentials.get('demo-token');
+      setCredStatus('Stored & retrieved: ' + val);
+      await credentials.delete('demo-token');
+    } catch (e) {
+      setCredStatus('Error: ' + e);
+    }
+  }
+
+  return (
+    <ScrollView width={winW} height={winH - HEADER_H - PAD} contentHeight={1300}>
+      <View style={{ gap: 20, padding: PAD, alignItems: 'flex-start', justifyContent: 'flex-start' }} width={inner}>
+
+        <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }} width={inner} height={34}>
+          <BackBtn />
+          <Text fontSize={16} width={inner - 100} height={22} style={{ color: C.text }}>Form Fields</Text>
+        </View>
+
+        <Section title="CHECKBOX">
+          <Checkbox
+            checked={checked}
+            onChange={setChecked}
+            label={checked ? 'Checked ✓' : 'Unchecked'}
+          />
+          <Checkbox checked={true} disabled label="Disabled (checked)" />
+          <Checkbox checked={false} disabled label="Disabled (unchecked)" />
+        </Section>
+
+        <Section title="SWITCH">
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }} width={inner} height={28}>
+            <Switch value={switched} onValueChange={setSwitched} />
+            <Text fontSize={13} width={inner - 64} height={18} style={{ color: C.subtle }}>
+              {switched ? 'On' : 'Off'}
+            </Text>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }} width={inner} height={28}>
+            <Switch value={true} disabled />
+            <Text fontSize={13} width={inner - 64} height={18} style={{ color: C.dim }}>Disabled (on)</Text>
+          </View>
+        </Section>
+
+        <Section title="RADIO GROUP">
+          <RadioGroup value={radioVal} onValueChange={setRadioVal}>
+            <Radio value="option_a" label="Option A" />
+            <Radio value="option_b" label="Option B" />
+            <Radio value="option_c" label="Option C" />
+            <Radio value="option_d" label="Disabled option" disabled />
+          </RadioGroup>
+          <Text fontSize={12} width={inner} height={18} style={{ color: C.dim }}>
+            {'Selected: ' + radioVal}
+          </Text>
+        </Section>
+
+        <Section title="FILE INPUT (requires dialog capability)">
+          <FileInput
+            accept=".txt,.md,.json"
+            onFilesSelected={paths => setPickedFile(paths[0])}
+            label="Pick a text file…"
+          />
+          {pickedFile != null && (
+            <Text fontSize={11} width={inner} height={16} style={{ color: C.teal }}>
+              {pickedFile}
+            </Text>
+          )}
+          <FileInput disabled label="Disabled picker" />
+        </Section>
+
+        <Section title="CREDENTIALS (OS keychain)">
+          <Btn label="Test set / get / delete" onPress={testCredentials} width={200} color={C.mauve} />
+          {credStatus ? (
+            <Text fontSize={11} width={inner} height={16} style={{ color: C.green }}>{credStatus}</Text>
+          ) : null}
+        </Section>
+
+        <Section title="SLIDER">
+          <Slider
+            value={sliderVal}
+            onValueChange={setSliderVal}
+            min={0} max={1} step={0.05}
+            style={{ width: inner - 60 }}
+          />
+          <Text fontSize={12} width={inner} height={18} style={{ color: C.dim }}>
+            {'Value: ' + sliderVal.toFixed(2)}
+          </Text>
+          <Slider value={0.6} disabled style={{ width: inner - 60 }} />
+          <Text fontSize={11} width={inner} height={16} style={{ color: C.dim }}>Disabled</Text>
+        </Section>
+
+        <Section title="SELECT">
+          <Select
+            value={selectVal}
+            options={[
+              { label: 'Catppuccin Mocha', value: 'mocha' },
+              { label: 'Catppuccin Latte', value: 'latte' },
+              { label: 'Tokyo Night',      value: 'tokyo' },
+              { label: 'Gruvbox Dark',     value: 'gruvbox' },
+            ]}
+            onValueChange={setSelectVal}
+            placeholder="Pick a theme…"
+            style={{ width: inner }}
+          />
+          {selectVal && (
+            <Text fontSize={12} width={inner} height={18} style={{ color: C.teal }}>
+              {'Selected: ' + selectVal}
+            </Text>
+          )}
+          <Select disabled placeholder="Disabled select" style={{ width: inner }} />
+        </Section>
+
+        <Section title="DATE PICKER">
+          <DatePicker
+            value={dateVal}
+            onValueChange={setDateVal}
+            style={{ width: inner }}
+          />
+          {dateVal && (
+            <Text fontSize={12} width={inner} height={18} style={{ color: C.teal }}>
+              {'Picked: ' + dateVal.toDateString()}
+            </Text>
+          )}
+        </Section>
+
+      </View>
+    </ScrollView>
+  );
+}
+
+// ── Screen: Audio Demo ────────────────────────────────────────────────────────
+//
+// Phase 16G — audio.play, pause, resume, stop, volume.
+
+function AudioDemoScreen() {
+  const { width: winW, height: winH } = useWindowSize();
+  const navigate = useNavigate();
+  const C = useThemeColors();
+  const inner = winW - PAD * 2;
+
+  const [player,  setPlayer]  = useState(null);
+  const [playing, setPlaying] = useState(false);
+  const [volume,  setVolume]  = useState(1.0);
+  const [log,     setLog]     = useState([]);
+
+  function addLog(msg) {
+    setLog(prev => [msg, ...prev].slice(0, 10));
+  }
+
+  async function pickAndPlay() {
+    try {
+      const paths = await dialog.openFile({ filters: [{ name: 'Audio', extensions: ['mp3', 'flac', 'ogg', 'wav'] }], multiple: false });
+      if (!paths || paths.length === 0) return;
+      const src = paths[0];
+      addLog('Playing: ' + src.split(/[\\/]/).pop());
+      const p = await audio.play(src, {
+        volume,
+        onEnded: () => { setPlaying(false); addLog('Playback ended.'); },
+      });
+      setPlayer(p);
+      setPlaying(true);
+    } catch (e) {
+      addLog('Error: ' + e);
+    }
+  }
+
+  function handlePause() {
+    if (!player) return;
+    player.pause();
+    setPlaying(false);
+    addLog('Paused.');
+  }
+
+  function handleResume() {
+    if (!player) return;
+    player.resume();
+    setPlaying(true);
+    addLog('Resumed.');
+  }
+
+  function handleStop() {
+    if (!player) return;
+    player.stop();
+    setPlayer(null);
+    setPlaying(false);
+    addLog('Stopped.');
+  }
+
+  function adjustVolume(delta) {
+    const v = Math.max(0, Math.min(2, volume + delta));
+    setVolume(v);
+    if (player) player.setVolume(v);
+    addLog('Volume: ' + Math.round(v * 100) + '%');
+  }
+
+  return (
+    <ScrollView width={winW} height={winH - HEADER_H - PAD} contentHeight={600}>
+      <View style={{ gap: 16, padding: PAD, alignItems: 'flex-start', justifyContent: 'flex-start' }} width={inner}>
+
+        <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }} width={inner} height={34}>
+          <BackBtn />
+          <Text fontSize={16} width={inner - 100} height={22} style={{ color: C.text }}>Audio Playback</Text>
+        </View>
+
+        <Text fontSize={12} width={inner} height={18} style={{ color: C.dim }}>
+          Requires <Text fontSize={12} style={{ color: C.accent }}>audio: true</Text> + <Text fontSize={12} style={{ color: C.accent }}>dialog: true</Text> in velox.config.json
+        </Text>
+
+        {/* Transport controls */}
+        <View style={{ flexDirection: 'row', gap: 8 }} width={inner} height={36}>
+          <Btn label="Open file" onPress={pickAndPlay} width={100} color={C.teal} />
+          <Btn label="Pause"  onPress={handlePause}  width={72} color={C.yellow} disabled={!playing} />
+          <Btn label="Resume" onPress={handleResume} width={80} color={C.green}  disabled={playing || !player} />
+          <Btn label="Stop"   onPress={handleStop}   width={72} color={C.red}    disabled={!player} />
+        </View>
+
+        {/* Volume control */}
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }} width={inner} height={34}>
+          <Text fontSize={12} width={60} height={18} style={{ color: C.subtle }}>Volume</Text>
+          <Btn label="-10%" onPress={() => adjustVolume(-0.1)} width={60} color={C.dim} />
+          <Text fontSize={13} width={48} height={18} style={{ color: C.text }}>{Math.round(volume * 100) + '%'}</Text>
+          <Btn label="+10%" onPress={() => adjustVolume(+0.1)} width={60} color={C.dim} />
+        </View>
+
+        {/* Status */}
+        <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }} width={inner} height={20}>
+          <Text fontSize={11} width={60} height={16} style={{ color: C.dim }}>Status:</Text>
+          <Text fontSize={11} width={inner - 72} height={16} style={{ color: player ? (playing ? C.green : C.yellow) : C.dim }}>
+            {player ? (playing ? 'Playing' : 'Paused') : 'Stopped'}
+          </Text>
+        </View>
+
+        {/* Log */}
+        <View style={{ backgroundColor: C.surface, borderRadius: 6, padding: 10, gap: 4 }} width={inner}>
+          <Text fontSize={10} width={inner - 20} height={14} style={{ color: C.dim }}>Log (newest first):</Text>
+          {log.length === 0
+            ? <Text fontSize={11} width={inner - 20} height={16} style={{ color: C.dim }}>No events yet.</Text>
+            : log.map((l, i) => (
+              <Text key={i} fontSize={11} width={inner - 20} height={16} style={{ color: C.subtle }}>{l}</Text>
+            ))
+          }
+        </View>
+
+      </View>
+    </ScrollView>
+  );
+}
+
 // ── Screen: Network Test ──────────────────────────────────────────────────────
 //
 // Demonstrates Phase 12 fetch binding.  Fires a GET and a POST request
@@ -1751,6 +2041,8 @@ function App() {
               <Route name="search"  component={NoteSearchScreen}  />
               <Route name="network" component={NetworkTestScreen} />
               <Route name="sysapi"  component={SysApiScreen}      />
+              <Route name="forms"   component={FormDemoScreen}    />
+              <Route name="audio"   component={AudioDemoScreen}   />
             </Router>
           </View>
 

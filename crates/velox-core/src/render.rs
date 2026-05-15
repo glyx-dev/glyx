@@ -64,7 +64,11 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
                 ctx.frame.push_layer(rx, ry, rw, rh);
             }
 
-            let children: Vec<u32> = node.children.clone();
+            // Sort children by z_index (stable — preserves document order for ties).
+            let mut children: Vec<u32> = node.children.clone();
+            children.sort_by_key(|&cid| {
+                ctx.nodes.get(&cid).and_then(|n| n.props.z_index).unwrap_or(0)
+            });
             for child_id in children {
                 render_subtree(child_id, child_scroll_y, ctx);
             }

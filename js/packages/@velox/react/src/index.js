@@ -7,6 +7,7 @@ import {
   registerPressable, unregisterPressable,
   registerInput, unregisterInput,
   registerScrollView, unregisterScrollView,
+  registerDraggable, unregisterDraggable,
   dispatchEvents,
   addWindowSizeListener, removeWindowSizeListener,
   addKeyListener,
@@ -167,6 +168,34 @@ function _pollLeakWarnings() {
   }
 }
 
+// ── Audio event polling ───────────────────────────────────────────────────────
+//
+// Drains `__velox_audio_poll()` each frame and fires registered onEnded callbacks.
+// Map: handle (string) → array of { onEnded } objects.
+
+const _audioCallbacks = new Map();
+
+function _pollAudio() {
+  if (typeof __velox_audio_poll === 'undefined') return;
+  let raw;
+  try { raw = __velox_audio_poll(); } catch { return; }
+  if (!raw || raw === '[]') return;
+  let events;
+  try { events = JSON.parse(raw); } catch { return; }
+  for (const ev of events) {
+    const key = String(ev.handle);
+    const cbs = _audioCallbacks.get(key);
+    if (cbs) {
+      for (const cb of cbs) {
+        if (ev.event === 'ended' && cb.onEnded) {
+          try { cb.onEnded(); } catch (e) { __velox_log('[audio] onEnded error: ' + e); }
+        }
+      }
+      if (ev.event === 'ended') _audioCallbacks.delete(key);
+    }
+  }
+}
+
 // ── Frame callback ────────────────────────────────────────────────────────────
 //
 // Rust calls __velox_frameCallback() once per RedrawRequested (frame_tick),
@@ -183,6 +212,7 @@ globalThis.__velox_frameCallback = function veloxFrameCallback() {
     _pollGlobalShortcuts();
     _pollPerfViolations();
     _pollLeakWarnings();
+    _pollAudio();
     dispatchEvents();
   });
 };
@@ -603,6 +633,7 @@ export function TextInput({
     justifyContent: multiline ? 'flex-start' : 'center',
     alignItems: 'flex-start',
     padding: innerPadding,
+    clip: true,   // prevent text from rendering outside the input bounds
     ...style,
   };
 
@@ -950,7 +981,13 @@ export const dialog = {
    */
   openFile({ filters = [], multiple = false } = {}) {
     if (typeof __velox_dialog_openFile === 'undefined') return _noBinding('dialog.openFile');
-    return __velox_dialog_openFile(JSON.stringify(filters), multiple).then(JSON.parse);
+    return __velox_dialog_openFile(JSON.stringify(filters), multiple).then(raw => {
+      const result = JSON.parse(raw);
+      if (result === null) return null;
+      // multiple=false returns a bare JSON string; multiple=true returns a JSON array.
+      // Always normalise to string[] so callers can use result[0] uniformly.
+      return Array.isArray(result) ? result : [result];
+    });
   },
 
   /**
@@ -1381,6 +1418,214 @@ export const credentials = {
   },
 };
 
+// ── Audio playback ────────────────────────────────────────────────────────────
+
+/**
+ * Audio playback API.
+ *
+ * Capability: `audio: true` in velox.config.json.
+ *
+ * @example
+ * const player = await audio.play('/path/to/file.mp3');
+ * player.pause();
+ * player.setVolume(0.5);
+ * player.stop();
+ */
+export const audio = {
+  /**
+   * Play an audio file. Returns a player handle.
+   * @param {string} src  Absolute path to the audio file (mp3, flac, ogg, wav).
+   * @param {{ volume?: number, onEnded?: function }} [opts]
+   * @returns {Promise<{ id: string, pause, resume, stop, setVolume, getVolume }>}
+   */
+  async play(src, { volume = 1.0, onEnded } = {}) {
+    if (typeof __velox_audio_play === 'undefined')
+      throw new Error('audio binding unavailable');
+    const rawId = await __velox_audio_play(src, JSON.stringify({ volume }));
+    const id = String(JSON.parse(rawId));
+    if (onEnded) {
+      if (!_audioCallbacks.has(id)) _audioCallbacks.set(id, []);
+      _audioCallbacks.get(id).push({ onEnded });
+    }
+    return {
+      id,
+      pause()           { if (typeof __velox_audio_pause     !== 'undefined') __velox_audio_pause(id); },
+      resume()          { if (typeof __velox_audio_resume    !== 'undefined') __velox_audio_resume(id); },
+      stop()            { if (typeof __velox_audio_stop      !== 'undefined') __velox_audio_stop(id); _audioCallbacks.delete(id); },
+      setVolume(v)      { if (typeof __velox_audio_setVolume !== 'undefined') __velox_audio_setVolume(id, v); },
+      getVolume()       { return typeof __velox_audio_getVolume !== 'undefined' ? __velox_audio_getVolume(id) : 1.0; },
+      onEnded(cb)       {
+        if (!_audioCallbacks.has(id)) _audioCallbacks.set(id, []);
+        _audioCallbacks.get(id).push({ onEnded: cb });
+      },
+    };
+  },
+};
+
+// ── Form field components ─────────────────────────────────────────────────────
+//
+// Tier 1: pure React components, no new native bindings.
+// All styled for the Velox dark-blue aesthetic.
+
+/**
+ * Controlled checkbox.
+ *
+ * @param {{ checked?: boolean, onChange?: function, disabled?: boolean,
+ *           label?: string, style?: object }} props
+ */
+export function Checkbox({ checked = false, onChange, disabled = false, label, style, ...rest }) {
+  const SIZE = 20;
+  const active = checked && !disabled;
+  const box = React.createElement(View, {
+    style: {
+      width: SIZE, height: SIZE,
+      borderWidth: 2,
+      borderColor: disabled ? '#555' : (active ? '#7aa2f7' : '#555'),
+      borderRadius: 4,
+      backgroundColor: active ? '#7aa2f7' : 'transparent',
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+  }, active ? React.createElement(Text, { style: { color: '#171923', fontSize: 13 }, width: SIZE, height: SIZE }, '\u2713') : null);
+
+  const lbl = label != null
+    ? React.createElement(Text, { style: { color: disabled ? '#555' : '#e7ecff', fontSize: 14 } }, String(label))
+    : null;
+
+  return React.createElement(Pressable, {
+    onPress: () => { if (!disabled && onChange) onChange(!checked); },
+    style: { flexDirection: 'row', alignItems: 'center', gap: 8, ...style },
+    ...rest,
+  }, box, lbl);
+}
+
+/**
+ * Toggle switch.
+ *
+ * @param {{ value?: boolean, onValueChange?: function, disabled?: boolean,
+ *           style?: object }} props
+ */
+export function Switch({ value = false, onValueChange, disabled = false, style, ...rest }) {
+  return React.createElement(Pressable, {
+    onPress: () => { if (!disabled && onValueChange) onValueChange(!value); },
+    style: {
+      width: 48, height: 24,
+      backgroundColor: disabled ? '#333' : (value ? '#7aa2f7' : '#3c4464'),
+      borderRadius: 12,
+      justifyContent: 'center',
+      alignItems: value ? 'flex-end' : 'flex-start',
+      padding: 2,
+      ...style,
+    },
+    ...rest,
+  },
+    React.createElement(View, {
+      style: { width: 20, height: 20, backgroundColor: disabled ? '#666' : '#fff', borderRadius: 10 },
+    })
+  );
+}
+
+// Context for RadioGroup → Radio communication.
+const _RadioCtx = React.createContext(null);
+
+/**
+ * Radio button group wrapper. Provides context for child Radio components.
+ *
+ * @param {{ value: any, onValueChange?: function, children, style?: object }} props
+ */
+export function RadioGroup({ value, onValueChange, children, style, ...rest }) {
+  return React.createElement(
+    _RadioCtx.Provider,
+    { value: { value, onValueChange } },
+    React.createElement(View, { style: { gap: 8, ...style }, ...rest }, children)
+  );
+}
+
+/**
+ * Individual radio option. Must be a descendant of RadioGroup.
+ *
+ * @param {{ value: any, label?: string, disabled?: boolean, style?: object }} props
+ */
+export function Radio({ value, label, disabled = false, style, ...rest }) {
+  const ctx      = React.useContext(_RadioCtx);
+  const selected = ctx != null && ctx.value === value;
+  const ringColor = disabled ? '#555' : (selected ? '#7aa2f7' : '#555');
+
+  const circle = React.createElement(View, {
+    style: {
+      width: 20, height: 20,
+      borderWidth: 2,
+      borderColor: ringColor,
+      borderRadius: 10,
+      justifyContent: 'center',
+      alignItems: 'center',
+      backgroundColor: 'transparent',
+    },
+  }, selected ? React.createElement(View, {
+    style: { width: 10, height: 10, backgroundColor: disabled ? '#555' : '#7aa2f7', borderRadius: 5 },
+  }) : null);
+
+  const lbl = label != null
+    ? React.createElement(Text, { style: { color: disabled ? '#555' : '#e7ecff', fontSize: 14 } }, String(label))
+    : null;
+
+  return React.createElement(Pressable, {
+    onPress: () => { if (!disabled && ctx && ctx.onValueChange) ctx.onValueChange(value); },
+    style: { flexDirection: 'row', alignItems: 'center', gap: 8, ...style },
+    ...rest,
+  }, circle, lbl);
+}
+
+/**
+ * File picker button. Opens the OS file dialog and fires `onFilesSelected`
+ * with an array of selected absolute paths.
+ *
+ * Requires `dialog: true` capability in velox.config.json.
+ *
+ * @param {{ onFilesSelected?: function, accept?: string, multiple?: boolean,
+ *           label?: string, disabled?: boolean, style?: object }} props
+ */
+export function FileInput({
+  onFilesSelected,
+  accept,
+  multiple = false,
+  label = 'Browse files\u2026',
+  disabled = false,
+  style,
+  ...rest
+}) {
+  const handlePress = () => {
+    if (disabled) return;
+    const filters = accept
+      ? accept.split(',').map(e => e.trim().replace(/^\./, ''))
+      : [];
+    dialog.openFile({ filters, multiple })
+      .then(paths => {
+        if (paths && paths.length > 0 && onFilesSelected) onFilesSelected(paths);
+      })
+      .catch(e => __velox_log('[FileInput] error: ' + e));
+  };
+
+  return React.createElement(Pressable, {
+    onPress: handlePress,
+    style: {
+      padding: 8,
+      backgroundColor: disabled ? '#1f2333' : '#262b3f',
+      borderWidth: 1,
+      borderColor: disabled ? '#3c4464' : '#7aa2f7',
+      borderRadius: 6,
+      justifyContent: 'center',
+      alignItems: 'center',
+      ...style,
+    },
+    ...rest,
+  },
+    React.createElement(Text, {
+      style: { color: disabled ? '#555' : '#7aa2f7', fontSize: 14 },
+    }, label)
+  );
+}
+
 export const input = {
   gamepads: {
     /**
@@ -1484,3 +1729,289 @@ export const deeplink = {
     };
   },
 };
+
+// ── Form field components — Tier 2 ────────────────────────────────────────────
+//
+// Slider:    draggable thumb backed by native drag events.
+// Select:    inline-expandable option list (accordion style).
+// DatePicker: inline month calendar.
+
+/**
+ * Horizontal range slider.
+ *
+ * @param {{ value?: number, onValueChange?: function,
+ *           min?: number, max?: number, step?: number,
+ *           disabled?: boolean, style?: object }} props
+ */
+export function Slider({
+  value = 0, onValueChange,
+  min = 0, max = 1, step = 0,
+  disabled = false, style,
+  ...rest
+}) {
+  const pct = max === min ? 0 : Math.max(0, Math.min(1, (Math.min(max, Math.max(min, value)) - min) / (max - min)));
+
+  // Plain useRefs for native node IDs — NOT React refs (which give {id} objects).
+  const trackNodeId = useRef(null);
+  const thumbNodeId = useRef(null);
+
+  // Always-current refs so the stable drag handler never has stale closures.
+  const valueRef      = useRef(value);      valueRef.current      = value;
+  const minRef        = useRef(min);        minRef.current        = min;
+  const maxRef        = useRef(max);        maxRef.current        = max;
+  const stepRef       = useRef(step);       stepRef.current       = step;
+  const disabledRef   = useRef(disabled);   disabledRef.current   = disabled;
+  const onChangeRef   = useRef(onValueChange); onChangeRef.current = onValueChange;
+
+  // _veloxOnMount fires synchronously from createInstance with the bare node ID (number).
+  // This is the correct way to capture native IDs in Velox — React `ref` gives {id} objects.
+  const onTrackMount = useCallback((id) => {
+    trackNodeId.current = id;
+  }, []);
+
+  const onThumbMount = useCallback((id) => {
+    thumbNodeId.current = id;
+    registerDraggable(id, {
+      onDragMove({ dx }) {
+        if (disabledRef.current || !onChangeRef.current) return;
+        const layout = __velox_getLayout(trackNodeId.current);
+        if (!layout || layout.width <= 0) return;
+        const range = maxRef.current - minRef.current;
+        const delta = (dx / layout.width) * range;
+        const clampFn = v => Math.min(maxRef.current, Math.max(minRef.current, v));
+        let v = clampFn(valueRef.current + delta);
+        const s = stepRef.current;
+        if (s > 0) v = Math.round(v / s) * s;
+        onChangeRef.current(v);
+      },
+    });
+  }, []); // stable — all values read via refs at call time
+
+  useEffect(() => {
+    return () => {
+      if (thumbNodeId.current !== null) unregisterDraggable(thumbNodeId.current);
+    };
+  }, []);
+
+  const THUMB = 20;
+  const TRACK = 4;
+  const accent = disabled ? '#555' : '#7aa2f7';
+
+  return React.createElement(View, {
+    _veloxOnMount: onTrackMount,
+    style: { flexDirection: 'row', alignItems: 'center', height: THUMB, ...style },
+    ...rest,
+  },
+    React.createElement(View, { style: { flex: pct, height: TRACK, backgroundColor: accent } }),
+    React.createElement(View, {
+      _veloxOnMount: onThumbMount,
+      style: { width: THUMB, height: THUMB, borderRadius: THUMB / 2, backgroundColor: accent },
+    }),
+    React.createElement(View, { style: { flex: 1 - pct, height: TRACK, backgroundColor: '#3c4464' } }),
+  );
+}
+
+/**
+ * Inline-expandable select (accordion style — no absolute positioning needed).
+ *
+ * @param {{ value?: any, options?: {label:string,value:any}[],
+ *           onValueChange?: function, disabled?: boolean,
+ *           placeholder?: string, style?: object }} props
+ */
+export function Select({
+  value, options = [], onValueChange,
+  disabled = false, placeholder = 'Select\u2026', style,
+  ...rest
+}) {
+  const [open, setOpen] = React.useState(false);
+  const selected = options.find(o => o.value === value);
+
+  return React.createElement(View, { style, ...rest },
+    React.createElement(Pressable, {
+      onPress: () => { if (!disabled) setOpen(o => !o); },
+      style: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        padding: 10,
+        borderRadius: 8,
+        backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
+        borderWidth: 1,
+        borderColor: open ? '#7aa2f7' : '#3c4464',
+      },
+    },
+      React.createElement(Text, {
+        style: { color: selected ? '#e7ecff' : '#666', fontSize: 14 },
+      }, selected ? selected.label : placeholder),
+      React.createElement(Text, {
+        style: { color: '#7aa2f7', fontSize: 11 },
+      }, open ? '\u25b2' : '\u25bc'),
+    ),
+    open && React.createElement(View, {
+      style: {
+        backgroundColor: '#1e2235',
+        borderRadius: 8,
+        marginTop: 4,
+        borderWidth: 1,
+        borderColor: '#3c4464',
+        zIndex: 10,
+      },
+    },
+      ...options.map((opt, i) =>
+        React.createElement(Pressable, {
+          key: String(i),
+          onPress: () => { onValueChange?.(opt.value); setOpen(false); },
+          style: {
+            padding: 10,
+            backgroundColor: opt.value === value ? '#2e3555' : 'transparent',
+            borderRadius: 6,
+          },
+        },
+          React.createElement(Text, {
+            style: { color: opt.value === value ? '#7aa2f7' : '#cdd6f4', fontSize: 14 },
+          }, opt.label),
+        )
+      ),
+    ),
+  );
+}
+
+/**
+ * Inline date picker with month navigation.
+ *
+ * @param {{ value?: Date|null, onValueChange?: function,
+ *           disabled?: boolean, style?: object }} props
+ */
+export function DatePicker({ value = null, onValueChange, disabled = false, style, ...rest }) {
+  const today       = value ? new Date(value) : new Date();
+  const [open, setOpen]           = React.useState(false);
+  const [viewYear, setViewYear]   = React.useState(today.getFullYear());
+  const [viewMonth, setViewMonth] = React.useState(today.getMonth());
+
+  const displayStr = value
+    ? `${new Date(value).getFullYear()}-${String(new Date(value).getMonth() + 1).padStart(2, '0')}-${String(new Date(value).getDate()).padStart(2, '0')}`
+    : 'Select date\u2026';
+
+  const monthNames = ['January','February','March','April','May','June',
+                      'July','August','September','October','November','December'];
+  const dayNames   = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+
+  const firstDow    = new Date(viewYear, viewMonth, 1).getDay();
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+
+  // Build flat cell array: null for padding, number for actual days.
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const prevMonth = () => {
+    if (viewMonth === 0) { setViewMonth(11); setViewYear(y => y - 1); }
+    else setViewMonth(m => m - 1);
+  };
+  const nextMonth = () => {
+    if (viewMonth === 11) { setViewMonth(0); setViewYear(y => y + 1); }
+    else setViewMonth(m => m + 1);
+  };
+
+  // Build rows (7 cells each).
+  const rowCount = Math.ceil(cells.length / 7);
+  const rows = Array.from({ length: rowCount }, (_, r) => cells.slice(r * 7, r * 7 + 7));
+
+  // Fixed cell size: compact 36×32 grid so the calendar is always 268px wide.
+  const CELL_W = 36;
+  const CELL_H = 32;
+  const CAL_W  = CELL_W * 7; // 252px content; +16 for 8px padding each side
+
+  return React.createElement(View, { style, ...rest },
+    // Trigger button
+    React.createElement(Pressable, {
+      onPress: () => { if (!disabled) setOpen(o => !o); },
+      style: {
+        padding: 10,
+        borderRadius: 8,
+        backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
+        borderWidth: 1,
+        borderColor: open ? '#7aa2f7' : '#3c4464',
+      },
+    },
+      React.createElement(Text, {
+        style: { color: value ? '#e7ecff' : '#666', fontSize: 14 },
+      }, displayStr),
+    ),
+
+    open && React.createElement(View, {
+      width: CAL_W + 16,
+      style: {
+        backgroundColor: '#1e2235',
+        borderRadius: 8,
+        marginTop: 4,
+        padding: 8,
+        borderWidth: 1,
+        borderColor: '#3c4464',
+      },
+    },
+      // Month navigation header
+      React.createElement(View, {
+        width: CAL_W, height: 28,
+        style: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+      },
+        React.createElement(Pressable, { onPress: prevMonth, width: 24, height: 28, style: { justifyContent: 'center', alignItems: 'center' } },
+          React.createElement(Text, { style: { color: '#7aa2f7', fontSize: 18 }, width: 20, height: 22 }, '\u2039'),
+        ),
+        React.createElement(Text, { style: { color: '#cdd6f4', fontSize: 13 }, width: CAL_W - 56, height: 18 },
+          `${monthNames[viewMonth]} ${viewYear}`),
+        React.createElement(Pressable, { onPress: nextMonth, width: 24, height: 28, style: { justifyContent: 'center', alignItems: 'center' } },
+          React.createElement(Text, { style: { color: '#7aa2f7', fontSize: 18 }, width: 20, height: 22 }, '\u203a'),
+        ),
+      ),
+
+      // Day-of-week header row
+      React.createElement(View, { width: CAL_W, height: 20, style: { flexDirection: 'row', marginBottom: 2 } },
+        ...dayNames.map(d =>
+          React.createElement(View, {
+            key: d, width: CELL_W, height: 20,
+            style: { alignItems: 'center', justifyContent: 'center' },
+          },
+            React.createElement(Text, { style: { color: '#555', fontSize: 10 }, width: CELL_W, height: 14 }, d),
+          )
+        ),
+      ),
+
+      // Calendar day rows — explicit width + height for every cell keeps the grid tight.
+      ...rows.map((row, ri) =>
+        React.createElement(View, {
+          key: ri, width: CAL_W, height: CELL_H,
+          style: { flexDirection: 'row' },
+        },
+          ...row.map((day, ci) => {
+            if (day === null) {
+              return React.createElement(View, { key: ci, width: CELL_W, height: CELL_H });
+            }
+            const selDate = value ? new Date(value) : null;
+            const isSelected = selDate &&
+              selDate.getDate() === day &&
+              selDate.getMonth() === viewMonth &&
+              selDate.getFullYear() === viewYear;
+
+            return React.createElement(Pressable, {
+              key: ci,
+              onPress: () => { onValueChange?.(new Date(viewYear, viewMonth, day)); setOpen(false); },
+              width: CELL_W, height: CELL_H,
+              style: {
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderRadius: 4,
+                backgroundColor: isSelected ? '#7aa2f7' : 'transparent',
+              },
+            },
+              React.createElement(Text, {
+                style: { color: isSelected ? '#171923' : '#cdd6f4', fontSize: 13 },
+                width: CELL_W, height: 18,
+              }, String(day)),
+            );
+          }),
+        )
+      ),
+    ),
+  );
+}

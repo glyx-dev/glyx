@@ -111,6 +111,9 @@ pub struct Capabilities {
     /// Allows storing/retrieving secrets encrypted by the OS, tied to the logged-in user.
     #[serde(default)]
     pub credentials: bool,
+    /// Audio playback (local files via rodio + Symphonia decoders).
+    #[serde(default)]
+    pub audio: bool,
     /// Deep-link URL scheme registration.  `None` = no deep-link support.
     pub deeplink: Option<DeeplinkCapability>,
 }

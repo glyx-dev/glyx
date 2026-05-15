@@ -126,6 +126,16 @@ globalThis.__velox_shortcut_poll       = function() { return '[]'; };
 globalThis.__velox_credentials_set    = function() { return stubPromise('null'); };
 globalThis.__velox_credentials_get    = function() { return stubPromise('null'); };
 globalThis.__velox_credentials_delete = function() { return stubPromise('null'); };
+
+// Audio playback bindings
+let __velox_nextAudioId = 1;
+globalThis.__velox_audio_play      = function() { return stubPromise(String(__velox_nextAudioId++)); };
+globalThis.__velox_audio_pause     = function() {};
+globalThis.__velox_audio_resume    = function() {};
+globalThis.__velox_audio_stop      = function() {};
+globalThis.__velox_audio_setVolume = function() {};
+globalThis.__velox_audio_getVolume = function() { return 1.0; };
+globalThis.__velox_audio_poll      = function() { return '[]'; };
 "#
     .to_string()
 }

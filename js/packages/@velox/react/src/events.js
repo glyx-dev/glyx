@@ -31,6 +31,13 @@ const inputRegistry = new Map();
 // scroll view the cursor is currently over.
 const scrollRegistry = new Map();
 
+// Map from nodeId -> { onDragStart?, onDragMove?, onDragEnd? }
+// Draggable nodes (e.g. Slider thumb) register here.
+const dragRegistry = new Map();
+
+// Currently dragged node id (or null). Set on dragStart, cleared on dragEnd.
+let activeDragId = null;
+
 // Listeners notified on window resize: Array<(size: {width, height}) => void>
 const windowSizeListeners = [];
 
@@ -104,6 +111,24 @@ export function registerScrollView(nodeId, handlers) {
  */
 export function unregisterScrollView(nodeId) {
   scrollRegistry.delete(nodeId);
+}
+
+/**
+ * Register a draggable node (e.g. a Slider thumb).
+ * @param {number} nodeId
+ * @param {{ onDragStart?: (e:{x,y})=>void, onDragMove?: (e:{x,y,dx,dy})=>void, onDragEnd?: (e:{x,y})=>void }} handlers
+ */
+export function registerDraggable(nodeId, handlers) {
+  dragRegistry.set(nodeId, handlers);
+}
+
+/**
+ * Unregister a draggable node (called when the component unmounts).
+ * @param {number} nodeId
+ */
+export function unregisterDraggable(nodeId) {
+  if (activeDragId === nodeId) activeDragId = null;
+  dragRegistry.delete(nodeId);
 }
 
 /**
@@ -268,6 +293,34 @@ export function dispatchEvents() {
       case 'resize': {
         const size = { width: ev.width, height: ev.height };
         for (const fn of windowSizeListeners) fn(size);
+        break;
+      }
+
+      case 'dragStart': {
+        for (const [nodeId, handlers] of dragRegistry) {
+          if (hitTest(nodeId, ev.x, ev.y)) {
+            activeDragId = nodeId;
+            handlers.onDragStart?.({ x: ev.x, y: ev.y });
+            break;
+          }
+        }
+        break;
+      }
+
+      case 'dragMove': {
+        if (activeDragId !== null) {
+          const handlers = dragRegistry.get(activeDragId);
+          handlers?.onDragMove?.({ x: ev.x, y: ev.y, dx: ev.dx, dy: ev.dy });
+        }
+        break;
+      }
+
+      case 'dragEnd': {
+        if (activeDragId !== null) {
+          const handlers = dragRegistry.get(activeDragId);
+          handlers?.onDragEnd?.({ x: ev.x, y: ev.y });
+          activeDragId = null;
+        }
         break;
       }
 

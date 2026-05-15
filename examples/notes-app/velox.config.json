@@ -19,6 +19,8 @@
     "storage":        true,
     "gamepads":       true,
     "globalShortcuts": true,
+    "credentials":    true,
+    "audio":          true,
     "deeplink": { "scheme": "notes", "singleInstance": true }
   },
   "dev": {

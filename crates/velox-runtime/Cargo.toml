@@ -28,3 +28,4 @@ sysinfo             = { workspace = true }
 keepawake           = { workspace = true }
 gilrs               = { workspace = true }
 global-hotkey       = { workspace = true }
+rodio               = { workspace = true }

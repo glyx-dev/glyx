@@ -61,6 +61,12 @@ pub enum InputEvent {
     MouseButton { x: f32, y: f32, button: u8, pressed: bool },
     /// Cursor moved to pixel position.
     CursorMoved { x: f32, y: f32 },
+    /// Pointer drag started (left button down + first move).
+    DragStart { x: f32, y: f32 },
+    /// Pointer dragged — continuous move while left button held.
+    DragMove { x: f32, y: f32, dx: f32, dy: f32 },
+    /// Pointer drag ended (left button released after drag).
+    DragEnd { x: f32, y: f32 },
     /// Keyboard key pressed or released.
     KeyInput { key: String, text: Option<String>, pressed: bool },
     /// Vertical scroll delta (positive = down).
@@ -215,6 +221,11 @@ pub struct NodeProps {
     pub image_id: Option<u32>,
     /// `"cover"` | `"contain"` | `"stretch"` (default).
     pub image_resize_mode: Option<String>,
+
+    // ── Stacking ─────────────────────────────────────────────────────────────
+    /// Z-index for draw ordering within the same parent.
+    /// Higher values render on top. Default 0.
+    pub z_index: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +258,16 @@ pub fn register_all(
     set_func(scope, global, "__velox_getTime", get_time);
     set_func(scope, global, "__velox_log",     js_log);
 
+    // Initialise rodio audio device (best-effort — no audio if no device found).
+    let (audio_stream_init, audio_handle_init) =
+        match rodio::OutputStream::try_default() {
+            Ok((stream, handle)) => (Some(stream), Some(handle)),
+            Err(e) => {
+                log::warn!("[velox] Audio init failed: {e}. Audio playback unavailable.");
+                (None, None)
+            }
+        };
+
     // Store all shared state in a heap-allocated struct, hand the raw
     // pointer to V8 via External so callbacks can recover it.
     let hwnd = window.as_ref().and_then(|w| w.hwnd);
@@ -277,6 +298,11 @@ pub fn register_all(
         hotkey_state:   std::cell::RefCell::new(None),
         next_hotkey_id: std::sync::atomic::AtomicU32::new(1),
         deeplink_url_queue,
+        audio_stream:  std::cell::RefCell::new(audio_stream_init),
+        audio_handle:  audio_handle_init,
+        audio_sinks:   Arc::new(Mutex::new(HashMap::new())),
+        audio_events:  Arc::new(Mutex::new(VecDeque::new())),
+        next_audio_id: std::sync::atomic::AtomicU32::new(1),
     });
     let ptr   = Box::into_raw(state) as *mut std::ffi::c_void;
     // Safety: ptr is valid for the lifetime of the isolate.
@@ -389,6 +415,15 @@ pub fn register_all(
     register!("__velox_credentials_get",    credentials_get_callback);
     register!("__velox_credentials_delete", credentials_delete_callback);
 
+    // ── Audio playback ───────────────────────────────────────────────────────
+    register!("__velox_audio_play",      audio_play_callback);
+    register!("__velox_audio_pause",     audio_pause_callback);
+    register!("__velox_audio_resume",    audio_resume_callback);
+    register!("__velox_audio_stop",      audio_stop_callback);
+    register!("__velox_audio_setVolume", audio_set_volume_callback);
+    register!("__velox_audio_getVolume", audio_get_volume_callback);
+    register!("__velox_audio_poll",      audio_poll_callback);
+
     // ── App lifecycle ────────────────────────────────────────────────────────
     register!("__velox_quit", quit_callback);
 
@@ -434,6 +469,19 @@ struct AsyncState {
     /// Forwarded deep-link URLs from single-instance pipe listener.
     /// Drained by `__velox_deeplink_poll` each frame.
     deeplink_url_queue: Arc<Mutex<VecDeque<String>>>,
+    // ── Audio playback (rodio) ───────────────────────────────────────────────
+    /// The OutputStream keeps the audio device open for the app lifetime.
+    /// Stored in RefCell because rodio::OutputStream is !Send.
+    /// Never read directly — held purely to keep the audio device alive.
+    #[allow(dead_code)]
+    audio_stream:  std::cell::RefCell<Option<rodio::OutputStream>>,
+    /// Handle cloned into async tasks to create Sinks.
+    audio_handle:  Option<rodio::OutputStreamHandle>,
+    /// Live sink map — keyed by velox audio handle ID.
+    audio_sinks:   Arc<Mutex<HashMap<u32, rodio::Sink>>>,
+    /// Events (e.g. "ended") produced by the audio subsystem, drained each frame.
+    audio_events:  Arc<Mutex<VecDeque<String>>>,
+    next_audio_id: std::sync::atomic::AtomicU32,
 }
 
 struct WsHandle {
@@ -591,6 +639,7 @@ fn parse_props(
     props.scroll_offset_y = get_num_prop(scope, obj, "scrollOffsetY");
     props.image_id        = get_num_prop(scope, obj, "imageId").map(|v| v as u32);
     props.image_resize_mode = get_str_prop(scope, obj, "resizeMode");
+    props.z_index         = get_num_prop(scope, obj, "zIndex").map(|v| v as i32);
 
     props
 }
@@ -700,6 +749,23 @@ fn poll_events_callback(
                 set_str!("type", "resize");
                 set_num!("width", width);
                 set_num!("height", height);
+            }
+            InputEvent::DragStart { x, y } => {
+                set_str!("type", "dragStart");
+                set_num!("x", x);
+                set_num!("y", y);
+            }
+            InputEvent::DragMove { x, y, dx, dy } => {
+                set_str!("type", "dragMove");
+                set_num!("x", x);
+                set_num!("y", y);
+                set_num!("dx", dx);
+                set_num!("dy", dy);
+            }
+            InputEvent::DragEnd { x, y } => {
+                set_str!("type", "dragEnd");
+                set_num!("x", x);
+                set_num!("y", y);
             }
         }
 
@@ -2835,6 +2901,202 @@ fn credentials_delete_callback(
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result });
     });
     rv.set(promise.into());
+}
+
+// ── Audio playback bindings ───────────────────────────────────────────────────
+
+/// `__velox_audio_play(src, optsJson)` → Promise<handle_id>
+///
+/// `optsJson` shape: `{ volume?: f32, loop?: bool }` (loop not yet implemented).
+/// Returns the integer handle ID as a JSON string.
+fn audio_play_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !velox_security::get().audio {
+        rv.set(reject_cap_promise(scope, "audio").into()); return;
+    }
+    let src = args.get(0).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+    let opts_raw = args.get(1).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_else(|| "{}".into());
+
+    // Parse opts: { volume?: f32, loop?: bool }
+    let volume: f32 = serde_json::from_str::<serde_json::Value>(&opts_raw)
+        .ok()
+        .and_then(|v| v.get("volume").and_then(|v| v.as_f64()).map(|f| f as f32))
+        .unwrap_or(1.0);
+
+    let Some(handle) = state.audio_handle.as_ref().map(Clone::clone) else {
+        rv.set(reject_promise_with_error(scope, "audio device unavailable").into());
+        return;
+    };
+
+    let sinks = Arc::clone(&state.audio_sinks);
+    let id = state.next_audio_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
+
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let file = std::fs::File::open(&src)
+                .map_err(|e| format!("audio open '{}': {e}", src))?;
+            let decoder = rodio::Decoder::new(std::io::BufReader::new(file))
+                .map_err(|e| format!("audio decode: {e}"))?;
+            let sink = rodio::Sink::try_new(&handle)
+                .map_err(|e| format!("audio sink: {e}"))?;
+            sink.set_volume(volume);
+            sink.append(decoder);
+            sink.play();
+            sinks.lock().unwrap().insert(id, sink);
+            Ok(id.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result });
+    });
+    rv.set(promise.into());
+}
+
+/// `__velox_audio_pause(handle)` → void (sync)
+fn audio_pause_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if let Some(id_str) = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)) {
+        if let Ok(id) = id_str.parse::<u32>() {
+            if let Some(sink) = state.audio_sinks.lock().unwrap().get(&id) {
+                sink.pause();
+            }
+        }
+    }
+}
+
+/// `__velox_audio_resume(handle)` → void (sync)
+fn audio_resume_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if let Some(id_str) = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)) {
+        if let Ok(id) = id_str.parse::<u32>() {
+            if let Some(sink) = state.audio_sinks.lock().unwrap().get(&id) {
+                sink.play();
+            }
+        }
+    }
+}
+
+/// `__velox_audio_stop(handle)` → void (sync)
+///
+/// Stops playback and removes the sink from the map.
+fn audio_stop_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if let Some(id_str) = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)) {
+        if let Ok(id) = id_str.parse::<u32>() {
+            if let Some(sink) = state.audio_sinks.lock().unwrap().remove(&id) {
+                sink.stop();
+            }
+        }
+    }
+}
+
+/// `__velox_audio_setVolume(handle, volume)` → void (sync)
+fn audio_set_volume_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let id_val = args.get(0);
+    let vol_val = args.get(1);
+    let id_str = id_val.to_string(scope).map(|s| s.to_rust_string_lossy(scope));
+    let vol = vol_val.number_value(scope).unwrap_or(1.0) as f32;
+    if let Some(id_str) = id_str {
+        if let Ok(id) = id_str.parse::<u32>() {
+            if let Some(sink) = state.audio_sinks.lock().unwrap().get(&id) {
+                sink.set_volume(vol.clamp(0.0, 2.0));
+            }
+        }
+    }
+}
+
+/// `__velox_audio_getVolume(handle)` → f32 (sync)
+fn audio_get_volume_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let vol = if let Some(id_str) = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)) {
+        if let Ok(id) = id_str.parse::<u32>() {
+            state.audio_sinks.lock().unwrap().get(&id).map(|s| s.volume()).unwrap_or(1.0)
+        } else { 1.0 }
+    } else { 1.0 };
+    rv.set(v8::Number::new(scope, vol as f64).into());
+}
+
+/// `__velox_audio_poll()` → JSON string — drained each frame by JS.
+///
+/// Scans sinks; for any that have finished playing emits `{"handle":N,"event":"ended"}`.
+/// Finished sinks are removed from the map.
+fn audio_poll_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let mut sinks_guard = state.audio_sinks.lock().unwrap();
+    let mut ended_ids: Vec<u32> = Vec::new();
+    for (&id, sink) in sinks_guard.iter() {
+        if sink.empty() {
+            ended_ids.push(id);
+        }
+    }
+    for id in &ended_ids {
+        sinks_guard.remove(id);
+    }
+    drop(sinks_guard);
+
+    // Merge newly-ended events with the shared events queue, then drain all.
+    let json = {
+        let mut evts = state.audio_events.lock().unwrap();
+        for id in ended_ids {
+            evts.push_back(format!("{{\"handle\":{id},\"event\":\"ended\"}}"));
+        }
+        if evts.is_empty() {
+            "[]".to_string()
+        } else {
+            let items: Vec<String> = evts.drain(..).collect();
+            format!("[{}]", items.join(","))
+        }
+    };
+
+    let s = v8::String::new(scope, &json).unwrap();
+    rv.set(s.into());
 }
 
 /// Parse `"ctrl+shift+v"` into a `global_hotkey::hotkey::HotKey`.

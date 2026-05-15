@@ -428,6 +428,10 @@ struct PerWindowState {
     /// Current cursor position in physical pixels.
     cursor_x:     f32,
     cursor_y:     f32,
+    /// Drag tracking: set when left button is held down and cursor has moved.
+    drag_active:  bool,
+    drag_start_x: f32,
+    drag_start_y: f32,
     /// Callback to request another frame — used for cursor blinking.
     /// Wrapped in Arc so it can be cloned into the blink timer thread.
     request_redraw: Arc<dyn Fn() + Send + Sync>,
@@ -1125,6 +1129,9 @@ pub fn run(mut config: AppConfig) {
                     label_cache:  lru::LruCache::new(std::num::NonZeroUsize::new(256).unwrap()),
                     cursor_x:     0.0,
                     cursor_y:     0.0,
+                    drag_active:  false,
+                    drag_start_x: 0.0,
+                    drag_start_y: 0.0,
                     request_redraw: Arc::clone(&request_redraw),
                     cursor_blink_on:       true,
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
@@ -1177,12 +1184,22 @@ pub fn run(mut config: AppConfig) {
             // ── Cursor movement ───────────────────────────────────────────
             ShellEvent::CursorMoved { window_handle, x, y } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    let prev_x = s.cursor_x;
+                    let prev_y = s.cursor_y;
                     s.cursor_x = x as f32;
                     s.cursor_y = y as f32;
                     s.runtime.push_event(InputEvent::CursorMoved {
                         x: s.cursor_x,
                         y: s.cursor_y,
                     });
+                    if s.drag_active {
+                        s.runtime.push_event(InputEvent::DragMove {
+                            x: s.cursor_x,
+                            y: s.cursor_y,
+                            dx: s.cursor_x - prev_x,
+                            dy: s.cursor_y - prev_y,
+                        });
+                    }
                     (s.request_redraw)();
                 }
             }
@@ -1193,6 +1210,22 @@ pub fn run(mut config: AppConfig) {
                     s.runtime.push_event(InputEvent::MouseButton {
                         x: s.cursor_x, y: s.cursor_y, button, pressed,
                     });
+                    // Track left-button drag state (button == 0).
+                    if button == 0 {
+                        if pressed {
+                            s.drag_active  = true;
+                            s.drag_start_x = s.cursor_x;
+                            s.drag_start_y = s.cursor_y;
+                            s.runtime.push_event(InputEvent::DragStart {
+                                x: s.cursor_x, y: s.cursor_y,
+                            });
+                        } else if s.drag_active {
+                            s.drag_active = false;
+                            s.runtime.push_event(InputEvent::DragEnd {
+                                x: s.cursor_x, y: s.cursor_y,
+                            });
+                        }
+                    }
                 }
             }
 

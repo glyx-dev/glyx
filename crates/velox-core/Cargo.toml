@@ -33,3 +33,5 @@ serde_json     = { workspace = true }
 dotenvy        = { workspace = true }
 sysinfo        = { workspace = true }
 lru            = { workspace = true }
+smallvec       = { workspace = true }
+velox-3d       = { path = "../velox-3d" }

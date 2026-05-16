@@ -23,6 +23,7 @@ import {
   battery, system, power, storage, input, perf, deeplink, credentials,
   Checkbox, Switch, RadioGroup, Radio, FileInput, audio,
   Slider, Select, DatePicker,
+  Canvas, Canvas3D,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
 
@@ -46,6 +47,7 @@ const C = {
   yellow:      '#e0af68',
   mauve:       '#bb9af7',
   teal:        '#7dcfff',
+  sapphire:    '#2ac3de',
   header:      '#141824',
 };
 
@@ -442,6 +444,12 @@ function NoteListScreen() {
             onPress={() => navigate('audio')}
             width={74}
             color={C.teal}
+          />
+          <Btn
+            label="Canvas"
+            onPress={() => navigate('canvas')}
+            width={80}
+            color={C.sapphire}
           />
         </View>
         <Text fontSize={11} width={isWide ? inner - 308 : inner} height={16} style={{ color: C.dim }}>
@@ -1847,6 +1855,160 @@ function TextInputTestBox({ width }) {
   );
 }
 
+// ── Screen: Canvas Demo ───────────────────────────────────────────────────────
+
+function CanvasDemoScreen() {
+  const { width: winW } = useWindowSize();
+  const inner = winW - PAD * 2;
+
+  // 2D canvas ref — we draw into it on every animation frame.
+  const canvasRef = React.useRef(null);
+  const angleRef  = React.useRef(0);
+
+  useEffect(() => {
+    let raf;
+    function loop() {
+      const ctx = canvasRef.current;
+      if (ctx) {
+        const t = angleRef.current;
+        angleRef.current += 0.04;
+
+        ctx.clear();
+
+        // Background grid
+        ctx.strokeStyle = '#1e2030';
+        ctx.lineWidth   = 1;
+        for (let x = 0; x <= 300; x += 30)  ctx.strokeLine(x, 0, x, 200);
+        for (let y = 0; y <= 200; y += 30)  ctx.strokeLine(0, y, 300, y);
+
+        // Rotating coloured rectangles
+        const cx = 150 + Math.cos(t) * 60;
+        const cy = 100 + Math.sin(t) * 40;
+        ctx.fillStyle   = [100, 140, 255, 200];
+        ctx.fillRect(cx - 20, cy - 15, 40, 30);
+
+        const cx2 = 150 + Math.cos(t + 2) * 60;
+        const cy2 = 100 + Math.sin(t + 2) * 40;
+        ctx.fillStyle   = [255, 100, 140, 200];
+        ctx.fillRect(cx2 - 20, cy2 - 15, 40, 30);
+
+        // Pulsing circle
+        const r = 18 + Math.sin(t * 2) * 8;
+        ctx.fillStyle   = [120, 220, 160, 220];
+        ctx.fillCircle(150, 100, r);
+
+        // Spoke lines from centre
+        ctx.strokeStyle = [255, 200, 80, 180];
+        ctx.lineWidth   = 2;
+        for (let i = 0; i < 6; i++) {
+          const a = t + i * Math.PI / 3;
+          ctx.strokeLine(150, 100, 150 + Math.cos(a) * 70, 100 + Math.sin(a) * 70);
+        }
+
+        // Stroke circle outline
+        ctx.strokeStyle = [200, 200, 255, 120];
+        ctx.lineWidth   = 1;
+        ctx.strokeCircle(150, 100, 70);
+
+        // Label
+        ctx.fillStyle   = [220, 230, 255, 255];
+        ctx.fillText('Canvas 2D', 6, 6, 13);
+
+        ctx.flush();
+      }
+      raf = setTimeout(loop, 16);
+    }
+    loop();
+    return () => clearTimeout(raf);
+  }, []);
+
+  // 3D canvas ref — simple rotating box via Scene3D
+  const c3dRef  = React.useRef(null);
+  const tRef3d  = React.useRef(0);
+
+  useEffect(() => {
+    let raf3d;
+    function loop3d() {
+      const c = c3dRef.current;
+      if (c) {
+        const t = tRef3d.current;
+        tRef3d.current += 0.02;
+
+        const cos = Math.cos(t), sin = Math.sin(t);
+        // Y-rotation matrix (column-major → row-major for our WGSL which uses row vectors)
+        const transform = [
+           cos, 0, sin, 0,
+             0, 1,   0, 0,
+          -sin, 0, cos, 0,
+             0, 0,   0, 1,
+        ];
+
+        c.updateScene({
+          background: [15, 17, 32, 255],
+          camera: {
+            position:  [0, 1.2, 3.5],
+            target:    [0, 0, 0],
+            up:        [0, 1, 0],
+            fovDeg:    55,
+            near:      0.1,
+            far:       100,
+          },
+          lights: [
+            { type: 'ambient',     color: [255,255,255,255], intensity: 0.25 },
+            { type: 'directional', color: [255,240,210,255], intensity: 1.0,
+              direction: [-0.5, -1, -0.8] },
+          ],
+          meshes: [
+            {
+              geometry:  { type: 'box', width: 1, height: 1, depth: 1 },
+              transform,
+              color:     [100, 140, 255, 255],
+            },
+            {
+              geometry:  { type: 'plane', width: 4, depth: 4 },
+              transform: [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,-0.5,0,1],
+              color:     [40, 45, 70, 255],
+            },
+          ],
+        });
+      }
+      raf3d = setTimeout(loop3d, 33);
+    }
+    loop3d();
+    return () => clearTimeout(raf3d);
+  }, []);
+
+  return (
+    <ScrollView width={inner} height={600} style={{ gap: 20 }}>
+      <Text fontSize={18} width={inner} height={24} style={{ color: C.text }}>
+        Canvas Demo
+      </Text>
+
+      {/* 2D Canvas */}
+      <Text fontSize={13} width={inner} height={18} style={{ color: C.dim }}>
+        2D Canvas — Vello primitives, animated each frame
+      </Text>
+      <Canvas
+        ref={canvasRef}
+        width={300}
+        height={200}
+        style={{ borderRadius: 8, borderWidth: 1, borderColor: C.border }}
+      />
+
+      {/* 3D Canvas */}
+      <Text fontSize={13} width={inner} height={18} style={{ color: C.dim }}>
+        3D Canvas — wgpu Phong shading, rotating box
+      </Text>
+      <Canvas3D
+        ref={c3dRef}
+        width={300}
+        height={220}
+        style={{ borderRadius: 8, borderWidth: 1, borderColor: C.border, backgroundColor: '#0f1120' }}
+      />
+    </ScrollView>
+  );
+}
+
 // ── App shell ─────────────────────────────────────────────────────────────────
 //
 // Initialises the DB and vector store once, provides them via context.
@@ -2049,6 +2211,7 @@ function App() {
               <Route name="sysapi"  component={SysApiScreen}      />
               <Route name="forms"   component={FormDemoScreen}    />
               <Route name="audio"   component={AudioDemoScreen}   />
+              <Route name="canvas"  component={CanvasDemoScreen}  />
             </Router>
           </View>
 

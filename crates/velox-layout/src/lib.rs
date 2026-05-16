@@ -197,6 +197,22 @@ impl LayoutTree {
         Ok(())
     }
 
+    /// Update the Taffy style for an existing node in-place.
+    ///
+    /// Use this when only CSS-equivalent props changed (flex, width, height, etc.)
+    /// without any structural change (no appendChild / removeChild).
+    /// Combine with `mark_dirty` to trigger an incremental recompute.
+    pub fn set_style(&mut self, node: NodeId, style: Style) -> Result<(), LayoutError> {
+        self.tree.set_style(node, style).map_err(LayoutError::Taffy)
+    }
+
+    /// Mark a node dirty so Taffy recomputes it and its ancestors on the next
+    /// `compute_with_measure` call.  Subtrees that were not marked dirty are
+    /// skipped, making updates proportional to the number of changed nodes.
+    pub fn mark_dirty(&mut self, node: NodeId) -> Result<(), LayoutError> {
+        self.tree.mark_dirty(node).map_err(LayoutError::Taffy)
+    }
+
     /// Look up metadata for a node.
     pub fn meta(&self, node: NodeId) -> Option<&NodeMeta> {
         self.meta.get(&node)

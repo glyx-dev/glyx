@@ -137,6 +137,11 @@ globalThis.__velox_audio_stop      = function() {};
 globalThis.__velox_audio_setVolume = function() {};
 globalThis.__velox_audio_getVolume = function() { return 1.0; };
 globalThis.__velox_audio_poll      = function() { return '[]'; };
+
+// Canvas 2D / 3D bindings
+globalThis.__velox_canvas_update      = function() {};
+globalThis.__velox_canvas3d_update    = function() {};
+globalThis.__velox_canvas3d_load_gltf = function() {};
 "#
     .to_string()
 }

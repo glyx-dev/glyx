@@ -85,6 +85,8 @@ global-hotkey       = "0.6"
 lru                 = "0.12"
 dark-light          = "1"
 rodio               = { version = "0.17", features = ["symphonia-mp3", "symphonia-flac", "symphonia-vorbis", "symphonia-wav"] }
+glam                = "0.28"
+gltf                = { version = "1" }
 
 [profile.dev]
 opt-level = 1          # faster compiles, decent perf in dev

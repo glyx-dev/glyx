@@ -2121,3 +2121,197 @@ export function DatePicker({ value = null, onValueChange, disabled = false, styl
     ),
   );
 }
+
+// ── Canvas 2D ─────────────────────────────────────────────────────────────────
+//
+// <Canvas ref={canvasRef} style={{ width: 300, height: 200 }} />
+//
+// Exposes a lightweight 2D drawing context via ref:
+//   const ctx = canvasRef.current;
+//   ctx.fillStyle = '#ff0000';      // or [r,g,b,a]
+//   ctx.strokeStyle = '#ffffff';
+//   ctx.lineWidth = 2;
+//   ctx.fillRect(x, y, w, h);
+//   ctx.strokeRect(x, y, w, h);
+//   ctx.fillCircle(cx, cy, r);
+//   ctx.strokeCircle(cx, cy, r);
+//   ctx.strokeLine(x0, y0, x1, y1);
+//   ctx.fillText(text, x, y, fontSize);
+//   ctx.clear();
+//   ctx.flush();     // or commands are flushed automatically on the next frame
+
+function _parseColor(c) {
+  if (Array.isArray(c)) return c;
+  if (typeof c === 'string' && c.startsWith('#')) {
+    const h = c.slice(1);
+    if (h.length === 3) {
+      const [r, g, b] = h.split('').map(x => parseInt(x + x, 16));
+      return [r, g, b, 255];
+    }
+    if (h.length === 6) {
+      return [
+        parseInt(h.slice(0, 2), 16),
+        parseInt(h.slice(2, 4), 16),
+        parseInt(h.slice(4, 6), 16),
+        255,
+      ];
+    }
+    if (h.length === 8) {
+      return [
+        parseInt(h.slice(0, 2), 16),
+        parseInt(h.slice(2, 4), 16),
+        parseInt(h.slice(4, 6), 16),
+        parseInt(h.slice(6, 8), 16),
+      ];
+    }
+  }
+  return [255, 255, 255, 255];
+}
+
+class VeloxCanvasContext {
+  constructor(nativeId) {
+    this._id    = nativeId;
+    this._cmds  = [];
+    this.fillStyle   = [255, 255, 255, 255];
+    this.strokeStyle = [255, 255, 255, 255];
+    this.lineWidth   = 1;
+  }
+
+  clear() { this._cmds = [{ type: 'Clear' }]; }
+
+  fillRect(x, y, w, h) {
+    this._cmds.push({ type: 'FillRect', x, y, w, h, color: _parseColor(this.fillStyle) });
+  }
+  strokeRect(x, y, w, h) {
+    this._cmds.push({ type: 'StrokeRect', x, y, w, h, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+  }
+  fillCircle(cx, cy, r) {
+    this._cmds.push({ type: 'FillCircle', cx, cy, r, color: _parseColor(this.fillStyle) });
+  }
+  strokeCircle(cx, cy, r) {
+    this._cmds.push({ type: 'StrokeCircle', cx, cy, r, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+  }
+  strokeLine(x0, y0, x1, y1) {
+    this._cmds.push({ type: 'StrokeLine', x0, y0, x1, y1, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+  }
+  fillText(text, x, y, fontSize = 16) {
+    this._cmds.push({ type: 'FillText', text: String(text), x, y, fontSize, color: _parseColor(this.fillStyle) });
+  }
+
+  /** Send accumulated draw commands to the native layer. */
+  flush() {
+    if (typeof __velox_canvas_update === 'undefined') return;
+    try {
+      __velox_canvas_update(this._id, JSON.stringify(this._cmds));
+    } catch (e) {
+      __velox_log('[canvas] flush error: ' + e);
+    }
+    this._cmds = [];
+  }
+}
+
+/**
+ * A 2D canvas node backed by Vello primitives.
+ *
+ * @param {{ style?: object, ref?: React.Ref<VeloxCanvasContext> }} props
+ */
+export const Canvas = React.forwardRef(function Canvas({ style, ...props }, ref) {
+  const ctxRef   = useRef(null);
+  const nativeId = useRef(null);
+
+  const onMount = useCallback((id) => {
+    nativeId.current = id;
+    const ctx = new VeloxCanvasContext(id);
+    ctxRef.current = ctx;
+    if (ref) {
+      if (typeof ref === 'function') ref(ctx);
+      else ref.current = ctx;
+    }
+  }, [ref]);
+
+  return React.createElement('canvas', {
+    _veloxOnMount: onMount,
+    style,
+    ...props,
+  });
+});
+
+// ── Canvas 3D ─────────────────────────────────────────────────────────────────
+//
+// <Canvas3D ref={c3dRef} style={{ width: 400, height: 300 }} />
+//
+// Exposes:
+//   c3dRef.current.updateScene(scene);   // push Scene3D JSON description
+//   c3dRef.current.loadGltf(path);       // preload a GLTF file
+//
+// Scene shape (all optional fields):
+//   {
+//     background: [r, g, b, a],          // background fill color [0..255]
+//     camera: {
+//       position: [x, y, z],
+//       target:   [x, y, z],
+//       up:       [x, y, z],
+//       fovDeg:   60,
+//       near:     0.1,
+//       far:      1000,
+//     },
+//     lights: [
+//       { type: 'ambient',     color: [r,g,b,a], intensity: 0.3 },
+//       { type: 'directional', color: [r,g,b,a], intensity: 1.0, direction: [x,y,z] },
+//     ],
+//     meshes: [
+//       {
+//         geometry: { type: 'box',    width: 1, height: 1, depth: 1 },
+//         // or:    { type: 'sphere', radius: 1, rings: 20, sectors: 20 },
+//         // or:    { type: 'plane',  width: 10, depth: 10 },
+//         // or:    { type: 'gltf',   path: '/path/to/model.glb' },
+//         transform: [16 floats, row-major 4x4 matrix],  // identity by default
+//         color:     [r, g, b, a],
+//       },
+//     ],
+//   }
+
+class VeloxCanvas3DContext {
+  constructor(nativeId) {
+    this._id = nativeId;
+  }
+
+  updateScene(scene) {
+    if (typeof __velox_canvas3d_update === 'undefined') return;
+    try {
+      __velox_canvas3d_update(this._id, JSON.stringify(scene));
+    } catch (e) {
+      __velox_log('[canvas3d] updateScene error: ' + e);
+    }
+  }
+
+  loadGltf(path) {
+    if (typeof __velox_canvas3d_load_gltf === 'undefined') return;
+    try {
+      __velox_canvas3d_load_gltf(this._id, path);
+    } catch (e) {
+      __velox_log('[canvas3d] loadGltf error: ' + e);
+    }
+  }
+}
+
+/**
+ * A 3D canvas node rendered via wgpu as a post-Vello overlay.
+ *
+ * @param {{ style?: object, ref?: React.Ref<VeloxCanvas3DContext> }} props
+ */
+export const Canvas3D = React.forwardRef(function Canvas3D({ style, ...props }, ref) {
+  const onMount = useCallback((id) => {
+    const ctx = new VeloxCanvas3DContext(id);
+    if (ref) {
+      if (typeof ref === 'function') ref(ctx);
+      else ref.current = ctx;
+    }
+  }, [ref]);
+
+  return React.createElement('canvas3d', {
+    _veloxOnMount: onMount,
+    style,
+    ...props,
+  });
+});

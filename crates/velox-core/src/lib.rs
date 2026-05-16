@@ -58,12 +58,13 @@ use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use smallvec::SmallVec;
 use velox_gpu::GpuContext;
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
 use velox_renderer::{colors, peniko, VeloxRenderer, FrameBuilder};
 use velox_runtime::{
     init_v8, new_ipc_bus,
-    InputEvent, NodeProps, NodeType, SceneCommand,
+    CanvasCmd, InputEvent, NodeProps, NodeType, SceneCommand,
     VeloxRuntime, WindowController,
 };
 
@@ -249,10 +250,35 @@ use scene::apply_scene_commands;
 use layout::{recompute_layout, update_scroll_positions};
 use render::{render_subtree, RenderCtx};
 
-/// Cache key for shaped text: (text, font_size_bits, max_width_bits, color).
-/// `to_bits()` gives an exact bitwise representation of f32, so equal floats
-/// always produce the same key.
-type LabelKey = (String, u32, u32, [u8; 4]);
+/// Zero-allocation cache key for shaped text.
+///
+/// The text content is represented by a 64-bit hash rather than a heap-allocated
+/// `String`, eliminating one (or two with `.clone()`) String allocations per
+/// cache lookup — i.e. per text node per frame.
+///
+/// Hash collisions are astronomically unlikely for typical UI text and merely
+/// produce a cache miss (re-shape), never a correctness bug.
+#[derive(Hash, Eq, PartialEq)]
+struct LabelKey {
+    text_hash:      u64,
+    font_size_bits: u32,
+    max_width_bits: u32,
+    color:          [u8; 4],
+}
+
+impl LabelKey {
+    fn new(text: &str, font_size: f32, max_width: f32, color: [u8; 4]) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        Self {
+            text_hash:      h.finish(),
+            font_size_bits: font_size.to_bits(),
+            max_width_bits: max_width.to_bits(),
+            color,
+        }
+    }
+}
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -413,6 +439,11 @@ struct PerWindowState {
     layout:       LayoutTree,
     runtime:      VeloxRuntime,
     layout_dirty: bool,
+    /// When true, the scene graph structure changed (nodes added/removed/reparented).
+    /// `recompute_layout` must do a full Taffy tree rebuild before computing.
+    /// When false but `layout_dirty` is true, only style props changed — Taffy's
+    /// incremental path (mark_dirty + compute) is used, skipping clean subtrees.
+    layout_structure_dirty: bool,
     resolved:     Vec<(NodeId, ResolvedLayout)>,
     js_nodes:     std::collections::HashMap<u32, JsNode>,
     js_root:      Option<u32>,
@@ -444,6 +475,13 @@ struct PerWindowState {
     /// Process RSS bytes — written by a background tokio task every 2 s.
     /// Reading is always lock-free (Relaxed load) so it never stalls the frame loop.
     rss_bytes: Arc<std::sync::atomic::AtomicU64>,
+    /// Draw commands for Canvas nodes, keyed by node ID.
+    /// Updated each frame when JS calls `__velox_canvas_update`.
+    canvas_cmds: std::collections::HashMap<u32, Vec<CanvasCmd>>,
+    /// Scene descriptions for Canvas3D nodes, keyed by node ID.
+    canvas3d_scenes: std::collections::HashMap<u32, velox_3d::Scene3D>,
+    /// 3D renderer — lazy-initialised on first Canvas3D encounter.
+    renderer_3d: Option<velox_3d::Renderer3D>,
     #[cfg(feature = "dev")]
     dev_mode: Option<DevModeState>,
 }
@@ -451,7 +489,10 @@ struct PerWindowState {
 struct JsNode {
     node_type: NodeType,
     props:     NodeProps,
-    children:  Vec<u32>,
+    /// Inline storage for up to 4 children — covers the vast majority of nodes
+    /// without a heap allocation.  Spills to the heap only for containers with
+    /// 5+ children (e.g. long lists rendered inside a loop).
+    children:  SmallVec<[u32; 4]>,
     layout_id: Option<NodeId>,
 }
 
@@ -1117,11 +1158,12 @@ pub fn run(mut config: AppConfig) {
                     text_sys:     TextSystem::new(),
                     layout:       LayoutTree::new(),
                     runtime:      rt,
-                    layout_dirty: true,
-                    resolved:     Vec::new(),
-                    js_nodes:     std::collections::HashMap::new(),
+                    layout_dirty:           true,
+                    layout_structure_dirty: true,
+                    resolved:               Vec::new(),
+                    js_nodes:     std::collections::HashMap::with_capacity(256),
                     js_root:      None,
-                    images:       std::collections::HashMap::new(),
+                    images:       std::collections::HashMap::with_capacity(32),
                     images_by_path: lru::LruCache::new(std::num::NonZeroUsize::new(64).unwrap()),
                     image_cache_hits: 0,
                     image_cache_misses: 0,
@@ -1157,6 +1199,9 @@ pub fn run(mut config: AppConfig) {
                         });
                         rss_atomic
                     },
+                    canvas_cmds:     std::collections::HashMap::new(),
+                    canvas3d_scenes: std::collections::HashMap::new(),
+                    renderer_3d:     None,
                     #[cfg(feature = "dev")]
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
@@ -1335,6 +1380,7 @@ pub fn run(mut config: AppConfig) {
                 // 9. Render JS scene graph.
                 let mut frame = s.renderer.begin_frame();
                 let mut any_cursor_active = false;
+                let mut canvas3d_overlays: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
 
                 if let Some(root_id) = s.js_root {
                     let mut render_ctx = RenderCtx {
@@ -1344,6 +1390,8 @@ pub fn run(mut config: AppConfig) {
                         frame:             &mut frame,
                         text_sys:          &mut s.text_sys,
                         label_cache:       &mut s.label_cache,
+                        canvas_cmds:       &s.canvas_cmds,
+                        canvas3d_overlays: &mut canvas3d_overlays,
                         cursor_blink_on:   s.cursor_blink_on,
                         any_cursor_active: &mut any_cursor_active,
                     };
@@ -1363,6 +1411,38 @@ pub fn run(mut config: AppConfig) {
                     log::error!("Render error: {}", e);
                     return;
                 }
+
+                // 3D overlays — blitted on top of Vello with LoadOp::Load.
+                if !canvas3d_overlays.is_empty() {
+                    let surface_view = texture.texture.create_view(&Default::default());
+                    let sw = s.gpu.width()  as f32;
+                    let sh = s.gpu.height() as f32;
+                    for (id, x, y, w, h) in &canvas3d_overlays {
+                        // Lazy-initialise Renderer3D on first use.
+                        if s.renderer_3d.is_none() {
+                            s.renderer_3d = Some(velox_3d::Renderer3D::new(
+                                &s.gpu.device,
+                                s.gpu.surface_format(),
+                            ));
+                        }
+                        if let Some(scene) = s.canvas3d_scenes.get(id) {
+                            let scene = scene.clone();
+                            let r3d = s.renderer_3d.as_mut().unwrap();
+                            // Pre-warm any GLTF paths encountered in this scene.
+                            for mesh in &scene.meshes {
+                                if let velox_3d::Geometry3D::Gltf { path } = &mesh.geometry {
+                                    if let Err(e) = r3d.load_gltf(&s.gpu.device, path) {
+                                        log::warn!("GLTF load error '{}': {}", path, e);
+                                    }
+                                }
+                            }
+                            r3d.render(&s.gpu.device, &s.gpu.queue,
+                                       *id, &scene, *x, *y, *w, *h,
+                                       &surface_view, sw, sh);
+                        }
+                    }
+                }
+
                 texture.present();
                 let gpu_time_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
 

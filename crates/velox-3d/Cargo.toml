@@ -2,3 +2,13 @@
 name    = "velox-3d"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+wgpu       = { workspace = true }
+bytemuck   = { workspace = true }
+glam       = { workspace = true }
+gltf       = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+log        = { workspace = true }
+velox-gpu  = { path = "../velox-gpu" }

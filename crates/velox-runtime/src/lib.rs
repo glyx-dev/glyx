@@ -34,7 +34,7 @@ pub mod snapshot;
 
 pub use runtime::{VeloxRuntime, HeapStats};
 pub use bindings::{
-    NodeProps, NodeType, SceneCommand, InputEvent, WindowController,
+    NodeProps, NodeType, CanvasCmd, SceneCommand, InputEvent, WindowController,
     IpcBus, IpcInbox, new_ipc_bus,
 };
 pub use snapshot::{SnapshotBlob, create_stub_bindings_script};

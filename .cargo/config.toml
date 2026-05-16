@@ -1,0 +1,12 @@
+# Use cargo-zigbuild for cross-compilation (install with: cargo install cargo-zigbuild)
+# On the target machine, set CARGO_BUILD_TARGET to cross-compile, e.g.:
+#   cargo zigbuild --target aarch64-apple-darwin --release
+#   cargo zigbuild --target x86_64-unknown-linux-gnu --release
+
+[build]
+# Native build: no custom linker needed — zigbuild is opt-in via `cargo zigbuild` command.
+
+[profile.release]
+# Mirrors workspace Cargo.toml release profile — defined here so it applies
+# to all crates even when invoked from a sub-crate directory.
+# The canonical settings live in the workspace Cargo.toml [profile.release].

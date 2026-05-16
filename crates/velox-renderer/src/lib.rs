@@ -14,7 +14,7 @@
 use thiserror::Error;
 use velox_gpu::GpuContext;
 use vello::{
-    kurbo::{Affine, RoundedRect, Stroke},
+    kurbo::{Affine, Circle, Line, Point, RoundedRect, Stroke},
     peniko::{Brush, Color, Fill, Image},
     AaConfig, Renderer, RendererOptions, Scene,
 };
@@ -413,5 +413,22 @@ impl FrameBuilder {
 
     pub fn append_scene(&mut self, other: &Scene, transform: Option<Affine>) {
         self.scene.append(other, transform);
+    }
+
+    pub fn fill_circle(&mut self, cx: f64, cy: f64, r: f64, color: Color) {
+        let c = Circle::new(Point::new(cx, cy), r);
+        self.scene.fill(vello::peniko::Fill::NonZero, Affine::IDENTITY, &Brush::Solid(color), None, &c);
+    }
+
+    pub fn stroke_circle(&mut self, cx: f64, cy: f64, r: f64, width: f64, color: Color) {
+        let c      = Circle::new(Point::new(cx, cy), r);
+        let stroke = Stroke::new(width);
+        self.scene.stroke(&stroke, Affine::IDENTITY, &Brush::Solid(color), None, &c);
+    }
+
+    pub fn stroke_line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64, width: f64, color: Color) {
+        let line   = Line::new(Point::new(x0, y0), Point::new(x1, y1));
+        let stroke = Stroke::new(width);
+        self.scene.stroke(&stroke, Affine::IDENTITY, &Brush::Solid(color), None, &line);
     }
 }

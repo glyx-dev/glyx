@@ -7,6 +7,9 @@ pub(crate) struct RenderCtx<'a> {
     pub frame: &'a mut FrameBuilder,
     pub text_sys: &'a mut TextSystem,
     pub label_cache: &'a mut lru::LruCache<LabelKey, CachedLabel>,
+    pub canvas_cmds: &'a std::collections::HashMap<u32, Vec<CanvasCmd>>,
+    /// Accumulated (canvas3d_id, x, y, w, h) for post-Vello 3D overlay rendering.
+    pub canvas3d_overlays: &'a mut Vec<(u32, f32, f32, f32, f32)>,
     pub cursor_blink_on: bool,
     pub any_cursor_active: &'a mut bool,
 }
@@ -65,7 +68,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
             }
 
             // Sort children by z_index (stable — preserves document order for ties).
-            let mut children: Vec<u32> = node.children.clone();
+            let mut children: Vec<u32> = node.children.to_vec();
             children.sort_by_key(|&cid| {
                 ctx.nodes.get(&cid).and_then(|n| n.props.z_index).unwrap_or(0)
             });
@@ -143,17 +146,13 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
             let selection_start = node.props.selection_start.map(|p| p as usize);
             let selection_end   = node.props.selection_end.map(|p| p as usize);
 
-            let key: LabelKey = (
-                text.to_owned(),
-                font_size.to_bits(),
-                max_width.to_bits(),
-                color,
-            );
-            if !ctx.label_cache.contains(&key) {
+            // LabelKey::new() is allocation-free (hashes text, packs fields).
+            // Derive it twice instead of cloning — cheaper than a String clone.
+            if ctx.label_cache.peek(&LabelKey::new(text, font_size, max_width, color)).is_none() {
                 let lbl = CachedLabel::new(ctx.text_sys, text, font_size, max_width, color);
-                ctx.label_cache.put(key.clone(), lbl);
+                ctx.label_cache.put(LabelKey::new(text, font_size, max_width, color), lbl);
             }
-            let label = ctx.label_cache.get(&key).unwrap();
+            let label = ctx.label_cache.get(&LabelKey::new(text, font_size, max_width, color)).unwrap();
 
             let bw = rw;
             let bh = rh;
@@ -215,6 +214,61 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
                     );
                 }
             }
+        }
+
+        NodeType::Canvas => {
+            // Draw optional background.
+            if let Some(bg) = node.props.background_color.map(rgba_to_vello) {
+                let radius = node.props.border_radius.unwrap_or(0.0) as f64;
+                ctx.frame.fill_rounded_rect(rx, ry, rw, rh, radius, bg);
+            }
+            // Clip all canvas draw commands to the node's layout rect.
+            ctx.frame.push_layer(rx, ry, rw, rh);
+            if let Some(cmds) = ctx.canvas_cmds.get(&id) {
+                for cmd in cmds {
+                    draw_canvas_cmd(ctx.frame, cmd, rx, ry);
+                }
+            }
+            ctx.frame.pop_layer();
+        }
+
+        NodeType::Canvas3D => {
+            // Draw optional background fill in the 2D scene so the layout box is
+            // visible even before the first 3D render completes.
+            if let Some(bg) = node.props.background_color.map(rgba_to_vello) {
+                ctx.frame.fill_rect(rx, ry, rw, rh, bg);
+            }
+            // Register this canvas for post-Vello 3D rendering.
+            ctx.canvas3d_overlays.push((id, rx as f32, ry as f32, rw as f32, rh as f32));
+        }
+    }
+}
+
+fn draw_canvas_cmd(frame: &mut FrameBuilder, cmd: &CanvasCmd, ox: f64, oy: f64) {
+    use CanvasCmd::*;
+    match cmd {
+        Clear => {
+            // Clear is a no-op here — background is drawn by the Canvas node itself.
+        }
+        FillRect { x, y, w, h, color } => {
+            frame.fill_rect(ox + *x as f64, oy + *y as f64, *w as f64, *h as f64, rgba_to_vello(*color));
+        }
+        StrokeRect { x, y, w, h, color, line_width } => {
+            frame.stroke_rounded_rect(ox + *x as f64, oy + *y as f64, *w as f64, *h as f64, 0.0, *line_width as f64, rgba_to_vello(*color));
+        }
+        FillCircle { cx, cy, r, color } => {
+            frame.fill_circle(ox + *cx as f64, oy + *cy as f64, *r as f64, rgba_to_vello(*color));
+        }
+        StrokeCircle { cx, cy, r, color, line_width } => {
+            frame.stroke_circle(ox + *cx as f64, oy + *cy as f64, *r as f64, *line_width as f64, rgba_to_vello(*color));
+        }
+        StrokeLine { x0, y0, x1, y1, color, line_width } => {
+            frame.stroke_line(ox + *x0 as f64, oy + *y0 as f64, ox + *x1 as f64, oy + *y1 as f64, *line_width as f64, rgba_to_vello(*color));
+        }
+        FillText { text, x, y, font_size, color } => {
+            // Canvas text: draw a filled placeholder rect sized to the text.
+            // Full Parley shaping requires a mutable TextSystem not available here.
+            frame.fill_rect(ox + *x as f64, oy + *y as f64, *font_size as f64 * text.len() as f64 * 0.6, *font_size as f64 * 1.2, rgba_to_vello(*color));
         }
     }
 }

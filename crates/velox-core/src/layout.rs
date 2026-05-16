@@ -1,6 +1,7 @@
 use super::*;
+use smallvec::SmallVec;
 
-fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::prelude::Style {
+pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::prelude::Style {
     use taffy::prelude::*;
 
     match node_type {
@@ -53,7 +54,7 @@ fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::prelude::St
 
             style
         }
-        NodeType::Text | NodeType::Image => {
+        NodeType::Text | NodeType::Image | NodeType::Canvas | NodeType::Canvas3D => {
             let mut style = taffy::prelude::Style::default();
             if let Some(w) = props.width  { style.size.width  = length(w); }
             if let Some(h) = props.height { style.size.height = length(h); }
@@ -79,7 +80,8 @@ pub(crate) fn rebuild_layout_from_scene(
     ) -> Option<NodeId> {
         let (node_type, props, children) = {
             let node = nodes.get(&id)?;
-            (node.node_type.clone(), node.props.clone(), node.children.clone())
+            (node.node_type.clone(), node.props.clone(),
+             node.children.iter().copied().collect::<SmallVec<[u32; 4]>>())
         };
         let style = to_taffy_style(&node_type, &props);
 
@@ -101,7 +103,7 @@ pub(crate) fn rebuild_layout_from_scene(
                     };
                     layout.add_text_node(style, ctx, Some(format!("js-{}", id))).ok()?
                 }
-                NodeType::View | NodeType::Image => {
+                NodeType::View | NodeType::Image | NodeType::Canvas | NodeType::Canvas3D => {
                     layout.add_node(style, Some(format!("js-{}", id))).ok()?
                 }
             }
@@ -137,12 +139,15 @@ pub(crate) fn layout_props_changed(new: &NodeProps, old: &NodeProps) -> bool {
 
 pub(crate) fn recompute_layout(state: &mut PerWindowState) {
     if !state.layout_dirty { return; }
-    log::info!("Layout dirty, recomputing...");
-    let Some(root_id) = state.js_root else {
-        log::warn!("No JS root, skipping layout");
-        return;
-    };
-    rebuild_layout_from_scene(&mut state.layout, &mut state.js_nodes, root_id);
+    let Some(root_id) = state.js_root else { return };
+
+    if state.layout_structure_dirty {
+        // Tree structure changed (nodes added/removed/reparented) — full rebuild.
+        rebuild_layout_from_scene(&mut state.layout, &mut state.js_nodes, root_id);
+        state.layout_structure_dirty = false;
+    }
+    // else: incremental path — set_style + mark_dirty already applied per-node in
+    // apply_scene_commands; Taffy skips clean subtrees automatically.
 
     let w = state.gpu.width()  as f32;
     let h = state.gpu.height() as f32;
@@ -172,7 +177,7 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
 
     match result {
         Ok(r) => {
-            log::info!("Layout computed: {} nodes", r.len());
+            log::debug!("Layout computed: {} nodes", r.len());
             state.resolved = r;
             for (js_id, node) in &state.js_nodes {
                 if let Some(lid) = node.layout_id {
@@ -224,8 +229,8 @@ fn scroll_walk(
             cache.insert(id, [-9999.0, -9999.0, 0.0, 0.0]);
             // Still recurse so children that might themselves be clipped containers
             // also get their cache entries invalidated.
-            let children: Vec<u32> = node.children.clone();
-            for child_id in children {
+            let child_ids: SmallVec<[u32; 4]> = node.children.iter().copied().collect();
+            for child_id in child_ids {
                 scroll_walk(child_id, nodes, resolved, scroll_y, clip_rect, cache);
             }
             return;
@@ -271,8 +276,8 @@ fn scroll_walk(
         clip_rect
     };
 
-    let children: Vec<u32> = node.children.clone();
-    for child_id in children {
+    let child_ids: SmallVec<[u32; 4]> = node.children.iter().copied().collect();
+    for child_id in child_ids {
         scroll_walk(child_id, nodes, resolved, child_scroll_y, child_clip, cache);
     }
 }

@@ -69,15 +69,14 @@ impl TextSystem {
                         let name = entry.file_name()
                             .to_string_lossy()
                             .to_ascii_lowercase();
-                        // Load only the core Segoe UI text variants.
-                        // Deliberately excluded: seguiemj (Emoji, ~25 MB),
-                        // seguisym / segoesym (Symbol, ~15 MB), segmdl2 (icons).
-                        // fontique discovers all other system fonts lazily.
+                        // Load only the three core Segoe UI text variants needed
+                        // for regular, bold, and semibold rendering.  Italic and
+                        // light variants are omitted — fontique synthesises oblique
+                        // on demand and the app rarely needs true italic faces.
+                        // Excluded: seguiemj (Emoji, ~25 MB), seguisym (~15 MB),
+                        // and all 7 condensed/light/italic variants (~40 MB total).
                         let wanted = matches!(name.as_str(),
-                            "segoeui.ttf"   | "segoeuib.ttf" | "segoeuii.ttf" |
-                            "segoeuiz.ttf"  | "segoeuisl.ttf"| "seguisb.ttf"  |
-                            "seguili.ttf"   | "seguibli.ttf" | "seguisbi.ttf" |
-                            "seguisli.ttf"
+                            "segoeui.ttf" | "segoeuib.ttf" | "seguisb.ttf"
                         );
                         if wanted && register_font_file(&mut font_cx, &entry.path()) {
                             count += 1;

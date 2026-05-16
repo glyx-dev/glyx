@@ -7849,6 +7849,30 @@ No matching component was found for:
       ]
     });
   }
+  function FormSection({ title, children }) {
+    const C2 = useThemeColors();
+    const { width: winW } = useWindowSize();
+    const w = winW - PAD * 2;
+    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
+      style: { gap: 10, alignItems: "flex-start" },
+      width: w,
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 11,
+          width: w,
+          height: 16,
+          style: { color: C2.dim },
+          children: title
+        }),
+        children,
+        /* @__PURE__ */ jsx_runtime.jsx(View, {
+          style: { backgroundColor: C2.border },
+          width: w,
+          height: 1
+        })
+      ]
+    });
+  }
   function NoteCard({ note, onPress, width: w, index = 0 }) {
     const C2 = useThemeColors();
     const ACCENT_BANDS = getAccentBands(C2);
@@ -9104,27 +9128,6 @@ Ranking: cosine similarity across stored note vectors.`
     const [sliderVal, setSliderVal] = import_react3.useState(0.4);
     const [selectVal, setSelectVal] = import_react3.useState(null);
     const [dateVal, setDateVal] = import_react3.useState(null);
-    function Section({ title, children }) {
-      return /* @__PURE__ */ jsx_runtime.jsxs(View, {
-        style: { gap: 10, alignItems: "flex-start" },
-        width: inner,
-        children: [
-          /* @__PURE__ */ jsx_runtime.jsx(Text, {
-            fontSize: 11,
-            width: inner,
-            height: 16,
-            style: { color: C2.dim },
-            children: title
-          }),
-          children,
-          /* @__PURE__ */ jsx_runtime.jsx(View, {
-            style: { backgroundColor: C2.border },
-            width: inner,
-            height: 1
-          })
-        ]
-      });
-    }
     async function testCredentials() {
       try {
         await credentials.set("demo-token", "velox-secret-1234");
@@ -9158,7 +9161,7 @@ Ranking: cosine similarity across stored note vectors.`
               })
             ]
           }),
-          /* @__PURE__ */ jsx_runtime.jsxs(Section, {
+          /* @__PURE__ */ jsx_runtime.jsxs(FormSection, {
             title: "CHECKBOX",
             children: [
               /* @__PURE__ */ jsx_runtime.jsx(Checkbox, {
@@ -9178,7 +9181,7 @@ Ranking: cosine similarity across stored note vectors.`
               })
             ]
           }),
-          /* @__PURE__ */ jsx_runtime.jsxs(Section, {
+          /* @__PURE__ */ jsx_runtime.jsxs(FormSection, {
             title: "SWITCH",
             children: [
               /* @__PURE__ */ jsx_runtime.jsxs(View, {
@@ -9219,7 +9222,7 @@ Ranking: cosine similarity across stored note vectors.`
               })
             ]
           }),
-          /* @__PURE__ */ jsx_runtime.jsxs(Section, {
+          /* @__PURE__ */ jsx_runtime.jsxs(FormSection, {
             title: "RADIO GROUP",
             children: [
               /* @__PURE__ */ jsx_runtime.jsxs(RadioGroup, {
@@ -9254,7 +9257,7 @@ Ranking: cosine similarity across stored note vectors.`
               })
             ]
           }),
-          /* @__PURE__ */ jsx_runtime.jsxs(Section, {
+          /* @__PURE__ */ jsx_runtime.jsxs(FormSection, {
             title: "FILE INPUT (requires dialog capability)",
             children: [
               /* @__PURE__ */ jsx_runtime.jsx(FileInput, {
@@ -9275,7 +9278,7 @@ Ranking: cosine similarity across stored note vectors.`
               })
             ]
           }),
-          /* @__PURE__ */ jsx_runtime.jsxs(Section, {
+          /* @__PURE__ */ jsx_runtime.jsxs(FormSection, {
             title: "CREDENTIALS (OS keychain)",
             children: [
               /* @__PURE__ */ jsx_runtime.jsx(Btn, {
@@ -9293,7 +9296,7 @@ Ranking: cosine similarity across stored note vectors.`
               }) : null
             ]
           }),
-          /* @__PURE__ */ jsx_runtime.jsxs(Section, {
+          /* @__PURE__ */ jsx_runtime.jsxs(FormSection, {
             title: "SLIDER",
             children: [
               /* @__PURE__ */ jsx_runtime.jsx(Slider, {
@@ -9325,7 +9328,7 @@ Ranking: cosine similarity across stored note vectors.`
               })
             ]
           }),
-          /* @__PURE__ */ jsx_runtime.jsxs(Section, {
+          /* @__PURE__ */ jsx_runtime.jsxs(FormSection, {
             title: "SELECT",
             children: [
               /* @__PURE__ */ jsx_runtime.jsx(Select, {
@@ -9354,7 +9357,7 @@ Ranking: cosine similarity across stored note vectors.`
               })
             ]
           }),
-          /* @__PURE__ */ jsx_runtime.jsxs(Section, {
+          /* @__PURE__ */ jsx_runtime.jsxs(FormSection, {
             title: "DATE PICKER",
             children: [
               /* @__PURE__ */ jsx_runtime.jsx(DatePicker, {

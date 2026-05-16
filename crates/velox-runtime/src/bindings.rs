@@ -150,6 +150,8 @@ pub enum NodeType {
     View,
     Text,
     Image,
+    Canvas,
+    Canvas3D,
 }
 
 /// All layout + visual props that JS can set on a node.
@@ -229,14 +231,30 @@ pub struct NodeProps {
     pub z_index: Option<i32>,
 }
 
+// ── Canvas 2D draw commands ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum CanvasCmd {
+    Clear,
+    FillRect   { x: f32, y: f32, w: f32, h: f32, color: [u8; 4] },
+    StrokeRect { x: f32, y: f32, w: f32, h: f32, color: [u8; 4], #[serde(rename = "lineWidth")] line_width: f32 },
+    FillCircle { cx: f32, cy: f32, r: f32, color: [u8; 4] },
+    StrokeCircle { cx: f32, cy: f32, r: f32, color: [u8; 4], #[serde(rename = "lineWidth")] line_width: f32 },
+    StrokeLine { x0: f32, y0: f32, x1: f32, y1: f32, color: [u8; 4], #[serde(rename = "lineWidth")] line_width: f32 },
+    FillText   { text: String, x: f32, y: f32, #[serde(rename = "fontSize")] font_size: f32, color: [u8; 4] },
+}
+
 #[derive(Debug, Clone)]
 pub enum SceneCommand {
-    CreateNode  { id: u32, node_type: NodeType, props: NodeProps },
-    CreateImage { id: u32, path: String },
-    AppendChild { parent_id: u32, child_id: u32 },
-    UpdateNode  { id: u32, props: NodeProps },
-    RemoveNode  { id: u32 },
-    SetRoot     { id: u32 },
+    CreateNode    { id: u32, node_type: NodeType, props: NodeProps },
+    CreateImage   { id: u32, path: String },
+    AppendChild   { parent_id: u32, child_id: u32 },
+    UpdateNode    { id: u32, props: NodeProps },
+    RemoveNode    { id: u32 },
+    SetRoot       { id: u32 },
+    CanvasUpdate  { id: u32, cmds: Vec<CanvasCmd> },
+    Canvas3DUpdate { id: u32, scene: velox_3d::Scene3D },
 }
 
 // ── Registration ──────────────────────────────────────────────────────────────
@@ -432,6 +450,11 @@ pub fn register_all(
     // ── Deep links ───────────────────────────────────────────────────────────
     register!("__velox_deeplink_getInitialUrl", deeplink_get_initial_url_callback);
     register!("__velox_deeplink_poll",          deeplink_poll_callback);
+
+    // ── Canvas 2D / 3D ───────────────────────────────────────────────────────
+    register!("__velox_canvas_update",   canvas_update_callback);
+    register!("__velox_canvas3d_update", canvas3d_update_callback);
+    register!("__velox_canvas3d_load_gltf", canvas3d_load_gltf_callback);
 }
 
 struct AsyncState {
@@ -517,9 +540,11 @@ fn parse_node_type(scope: &mut v8::HandleScope, value: v8::Local<v8::Value>) -> 
         .unwrap_or_default()
         .to_lowercase();
     match s.as_str() {
-        "text" => NodeType::Text,
-        "image" => NodeType::Image,
-        _ => NodeType::View,
+        "text"     => NodeType::Text,
+        "image"    => NodeType::Image,
+        "canvas"   => NodeType::Canvas,
+        "canvas3d" => NodeType::Canvas3D,
+        _          => NodeType::View,
     }
 }
 
@@ -3408,6 +3433,89 @@ fn deeplink_poll_callback(
     };
     let s = v8::String::new(scope, &json).unwrap();
     rv.set(s.into());
+}
+
+// ── Canvas 2D / 3D bindings ───────────────────────────────────────────────────
+
+/// `__velox_canvas_update(id, cmdsJson)` — sync.
+/// Parses a JSON array of CanvasCmd and pushes a CanvasUpdate scene command.
+fn canvas_update_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let id   = args.get(0).number_value(scope).unwrap_or_default() as u32;
+    let json = args.get(1).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+
+    let cmds: Vec<CanvasCmd> = match serde_json::from_str(&json) {
+        Ok(c)  => c,
+        Err(e) => { log::warn!("canvas_update parse error: {e}"); return; }
+    };
+    state.scene.lock().unwrap().push_back(SceneCommand::CanvasUpdate { id, cmds });
+}
+
+/// `__velox_canvas3d_update(id, sceneJson)` — sync.
+/// Parses a JSON Scene3D and pushes a Canvas3DUpdate scene command.
+fn canvas3d_update_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let id   = args.get(0).number_value(scope).unwrap_or_default() as u32;
+    let json = args.get(1).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+
+    let scene: velox_3d::Scene3D = match serde_json::from_str(&json) {
+        Ok(s)  => s,
+        Err(e) => { log::warn!("canvas3d_update parse error: {e}"); return; }
+    };
+    state.scene.lock().unwrap().push_back(SceneCommand::Canvas3DUpdate { id, scene });
+}
+
+/// `__velox_canvas3d_load_gltf(id, path)` — sync.
+/// Signals that a GLTF file should be loaded for this canvas on the render side.
+/// (Actual loading happens in velox-core on next frame via renderer_3d.)
+fn canvas3d_load_gltf_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let id   = args.get(0).number_value(scope).unwrap_or_default() as u32;
+    let path = args.get(1).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+
+    // Push a dummy scene update that triggers GLTF loading on render side.
+    // The GLTF geometry becomes available on the next canvas3d_update.
+    let scene = velox_3d::Scene3D {
+        background: None,
+        camera:     velox_3d::Camera3D { position: [0.,1.,3.], target: [0.;3], up: [0.,1.,0.], fov_deg: 60., near: 0.1, far: 1000. },
+        lights:     vec![],
+        meshes:     vec![velox_3d::Mesh3DInstance {
+            geometry:  velox_3d::Geometry3D::Gltf { path: path.clone() },
+            transform: [1.,0.,0.,0., 0.,1.,0.,0., 0.,0.,1.,0., 0.,0.,0.,1.],
+            color:     [1.;4],
+        }],
+    };
+    let _ = id; // used by canvas3d_update; here we just warm up gltf cache
+    // The load itself is triggered by the renderer when it encounters Gltf geometry.
+    // Push an info scene command with the path so velox-core can pre-warm the cache.
+    state.scene.lock().unwrap().push_back(SceneCommand::Canvas3DUpdate { id, scene });
 }
 
 /// Throw a generic JS Error with the given message.

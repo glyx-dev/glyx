@@ -189,6 +189,22 @@ function StatPill({ label, value, tone, width = 118 }) {
   );
 }
 
+// Defined at module level to avoid unmount/remount on parent re-renders.
+// (Defining components inside render functions creates a new type each render,
+//  causing React to unmount+remount subtrees and breaking drag state.)
+function FormSection({ title, children }) {
+  const C = useThemeColors();
+  const { width: winW } = useWindowSize();
+  const w = winW - PAD * 2;
+  return (
+    <View style={{ gap: 10, alignItems: 'flex-start' }} width={w}>
+      <Text fontSize={11} width={w} height={16} style={{ color: C.dim }}>{title}</Text>
+      {children}
+      <View style={{ backgroundColor: C.border }} width={w} height={1} />
+    </View>
+  );
+}
+
 function NoteCard({ note, onPress, width: w, index = 0 }) {
   const C = useThemeColors();
   const ACCENT_BANDS = getAccentBands(C);
@@ -1193,16 +1209,6 @@ function FormDemoScreen() {
   const [selectVal,  setSelectVal]  = useState(null);
   const [dateVal,    setDateVal]    = useState(null);
 
-  function Section({ title, children }) {
-    return (
-      <View style={{ gap: 10, alignItems: 'flex-start' }} width={inner}>
-        <Text fontSize={11} width={inner} height={16} style={{ color: C.dim }}>{title}</Text>
-        {children}
-        <View style={{ backgroundColor: C.border }} width={inner} height={1} />
-      </View>
-    );
-  }
-
   async function testCredentials() {
     try {
       await credentials.set('demo-token', 'velox-secret-1234');
@@ -1223,7 +1229,7 @@ function FormDemoScreen() {
           <Text fontSize={16} width={inner - 100} height={22} style={{ color: C.text }}>Form Fields</Text>
         </View>
 
-        <Section title="CHECKBOX">
+        <FormSection title="CHECKBOX">
           <Checkbox
             checked={checked}
             onChange={setChecked}
@@ -1231,9 +1237,9 @@ function FormDemoScreen() {
           />
           <Checkbox checked={true} disabled label="Disabled (checked)" />
           <Checkbox checked={false} disabled label="Disabled (unchecked)" />
-        </Section>
+        </FormSection>
 
-        <Section title="SWITCH">
+        <FormSection title="SWITCH">
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }} width={inner} height={28}>
             <Switch value={switched} onValueChange={setSwitched} />
             <Text fontSize={13} width={inner - 64} height={18} style={{ color: C.subtle }}>
@@ -1244,9 +1250,9 @@ function FormDemoScreen() {
             <Switch value={true} disabled />
             <Text fontSize={13} width={inner - 64} height={18} style={{ color: C.dim }}>Disabled (on)</Text>
           </View>
-        </Section>
+        </FormSection>
 
-        <Section title="RADIO GROUP">
+        <FormSection title="RADIO GROUP">
           <RadioGroup value={radioVal} onValueChange={setRadioVal}>
             <Radio value="option_a" label="Option A" />
             <Radio value="option_b" label="Option B" />
@@ -1256,9 +1262,9 @@ function FormDemoScreen() {
           <Text fontSize={12} width={inner} height={18} style={{ color: C.dim }}>
             {'Selected: ' + radioVal}
           </Text>
-        </Section>
+        </FormSection>
 
-        <Section title="FILE INPUT (requires dialog capability)">
+        <FormSection title="FILE INPUT (requires dialog capability)">
           <FileInput
             accept=".txt,.md,.json"
             onFilesSelected={paths => setPickedFile(paths[0])}
@@ -1270,16 +1276,16 @@ function FormDemoScreen() {
             </Text>
           )}
           <FileInput disabled label="Disabled picker" />
-        </Section>
+        </FormSection>
 
-        <Section title="CREDENTIALS (OS keychain)">
+        <FormSection title="CREDENTIALS (OS keychain)">
           <Btn label="Test set / get / delete" onPress={testCredentials} width={200} color={C.mauve} />
           {credStatus ? (
             <Text fontSize={11} width={inner} height={16} style={{ color: C.green }}>{credStatus}</Text>
           ) : null}
-        </Section>
+        </FormSection>
 
-        <Section title="SLIDER">
+        <FormSection title="SLIDER">
           <Slider
             value={sliderVal}
             onValueChange={setSliderVal}
@@ -1291,9 +1297,9 @@ function FormDemoScreen() {
           </Text>
           <Slider value={0.6} disabled style={{ width: inner - 60 }} />
           <Text fontSize={11} width={inner} height={16} style={{ color: C.dim }}>Disabled</Text>
-        </Section>
+        </FormSection>
 
-        <Section title="SELECT">
+        <FormSection title="SELECT">
           <Select
             value={selectVal}
             options={[
@@ -1312,9 +1318,9 @@ function FormDemoScreen() {
             </Text>
           )}
           <Select disabled placeholder="Disabled select" style={{ width: inner }} />
-        </Section>
+        </FormSection>
 
-        <Section title="DATE PICKER">
+        <FormSection title="DATE PICKER">
           <DatePicker
             value={dateVal}
             onValueChange={setDateVal}
@@ -1325,7 +1331,7 @@ function FormDemoScreen() {
               {'Picked: ' + dateVal.toDateString()}
             </Text>
           )}
-        </Section>
+        </FormSection>
 
       </View>
     </ScrollView>

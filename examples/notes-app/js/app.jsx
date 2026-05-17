@@ -24,6 +24,7 @@ import {
   Checkbox, Switch, RadioGroup, Radio, FileInput, audio,
   Slider, Select, DatePicker,
   Canvas, Canvas3D,
+  ai,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
 
@@ -450,6 +451,12 @@ function NoteListScreen() {
             onPress={() => navigate('canvas')}
             width={80}
             color={C.sapphire}
+          />
+          <Btn
+            label="AI"
+            onPress={() => navigate('ai')}
+            width={52}
+            color={C.mauve}
           />
         </View>
         <Text fontSize={11} width={isWide ? inner - 308 : inner} height={16} style={{ color: C.dim }}>
@@ -2009,6 +2016,245 @@ function CanvasDemoScreen() {
   );
 }
 
+// ── Screen: AI Demo ───────────────────────────────────────────────────────────
+
+const AI_TABS = ['Embed', 'Generate', 'Transcribe'];
+
+function AiDemoScreen() {
+  const { width: winW } = useWindowSize();
+  const inner = winW - PAD * 2;
+  const C = useThemeColors();
+
+  const [tab,      setTab]      = useState(0);
+  const [loading,  setLoading]  = useState(false);
+  const [result,   setResult]   = useState('');
+  const [error,    setError]    = useState('');
+
+  // Embed tab
+  const [embedText, setEmbedText] = useState('The quick brown fox jumps over the lazy dog.');
+
+  // Generate tab
+  const [prompt,      setPrompt]      = useState('Write a haiku about a Rust crate that renders UI:');
+  const [maxTokens,   setMaxTokens]   = useState(80);
+  const [temperature, setTemperature] = useState(0.7);
+
+  // Transcribe tab
+  const [audioPath, setAudioPath] = useState('');
+
+  function reset() { setResult(''); setError(''); }
+
+  async function runEmbed() {
+    reset(); setLoading(true);
+    try {
+      const vec = await ai.embed(embedText);
+      const preview = vec.slice(0, 8).map(v => v.toFixed(4)).join(', ');
+      setResult(`384-dim vector (first 8):\n[${preview}, …]\n\nL2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function runGenerate() {
+    reset(); setLoading(true);
+    try {
+      const text = await ai.generate(prompt, { maxTokens, temperature });
+      setResult(text);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function runTranscribe() {
+    if (!audioPath) { setError('Pick an audio file first.'); return; }
+    reset(); setLoading(true);
+    try {
+      const transcript = await ai.transcribe(audioPath);
+      setResult(transcript || '(no speech detected)');
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function pickAudio() {
+    try {
+      const paths = await dialog.openFile({ title: 'Pick audio file', multiple: false });
+      if (paths && paths.length > 0) setAudioPath(paths[0]);
+    } catch (e) { /* ignore */ }
+  }
+
+  return (
+    <ScrollView width={inner} height={620} style={{ gap: 16 }}>
+      <Text fontSize={18} width={inner} height={24} style={{ color: C.text }}>
+        Local AI Demo
+      </Text>
+      <Text fontSize={12} width={inner} height={16} style={{ color: C.dim }}>
+        Models download from HuggingFace Hub on first call and cache locally.
+      </Text>
+
+      {/* Tab bar */}
+      <View style={{ flexDirection: 'row', gap: 8 }} width={inner} height={34}>
+        {AI_TABS.map((label, i) => (
+          <Pressable
+            key={label}
+            onPress={() => { setTab(i); reset(); }}
+            width={100}
+            height={32}
+            style={{
+              backgroundColor: tab === i ? C.accent : C.surface,
+              borderRadius: 6,
+              borderWidth: 1,
+              borderColor: tab === i ? C.accent : C.border,
+              justifyContent: 'center',
+              alignItems: 'center',
+            }}
+          >
+            <Text fontSize={13} width={84} height={18} style={{ color: tab === i ? C.bg : C.text }}>
+              {label}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+
+      {/* Embed tab */}
+      {tab === 0 && (
+        <View style={{ gap: 10 }} width={inner} height={280}>
+          <Text fontSize={12} width={inner} height={16} style={{ color: C.dim }}>
+            MiniLM-L6-v2 · 384 dims · ~22 MB · ~1s after first download
+          </Text>
+          <TextInput
+            value={embedText}
+            onChangeText={setEmbedText}
+            placeholder="Text to embed…"
+            width={inner}
+            height={60}
+            multiline
+            style={{ backgroundColor: C.surface, borderRadius: 6, borderColor: C.border, borderWidth: 1, padding: 8, color: C.text, fontSize: 13 }}
+          />
+          <Pressable
+            onPress={runEmbed}
+            width={120}
+            height={32}
+            style={{ backgroundColor: loading ? C.border : C.accent, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}
+          >
+            <Text fontSize={13} width={100} height={18} style={{ color: C.bg }}>
+              {loading ? 'Embedding…' : 'Embed'}
+            </Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* Generate tab */}
+      {tab === 1 && (
+        <View style={{ gap: 10 }} width={inner} height={280}>
+          <Text fontSize={12} width={inner} height={16} style={{ color: C.dim }}>
+            Phi-2 Q4_K_M · CPU · ~1.7 GB · 10-30s per 200 tokens
+          </Text>
+          <TextInput
+            value={prompt}
+            onChangeText={setPrompt}
+            placeholder="Prompt…"
+            width={inner}
+            height={70}
+            multiline
+            style={{ backgroundColor: C.surface, borderRadius: 6, borderColor: C.border, borderWidth: 1, padding: 8, color: C.text, fontSize: 13 }}
+          />
+          <View style={{ flexDirection: 'row', gap: 16, alignItems: 'center' }} width={inner} height={28}>
+            <Text fontSize={12} width={80} height={16} style={{ color: C.dim }}>
+              {`Tokens: ${maxTokens}`}
+            </Text>
+            <Slider
+              value={maxTokens}
+              onValueChange={v => setMaxTokens(Math.round(v))}
+              min={20} max={400} step={10}
+              style={{ flex: 1 }}
+            />
+            <Text fontSize={12} width={80} height={16} style={{ color: C.dim }}>
+              {`Temp: ${temperature.toFixed(2)}`}
+            </Text>
+            <Slider
+              value={temperature}
+              onValueChange={v => setTemperature(Math.round(v * 100) / 100)}
+              min={0} max={1.5} step={0.05}
+              style={{ flex: 1 }}
+            />
+          </View>
+          <Pressable
+            onPress={runGenerate}
+            width={140}
+            height={32}
+            style={{ backgroundColor: loading ? C.border : C.green, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}
+          >
+            <Text fontSize={13} width={120} height={18} style={{ color: C.bg }}>
+              {loading ? 'Generating…' : 'Generate'}
+            </Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* Transcribe tab */}
+      {tab === 2 && (
+        <View style={{ gap: 10 }} width={inner} height={280}>
+          <Text fontSize={12} width={inner} height={16} style={{ color: C.dim }}>
+            Whisper-tiny · ~75 MB · ~5s for 30s clip · 16kHz WAV preferred
+          </Text>
+          <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }} width={inner} height={34}>
+            <Pressable
+              onPress={pickAudio}
+              width={130}
+              height={30}
+              style={{ backgroundColor: C.surface, borderRadius: 6, borderColor: C.border, borderWidth: 1, justifyContent: 'center', alignItems: 'center' }}
+            >
+              <Text fontSize={12} width={110} height={16} style={{ color: C.accent }}>
+                Pick Audio File
+              </Text>
+            </Pressable>
+            <Text fontSize={11} width={inner - 148} height={16} style={{ color: C.dim }}>
+              {audioPath || 'No file selected'}
+            </Text>
+          </View>
+          <Pressable
+            onPress={runTranscribe}
+            width={130}
+            height={32}
+            style={{ backgroundColor: loading ? C.border : C.teal, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}
+          >
+            <Text fontSize={13} width={110} height={18} style={{ color: C.bg }}>
+              {loading ? 'Transcribing…' : 'Transcribe'}
+            </Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* Result / error area */}
+      {(result || error) && (
+        <View
+          style={{
+            backgroundColor: error ? '#2a1018' : C.surface,
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: error ? C.red : C.border,
+            padding: 12,
+          }}
+          width={inner}
+          height={140}
+        >
+          <ScrollView width={inner - 24} height={116}>
+            <Text fontSize={12} width={inner - 32} height={0} style={{ color: error ? C.red : C.text }}>
+              {error || result}
+            </Text>
+          </ScrollView>
+        </View>
+      )}
+    </ScrollView>
+  );
+}
+
 // ── App shell ─────────────────────────────────────────────────────────────────
 //
 // Initialises the DB and vector store once, provides them via context.
@@ -2212,6 +2458,7 @@ function App() {
               <Route name="forms"   component={FormDemoScreen}    />
               <Route name="audio"   component={AudioDemoScreen}   />
               <Route name="canvas"  component={CanvasDemoScreen}  />
+              <Route name="ai"      component={AiDemoScreen}      />
             </Router>
           </View>
 

@@ -142,6 +142,11 @@ globalThis.__velox_audio_poll      = function() { return '[]'; };
 globalThis.__velox_canvas_update      = function() {};
 globalThis.__velox_canvas3d_update    = function() {};
 globalThis.__velox_canvas3d_load_gltf = function() {};
+
+// Local AI bindings (Candle — embed, generate, transcribe)
+globalThis.__velox_ai_embed      = function() { return stubPromise('[]'); };
+globalThis.__velox_ai_generate   = function() { return stubPromise(''); };
+globalThis.__velox_ai_transcribe = function() { return stubPromise(''); };
 "#
     .to_string()
 }

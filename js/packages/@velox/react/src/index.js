@@ -1656,6 +1656,67 @@ export function FileInput({
   );
 }
 
+// ── Local AI (Candle) ─────────────────────────────────────────────────────────
+//
+// Capability gate: `ai: true` in velox.config.json.
+//
+// Models are downloaded from HuggingFace Hub on first call and cached in
+// ~/.cache/huggingface/. Subsequent calls reuse cached weights.
+//
+// WARNING: first calls block until download completes:
+//   - ai.embed()      — ~22 MB (MiniLM-L6-v2), loads in ~1s after download
+//   - ai.generate()   — ~1.7 GB (Phi-2 Q4_K_M), CPU inference ~10-30s/200 tokens
+//   - ai.transcribe() — ~75 MB (Whisper-tiny), ~5s for a 30s clip
+
+export const ai = {
+  /**
+   * Embed text into a 384-dimensional unit-normalised vector.
+   *
+   * Uses sentence-transformers/all-MiniLM-L6-v2. Suitable for cosine-similarity
+   * search with the `vectorDb` API — replaces keyword-bag fake embeddings.
+   *
+   * @param {string} text
+   * @returns {Promise<number[]>}  384-element float32 array
+   */
+  async embed(text) {
+    if (typeof __velox_ai_embed === 'undefined')
+      throw new Error('ai.embed: binding unavailable — add ai:true to velox.config.json');
+    const raw = await __velox_ai_embed(String(text));
+    return JSON.parse(raw);
+  },
+
+  /**
+   * Generate text from a prompt using Phi-2 (quantized Q4_K_M, CPU).
+   *
+   * Resolves with the full generated string when done.
+   * Long-running — expect 10-30 seconds per 200 tokens on CPU.
+   *
+   * @param {string} prompt
+   * @param {{ maxTokens?: number, temperature?: number }} [opts]
+   * @returns {Promise<string>}
+   */
+  async generate(prompt, { maxTokens = 200, temperature = 0.7 } = {}) {
+    if (typeof __velox_ai_generate === 'undefined')
+      throw new Error('ai.generate: binding unavailable — add ai:true to velox.config.json');
+    return __velox_ai_generate(String(prompt), JSON.stringify({ maxTokens, temperature }));
+  },
+
+  /**
+   * Transcribe an audio file to text using Whisper-tiny (CPU).
+   *
+   * Supports WAV (16 kHz mono preferred), MP3, FLAC, OGG.
+   *
+   * @param {string} audioPath  Absolute path to the audio file
+   * @param {{ language?: string }} [opts]  ISO 639-1 code, e.g. 'en'; empty = auto-detect
+   * @returns {Promise<string>}  Plain text transcript
+   */
+  async transcribe(audioPath, { language = '' } = {}) {
+    if (typeof __velox_ai_transcribe === 'undefined')
+      throw new Error('ai.transcribe: binding unavailable — add ai:true to velox.config.json');
+    return __velox_ai_transcribe(String(audioPath), JSON.stringify({ language }));
+  },
+};
+
 export const input = {
   gamepads: {
     /**

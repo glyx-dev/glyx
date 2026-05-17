@@ -21,6 +21,7 @@
     "globalShortcuts": true,
     "credentials":    true,
     "audio":          true,
+    "ai":             true,
     "deeplink": { "scheme": "notes", "singleInstance": true }
   },
   "dev": {

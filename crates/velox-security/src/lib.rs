@@ -114,6 +114,10 @@ pub struct Capabilities {
     /// Audio playback (local files via rodio + Symphonia decoders).
     #[serde(default)]
     pub audio: bool,
+    /// Local AI inference (Candle — embeddings, text generation, speech-to-text).
+    /// Downloads model weights from HuggingFace Hub on first use (~22 MB – 1.7 GB).
+    #[serde(default)]
+    pub ai: bool,
     /// Deep-link URL scheme registration.  `None` = no deep-link support.
     pub deeplink: Option<DeeplinkCapability>,
 }

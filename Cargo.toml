@@ -88,6 +88,13 @@ rodio               = { version = "0.17", features = ["symphonia-mp3", "symphoni
 glam                = "0.28"
 gltf                = { version = "1" }
 
+# AI / ML — Candle (Hugging Face minimalist ML framework, CPU-only by default)
+candle-core         = { version = "0.8", default-features = false }
+candle-nn           = { version = "0.8", default-features = false }
+candle-transformers = { version = "0.8", default-features = false }
+hf-hub              = "0.3"
+tokenizers          = "0.19"
+
 [profile.dev]
 opt-level = 1          # faster compiles, decent perf in dev
 

@@ -1292,6 +1292,14 @@ veloxWindow.quit = function quit() {
   if (typeof __velox_quit !== 'undefined') __velox_quit();
 };
 
+/**
+ * Restart the application — quits cleanly then re-launches the same executable.
+ * Useful after applying an update or settings that require a full reload.
+ */
+veloxWindow.restart = function restart() {
+  if (typeof __velox_restart !== 'undefined') __velox_restart();
+};
+
 // ── Performance monitoring ────────────────────────────────────────────────────
 
 /**

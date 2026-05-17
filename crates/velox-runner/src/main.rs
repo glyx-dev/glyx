@@ -131,5 +131,19 @@ fn main() {
         velox_core::AppConfig::from_config()
     };
 
-    velox_core::run(config);
+    let restart = velox_core::run(config);
+
+    if restart {
+        // Re-launch this executable with the same arguments.
+        // The current process exits immediately after spawning the child.
+        match std::env::current_exe() {
+            Ok(exe) => {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                if let Err(e) = std::process::Command::new(&exe).args(&args).spawn() {
+                    eprintln!("[velox] restart failed: {e}");
+                }
+            }
+            Err(e) => eprintln!("[velox] restart: could not get current exe: {e}"),
+        }
+    }
 }

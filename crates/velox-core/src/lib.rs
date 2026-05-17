@@ -781,7 +781,8 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
 fn build_window_controller(
     window: Arc<winit::window::Window>,
     create_window_fn: Option<Arc<dyn Fn(u32, String, u32, u32) + Send + Sync>>,
-    quit_fn: Option<Arc<dyn Fn() + Send + Sync>>,
+    quit_fn:    Option<Arc<dyn Fn() + Send + Sync>>,
+    restart_fn: Option<Arc<dyn Fn() + Send + Sync>>,
 ) -> WindowController {
     use winit::window::Fullscreen;
 
@@ -854,13 +855,14 @@ fn build_window_controller(
         }),
         hwnd,
         create_window: create_window_fn,
-        quit: quit_fn,
+        quit:    quit_fn,
+        restart: restart_fn,
     }
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub fn run(mut config: AppConfig) {
+pub fn run(mut config: AppConfig) -> bool {
     // Set module-specific log levels first so they take precedence over any
     // global level set by RUST_LOG (e.g. RUST_LOG=info would otherwise
     // re-enable the very noisy wgpu_core submission-index spam).
@@ -999,7 +1001,7 @@ pub fn run(mut config: AppConfig) {
     let mut windows: std::collections::HashMap<u32, PerWindowState> =
         std::collections::HashMap::new();
 
-    velox_shell::run(window, move |event| {
+    let restart = velox_shell::run(window, move |event| {
         match event {
             // ── Window ready — initialise per-window subsystems ──────────
             ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy } => {
@@ -1021,10 +1023,15 @@ pub fn run(mut config: AppConfig) {
                 let quit_fn: Arc<dyn Fn() + Send + Sync> =
                     Arc::new(move || { let _ = proxy_quit.send_event(VeloxUserEvent::Quit); });
 
+                let proxy_restart = ev_proxy.clone();
+                let restart_fn: Arc<dyn Fn() + Send + Sync> =
+                    Arc::new(move || { let _ = proxy_restart.send_event(VeloxUserEvent::Restart); });
+
                 let window_ctrl = build_window_controller(
                     Arc::clone(&window),
                     Some(Arc::clone(&create_fn)),
                     Some(Arc::clone(&quit_fn)),
+                    Some(Arc::clone(&restart_fn)),
                 );
 
                 let ipc_clone  = Arc::clone(&ipc_bus);
@@ -1068,6 +1075,7 @@ pub fn run(mut config: AppConfig) {
                             log::warn!("Window {}: snapshot restore failed ({}); eval mode", window_handle, e);
                             let proxy_fb  = ev_proxy.clone();
                             let proxy_qfb = ev_proxy.clone();
+                            let proxy_rfb = ev_proxy.clone();
                             let wc = build_window_controller(
                                 Arc::clone(&window),
                                 Some(Arc::new(move |id, title, width, height| {
@@ -1077,6 +1085,9 @@ pub fn run(mut config: AppConfig) {
                                 })),
                                 Some(Arc::new(move || {
                                     let _ = proxy_qfb.send_event(VeloxUserEvent::Quit);
+                                })),
+                                Some(Arc::new(move || {
+                                    let _ = proxy_rfb.send_event(VeloxUserEvent::Restart);
                                 })),
                             );
                             VeloxRuntime::new_with_ipc(
@@ -1509,4 +1520,5 @@ pub fn run(mut config: AppConfig) {
     });
 
     drop(tokio_rt);
+    restart
 }

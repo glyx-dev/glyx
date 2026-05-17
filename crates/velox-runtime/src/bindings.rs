@@ -97,6 +97,8 @@ pub struct WindowController {
     pub create_window: Option<Arc<dyn Fn(u32, String, u32, u32) + Send + Sync>>,
     /// Quit the application — closes all windows and exits the event loop.
     pub quit: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Quit then re-launch the same executable.
+    pub restart: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 // ── Dialog parent HWND wrapper ────────────────────────────────────────────────
@@ -448,7 +450,8 @@ pub fn register_all(
     register!("__velox_audio_poll",      audio_poll_callback);
 
     // ── App lifecycle ────────────────────────────────────────────────────────
-    register!("__velox_quit", quit_callback);
+    register!("__velox_quit",    quit_callback);
+    register!("__velox_restart", restart_callback);
 
     // ── Deep links ───────────────────────────────────────────────────────────
     register!("__velox_deeplink_getInitialUrl", deeplink_get_initial_url_callback);
@@ -3401,6 +3404,22 @@ fn quit_callback(
     if let Some(ref ctrl) = state.window {
         if let Some(ref quit_fn) = ctrl.quit {
             (quit_fn)();
+        }
+    }
+}
+
+/// `__velox_restart()` — sync, requests app restart (quit + re-launch).
+fn restart_callback(
+    _scope: &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if let Some(ref ctrl) = state.window {
+        if let Some(ref restart_fn) = ctrl.restart {
+            (restart_fn)();
         }
     }
 }

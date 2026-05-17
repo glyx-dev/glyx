@@ -44,6 +44,8 @@ pub enum VeloxUserEvent {
     CreateWindow { id: u32, title: String, width: u32, height: u32 },
     /// Quit the application — closes all windows and exits the event loop.
     Quit,
+    /// Quit then re-launch the same executable (for OTA apply / settings reload).
+    Restart,
 }
 
 // ── Public event type ────────────────────────────────────────────────────────
@@ -125,7 +127,9 @@ impl Default for ShellConfig {
 /// Run the shell event loop, calling `handler` for every `ShellEvent`.
 ///
 /// Blocks until all windows are closed. Must be called from the main thread.
-pub fn run<F>(config: ShellConfig, handler: F)
+///
+/// Returns `true` if the app should restart (caller is responsible for re-exec).
+pub fn run<F>(config: ShellConfig, handler: F) -> bool
 where
     F: FnMut(ShellEvent) + 'static,
 {
@@ -145,28 +149,32 @@ where
 
     let mut app = ShellApp {
         config,
-        handler:      Box::new(handler),
+        handler:          Box::new(handler),
         proxy,
-        next_handle:  0,
-        windows:      HashMap::new(),
-        window_arcs:  HashMap::new(),
+        next_handle:      0,
+        windows:          HashMap::new(),
+        window_arcs:      HashMap::new(),
+        restart_requested: false,
     };
 
     event_loop.run_app(&mut app).expect("Event loop error");
+    app.restart_requested
 }
 
 // ── Internal ApplicationHandler ──────────────────────────────────────────────
 
 struct ShellApp {
-    config:       ShellConfig,
-    handler:      Box<dyn FnMut(ShellEvent)>,
-    proxy:        EventLoopProxy<VeloxUserEvent>,
+    config:            ShellConfig,
+    handler:           Box<dyn FnMut(ShellEvent)>,
+    proxy:             EventLoopProxy<VeloxUserEvent>,
     /// Next velox handle to assign to a newly created window.
-    next_handle:  u32,
+    next_handle:       u32,
     /// winit WindowId → velox handle
-    windows:      HashMap<WindowId, u32>,
+    windows:           HashMap<WindowId, u32>,
     /// velox handle → Arc<Window> (for request_redraw)
-    window_arcs:  HashMap<u32, Arc<Window>>,
+    window_arcs:       HashMap<u32, Arc<Window>>,
+    /// Set to true when a Restart event is received; checked after run() returns.
+    restart_requested: bool,
 }
 
 impl ShellApp {
@@ -227,6 +235,10 @@ impl ApplicationHandler<VeloxUserEvent> for ShellApp {
                 self.open_window(event_loop, id, attrs);
             }
             VeloxUserEvent::Quit => {
+                event_loop.exit();
+            }
+            VeloxUserEvent::Restart => {
+                self.restart_requested = true;
                 event_loop.exit();
             }
         }

@@ -5763,12 +5763,30 @@ No matching component was found for:
     };
   }
   if (typeof setTimeout === "undefined") {
-    let _nextId = 1;
-    globalThis.setTimeout = (fn, _ms) => {
-      fn();
-      return _nextId++;
+    let _nextTimerId = 1;
+    const _pendingTimers = new Map;
+    globalThis.setTimeout = (fn, ms) => {
+      const id = _nextTimerId++;
+      _pendingTimers.set(id, { fn, due: performance.now() + (ms > 0 ? ms : 0) });
+      return id;
     };
-    globalThis.clearTimeout = (_id) => {};
+    globalThis.clearTimeout = (id) => {
+      _pendingTimers.delete(id);
+    };
+    globalThis._veloxDrainTimers = () => {
+      if (_pendingTimers.size === 0)
+        return;
+      const now = performance.now();
+      const due = [];
+      for (const [id, t] of _pendingTimers) {
+        if (t.due <= now)
+          due.push([id, t.fn]);
+      }
+      for (const [id] of due)
+        _pendingTimers.delete(id);
+      for (const [, fn] of due)
+        fn();
+    };
   }
   if (typeof queueMicrotask === "undefined") {
     globalThis.queueMicrotask = (fn) => Promise.resolve().then(fn);
@@ -6394,6 +6412,7 @@ No matching component was found for:
   }
   globalThis.__velox_frameCallback = function veloxFrameCallback() {
     VeloxReconciler.flushSync(() => {
+      globalThis._veloxDrainTimers?.();
       _pollWebSockets();
       _pollIpc();
       _pollDeeplinks();
@@ -7021,6 +7040,10 @@ No matching component was found for:
     if (typeof __velox_quit !== "undefined")
       __velox_quit();
   };
+  veloxWindow.restart = function restart() {
+    if (typeof __velox_restart !== "undefined")
+      __velox_restart();
+  };
   var perf = {
     snapshot() {
       if (typeof __velox_perf_snapshot === "undefined")
@@ -7261,6 +7284,24 @@ No matching component was found for:
       style: { color: disabled ? "#555" : "#7aa2f7", fontSize: 14 }
     }, label));
   }
+  var ai = {
+    async embed(text) {
+      if (typeof __velox_ai_embed === "undefined")
+        throw new Error("ai.embed: binding unavailable — add ai:true to velox.config.json");
+      const raw = await __velox_ai_embed(String(text));
+      return JSON.parse(raw);
+    },
+    async generate(prompt, { maxTokens = 200, temperature = 0.7 } = {}) {
+      if (typeof __velox_ai_generate === "undefined")
+        throw new Error("ai.generate: binding unavailable — add ai:true to velox.config.json");
+      return __velox_ai_generate(String(prompt), JSON.stringify({ maxTokens, temperature }));
+    },
+    async transcribe(audioPath, { language = "" } = {}) {
+      if (typeof __velox_ai_transcribe === "undefined")
+        throw new Error("ai.transcribe: binding unavailable — add ai:true to velox.config.json");
+      return __velox_ai_transcribe(String(audioPath), JSON.stringify({ language }));
+    }
+  };
   var input = {
     gamepads: {
       onInput(cb) {
@@ -7634,6 +7675,135 @@ No matching component was found for:
       height: 16
     }, open ? "▲" : "▼")));
   }
+  function _parseColor(c) {
+    if (Array.isArray(c))
+      return c;
+    if (typeof c === "string" && c.startsWith("#")) {
+      const h = c.slice(1);
+      if (h.length === 3) {
+        const [r, g, b] = h.split("").map((x) => parseInt(x + x, 16));
+        return [r, g, b, 255];
+      }
+      if (h.length === 6) {
+        return [
+          parseInt(h.slice(0, 2), 16),
+          parseInt(h.slice(2, 4), 16),
+          parseInt(h.slice(4, 6), 16),
+          255
+        ];
+      }
+      if (h.length === 8) {
+        return [
+          parseInt(h.slice(0, 2), 16),
+          parseInt(h.slice(2, 4), 16),
+          parseInt(h.slice(4, 6), 16),
+          parseInt(h.slice(6, 8), 16)
+        ];
+      }
+    }
+    return [255, 255, 255, 255];
+  }
+
+  class VeloxCanvasContext {
+    constructor(nativeId) {
+      this._id = nativeId;
+      this._cmds = [];
+      this.fillStyle = [255, 255, 255, 255];
+      this.strokeStyle = [255, 255, 255, 255];
+      this.lineWidth = 1;
+    }
+    clear() {
+      this._cmds = [{ type: "clear" }];
+    }
+    fillRect(x, y, w, h) {
+      this._cmds.push({ type: "fillRect", x, y, w, h, color: _parseColor(this.fillStyle) });
+    }
+    strokeRect(x, y, w, h) {
+      this._cmds.push({ type: "strokeRect", x, y, w, h, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+    }
+    fillCircle(cx, cy, r) {
+      this._cmds.push({ type: "fillCircle", cx, cy, r, color: _parseColor(this.fillStyle) });
+    }
+    strokeCircle(cx, cy, r) {
+      this._cmds.push({ type: "strokeCircle", cx, cy, r, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+    }
+    strokeLine(x0, y0, x1, y1) {
+      this._cmds.push({ type: "strokeLine", x0, y0, x1, y1, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+    }
+    fillText(text, x, y, fontSize = 16) {
+      this._cmds.push({ type: "fillText", text: String(text), x, y, fontSize, color: _parseColor(this.fillStyle) });
+    }
+    flush() {
+      if (typeof __velox_canvas_update === "undefined")
+        return;
+      try {
+        __velox_canvas_update(this._id, JSON.stringify(this._cmds));
+      } catch (e) {
+        __velox_log("[canvas] flush error: " + e);
+      }
+      this._cmds = [];
+    }
+  }
+  var Canvas = import_react.default.forwardRef(function Canvas2({ style, ...props }, ref) {
+    const ctxRef = import_react.useRef(null);
+    const nativeId = import_react.useRef(null);
+    const onMount = import_react.useCallback((id) => {
+      nativeId.current = id;
+      const ctx = new VeloxCanvasContext(id);
+      ctxRef.current = ctx;
+      if (ref) {
+        if (typeof ref === "function")
+          ref(ctx);
+        else
+          ref.current = ctx;
+      }
+    }, [ref]);
+    return import_react.default.createElement("canvas", {
+      _veloxOnMount: onMount,
+      style,
+      ...props
+    });
+  });
+
+  class VeloxCanvas3DContext {
+    constructor(nativeId) {
+      this._id = nativeId;
+    }
+    updateScene(scene) {
+      if (typeof __velox_canvas3d_update === "undefined")
+        return;
+      try {
+        __velox_canvas3d_update(this._id, JSON.stringify(scene));
+      } catch (e) {
+        __velox_log("[canvas3d] updateScene error: " + e);
+      }
+    }
+    loadGltf(path) {
+      if (typeof __velox_canvas3d_load_gltf === "undefined")
+        return;
+      try {
+        __velox_canvas3d_load_gltf(this._id, path);
+      } catch (e) {
+        __velox_log("[canvas3d] loadGltf error: " + e);
+      }
+    }
+  }
+  var Canvas3D = import_react.default.forwardRef(function Canvas3D2({ style, ...props }, ref) {
+    const onMount = import_react.useCallback((id) => {
+      const ctx = new VeloxCanvas3DContext(id);
+      if (ref) {
+        if (typeof ref === "function")
+          ref(ctx);
+        else
+          ref.current = ctx;
+      }
+    }, [ref]);
+    return import_react.default.createElement("canvas3d", {
+      _veloxOnMount: onMount,
+      style,
+      ...props
+    });
+  });
 
   // ../../js/packages/@velox/router/src/index.js
   var import_react2 = __toESM(require_react(), 1);
@@ -7704,6 +7874,7 @@ No matching component was found for:
     yellow: "#e0af68",
     mauve: "#bb9af7",
     teal: "#7dcfff",
+    sapphire: "#2ac3de",
     header: "#141824"
   };
   function getAccentBands(theme) {
@@ -8174,6 +8345,18 @@ No matching component was found for:
                   onPress: () => navigate("audio"),
                   width: 74,
                   color: C2.teal
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "Canvas",
+                  onPress: () => navigate("canvas"),
+                  width: 80,
+                  color: C2.sapphire
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "AI",
+                  onPress: () => navigate("ai"),
+                  width: 52,
+                  color: C2.mauve
                 })
               ]
             }),
@@ -10116,6 +10299,465 @@ Ranking: cosine similarity across stored note vectors.`
       height: 40
     });
   }
+  function CanvasDemoScreen() {
+    const { width: winW } = useWindowSize();
+    const inner = winW - PAD * 2;
+    const canvasRef = import_react3.default.useRef(null);
+    const angleRef = import_react3.default.useRef(0);
+    import_react3.useEffect(() => {
+      let raf;
+      function loop() {
+        const ctx = canvasRef.current;
+        if (ctx) {
+          const t = angleRef.current;
+          angleRef.current += 0.04;
+          ctx.clear();
+          ctx.strokeStyle = "#1e2030";
+          ctx.lineWidth = 1;
+          for (let x = 0;x <= 300; x += 30)
+            ctx.strokeLine(x, 0, x, 200);
+          for (let y = 0;y <= 200; y += 30)
+            ctx.strokeLine(0, y, 300, y);
+          const cx = 150 + Math.cos(t) * 60;
+          const cy = 100 + Math.sin(t) * 40;
+          ctx.fillStyle = [100, 140, 255, 200];
+          ctx.fillRect(cx - 20, cy - 15, 40, 30);
+          const cx2 = 150 + Math.cos(t + 2) * 60;
+          const cy2 = 100 + Math.sin(t + 2) * 40;
+          ctx.fillStyle = [255, 100, 140, 200];
+          ctx.fillRect(cx2 - 20, cy2 - 15, 40, 30);
+          const r = 18 + Math.sin(t * 2) * 8;
+          ctx.fillStyle = [120, 220, 160, 220];
+          ctx.fillCircle(150, 100, r);
+          ctx.strokeStyle = [255, 200, 80, 180];
+          ctx.lineWidth = 2;
+          for (let i = 0;i < 6; i++) {
+            const a = t + i * Math.PI / 3;
+            ctx.strokeLine(150, 100, 150 + Math.cos(a) * 70, 100 + Math.sin(a) * 70);
+          }
+          ctx.strokeStyle = [200, 200, 255, 120];
+          ctx.lineWidth = 1;
+          ctx.strokeCircle(150, 100, 70);
+          ctx.fillStyle = [220, 230, 255, 255];
+          ctx.fillText("Canvas 2D", 6, 6, 13);
+          ctx.flush();
+        }
+        raf = setTimeout(loop, 16);
+      }
+      loop();
+      return () => clearTimeout(raf);
+    }, []);
+    const c3dRef = import_react3.default.useRef(null);
+    const tRef3d = import_react3.default.useRef(0);
+    import_react3.useEffect(() => {
+      let raf3d;
+      function loop3d() {
+        const c = c3dRef.current;
+        if (c) {
+          const t = tRef3d.current;
+          tRef3d.current += 0.02;
+          const cos = Math.cos(t), sin = Math.sin(t);
+          const transform = [
+            cos,
+            0,
+            sin,
+            0,
+            0,
+            1,
+            0,
+            0,
+            -sin,
+            0,
+            cos,
+            0,
+            0,
+            0,
+            0,
+            1
+          ];
+          c.updateScene({
+            background: [0.06, 0.067, 0.125, 1],
+            camera: {
+              position: [0, 1.2, 3.5],
+              target: [0, 0, 0],
+              up: [0, 1, 0],
+              fovDeg: 55,
+              near: 0.1,
+              far: 100
+            },
+            lights: [
+              { type: "ambient", color: [1, 1, 1], intensity: 0.25 },
+              {
+                type: "directional",
+                color: [1, 0.94, 0.82],
+                intensity: 1,
+                direction: [-0.5, -1, -0.8]
+              }
+            ],
+            meshes: [
+              {
+                geometry: { type: "box", width: 1, height: 1, depth: 1 },
+                transform,
+                color: [0.39, 0.55, 1, 1]
+              },
+              {
+                geometry: { type: "plane", width: 4, depth: 4 },
+                transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -0.5, 0, 1],
+                color: [0.157, 0.176, 0.275, 1]
+              }
+            ]
+          });
+        }
+        raf3d = setTimeout(loop3d, 33);
+      }
+      loop3d();
+      return () => clearTimeout(raf3d);
+    }, []);
+    return /* @__PURE__ */ jsx_runtime.jsxs(ScrollView, {
+      width: inner,
+      height: 600,
+      style: { gap: 20 },
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 18,
+          width: inner,
+          height: 24,
+          style: { color: C.text },
+          children: "Canvas Demo"
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 13,
+          width: inner,
+          height: 18,
+          style: { color: C.dim },
+          children: "2D Canvas — Vello primitives, animated each frame"
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Canvas, {
+          ref: canvasRef,
+          width: 300,
+          height: 200,
+          style: { borderRadius: 8, borderWidth: 1, borderColor: C.border }
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 13,
+          width: inner,
+          height: 18,
+          style: { color: C.dim },
+          children: "3D Canvas — wgpu Phong shading, rotating box"
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Canvas3D, {
+          ref: c3dRef,
+          width: 300,
+          height: 220,
+          style: { borderRadius: 8, borderWidth: 1, borderColor: C.border, backgroundColor: "#0f1120" }
+        })
+      ]
+    });
+  }
+  var AI_TABS = ["Embed", "Generate", "Transcribe"];
+  function AiDemoScreen() {
+    const { width: winW } = useWindowSize();
+    const inner = winW - PAD * 2;
+    const C2 = useThemeColors();
+    const [tab, setTab] = import_react3.useState(0);
+    const [loading, setLoading] = import_react3.useState(false);
+    const [result, setResult] = import_react3.useState("");
+    const [error, setError] = import_react3.useState("");
+    const [embedText, setEmbedText] = import_react3.useState("The quick brown fox jumps over the lazy dog.");
+    const [prompt, setPrompt] = import_react3.useState("Write a haiku about a Rust crate that renders UI:");
+    const [maxTokens, setMaxTokens] = import_react3.useState(80);
+    const [temperature, setTemperature] = import_react3.useState(0.7);
+    const [audioPath, setAudioPath] = import_react3.useState("");
+    function reset() {
+      setResult("");
+      setError("");
+    }
+    async function runEmbed() {
+      reset();
+      setLoading(true);
+      try {
+        const vec = await ai.embed(embedText);
+        const preview = vec.slice(0, 8).map((v) => v.toFixed(4)).join(", ");
+        setResult(`384-dim vector (first 8):
+[${preview}, …]
+
+L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    }
+    async function runGenerate() {
+      reset();
+      setLoading(true);
+      try {
+        const text = await ai.generate(prompt, { maxTokens, temperature });
+        setResult(text);
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    }
+    async function runTranscribe() {
+      if (!audioPath) {
+        setError("Pick an audio file first.");
+        return;
+      }
+      reset();
+      setLoading(true);
+      try {
+        const transcript = await ai.transcribe(audioPath);
+        setResult(transcript || "(no speech detected)");
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    }
+    async function pickAudio() {
+      try {
+        const paths = await dialog.openFile({ title: "Pick audio file", multiple: false });
+        if (paths && paths.length > 0)
+          setAudioPath(paths[0]);
+      } catch (e) {}
+    }
+    return /* @__PURE__ */ jsx_runtime.jsxs(ScrollView, {
+      width: inner,
+      height: 620,
+      style: { gap: 16 },
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 18,
+          width: inner,
+          height: 24,
+          style: { color: C2.text },
+          children: "Local AI Demo"
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize: 12,
+          width: inner,
+          height: 16,
+          style: { color: C2.dim },
+          children: "Models download from HuggingFace Hub on first call and cache locally."
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(View, {
+          style: { flexDirection: "row", gap: 8 },
+          width: inner,
+          height: 34,
+          children: AI_TABS.map((label, i) => /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+            onPress: () => {
+              setTab(i);
+              reset();
+            },
+            width: 100,
+            height: 32,
+            style: {
+              backgroundColor: tab === i ? C2.accent : C2.surface,
+              borderRadius: 6,
+              borderWidth: 1,
+              borderColor: tab === i ? C2.accent : C2.border,
+              justifyContent: "center",
+              alignItems: "center"
+            },
+            children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 13,
+              width: 84,
+              height: 18,
+              style: { color: tab === i ? C2.bg : C2.text },
+              children: label
+            })
+          }, label))
+        }),
+        tab === 0 && /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: { gap: 10 },
+          width: inner,
+          height: 280,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: inner,
+              height: 16,
+              style: { color: C2.dim },
+              children: "MiniLM-L6-v2 · 384 dims · ~22 MB · ~1s after first download"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+              value: embedText,
+              onChangeText: setEmbedText,
+              placeholder: "Text to embed…",
+              width: inner,
+              height: 60,
+              multiline: true,
+              style: { backgroundColor: C2.surface, borderRadius: 6, borderColor: C2.border, borderWidth: 1, padding: 8, color: C2.text, fontSize: 13 }
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+              onPress: runEmbed,
+              width: 120,
+              height: 32,
+              style: { backgroundColor: loading ? C2.border : C2.accent, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 13,
+                width: 100,
+                height: 18,
+                style: { color: C2.bg },
+                children: loading ? "Embedding…" : "Embed"
+              })
+            })
+          ]
+        }),
+        tab === 1 && /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: { gap: 10 },
+          width: inner,
+          height: 280,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: inner,
+              height: 16,
+              style: { color: C2.dim },
+              children: "Phi-2 Q4_K_M · CPU · ~1.7 GB · 10-30s per 200 tokens"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+              value: prompt,
+              onChangeText: setPrompt,
+              placeholder: "Prompt…",
+              width: inner,
+              height: 70,
+              multiline: true,
+              style: { backgroundColor: C2.surface, borderRadius: 6, borderColor: C2.border, borderWidth: 1, padding: 8, color: C2.text, fontSize: 13 }
+            }),
+            /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexDirection: "row", gap: 16, alignItems: "center" },
+              width: inner,
+              height: 28,
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                  fontSize: 12,
+                  width: 80,
+                  height: 16,
+                  style: { color: C2.dim },
+                  children: `Tokens: ${maxTokens}`
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Slider, {
+                  value: maxTokens,
+                  onValueChange: (v) => setMaxTokens(Math.round(v)),
+                  min: 20,
+                  max: 400,
+                  step: 10,
+                  style: { flex: 1 }
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                  fontSize: 12,
+                  width: 80,
+                  height: 16,
+                  style: { color: C2.dim },
+                  children: `Temp: ${temperature.toFixed(2)}`
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Slider, {
+                  value: temperature,
+                  onValueChange: (v) => setTemperature(Math.round(v * 100) / 100),
+                  min: 0,
+                  max: 1.5,
+                  step: 0.05,
+                  style: { flex: 1 }
+                })
+              ]
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+              onPress: runGenerate,
+              width: 140,
+              height: 32,
+              style: { backgroundColor: loading ? C2.border : C2.green, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 13,
+                width: 120,
+                height: 18,
+                style: { color: C2.bg },
+                children: loading ? "Generating…" : "Generate"
+              })
+            })
+          ]
+        }),
+        tab === 2 && /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: { gap: 10 },
+          width: inner,
+          height: 280,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: inner,
+              height: 16,
+              style: { color: C2.dim },
+              children: "Whisper-tiny · ~75 MB · ~5s for 30s clip · 16kHz WAV preferred"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexDirection: "row", gap: 10, alignItems: "center" },
+              width: inner,
+              height: 34,
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: pickAudio,
+                  width: 130,
+                  height: 30,
+                  style: { backgroundColor: C2.surface, borderRadius: 6, borderColor: C2.border, borderWidth: 1, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 12,
+                    width: 110,
+                    height: 16,
+                    style: { color: C2.accent },
+                    children: "Pick Audio File"
+                  })
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                  fontSize: 11,
+                  width: inner - 148,
+                  height: 16,
+                  style: { color: C2.dim },
+                  children: audioPath || "No file selected"
+                })
+              ]
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+              onPress: runTranscribe,
+              width: 130,
+              height: 32,
+              style: { backgroundColor: loading ? C2.border : C2.teal, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 13,
+                width: 110,
+                height: 18,
+                style: { color: C2.bg },
+                children: loading ? "Transcribing…" : "Transcribe"
+              })
+            })
+          ]
+        }),
+        (result || error) && /* @__PURE__ */ jsx_runtime.jsx(View, {
+          style: {
+            backgroundColor: error ? "#2a1018" : C2.surface,
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: error ? C2.red : C2.border,
+            padding: 12
+          },
+          width: inner,
+          height: 140,
+          children: /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
+            width: inner - 24,
+            height: 116,
+            children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: inner - 32,
+              height: 0,
+              style: { color: error ? C2.red : C2.text },
+              children: error || result
+            })
+          })
+        })
+      ]
+    });
+  }
   function DeeplinkHandler({ url }) {
     const navigate = useNavigate();
     import_react3.useEffect(() => {
@@ -10312,6 +10954,14 @@ Ranking: cosine similarity across stored note vectors.`
                 /* @__PURE__ */ jsx_runtime.jsx(Route, {
                   name: "audio",
                   component: AudioDemoScreen
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Route, {
+                  name: "canvas",
+                  component: CanvasDemoScreen
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Route, {
+                  name: "ai",
+                  component: AiDemoScreen
                 })
               ]
             })

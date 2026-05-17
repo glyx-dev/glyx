@@ -1951,7 +1951,7 @@ function CanvasDemoScreen() {
         ];
 
         c.updateScene({
-          background: [15, 17, 32, 255],
+          background: [0.06, 0.067, 0.125, 1.0],
           camera: {
             position:  [0, 1.2, 3.5],
             target:    [0, 0, 0],
@@ -1961,20 +1961,20 @@ function CanvasDemoScreen() {
             far:       100,
           },
           lights: [
-            { type: 'ambient',     color: [255,255,255,255], intensity: 0.25 },
-            { type: 'directional', color: [255,240,210,255], intensity: 1.0,
+            { type: 'ambient',     color: [1.0, 1.0, 1.0],        intensity: 0.25 },
+            { type: 'directional', color: [1.0, 0.94, 0.82],      intensity: 1.0,
               direction: [-0.5, -1, -0.8] },
           ],
           meshes: [
             {
               geometry:  { type: 'box', width: 1, height: 1, depth: 1 },
               transform,
-              color:     [100, 140, 255, 255],
+              color:     [0.39, 0.55, 1.0, 1.0],
             },
             {
               geometry:  { type: 'plane', width: 4, depth: 4 },
               transform: [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,-0.5,0,1],
-              color:     [40, 45, 70, 255],
+              color:     [0.157, 0.176, 0.275, 1.0],
             },
           ],
         });

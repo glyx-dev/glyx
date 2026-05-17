@@ -181,14 +181,13 @@ struct Rect { x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32, _p0: f32, _p1: f
 struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
 @vertex fn vs(@builtin(vertex_index) vi: u32) -> VOut {
-    let cx = array<f32,4>(r.x,       r.x+r.w, r.x,       r.x+r.w);
-    let cy = array<f32,4>(r.y,       r.y,     r.y+r.h,   r.y+r.h);
-    let ux = array<f32,4>(0.0, 1.0, 0.0, 1.0);
-    let uy = array<f32,4>(0.0, 0.0, 1.0, 1.0);
-    let ii = array<u32,6>(0u,1u,2u,1u,3u,2u);
-    let i  = ii[vi];
-    let ndc = vec2<f32>(cx[i]/r.sw*2.0-1.0, 1.0-cy[i]/r.sh*2.0);
-    var o: VOut; o.pos = vec4<f32>(ndc,0.0,1.0); o.uv = vec2<f32>(ux[i],uy[i]); return o;
+    // Triangle-strip order: TL, TR, BL, BR — no dynamic array indexing (SM5 compat).
+    let px = select(r.x, r.x + r.w, (vi & 1u) != 0u);
+    let py = select(r.y, r.y + r.h, (vi & 2u) != 0u);
+    let u  = select(0.0, 1.0,       (vi & 1u) != 0u);
+    let v  = select(0.0, 1.0,       (vi & 2u) != 0u);
+    let ndc = vec2<f32>(px / r.sw * 2.0 - 1.0, 1.0 - py / r.sh * 2.0);
+    var o: VOut; o.pos = vec4<f32>(ndc, 0.0, 1.0); o.uv = vec2<f32>(u, v); return o;
 }
 
 @fragment fn fs(v: VOut) -> @location(0) vec4<f32> {
@@ -221,13 +220,14 @@ fn gen_box() -> (Vec<f32>, Vec<u16>) {
     let mut v: Vec<f32> = Vec::new();
     let mut idx: Vec<u16> = Vec::new();
     // [normal, 4 corners] per face
+    // Corners ordered CCW when viewed from outside (so (v1-v0)×(v2-v0) points outward).
     let faces: &[([f32; 3], [[f32; 3]; 4])] = &[
         ([ 1.0, 0.0, 0.0], [[ 0.5,-0.5,-0.5],[ 0.5, 0.5,-0.5],[ 0.5, 0.5, 0.5],[ 0.5,-0.5, 0.5]]),
         ([-1.0, 0.0, 0.0], [[-0.5,-0.5, 0.5],[-0.5, 0.5, 0.5],[-0.5, 0.5,-0.5],[-0.5,-0.5,-0.5]]),
-        ([ 0.0, 1.0, 0.0], [[-0.5, 0.5,-0.5],[ 0.5, 0.5,-0.5],[ 0.5, 0.5, 0.5],[-0.5, 0.5, 0.5]]),
-        ([ 0.0,-1.0, 0.0], [[-0.5,-0.5, 0.5],[ 0.5,-0.5, 0.5],[ 0.5,-0.5,-0.5],[-0.5,-0.5,-0.5]]),
-        ([ 0.0, 0.0, 1.0], [[ 0.5,-0.5, 0.5],[-0.5,-0.5, 0.5],[-0.5, 0.5, 0.5],[ 0.5, 0.5, 0.5]]),
-        ([ 0.0, 0.0,-1.0], [[ 0.5,-0.5,-0.5],[ 0.5, 0.5,-0.5],[-0.5, 0.5,-0.5],[-0.5,-0.5,-0.5]]),
+        ([ 0.0, 1.0, 0.0], [[ 0.5, 0.5,-0.5],[-0.5, 0.5,-0.5],[-0.5, 0.5, 0.5],[ 0.5, 0.5, 0.5]]),
+        ([ 0.0,-1.0, 0.0], [[ 0.5,-0.5, 0.5],[-0.5,-0.5, 0.5],[-0.5,-0.5,-0.5],[ 0.5,-0.5,-0.5]]),
+        ([ 0.0, 0.0, 1.0], [[-0.5,-0.5, 0.5],[ 0.5,-0.5, 0.5],[ 0.5, 0.5, 0.5],[-0.5, 0.5, 0.5]]),
+        ([ 0.0, 0.0,-1.0], [[-0.5,-0.5,-0.5],[-0.5, 0.5,-0.5],[ 0.5, 0.5,-0.5],[ 0.5,-0.5,-0.5]]),
     ];
     for (n, corners) in faces {
         let base = (v.len() / 6) as u16;
@@ -457,7 +457,10 @@ impl Renderer3D {
                     })],
                     compilation_options: Default::default(),
                 }),
-                primitive:     wgpu::PrimitiveState::default(),
+                primitive:     wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
                 depth_stencil: None,
                 multisample:   wgpu::MultisampleState::default(),
                 multiview:     None, cache: None,
@@ -658,7 +661,7 @@ impl Renderer3D {
             });
             pass.set_pipeline(&self.overlay_pipeline);
             pass.set_bind_group(0, &ov_bg, &[]);
-            pass.draw(0..6, 0..1);
+            pass.draw(0..4, 0..1);
         }
 
         queue.submit([enc.finish()]);

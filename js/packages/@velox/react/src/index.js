@@ -206,6 +206,8 @@ globalThis.__velox_frameCallback = function veloxFrameCallback() {
   // flushSync forces React to commit all state updates triggered by events
   // synchronously, so scene commands are in the queue before Rust drains them.
   VeloxReconciler.flushSync(() => {
+    // Drain deferred setTimeout callbacks (animation loops, React scheduler).
+    globalThis._veloxDrainTimers?.();
     _pollWebSockets();
     _pollIpc();
     _pollDeeplinks();
@@ -2246,25 +2248,25 @@ class VeloxCanvasContext {
     this.lineWidth   = 1;
   }
 
-  clear() { this._cmds = [{ type: 'Clear' }]; }
+  clear() { this._cmds = [{ type: 'clear' }]; }
 
   fillRect(x, y, w, h) {
-    this._cmds.push({ type: 'FillRect', x, y, w, h, color: _parseColor(this.fillStyle) });
+    this._cmds.push({ type: 'fillRect', x, y, w, h, color: _parseColor(this.fillStyle) });
   }
   strokeRect(x, y, w, h) {
-    this._cmds.push({ type: 'StrokeRect', x, y, w, h, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+    this._cmds.push({ type: 'strokeRect', x, y, w, h, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
   }
   fillCircle(cx, cy, r) {
-    this._cmds.push({ type: 'FillCircle', cx, cy, r, color: _parseColor(this.fillStyle) });
+    this._cmds.push({ type: 'fillCircle', cx, cy, r, color: _parseColor(this.fillStyle) });
   }
   strokeCircle(cx, cy, r) {
-    this._cmds.push({ type: 'StrokeCircle', cx, cy, r, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+    this._cmds.push({ type: 'strokeCircle', cx, cy, r, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
   }
   strokeLine(x0, y0, x1, y1) {
-    this._cmds.push({ type: 'StrokeLine', x0, y0, x1, y1, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+    this._cmds.push({ type: 'strokeLine', x0, y0, x1, y1, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
   }
   fillText(text, x, y, fontSize = 16) {
-    this._cmds.push({ type: 'FillText', text: String(text), x, y, fontSize, color: _parseColor(this.fillStyle) });
+    this._cmds.push({ type: 'fillText', text: String(text), x, y, fontSize, color: _parseColor(this.fillStyle) });
   }
 
   /** Send accumulated draw commands to the native layer. */
@@ -2315,7 +2317,7 @@ export const Canvas = React.forwardRef(function Canvas({ style, ...props }, ref)
 //
 // Scene shape (all optional fields):
 //   {
-//     background: [r, g, b, a],          // background fill color [0..255]
+//     background: [r, g, b, a],          // background fill color 0.0–1.0
 //     camera: {
 //       position: [x, y, z],
 //       target:   [x, y, z],

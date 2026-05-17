@@ -15,12 +15,31 @@ if (typeof performance === 'undefined') {
 }
 
 if (typeof setTimeout === 'undefined') {
-  // React uses setTimeout for low-priority deferred work.
-  // In LegacyRoot sync mode the initial render never defers, so calling
-  // fn() immediately is correct for Week 11.
-  let _nextId = 1;
-  globalThis.setTimeout  = (fn, _ms) => { fn(); return _nextId++; };
-  globalThis.clearTimeout = (_id) => {};
+  // Deferred timer queue — drained each frame by _veloxDrainTimers()
+  // which is called from __velox_frameCallback in @velox/react/index.js.
+  // Calling fn() immediately caused infinite recursion in animation loops.
+  let _nextTimerId = 1;
+  const _pendingTimers = new Map(); // id → { fn, due }
+
+  globalThis.setTimeout = (fn, ms) => {
+    const id = _nextTimerId++;
+    _pendingTimers.set(id, { fn, due: performance.now() + (ms > 0 ? ms : 0) });
+    return id;
+  };
+
+  globalThis.clearTimeout = (id) => { _pendingTimers.delete(id); };
+
+  // Called once per frame from __velox_frameCallback (index.js).
+  globalThis._veloxDrainTimers = () => {
+    if (_pendingTimers.size === 0) return;
+    const now = performance.now();
+    const due = [];
+    for (const [id, t] of _pendingTimers) {
+      if (t.due <= now) due.push([id, t.fn]);
+    }
+    for (const [id] of due) _pendingTimers.delete(id);
+    for (const [, fn] of due) fn();
+  };
 }
 
 if (typeof queueMicrotask === 'undefined') {

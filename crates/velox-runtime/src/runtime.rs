@@ -6,9 +6,9 @@ use tokio::runtime::Handle;
 use crate::{
     bindings::{
         new_completion_queue, new_event_queue, new_layout_cache, new_scene_queue,
-        new_ipc_bus, register_all,
-        CompletionQueue, EventQueue, InputEvent, IpcBus, LayoutCache, SceneCommand, SceneQueue,
-        WindowController,
+        new_ipc_bus, new_db_pools, register_all,
+        CompletionQueue, DbPools, EventQueue, InputEvent, IpcBus, LayoutCache, SceneCommand,
+        SceneQueue, WindowController,
     },
     RuntimeError,
 };
@@ -47,6 +47,8 @@ pub struct VeloxRuntime {
     /// Forwarded deep-link URL queue.
     /// velox-core's single-instance listener pushes URLs here; `__velox_deeplink_poll` drains them.
     pub deeplink_url_queue: Arc<std::sync::Mutex<VecDeque<String>>>,
+    /// Shared SQLite pool map. Cleared on window close for graceful shutdown.
+    pub db_pools: DbPools,
 }
 
 pub struct HeapStats {
@@ -88,6 +90,7 @@ impl VeloxRuntime {
         let events             = new_event_queue();
         let layout_cache       = new_layout_cache();
         let deeplink_url_queue = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+        let db_pools           = new_db_pools();
 
         let (context, queue, scene) = {
             let scope  = &mut v8::HandleScope::new(&mut isolate);
@@ -110,12 +113,13 @@ impl VeloxRuntime {
                 next_window_id,
                 Arc::clone(&perf_state),
                 Arc::clone(&deeplink_url_queue),
+                Arc::clone(&db_pools),
             );
 
             (v8::Global::new(scope, ctx), queue, scene)
         };
 
-        Self { isolate, context, queue, scene, events, layout_cache, perf_state, deeplink_url_queue }
+        Self { isolate, context, queue, scene, events, layout_cache, perf_state, deeplink_url_queue, db_pools }
     }
 
     /// Create a new VeloxRuntime from a snapshot blob (pre-executed JS heap).
@@ -153,6 +157,7 @@ impl VeloxRuntime {
         let events             = new_event_queue();
         let layout_cache       = new_layout_cache();
         let deeplink_url_queue = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+        let db_pools           = new_db_pools();
 
         let (context, queue, scene) = {
             let scope  = &mut v8::HandleScope::new(&mut isolate);
@@ -178,12 +183,13 @@ impl VeloxRuntime {
                 next_window_id,
                 Arc::clone(&perf_state),
                 Arc::clone(&deeplink_url_queue),
+                Arc::clone(&db_pools),
             );
 
             (v8::Global::new(scope, ctx), queue, scene)
         };
 
-        Ok(Self { isolate, context, queue, scene, events, layout_cache, perf_state, deeplink_url_queue })
+        Ok(Self { isolate, context, queue, scene, events, layout_cache, perf_state, deeplink_url_queue, db_pools })
     }
 
     // ── Extensions ────────────────────────────────────────────────────────────
@@ -348,6 +354,14 @@ impl VeloxRuntime {
     pub fn drain_scene_commands(&mut self) -> Vec<SceneCommand> {
         let mut q = self.scene.lock().unwrap();
         q.drain(..).collect()
+    }
+
+    /// Close all open SQLite pools — called by velox-core when the window is closing.
+    ///
+    /// Clearing the map drops the `SqlitePool` values, which triggers SQLx's
+    /// graceful pool shutdown (waits for in-flight queries, then closes connections).
+    pub fn shutdown_db_pools(&self) {
+        self.db_pools.lock().unwrap().clear();
     }
 
     pub fn heap_stats(&mut self) -> HeapStats {

@@ -54,6 +54,10 @@ unsafe impl Send for Completion {}
 pub type CompletionQueue = Arc<Mutex<VecDeque<Completion>>>;
 pub type SceneQueue      = Arc<Mutex<VecDeque<SceneCommand>>>;
 pub type RedrawRequest   = Arc<dyn Fn() + Send + Sync>;
+/// Shared SQLite pool map — keyed by the integer handle returned to JS.
+/// Exposed so velox-core can drain it on window close for graceful shutdown.
+pub type DbPools = Arc<Mutex<HashMap<u32, velox_db::SqlitePool>>>;
+pub fn new_db_pools() -> DbPools { Arc::new(Mutex::new(HashMap::new())) }
 
 /// An input event pushed by the Rust side and consumed by JS via __velox_pollEvents.
 #[derive(Debug, Clone)]
@@ -281,19 +285,13 @@ pub fn register_all(
     next_window_id: Arc<std::sync::atomic::AtomicU32>,
     perf_state:   Arc<Mutex<velox_perf::PerfState>>,
     deeplink_url_queue: Arc<Mutex<VecDeque<String>>>,
+    db_pools:     DbPools,
 ) {
     set_func(scope, global, "__velox_getTime", get_time);
     set_func(scope, global, "__velox_log",     js_log);
 
-    // Initialise rodio audio device (best-effort — no audio if no device found).
-    let (audio_stream_init, audio_handle_init) =
-        match rodio::OutputStream::try_default() {
-            Ok((stream, handle)) => (Some(stream), Some(handle)),
-            Err(e) => {
-                log::warn!("[velox] Audio init failed: {e}. Audio playback unavailable.");
-                (None, None)
-            }
-        };
+    // Audio and gamepad are initialised lazily on first use to avoid
+    // wasting resources in apps that don't use them.
 
     // Store all shared state in a heap-allocated struct, hand the raw
     // pointer to V8 via External so callbacks can recover it.
@@ -309,7 +307,7 @@ pub fn register_all(
         next_image_id: std::sync::atomic::AtomicU32::new(1),
         window,
         hwnd,
-        db_pools:      Arc::new(Mutex::new(HashMap::new())),
+        db_pools,
         next_db_id:    std::sync::atomic::AtomicU32::new(1),
         vector_stores: Arc::new(Mutex::new(HashMap::new())),
         next_vdb_id:   std::sync::atomic::AtomicU32::new(1),
@@ -321,12 +319,12 @@ pub fn register_all(
         perf_state,
         sleep_guards:   std::cell::RefCell::new(HashMap::new()),
         next_guard_id:  std::sync::atomic::AtomicU32::new(1),
-        gamepad_gilrs:  std::cell::RefCell::new(gilrs::Gilrs::new().ok()),
+        gamepad_gilrs:  std::cell::RefCell::new(None),
         hotkey_state:   std::cell::RefCell::new(None),
         next_hotkey_id: std::sync::atomic::AtomicU32::new(1),
         deeplink_url_queue,
-        audio_stream:  std::cell::RefCell::new(audio_stream_init),
-        audio_handle:  audio_handle_init,
+        audio_stream:  std::cell::RefCell::new(None),
+        audio_handle:  std::cell::RefCell::new(None),
         audio_sinks:   Arc::new(Mutex::new(HashMap::new())),
         audio_events:  Arc::new(Mutex::new(VecDeque::new())),
         next_audio_id: std::sync::atomic::AtomicU32::new(1),
@@ -520,7 +518,8 @@ struct AsyncState {
     #[allow(dead_code)]
     audio_stream:  std::cell::RefCell<Option<rodio::OutputStream>>,
     /// Handle cloned into async tasks to create Sinks.
-    audio_handle:  Option<rodio::OutputStreamHandle>,
+    /// Wrapped in RefCell so lazy init can mutate through &AsyncState.
+    audio_handle:  std::cell::RefCell<Option<rodio::OutputStreamHandle>>,
     /// Live sink map — keyed by velox audio handle ID.
     audio_sinks:   Arc<Mutex<HashMap<u32, rodio::Sink>>>,
     /// Events (e.g. "ended") produced by the audio subsystem, drained each frame.
@@ -2849,6 +2848,10 @@ fn gamepad_poll_callback(
         throw_cap_error(scope, "gamepads"); return;
     }
     let mut gilrs_opt = state.gamepad_gilrs.borrow_mut();
+    // Lazy-init gilrs on first poll.
+    if gilrs_opt.is_none() {
+        *gilrs_opt = gilrs::Gilrs::new().ok();
+    }
     let json = match gilrs_opt.as_mut() {
         None => "[]".into(),
         Some(gilrs) => {
@@ -3083,7 +3086,19 @@ fn audio_play_callback(
         .and_then(|v| v.get("volume").and_then(|v| v.as_f64()).map(|f| f as f32))
         .unwrap_or(1.0);
 
-    let Some(handle) = state.audio_handle.as_ref().map(Clone::clone) else {
+    // Lazy-init audio device on first play.
+    if state.audio_handle.borrow().is_none() {
+        match rodio::OutputStream::try_default() {
+            Ok((stream, handle)) => {
+                *state.audio_stream.borrow_mut() = Some(stream);
+                *state.audio_handle.borrow_mut() = Some(handle);
+            }
+            Err(e) => {
+                log::warn!("[velox] Audio init failed: {e}. Audio playback unavailable.");
+            }
+        }
+    }
+    let Some(handle) = state.audio_handle.borrow().as_ref().map(Clone::clone) else {
         rv.set(reject_promise_with_error(scope, "audio device unavailable").into());
         return;
     };

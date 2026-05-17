@@ -1565,6 +1565,10 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Close ─────────────────────────────────────────────────────
             ShellEvent::CloseRequested { window_handle } => {
                 log::info!("Window {} closed.", window_handle);
+                // Close SQLite pools gracefully before dropping the window state.
+                if let Some(s) = windows.get(&window_handle) {
+                    s.runtime.shutdown_db_pools();
+                }
                 windows.remove(&window_handle);
             }
         }

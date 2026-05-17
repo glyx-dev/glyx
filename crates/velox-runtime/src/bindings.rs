@@ -231,6 +231,12 @@ pub struct NodeProps {
     /// Z-index for draw ordering within the same parent.
     /// Higher values render on top. Default 0.
     pub z_index: Option<i32>,
+
+    // ── Window drag ──────────────────────────────────────────────────────────
+    /// When `true`, a mouse-down on this node (and not on an interactive child)
+    /// initiates an OS-level window drag. Used to implement custom title bars.
+    /// Only effective when `window.decorations` is `false` in the app config.
+    pub draggable: Option<bool>,
 }
 
 // ── Canvas 2D draw commands ───────────────────────────────────────────────────
@@ -450,8 +456,10 @@ pub fn register_all(
     register!("__velox_audio_poll",      audio_poll_callback);
 
     // ── App lifecycle ────────────────────────────────────────────────────────
-    register!("__velox_quit",    quit_callback);
-    register!("__velox_restart", restart_callback);
+    register!("__velox_quit",         quit_callback);
+    register!("__velox_window_close", quit_callback);  // alias: close the window / app
+    register!("__velox_restart",      restart_callback);
+    register!("__velox_platform",     platform_callback);
 
     // ── Deep links ───────────────────────────────────────────────────────────
     register!("__velox_deeplink_getInitialUrl", deeplink_get_initial_url_callback);
@@ -685,6 +693,7 @@ fn parse_props(
     props.image_id        = get_num_prop(scope, obj, "imageId").map(|v| v as u32);
     props.image_resize_mode = get_str_prop(scope, obj, "resizeMode");
     props.z_index         = get_num_prop(scope, obj, "zIndex").map(|v| v as i32);
+    props.draggable       = get_bool_prop(scope, obj, "draggable");
 
     props
 }
@@ -3422,6 +3431,18 @@ fn restart_callback(
             (restart_fn)();
         }
     }
+}
+
+/// `__velox_platform()` → `"windows"` | `"macos"` | `"linux"` (compile-time constant).
+fn platform_callback(
+    scope: &mut v8::HandleScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let s = if cfg!(target_os = "windows") { "windows" }
+            else if cfg!(target_os = "macos") { "macos" }
+            else { "linux" };
+    rv.set(v8::String::new(scope, s).unwrap().into());
 }
 
 // ── Deep link bindings ────────────────────────────────────────────────────────

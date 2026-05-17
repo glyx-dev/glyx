@@ -31,7 +31,7 @@
   };
   var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
 
-  // ../../node_modules/.bun/react@18.3.1/node_modules/react/cjs/react.production.min.js
+  // node_modules/.bun/react@18.3.1/node_modules/react/cjs/react.production.min.js
   var require_react_production_min = __commonJS((exports) => {
     var l = Symbol.for("react.element");
     var n = Symbol.for("react.portal");
@@ -322,14 +322,14 @@
     exports.version = "18.3.1";
   });
 
-  // ../../node_modules/.bun/react@18.3.1/node_modules/react/index.js
+  // node_modules/.bun/react@18.3.1/node_modules/react/index.js
   var require_react = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_production_min();
     } else {}
   });
 
-  // ../../node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/cjs/scheduler.production.min.js
+  // node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/cjs/scheduler.production.min.js
   var require_scheduler_production_min = __commonJS((exports) => {
     function f(a, b) {
       var c = a.length;
@@ -595,14 +595,14 @@
     };
   });
 
-  // ../../node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/index.js
+  // node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/index.js
   var require_scheduler = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_scheduler_production_min();
     } else {}
   });
 
-  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler.production.min.js
+  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler.production.min.js
   var require_react_reconciler_production_min = __commonJS((exports, module) => {
     module.exports = function $$$reconciler($$$hostConfig) {
       var exports2 = {};
@@ -5700,14 +5700,14 @@ No matching component was found for:
     };
   });
 
-  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/index.js
+  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/index.js
   var require_react_reconciler = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_reconciler_production_min();
     } else {}
   });
 
-  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler-constants.production.min.js
+  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler-constants.production.min.js
   var require_react_reconciler_constants_production_min = __commonJS((exports) => {
     exports.ConcurrentRoot = 1;
     exports.ContinuousEventPriority = 4;
@@ -5717,14 +5717,14 @@ No matching component was found for:
     exports.LegacyRoot = 0;
   });
 
-  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/constants.js
+  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/constants.js
   var require_constants = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_reconciler_constants_production_min();
     } else {}
   });
 
-  // ../../node_modules/.bun/react@18.3.1/node_modules/react/cjs/react-jsx-runtime.production.min.js
+  // node_modules/.bun/react@18.3.1/node_modules/react/cjs/react-jsx-runtime.production.min.js
   var require_react_jsx_runtime_production_min = __commonJS((exports) => {
     var f = require_react();
     var k = Symbol.for("react.element");
@@ -5749,14 +5749,14 @@ No matching component was found for:
     exports.jsxs = q;
   });
 
-  // ../../node_modules/.bun/react@18.3.1/node_modules/react/jsx-runtime.js
+  // node_modules/.bun/react@18.3.1/node_modules/react/jsx-runtime.js
   var require_jsx_runtime = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_jsx_runtime_production_min();
     } else {}
   });
 
-  // js/polyfills.js
+  // examples/notes-app/js/polyfills.js
   if (typeof performance === "undefined") {
     globalThis.performance = {
       now: () => Number(__velox_getTime())
@@ -5811,18 +5811,20 @@ No matching component was found for:
     };
   }
 
-  // js/app.jsx
+  // examples/notes-app/js/app.jsx
   var import_react3 = __toESM(require_react(), 1);
 
-  // ../../js/packages/@velox/react/src/index.js
+  // js/packages/@velox/react/src/index.js
   var import_react = __toESM(require_react(), 1);
   var import_react_reconciler = __toESM(require_react_reconciler(), 1);
 
-  // ../../js/packages/@velox/react/src/hostConfig.js
+  // js/packages/@velox/react/src/hostConfig.js
   var import_constants = __toESM(require_constants(), 1);
   function createInstance(type, props) {
-    const { children, style, ref: _ref, _veloxOnMount, ...rest } = props;
+    const { children, style, ref: _ref, _veloxOnMount, veloxDraggable, ...rest } = props;
     const nodeProps = { ...rest, ...style };
+    if (veloxDraggable)
+      nodeProps.draggable = true;
     const id = __velox_createNode(type, nodeProps);
     if (typeof _veloxOnMount === "function") {
       _veloxOnMount(id);
@@ -5878,8 +5880,10 @@ No matching component was found for:
     return newProps;
   }
   function commitUpdate(instance, updatePayload) {
-    const { children, style, ref: _ref, _veloxOnMount, ...rest } = updatePayload;
+    const { children, style, ref: _ref, _veloxOnMount, veloxDraggable, ...rest } = updatePayload;
     const nodeProps = { ...rest, ...style };
+    if (veloxDraggable)
+      nodeProps.draggable = true;
     __velox_updateNode(instance.id, nodeProps);
   }
   function commitTextUpdate() {}
@@ -5964,7 +5968,7 @@ No matching component was found for:
   };
   var hostConfig_default = HostConfig;
 
-  // ../../js/packages/@velox/react/src/events.js
+  // js/packages/@velox/react/src/events.js
   var pressableRegistry = new Map;
   var inputRegistry = new Map;
   var scrollRegistry = new Map;
@@ -6181,7 +6185,7 @@ No matching component was found for:
     }
   }
 
-  // ../../js/packages/@velox/react/src/index.js
+  // js/packages/@velox/react/src/index.js
   var VeloxReconciler = import_react_reconciler.default(hostConfig_default);
   var rootContainer = VeloxReconciler.createContainer({ isVeloxRoot: true }, 0, null, false, null, "", (err) => __velox_log("[React] Recoverable error: " + err.message), null);
   var _wsOpenSockets = new Map;
@@ -7044,6 +7048,17 @@ No matching component was found for:
     if (typeof __velox_restart !== "undefined")
       __velox_restart();
   };
+  veloxWindow.close = function close() {
+    if (typeof __velox_window_close !== "undefined")
+      __velox_window_close();
+  };
+  var _platformCache = null;
+  veloxWindow.platform = function platform() {
+    if (_platformCache !== null)
+      return _platformCache;
+    _platformCache = typeof __velox_platform !== "undefined" ? __velox_platform() : "unknown";
+    return _platformCache;
+  };
   var perf = {
     snapshot() {
       if (typeof __velox_perf_snapshot === "undefined")
@@ -7805,7 +7820,7 @@ No matching component was found for:
     });
   });
 
-  // ../../js/packages/@velox/router/src/index.js
+  // js/packages/@velox/router/src/index.js
   var import_react2 = __toESM(require_react(), 1);
   var RouterCtx = import_react2.createContext(null);
   function Router({ children, initialRoute }) {
@@ -7855,7 +7870,7 @@ No matching component was found for:
     return { name: ctx.routeName, params: ctx.params, canGoBack: ctx.canGoBack };
   }
 
-  // js/app.jsx
+  // examples/notes-app/js/app.jsx
   var jsx_runtime = __toESM(require_jsx_runtime(), 1);
   var HEADER_H = 48;
   var PAD = 16;

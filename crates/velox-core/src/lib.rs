@@ -97,6 +97,8 @@ struct WindowCfgJson {
     /// Omitting `width`/`height` with no `startupMode` also implies `"maximized"`.
     #[serde(rename = "startupMode")]
     startup_mode: Option<String>,
+    /// `true` (default) = OS title bar. `false` = frameless custom title bar.
+    decorations:  Option<bool>,
 }
 
 /// Read the project config as a JSON string.
@@ -139,6 +141,7 @@ fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> Capabilities {
 
     if let Some(w) = file.as_ref().and_then(|f| f.window.as_ref()) {
         if let Some(t) = &w.title { cfg.title = t.clone(); }
+        if let Some(d) = w.decorations { cfg.decorations = d; }
 
         cfg.startup_mode = match w.startup_mode.as_deref() {
             Some("fullscreen") => StartupMode::Fullscreen,
@@ -482,6 +485,13 @@ struct PerWindowState {
     canvas3d_scenes: std::collections::HashMap<u32, velox_3d::Scene3D>,
     /// 3D renderer — lazy-initialised on first Canvas3D encounter.
     renderer_3d: Option<velox_3d::Renderer3D>,
+    /// Whether the window is frameless (decorations=false). When true, velox
+    /// handles window drag via `veloxDraggable` nodes.
+    decorations: bool,
+    /// Closure that initiates an OS-level window drag. Populated only when
+    /// `decorations=false`; calling it is equivalent to the user grabbing the
+    /// title bar.
+    drag_window_fn: Option<Arc<dyn Fn() + Send + Sync>>,
     #[cfg(feature = "dev")]
     dev_mode: Option<DevModeState>,
 }
@@ -987,6 +997,8 @@ pub fn run(mut config: AppConfig) -> bool {
     init_v8();
 
     let AppConfig { window, js_src, snapshot_blob, dev_mode: _dev_mode, extensions } = config;
+    // Capture before `window` is moved into velox_shell::run().
+    let window_decorations = window.decorations;
 
     // Shared across all windows.
     let ipc_bus        = new_ipc_bus();
@@ -1163,6 +1175,15 @@ pub fn run(mut config: AppConfig) -> bool {
                 let request_redraw: Arc<dyn Fn() + Send + Sync> =
                     Arc::new(move || win.request_redraw());
 
+                // Frameless drag closure — captures the window directly.
+                let drag_window_fn: Option<Arc<dyn Fn() + Send + Sync>> =
+                    if !window_decorations {
+                        let w_drag = Arc::clone(&window);
+                        Some(Arc::new(move || { w_drag.drag_window().ok(); }))
+                    } else {
+                        None
+                    };
+
                 let ws = PerWindowState {
                     gpu:          gpu_ctx,
                     renderer,
@@ -1213,6 +1234,8 @@ pub fn run(mut config: AppConfig) -> bool {
                     canvas_cmds:     std::collections::HashMap::new(),
                     canvas3d_scenes: std::collections::HashMap::new(),
                     renderer_3d:     None,
+                    decorations:     window_decorations,
+                    drag_window_fn,
                     #[cfg(feature = "dev")]
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
@@ -1277,6 +1300,34 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Mouse button ──────────────────────────────────────────────
             ShellEvent::MouseInput { window_handle, button, pressed } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    // When frameless and left button pressed: check for a veloxDraggable
+                    // node under the cursor. If found, initiate an OS window drag and
+                    // skip the normal DragStart event so JS sliders/etc. aren't affected.
+                    if button == 0 && pressed && !s.decorations {
+                        if let Some(ref drag_fn) = s.drag_window_fn.clone() {
+                            let cx = s.cursor_x;
+                            let cy = s.cursor_y;
+                            let hit = {
+                                let cache = s.runtime.layout_cache.lock().unwrap();
+                                s.js_nodes.iter().any(|(&id, node)| {
+                                    node.props.draggable == Some(true)
+                                        && cache.get(&id).map_or(false, |&[x, y, w, h]| {
+                                            cx >= x && cx <= x + w && cy >= y && cy <= y + h
+                                        })
+                                })
+                            };
+                            if hit {
+                                drag_fn();
+                                // Still send MouseButton so onPressIn handlers fire, but
+                                // do NOT start a DragStart — the OS owns this drag now.
+                                s.runtime.push_event(InputEvent::MouseButton {
+                                    x: cx, y: cy, button, pressed,
+                                });
+                                return;
+                            }
+                        }
+                    }
+
                     s.runtime.push_event(InputEvent::MouseButton {
                         x: s.cursor_x, y: s.cursor_y, button, pressed,
                     });

@@ -30,7 +30,7 @@ use winit::{
     event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, NamedKey, PhysicalKey},
-    window::{Window, WindowAttributes, WindowId},
+    window::{CursorIcon, ResizeDirection, Window, WindowAttributes, WindowId},
 };
 
 pub use winit::event_loop::EventLoopProxy;
@@ -110,6 +110,9 @@ pub struct ShellConfig {
     pub continuous:   bool,
     /// How the window appears on first launch.
     pub startup_mode: StartupMode,
+    /// `true` = OS title bar + borders (default). `false` = frameless; Velox
+    /// renders its own title bar and handles resize/drag hit zones.
+    pub decorations:  bool,
 }
 
 impl Default for ShellConfig {
@@ -120,6 +123,7 @@ impl Default for ShellConfig {
             height:       800,
             continuous:   false,
             startup_mode: StartupMode::Windowed,
+            decorations:  true,
         }
     }
 }
@@ -155,6 +159,8 @@ where
         windows:          HashMap::new(),
         window_arcs:      HashMap::new(),
         restart_requested: false,
+        cursor_pos:        HashMap::new(),
+        frameless:         HashMap::new(),
     };
 
     event_loop.run_app(&mut app).expect("Event loop error");
@@ -162,6 +168,45 @@ where
 }
 
 // ── Internal ApplicationHandler ──────────────────────────────────────────────
+
+// ── Frameless window helpers ─────────────────────────────────────────────────
+
+/// Edge size in physical pixels for resize hit zones.
+const EDGE: f64 = 8.0;
+
+/// Returns the resize direction if `(x, y)` is within `EDGE` pixels of the
+/// window border, or `None` if the cursor is in the interior.
+fn edge_resize_direction(x: f64, y: f64, w: f64, h: f64) -> Option<ResizeDirection> {
+    let left  = x < EDGE;
+    let right = x > w - EDGE;
+    let top   = y < EDGE;
+    let bot   = y > h - EDGE;
+    match (left, right, top, bot) {
+        (true,  false, true,  false) => Some(ResizeDirection::NorthWest),
+        (false, true,  true,  false) => Some(ResizeDirection::NorthEast),
+        (true,  false, false, true ) => Some(ResizeDirection::SouthWest),
+        (false, true,  false, true ) => Some(ResizeDirection::SouthEast),
+        (true,  false, false, false) => Some(ResizeDirection::West),
+        (false, true,  false, false) => Some(ResizeDirection::East),
+        (false, false, true,  false) => Some(ResizeDirection::North),
+        (false, false, false, true ) => Some(ResizeDirection::South),
+        _ => None,
+    }
+}
+
+fn edge_cursor_icon(dir: ResizeDirection) -> CursorIcon {
+    match dir {
+        ResizeDirection::NorthWest => CursorIcon::NwResize,
+        ResizeDirection::NorthEast => CursorIcon::NeResize,
+        ResizeDirection::SouthWest => CursorIcon::SwResize,
+        ResizeDirection::SouthEast => CursorIcon::SeResize,
+        ResizeDirection::West      => CursorIcon::WResize,
+        ResizeDirection::East      => CursorIcon::EResize,
+        ResizeDirection::North     => CursorIcon::NResize,
+        ResizeDirection::South     => CursorIcon::SResize,
+        _ => CursorIcon::Default,
+    }
+}
 
 struct ShellApp {
     config:            ShellConfig,
@@ -175,6 +220,10 @@ struct ShellApp {
     window_arcs:       HashMap<u32, Arc<Window>>,
     /// Set to true when a Restart event is received; checked after run() returns.
     restart_requested: bool,
+    /// Per-window last known cursor position (physical pixels).
+    cursor_pos:        HashMap<u32, (f64, f64)>,
+    /// Per-window: true when the window is frameless (decorations=false).
+    frameless:         HashMap<u32, bool>,
 }
 
 impl ShellApp {
@@ -205,7 +254,8 @@ impl ApplicationHandler<VeloxUserEvent> for ShellApp {
 
         let mut attrs = WindowAttributes::default()
             .with_title(&self.config.title)
-            .with_visible(true);
+            .with_visible(true)
+            .with_decorations(self.config.decorations);
 
         match self.config.startup_mode {
             StartupMode::Fullscreen => {
@@ -222,6 +272,7 @@ impl ApplicationHandler<VeloxUserEvent> for ShellApp {
             }
         }
 
+        self.frameless.insert(handle, !self.config.decorations);
         self.open_window(event_loop, handle, attrs);
     }
 
@@ -323,6 +374,22 @@ impl ApplicationHandler<VeloxUserEvent> for ShellApp {
                     _                   => 3,
                 };
                 let pressed = state == ElementState::Pressed;
+                // When frameless and left mouse pressed: check resize edge zones.
+                // If the cursor is on an 8px border, initiate OS resize and swallow
+                // the event (don't forward to velox-core / JS).
+                if btn == 0 && pressed
+                    && self.frameless.get(&handle).copied().unwrap_or(false)
+                {
+                    if let Some(w) = self.window_arcs.get(&handle) {
+                        let (cx, cy) = self.cursor_pos.get(&handle).copied().unwrap_or((0.0, 0.0));
+                        let s = w.inner_size();
+                        if let Some(dir) = edge_resize_direction(cx, cy, s.width as f64, s.height as f64) {
+                            w.drag_resize_window(dir).ok();
+                            w.request_redraw();
+                            return; // swallow — do not forward to velox-core
+                        }
+                    }
+                }
                 (self.handler)(ShellEvent::MouseInput {
                     window_handle: handle,
                     button: btn,
@@ -334,13 +401,25 @@ impl ApplicationHandler<VeloxUserEvent> for ShellApp {
             }
 
             WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos.insert(handle, (position.x, position.y));
                 (self.handler)(ShellEvent::CursorMoved {
                     window_handle: handle,
                     x: position.x,
                     y: position.y,
                 });
-                // Hover-state redraws are triggered by the cursor-moved handler in
-                // velox-core when needed. No unconditional redraw here.
+                // When frameless, update cursor icon at resize border zones.
+                if self.frameless.get(&handle).copied().unwrap_or(false) {
+                    if let Some(w) = self.window_arcs.get(&handle) {
+                        let s = w.inner_size();
+                        let icon = edge_resize_direction(
+                            position.x, position.y,
+                            s.width as f64, s.height as f64,
+                        )
+                        .map(edge_cursor_icon)
+                        .unwrap_or(CursorIcon::Default);
+                        w.set_cursor(icon);
+                    }
+                }
             }
 
             WindowEvent::MouseWheel { delta, .. } => {

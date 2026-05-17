@@ -1302,6 +1302,27 @@ veloxWindow.restart = function restart() {
   if (typeof __velox_restart !== 'undefined') __velox_restart();
 };
 
+/**
+ * Close the window (main window: exits the app; secondary windows: closes that window).
+ * In the current implementation this is equivalent to `veloxWindow.quit()`.
+ */
+veloxWindow.close = function close() {
+  if (typeof __velox_window_close !== 'undefined') __velox_window_close();
+};
+
+/** Cache so platform() never calls the binding twice. */
+let _platformCache = null;
+
+/**
+ * Returns the host OS: `"windows"` | `"macos"` | `"linux"`.
+ * Value is determined at compile time and never changes at runtime.
+ */
+veloxWindow.platform = function platform() {
+  if (_platformCache !== null) return _platformCache;
+  _platformCache = typeof __velox_platform !== 'undefined' ? __velox_platform() : 'unknown';
+  return _platformCache;
+};
+
 // ── Performance monitoring ────────────────────────────────────────────────────
 
 /**
@@ -2386,3 +2407,64 @@ export const Canvas3D = React.forwardRef(function Canvas3D({ style, ...props }, 
     ...props,
   });
 });
+
+// ── WindowControls ────────────────────────────────────────────────────────────
+//
+// A ready-made minimize / maximize-or-restore / close button row for custom
+// title bars (`window.decorations: false` in velox.config.json).
+//
+// Usage:
+//   import { WindowControls } from '@velox/react';
+//   <View veloxDraggable style={styles.titleBar}>
+//     <Text style={styles.title}>My App</Text>
+//     <WindowControls />
+//   </View>
+//
+// Platform-aware button order:
+//   macOS   → traffic-light order on the LEFT side  (close · minimize · maximize)
+//   Windows / Linux → standard order on the RIGHT side (minimize · maximize · close)
+
+const _wc_btn = (label, onPress, bg) =>
+  React.createElement(Pressable, {
+    onPress,
+    style: {
+      width: 14, height: 14, borderRadius: 7,
+      backgroundColor: bg,
+      justifyContent: 'center', alignItems: 'center',
+    },
+  }, React.createElement(Text, { style: { fontSize: 8, color: '#00000088' } }, label));
+
+export function WindowControls({ style } = {}) {
+  const [maximized, setMaximized] = React.useState(() => veloxWindow.isMaximized());
+
+  const minimize = () => veloxWindow.setMinimized();
+  const toggleMax = () => {
+    if (veloxWindow.isMaximized()) {
+      veloxWindow.setMaximized(false);
+      setMaximized(false);
+    } else {
+      veloxWindow.setMaximized(true);
+      setMaximized(true);
+    }
+  };
+  const close = () => veloxWindow.close();
+
+  const isMac    = veloxWindow.platform() === 'macos';
+  const btnClose = _wc_btn('✕', close,     '#ff5f57');
+  const btnMin   = _wc_btn('−', minimize,  '#febc2e');
+  const btnMax   = _wc_btn(maximized ? '⊡' : '⊞', toggleMax, '#28c840');
+
+  const buttons = isMac
+    ? [btnClose, btnMin, btnMax]   // traffic-light order: close · min · max
+    : [btnMin,   btnMax, btnClose]; // Windows/Linux: min · max · close
+
+  return React.createElement(View, {
+    style: {
+      flexDirection: 'row',
+      gap: 6,
+      alignItems: 'center',
+      ...(isMac ? { marginLeft: 8 } : { marginRight: 8 }),
+      ...style,
+    },
+  }, ...buttons);
+}

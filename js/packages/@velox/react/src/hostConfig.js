@@ -17,8 +17,9 @@ function createInstance(type, props) {
   // backgroundColor, borderRadius, etc. directly (not nested under style).
   // Strip `_veloxOnMount` — a callback that components use to learn their
   // native node ID synchronously, without relying on ref forwarding.
-  const { children, style, ref: _ref, _veloxOnMount, ...rest } = props;
+  const { children, style, ref: _ref, _veloxOnMount, veloxDraggable, ...rest } = props;
   const nodeProps = { ...rest, ...style };
+  if (veloxDraggable) nodeProps.draggable = true;
   const id = __velox_createNode(type, nodeProps);
   // Fire the mount callback immediately so the component can register its ID
   // before any useEffect / useLayoutEffect runs.
@@ -108,8 +109,9 @@ function prepareUpdate(_instance, _type, _oldProps, newProps) {
 }
 
 function commitUpdate(instance, updatePayload) {
-  const { children, style, ref: _ref, _veloxOnMount, ...rest } = updatePayload;
+  const { children, style, ref: _ref, _veloxOnMount, veloxDraggable, ...rest } = updatePayload;
   const nodeProps = { ...rest, ...style };
+  if (veloxDraggable) nodeProps.draggable = true;
   __velox_updateNode(instance.id, nodeProps);
 }
 

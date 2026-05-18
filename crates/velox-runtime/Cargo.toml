@@ -33,3 +33,6 @@ rodio               = { workspace = true }
 serde               = { workspace = true }
 velox-3d            = { path = "../velox-3d" }
 velox-ai            = { path = "../velox-ai" }
+
+[features]
+dev = []

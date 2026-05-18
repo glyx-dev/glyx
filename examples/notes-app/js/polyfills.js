@@ -23,7 +23,13 @@ if (typeof setTimeout === 'undefined') {
 
   globalThis.setTimeout = (fn, ms) => {
     const id = _nextTimerId++;
-    _pendingTimers.set(id, { fn, due: performance.now() + (ms > 0 ? ms : 0) });
+    const delay = ms > 0 ? ms : 0;
+    _pendingTimers.set(id, { fn, due: performance.now() + delay });
+    // Ask Rust to wake the event loop after `delay` ms so the timer fires on time.
+    // Without this, timers only run when the frame loop is already awake (e.g. overlay on).
+    if (typeof __velox_request_frame !== 'undefined') {
+      __velox_request_frame(delay);
+    }
     return id;
   };
 

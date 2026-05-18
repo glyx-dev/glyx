@@ -286,9 +286,9 @@ pub fn register_all(
     perf_state:   Arc<Mutex<velox_perf::PerfState>>,
     deeplink_url_queue: Arc<Mutex<VecDeque<String>>>,
     db_pools:     DbPools,
+    cdp_log_tx:   Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
 ) {
     set_func(scope, global, "__velox_getTime", get_time);
-    set_func(scope, global, "__velox_log",     js_log);
 
     // Audio and gamepad are initialised lazily on first use to avoid
     // wasting resources in apps that don't use them.
@@ -331,6 +331,7 @@ pub fn register_all(
         ai_embed_model:    Arc::new(Mutex::new(None)),
         ai_generate_model: Arc::new(Mutex::new(None)),
         ai_whisper_model:  Arc::new(Mutex::new(None)),
+        cdp_log_tx,
     });
     let ptr   = Box::into_raw(state) as *mut std::ffi::c_void;
     // Safety: ptr is valid for the lifetime of the isolate.
@@ -347,6 +348,8 @@ pub fn register_all(
         };
     }
 
+    register!("__velox_request_frame", request_frame_callback);
+    register!("__velox_log",         js_log);
     register!("__velox_getEnv",      get_env_callback);
     register!("__velox_readFile",      read_file_callback);
     register!("__velox_readFileBytes", read_file_bytes_callback);
@@ -532,6 +535,10 @@ struct AsyncState {
     ai_generate_model: Arc<Mutex<Option<velox_ai::GenerateModel>>>,
     /// Whisper transcription model (requires &mut self for decoder state).
     ai_whisper_model:  Arc<Mutex<Option<velox_ai::WhisperModel>>>,
+    // ── CDP Inspector console bridge ──────────────────────────────────────────
+    /// When the CDP inspector is active, this holds the outbox sender so
+    /// __velox_log can forward console messages as Runtime.consoleAPICalled events.
+    cdp_log_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
 }
 
 struct WsHandle {
@@ -711,6 +718,32 @@ fn get_time(
     rv.set(v8::Number::new(scope, ms).into());
 }
 
+/// `__velox_request_frame(ms)` — schedule a redraw after `ms` milliseconds.
+///
+/// Called by the `setTimeout` polyfill so timer-driven animation loops
+/// (canvas, React scheduler) wake the winit event loop at the right time
+/// without spinning the GPU on static screens.
+fn request_frame_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let ext   = v8::Local::<v8::External>::try_from(args.data().unwrap()).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let ms = args.get(0)
+        .number_value(scope)
+        .unwrap_or(16.0)
+        .max(0.0) as u64;
+    if let Some(redraw) = state.request_redraw.as_ref().map(Arc::clone) {
+        state.tokio.spawn(async move {
+            if ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            }
+            redraw();
+        });
+    }
+}
+
 fn js_log(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -722,6 +755,21 @@ fn js_log(
         .map(|s| s.to_rust_string_lossy(scope))
         .unwrap_or_else(|| "<no message>".into());
     log::info!("[JS] {}", msg);
+
+    // Forward to CDP inspector console if connected.
+    let ext   = v8::Local::<v8::External>::try_from(args.data().unwrap()).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if let Some(tx) = state.cdp_log_tx.lock().unwrap().as_ref() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let value_json = serde_json::to_string(&msg).unwrap_or_default();
+        let cdp = format!(
+            r#"{{"method":"Runtime.consoleAPICalled","params":{{"type":"log","args":[{{"type":"string","value":{value_json}}}],"timestamp":{ts},"executionContextId":1}}}}"#
+        );
+        let _ = tx.send(cdp);
+    }
 }
 
 // ── __velox_pollEvents ────────────────────────────────────────────────────────

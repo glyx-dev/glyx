@@ -524,6 +524,9 @@ struct DevModeState {
     /// so the numbers are readable instead of flickering at 120 fps.
     overlay_lines:        Vec<String>,
     overlay_next_refresh: Instant,
+    /// Last JS exception from frame_tick — shown as an error overlay.
+    /// Cleared on the next successful reload.
+    last_js_error: Option<String>,
 }
 
 // ── Colour helpers ─────────────────────────────────────────────────────────────
@@ -579,9 +582,20 @@ fn start_dev_mode_worker(
     std::thread::spawn(move || {
         let (watch_tx, watch_rx) = mpsc::channel::<()>();
         let out_tx_watch = out_tx.clone();
+        // The output JS path — we skip events for this file to avoid a circular
+        // rebuild loop (bun writes app.js → watcher fires → bun runs again → ...).
+        let app_js_for_filter = app_js.clone();
         let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             match res {
-                Ok(_) => {
+                Ok(event) => {
+                    // Skip events caused by the output file being written by bun itself.
+                    // Only source file changes (.jsx/.tsx/.ts/.js source, not the bundle)
+                    // should trigger a rebuild.
+                    let is_output_file = event.paths.iter().any(|p| p == &app_js_for_filter);
+                    if is_output_file {
+                        return;
+                    }
+                    log::debug!("[HMR] file changed: {:?}", event.paths);
                     let _ = watch_tx.send(());
                 }
                 Err(e) => {
@@ -604,12 +618,17 @@ fn start_dev_mode_worker(
         for p in &watch_paths {
             let wp = if p.is_absolute() { p.clone() } else { cwd.join(p) };
             if wp.exists() {
+                log::info!("[HMR] watching {:?}", wp);
                 let _ = watcher.watch(&wp, RecursiveMode::Recursive);
+            } else {
+                log::warn!("[HMR] watch path does not exist: {:?}", wp);
             }
         }
+        log::info!("[HMR] ready — edit {:?} to hot-reload", app_jsx);
 
         while watch_rx.recv().is_ok() {
             while watch_rx.recv_timeout(Duration::from_millis(180)).is_ok() {}
+            log::info!("[HMR] change detected — rebuilding…");
 
             let output = Command::new("bun")
                 .arg("build")
@@ -629,9 +648,11 @@ fn start_dev_mode_worker(
                 Ok(out) if out.status.success() => {
                     match std::fs::read_to_string(&app_js) {
                         Ok(js) => {
+                            log::info!("[HMR] build ok — reloading app");
                             let _ = out_tx.send(DevBuildEvent::BuildOk(js));
                         }
                         Err(e) => {
+                            log::warn!("[HMR] build succeeded but could not read output: {e}");
                             let _ = out_tx.send(DevBuildEvent::BuildErr(e.to_string()));
                         }
                     }
@@ -650,6 +671,7 @@ fn start_dev_mode_worker(
                     if msg.is_empty() {
                         msg = "bun build failed".to_string();
                     }
+                    log::warn!("[HMR] build error: {msg}");
                     let _ = out_tx.send(DevBuildEvent::BuildErr(msg));
                 }
                 Err(e) => {
@@ -684,10 +706,12 @@ fn handle_dev_build_events(state: &mut PerWindowState) {
                     Ok(_) => {
                         dev.last_reload = Some(Instant::now());
                         dev.last_build_message = "reload ok".to_string();
+                        dev.last_js_error = None;  // clear error on successful reload
                         state.layout_dirty = true;
                     }
                     Err(e) => {
                         dev.last_build_message = format!("reload error: {}", e);
+                        dev.last_js_error = Some(format!("Eval error: {}", e));
                     }
                 }
             }
@@ -784,6 +808,57 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
         };
         frame.fill_rect(x, y, bar_w - 0.5, h, col);
     }
+}
+
+/// Draw the JS error overlay — a red banner at the bottom of the window.
+/// Shown whenever a JS exception was thrown during `frame_tick()`.
+/// Always drawn in dev mode regardless of whether the perf overlay is toggled.
+#[cfg(feature = "dev")]
+fn draw_error_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
+    let Some(dev) = state.dev_mode.as_ref() else { return };
+    let Some(ref err) = dev.last_js_error.clone() else { return };
+
+    let win_w = state.gpu.width()  as f64;
+    let win_h = state.gpu.height() as f64;
+
+    // Background panel — 130px tall, full width, anchored to bottom.
+    let panel_h = 140.0_f64;
+    let panel_y = win_h - panel_h;
+    frame.fill_rounded_rect(0.0, panel_y, win_w, panel_h, 0.0,
+        peniko::Color::rgba8(40, 5, 5, 245));
+
+    // Red top border line.
+    frame.fill_rect(0.0, panel_y, win_w, 2.0,
+        peniko::Color::rgba8(220, 50, 50, 255));
+
+    let title_color = peniko::Color::rgba8(255, 100, 100, 255);
+    let body_color  = peniko::Color::rgba8(240, 200, 200, 255);
+    let dim_color   = peniko::Color::rgba8(160, 120, 120, 200);
+
+    // Title row.
+    let title = state.text_sys.label("⚠  JavaScript Error  (fix and save to dismiss)", 12.0, title_color);
+    frame.draw_text(&title, 16.0, panel_y + 12.0, title_color);
+
+    // Error lines — up to 4 lines, truncated at 120 chars each.
+    let max_line_chars = (win_w as usize).saturating_sub(40) / 7; // ~7px per char at 12pt
+    let lines: Vec<&str> = err.lines().take(4).collect();
+    for (i, line) in lines.iter().enumerate() {
+        let truncated = if line.len() > max_line_chars {
+            format!("{}…", &line[..max_line_chars.min(line.len())])
+        } else {
+            line.to_string()
+        };
+        let text = state.text_sys.label(&truncated, 11.0, body_color);
+        frame.draw_text(&text, 16.0, panel_y + 34.0 + (i as f64 * 18.0), body_color);
+    }
+    if err.lines().count() > 4 {
+        let more = state.text_sys.label("… (more lines in console)", 10.0, dim_color);
+        frame.draw_text(&more, 16.0, panel_y + 34.0 + (4.0 * 18.0), dim_color);
+    }
+
+    // Footer hint.
+    let hint = state.text_sys.label("Save any source file to rebuild and dismiss", 10.0, dim_color);
+    frame.draw_text(&hint, 16.0, panel_y + panel_h - 16.0, dim_color);
 }
 
 // ── Window controller builder ─────────────────────────────────────────────────
@@ -1252,6 +1327,7 @@ pub fn run(mut config: AppConfig) -> bool {
                             shift_down: false,
                             overlay_lines:        Vec::new(),
                             overlay_next_refresh: Instant::now(),
+                            last_js_error:        None,
                         })
                     } else {
                         None
@@ -1403,8 +1479,16 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 // 3. JS frame callback — dispatchEvents, React state updates.
                 let js_start = Instant::now();
-                s.runtime.frame_tick();
+                let frame_tick_err = s.runtime.frame_tick();
                 let js_time_ms = js_start.elapsed().as_secs_f64() * 1000.0;
+
+                // In dev mode, surface JS exceptions as a visual overlay.
+                #[cfg(feature = "dev")]
+                if let Some(err) = frame_tick_err {
+                    if let Some(dev) = s.dev_mode.as_mut() {
+                        dev.last_js_error = Some(err);
+                    }
+                }
 
                 // 4. Post-frame commands (React re-renders from step 3 events).
                 let post_commands = s.runtime.drain_scene_commands();
@@ -1462,6 +1546,9 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 #[cfg(feature = "dev")]
                 draw_dev_overlay(s, &mut frame);
+
+                #[cfg(feature = "dev")]
+                draw_error_overlay(s, &mut frame);
 
                 #[cfg(feature = "dev")]
                 if s.dev_mode.as_ref().map(|d| d.overlay_visible).unwrap_or(false) {

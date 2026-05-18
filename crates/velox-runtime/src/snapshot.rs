@@ -23,7 +23,25 @@ const stubPromise = function(value) { return Promise.resolve(value); };
 
 // Time binding (polyfill will provide Date.now())
 globalThis.__velox_getTime = function() { return Date.now(); };
+globalThis.__velox_request_frame = function() {};
 globalThis.__velox_log = function() {};
+
+// console — routes to __velox_log so app code can use console.log() normally.
+// The real __velox_log implementation also forwards to the CDP inspector when connected.
+(function() {
+  function _fmt(args) {
+    return Array.prototype.map.call(args, function(x) {
+      return typeof x === 'object' ? JSON.stringify(x) : String(x);
+    }).join(' ');
+  }
+  globalThis.console = {
+    log:   function() { __velox_log(_fmt(arguments)); },
+    info:  function() { __velox_log(_fmt(arguments)); },
+    warn:  function() { __velox_log('[warn] ' + _fmt(arguments)); },
+    error: function() { __velox_log('[error] ' + _fmt(arguments)); },
+    debug: function() { __velox_log('[debug] ' + _fmt(arguments)); },
+  };
+})();
 
 // File system bindings
 globalThis.__velox_readFile      = function() { return stubPromise(''); };

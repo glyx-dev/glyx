@@ -36,7 +36,14 @@ enum Commands {
         #[arg(long)]
         native: bool,
     },
-    Dev,
+    /// Start dev server with hot reload and optional CDP inspector.
+    Dev {
+        /// Enable Chrome DevTools Protocol inspector.
+        /// Optionally specify a port (default 9229).
+        /// Open chrome://inspect in Chrome and add 127.0.0.1:<port>.
+        #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "9229")]
+        inspect: Option<u16>,
+    },
     Build {
         /// Target OS (windows, macos, linux)
         target: Option<String>,
@@ -91,7 +98,7 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Create { name, native } => cmd_create(&name, native),
-        Commands::Dev                     => cmd_dev(),
+        Commands::Dev { inspect }         => cmd_dev(inspect),
         Commands::Build { target, mode, check_performance, perf_budget, perf_duration } =>
             cmd_build(target.as_deref(), &mode, check_performance, perf_budget, perf_duration),
         Commands::Package { target }      => cmd_package(target.as_deref()),
@@ -272,7 +279,7 @@ export default defineConfig({{
 
 // ── velox dev ─────────────────────────────────────────────────────────────────
 
-fn cmd_dev() -> Result<()> {
+fn cmd_dev(inspect: Option<u16>) -> Result<()> {
     let project_name = read_project_name()
         .context("Run `velox dev` from the project root (where velox.config.ts or package.json lives)")?;
     let cfg = read_dev_config();
@@ -281,24 +288,35 @@ fn cmd_dev() -> Result<()> {
         bun_build(entry, output).context("Initial bun build failed")?;
         println!("✓ JS built");
     }
-    println!("Starting dev server for '{project_name}' (hot reload active)...");
+
+    if let Some(port) = inspect {
+        println!("Starting dev server for '{project_name}' (hot reload + CDP inspector on :{port})...");
+        println!("  Open chrome://inspect and add 127.0.0.1:{port} under Discover network targets.");
+    } else {
+        println!("Starting dev server for '{project_name}' (hot reload active)...");
+    }
 
     if is_native_project() {
         // Native project: custom Rust extensions compiled in — use cargo run
-        let status = Command::new("cargo")
-            .args(["run", "-p", &project_name])
-            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
-            .status()
-            .context("Failed to run `cargo run`; is Rust installed?")?;
+        let mut cmd = Command::new("cargo");
+        cmd.args(["run", "-p", &project_name])
+            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()));
+        if let Some(port) = inspect {
+            cmd.env("VELOX_INSPECT_PORT", port.to_string());
+        }
+        let status = cmd.status().context("Failed to run `cargo run`; is Rust installed?")?;
         std::process::exit(status.code().unwrap_or(1));
     } else {
         // JS-only project: spawn the prebuilt velox-runner (dev build with hot-reload)
         let runner = find_or_build_runner(true)
             .context("Could not find or build velox-runner. Run `velox runtime build`.")?;
         log::info!("Using runner: {}", runner.display());
-        let status = Command::new(&runner)
-            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
-            .status()
+        let mut cmd = Command::new(&runner);
+        cmd.env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()));
+        if let Some(port) = inspect {
+            cmd.env("VELOX_INSPECT_PORT", port.to_string());
+        }
+        let status = cmd.status()
             .with_context(|| format!("Failed to launch {}", runner.display()))?;
         std::process::exit(status.code().unwrap_or(1));
     }

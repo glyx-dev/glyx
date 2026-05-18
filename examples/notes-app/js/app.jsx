@@ -82,7 +82,7 @@ function embedNote(title, body) {
 const SEED_NOTES = [
   {
     title: 'Project Ideas',
-    body:  'Ideas for next velox feature: vector search UI, responsive layout improvements, cross-platform build. Plan rollout for Q2.',
+    body:  'Ideas for next velox feature: vector search UI, nice responsive layout improvements, cross-platform build. Plan rollout for Q2.',
   },
   {
     title: 'Team Meeting Notes',
@@ -370,7 +370,7 @@ function NoteListScreen() {
       >
         <View style={{ gap: 6, justifyContent: 'flex-start', alignItems: 'flex-start' }} width={isWide ? inner - 420 : inner} height={98}>
           <Text fontSize={22} width={isWide ? inner - 430 : inner - 8} height={30} style={{ color: C.text }}>
-            My Notes Workspace
+            My Notes Workspace Demo
           </Text>
           <Text fontSize={12} width={isWide ? inner - 430 : inner - 8} style={{ color: C.subtle }}>
             {'Capture ideas, write drafts, and rediscover them instantly with semantic search.'}
@@ -1987,9 +1987,10 @@ function CanvasDemoScreen() {
 
   return (
     <ScrollView width={inner} height={600} style={{ gap: 20 }}>
-      <Text fontSize={18} width={inner} height={24} style={{ color: C.text }}>
-        Canvas Demo
-      </Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+        <BackBtn />
+        <Text fontSize={18} height={24} style={{ color: C.text }}>Canvas Demo</Text>
+      </View>
 
       {/* 2D Canvas */}
       <Text fontSize={13} width={inner} height={18} style={{ color: C.dim }}>

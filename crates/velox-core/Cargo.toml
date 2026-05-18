@@ -8,7 +8,7 @@ edition = "2021"
 # Production builds (velox build --mode snapshot/bundle) disable this feature
 # so notify and std::process::Command are never compiled in.
 default = ["dev"]
-dev = ["notify"]
+dev = ["notify", "velox-runtime/dev"]
 
 [dependencies]
 velox-gpu      = { path = "../velox-gpu" }

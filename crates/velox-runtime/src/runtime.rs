@@ -13,6 +13,9 @@ use crate::{
     RuntimeError,
 };
 
+#[cfg(feature = "dev")]
+use crate::inspector::VeloxInspector;
+
 use std::collections::VecDeque;
 
 /// V8 isolate params shared by fresh and snapshot-restore paths.
@@ -36,6 +39,11 @@ fn velox_create_params(snapshot: Option<Vec<u8>>) -> v8::CreateParams {
 }
 
 pub struct VeloxRuntime {
+    // ⚠ DROP ORDER MATTERS: inspector holds V8 references; it must be
+    //   dropped before `isolate`. Rust drops fields in declaration order.
+    /// CDP inspector — present only in dev mode when VELOX_INSPECT_PORT is set.
+    #[cfg(feature = "dev")]
+    pub inspector: Option<VeloxInspector>,
     isolate:      v8::OwnedIsolate,
     context:      v8::Global<v8::Context>,
     queue:        CompletionQueue,
@@ -91,6 +99,11 @@ impl VeloxRuntime {
         let layout_cache       = new_layout_cache();
         let deeplink_url_queue = Arc::new(std::sync::Mutex::new(VecDeque::new()));
         let db_pools           = new_db_pools();
+        let cdp_log_tx         = Arc::new(std::sync::Mutex::new(None::<tokio::sync::mpsc::UnboundedSender<String>>));
+
+        // Clone handle before moving into register_all; keep one for inspector.
+        #[cfg(feature = "dev")]
+        let inspect_handle = tokio_handle.clone();
 
         let (context, queue, scene) = {
             let scope  = &mut v8::HandleScope::new(&mut isolate);
@@ -114,12 +127,25 @@ impl VeloxRuntime {
                 Arc::clone(&perf_state),
                 Arc::clone(&deeplink_url_queue),
                 Arc::clone(&db_pools),
+                Arc::clone(&cdp_log_tx),
             );
 
             (v8::Global::new(scope, ctx), queue, scene)
         };
 
-        Self { isolate, context, queue, scene, events, layout_cache, perf_state, deeplink_url_queue, db_pools }
+        // Attach CDP inspector if VELOX_INSPECT_PORT is set (dev feature only).
+        #[cfg(feature = "dev")]
+        let inspector = std::env::var("VELOX_INSPECT_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .map(|port| VeloxInspector::new(&mut isolate, &context, port, &inspect_handle, Arc::clone(&cdp_log_tx)));
+
+        Self {
+            #[cfg(feature = "dev")]
+            inspector,
+            isolate, context, queue, scene, events, layout_cache,
+            perf_state, deeplink_url_queue, db_pools,
+        }
     }
 
     /// Create a new VeloxRuntime from a snapshot blob (pre-executed JS heap).
@@ -158,6 +184,11 @@ impl VeloxRuntime {
         let layout_cache       = new_layout_cache();
         let deeplink_url_queue = Arc::new(std::sync::Mutex::new(VecDeque::new()));
         let db_pools           = new_db_pools();
+        let cdp_log_tx         = Arc::new(std::sync::Mutex::new(None::<tokio::sync::mpsc::UnboundedSender<String>>));
+
+        // Clone handle before moving into register_all; keep one for inspector.
+        #[cfg(feature = "dev")]
+        let inspect_handle = tokio_handle.clone();
 
         let (context, queue, scene) = {
             let scope  = &mut v8::HandleScope::new(&mut isolate);
@@ -184,12 +215,24 @@ impl VeloxRuntime {
                 Arc::clone(&perf_state),
                 Arc::clone(&deeplink_url_queue),
                 Arc::clone(&db_pools),
+                Arc::clone(&cdp_log_tx),
             );
 
             (v8::Global::new(scope, ctx), queue, scene)
         };
 
-        Ok(Self { isolate, context, queue, scene, events, layout_cache, perf_state, deeplink_url_queue, db_pools })
+        #[cfg(feature = "dev")]
+        let inspector = std::env::var("VELOX_INSPECT_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .map(|port| VeloxInspector::new(&mut isolate, &context, port, &inspect_handle, Arc::clone(&cdp_log_tx)));
+
+        Ok(Self {
+            #[cfg(feature = "dev")]
+            inspector,
+            isolate, context, queue, scene, events, layout_cache,
+            perf_state, deeplink_url_queue, db_pools,
+        })
     }
 
     // ── Extensions ────────────────────────────────────────────────────────────
@@ -306,7 +349,17 @@ impl VeloxRuntime {
     ///
     /// This lets the JS event dispatcher run hit-testing and fire React
     /// state-update callbacks once per frame, before scene commands are drained.
-    pub fn frame_tick(&mut self) {
+    ///
+    /// Returns `Some(error_message)` if a JS exception was thrown, `None` on success.
+    pub fn frame_tick(&mut self) -> Option<String> {
+        // Pump pending CDP messages before running JS, so DevTools commands
+        // (e.g. Runtime.evaluate) execute at a predictable point each frame.
+        #[cfg(feature = "dev")]
+        if let Some(mut insp) = self.inspector.take() {
+            insp.pump_messages(&mut self.isolate, &self.context);
+            self.inspector = Some(insp);
+        }
+
         let scope = &mut v8::HandleScope::new(&mut self.isolate);
         let ctx   = v8::Local::new(scope, &self.context);
         let scope = &mut v8::ContextScope::new(scope, ctx);
@@ -315,22 +368,32 @@ impl VeloxRuntime {
         let key = v8::String::new(scope, "__velox_frameCallback").unwrap();
         let val = match global.get(scope, key.into()) {
             Some(v) => v,
-            None    => return,
+            None    => return None,
         };
         if !val.is_function() {
-            return;
+            return None;
         }
         let func = v8::Local::<v8::Function>::try_from(val).unwrap();
         let recv = global.into();
         let mut try_catch = v8::TryCatch::new(scope);
         if func.call(&mut try_catch, recv, &[]).is_some() {
             try_catch.perform_microtask_checkpoint();
+            None
         } else if let Some(exc) = try_catch.exception() {
+            // Extract both the exception message and the stack trace if available.
             let msg = exc
                 .to_string(&mut try_catch)
                 .map(|s| s.to_rust_string_lossy(&mut try_catch))
-                .unwrap_or_else(|| "Unknown".into());
-            log::error!("[JS] frameCallback error: {}", msg);
+                .unwrap_or_else(|| "Unknown JS exception".into());
+            let stack = try_catch.stack_trace()
+                .and_then(|st| st.to_string(&mut try_catch))
+                .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                .unwrap_or_default();
+            let full = if stack.is_empty() { msg } else { format!("{}\n{}", msg, stack) };
+            log::error!("[JS] frameCallback error: {}", full);
+            Some(full)
+        } else {
+            None
         }
     }
 

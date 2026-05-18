@@ -31,6 +31,8 @@ use thiserror::Error;
 pub mod bindings;
 pub mod runtime;
 pub mod snapshot;
+#[cfg(feature = "dev")]
+pub mod inspector;
 
 pub use runtime::{VeloxRuntime, HeapStats};
 pub use bindings::{

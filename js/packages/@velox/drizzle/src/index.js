@@ -32,18 +32,11 @@ export function createDrizzle(dbHandle, schema) {
         return { rows: [] };
       }
 
-      // SELECT — returns array of row objects from Velox binding
+      // SELECT — Velox returns JSON objects; sqlite-proxy expects positional arrays.
+      // Object.values() preserves column order (V8 insertion-order = SQLite column order).
       const rowsJson = await __velox_db_query(dbHandle, sql, JSON.stringify(params));
       const rows = JSON.parse(rowsJson);
-
-      if (method === 'values') {
-        // Drizzle's .toValues() path expects arrays of values, not objects.
-        // Object.values() preserves SQLite column order (V8 insertion-order guarantee).
-        return { rows: rows.map(r => Object.values(r)) };
-      }
-
-      // 'get' (single row) and 'all' (full result set) — objects are fine
-      return { rows };
+      return { rows: rows.map(r => Object.values(r)) };
     },
     schema ? { schema } : undefined,
   );

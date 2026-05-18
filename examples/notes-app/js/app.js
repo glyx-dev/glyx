@@ -11578,10 +11578,7 @@ No matching component was found for:
       }
       const rowsJson = await __velox_db_query(dbHandle, sql2, JSON.stringify(params));
       const rows = JSON.parse(rowsJson);
-      if (method === "values") {
-        return { rows: rows.map((r) => Object.values(r)) };
-      }
-      return { rows };
+      return { rows: rows.map((r) => Object.values(r)) };
     }, schema ? { schema } : undefined);
   }
 

@@ -27,6 +27,17 @@ import {
   ai, camera, microphone, Camera,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
+import { createDrizzle } from '@velox/drizzle';
+import { sqliteTable, integer, text, real } from 'drizzle-orm/sqlite-core';
+import { desc, eq, gt } from 'drizzle-orm';
+
+// ── Drizzle schema (used by DrizzleScreen) ────────────────────────────────────
+const drzProducts = sqliteTable('drz_products', {
+  id:         integer('id').primaryKey({ autoIncrement: true }),
+  name:       text('name').notNull(),
+  price:      real('price').notNull(),
+  created_at: integer('created_at').notNull(),
+});
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -463,6 +474,12 @@ function NoteListScreen() {
             onPress={() => navigate('media')}
             width={64}
             color={C.teal}
+          />
+          <Btn
+            label="Drizzle"
+            onPress={() => navigate('drizzle')}
+            width={68}
+            color={C.green}
           />
         </View>
         <Text fontSize={11} width={isWide ? inner - 308 : inner} height={16} style={{ color: C.dim }}>
@@ -2456,6 +2473,161 @@ function MediaDemoScreen() {
   );
 }
 
+// ── Screen: Drizzle ORM ────────────────────────────────────────────────────────
+
+const SEED_PRODUCTS = [
+  { name: 'Velox Pro',        price: 49.99  },
+  { name: 'Velox Starter',    price: 9.99   },
+  { name: 'Velox Enterprise', price: 299.99 },
+];
+
+function DrizzleScreen() {
+  const { width: winW } = useWindowSize();
+  const C = useThemeColors();
+
+  const [driz,    setDriz]    = useState(null);
+  const [rows,    setRows]    = useState([]);
+  const [name,    setName]    = useState('');
+  const [price,   setPrice]   = useState('');
+  const [status,  setStatus]  = useState('Initialising…');
+  const [filterGt, setFilterGt] = useState('0');
+
+  // Open in-memory DB, create table, seed data, build Drizzle instance
+  useEffect(() => {
+    let handle;
+    (async () => {
+      try {
+        handle = await db.open(':memory:');
+        await db.run(handle,
+          `CREATE TABLE drz_products (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             name TEXT NOT NULL,
+             price REAL NOT NULL,
+             created_at INTEGER NOT NULL
+           )`
+        );
+        const d = createDrizzle(handle);
+        await d.insert(drzProducts).values(
+          SEED_PRODUCTS.map(s => ({ ...s, created_at: Date.now() }))
+        );
+        setDriz(d);
+        const initial = await d.select().from(drzProducts).orderBy(desc(drzProducts.id));
+        setRows(initial);
+        setStatus('Drizzle ORM — in-memory SQLite via Velox bindings');
+      } catch (e) {
+        setStatus('Error: ' + e.message);
+      }
+    })();
+    return () => { if (handle != null) db.close(handle); };
+  }, []);
+
+  const refresh = async (d = driz, minPrice = Number(filterGt) || 0) => {
+    if (!d) return;
+    const result = minPrice > 0
+      ? await d.select().from(drzProducts)
+          .where(gt(drzProducts.price, minPrice))
+          .orderBy(desc(drzProducts.id))
+      : await d.select().from(drzProducts).orderBy(desc(drzProducts.id));
+    setRows(result);
+  };
+
+  const handleInsert = async () => {
+    if (!driz || !name.trim()) return;
+    const p = parseFloat(price) || 0;
+    await driz.insert(drzProducts).values({
+      name: name.trim(), price: p, created_at: Date.now(),
+    });
+    setName(''); setPrice('');
+    await refresh();
+  };
+
+  const handleDelete = async (id) => {
+    if (!driz) return;
+    await driz.delete(drzProducts).where(eq(drzProducts.id, id));
+    await refresh();
+  };
+
+  return (
+    <ScrollView style={{ flex: 1, backgroundColor: C.bg }} contentPadding={PAD}>
+      <BackBtn />
+      <Text fontSize={20} style={{ color: C.text, marginBottom: 4 }}>Drizzle ORM</Text>
+      <Text fontSize={12} style={{ color: C.dim, marginBottom: 16 }}>{status}</Text>
+
+      {/* Insert row */}
+      <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+        <TextInput
+          value={name} onChangeText={setName}
+          placeholder="Product name"
+          style={{ flex: 1, minWidth: 140, backgroundColor: C.surface, borderRadius: 6,
+                   paddingHorizontal: 10, height: 36, color: C.text, fontSize: 13 }}
+        />
+        <TextInput
+          value={price} onChangeText={setPrice}
+          placeholder="Price"
+          style={{ width: 80, backgroundColor: C.surface, borderRadius: 6,
+                   paddingHorizontal: 10, height: 36, color: C.text, fontSize: 13 }}
+        />
+        <Pressable
+          onPress={handleInsert}
+          style={{ backgroundColor: C.accent, borderRadius: 6, paddingHorizontal: 16,
+                   height: 36, justifyContent: 'center' }}
+        >
+          <Text fontSize={13} style={{ color: C.bg }}>Insert</Text>
+        </Pressable>
+      </View>
+
+      {/* Filter */}
+      <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 16 }}>
+        <Text fontSize={12} style={{ color: C.dim }}>Price &gt;</Text>
+        <TextInput
+          value={filterGt} onChangeText={v => { setFilterGt(v); refresh(driz, Number(v) || 0); }}
+          style={{ width: 70, backgroundColor: C.surface, borderRadius: 6,
+                   paddingHorizontal: 10, height: 30, color: C.text, fontSize: 12 }}
+        />
+        <Text fontSize={11} style={{ color: C.dim }}>
+          {`drizzle.select().from(products).where(gt(price, ${Number(filterGt)||0})).orderBy(desc(id))`}
+        </Text>
+      </View>
+
+      {/* Results */}
+      <View style={{ backgroundColor: C.surface, borderRadius: 8, overflow: 'hidden' }}>
+        {/* Header */}
+        <View style={{ flexDirection: 'row', backgroundColor: C.overlay,
+                       paddingHorizontal: 12, paddingVertical: 8 }}>
+          <Text fontSize={11} style={{ color: C.dim, width: 36 }}>ID</Text>
+          <Text fontSize={11} style={{ color: C.dim, flex: 1 }}>Name</Text>
+          <Text fontSize={11} style={{ color: C.dim, width: 72 }}>Price</Text>
+          <Text fontSize={11} style={{ color: C.dim, width: 32 }}></Text>
+        </View>
+        {rows.length === 0 ? (
+          <Text fontSize={12} style={{ color: C.dim, padding: 16 }}>No results</Text>
+        ) : rows.map(row => (
+          <View key={row.id}
+            style={{ flexDirection: 'row', alignItems: 'center',
+                     paddingHorizontal: 12, paddingVertical: 10,
+                     borderTopWidth: 1, borderTopColor: C.border }}
+          >
+            <Text fontSize={12} style={{ color: C.dim, width: 36 }}>{row.id}</Text>
+            <Text fontSize={13} style={{ color: C.text, flex: 1 }}>{row.name}</Text>
+            <Text fontSize={13} style={{ color: C.green, width: 72 }}>
+              ${row.price.toFixed(2)}
+            </Text>
+            <Pressable onPress={() => handleDelete(row.id)}
+              style={{ width: 32, alignItems: 'center' }}>
+              <Text fontSize={13} style={{ color: C.red }}>✕</Text>
+            </Pressable>
+          </View>
+        ))}
+      </View>
+
+      <Text fontSize={10} style={{ color: C.dim, marginTop: 12, lineHeight: 16 }}>
+        {'Typed insert / select / delete / where / orderBy — zero raw SQL in the screen. ' +
+         'Drizzle generates the SQL; @velox/drizzle routes it through __velox_db_* bindings.'}
+      </Text>
+    </ScrollView>
+  );
+}
+
 // ── App shell ─────────────────────────────────────────────────────────────────
 //
 // Initialises the DB and vector store once, provides them via context.
@@ -2661,6 +2833,7 @@ function App() {
               <Route name="canvas"  component={CanvasDemoScreen}  />
               <Route name="ai"      component={AiDemoScreen}      />
               <Route name="media"   component={MediaDemoScreen}   />
+              <Route name="drizzle" component={DrizzleScreen}      />
             </Router>
           </View>
 

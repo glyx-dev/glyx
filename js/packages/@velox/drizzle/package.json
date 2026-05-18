@@ -1,0 +1,10 @@
+{
+  "name": "@velox/drizzle",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "description": "Drizzle ORM adapter for Velox SQLite bindings",
+  "peerDependencies": {
+    "drizzle-orm": ">=0.36.0"
+  }
+}

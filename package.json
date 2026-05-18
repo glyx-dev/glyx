@@ -3,11 +3,14 @@
   "private": true,
   "workspaces": [
     "js/packages/@velox/react",
-    "js/packages/@velox/router"
+    "js/packages/@velox/router",
+    "js/packages/@velox/drizzle"
   ],
   "dependencies": {
     "@velox/react": "workspace:*",
     "@velox/router": "workspace:*",
+    "@velox/drizzle": "workspace:*",
+    "drizzle-orm": "^0.36.4",
     "react": "^18.2.0",
     "react-reconciler": "^0.29.0"
   }

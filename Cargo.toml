@@ -87,6 +87,9 @@ dark-light          = "1"
 rodio               = { version = "0.17", features = ["symphonia-mp3", "symphonia-flac", "symphonia-vorbis", "symphonia-wav"] }
 glam                = "0.28"
 gltf                = { version = "1" }
+nokhwa              = { version = "0.10", features = ["input-native", "output-threaded"] }
+cpal                = "0.15"
+hound               = "3"
 
 # AI / ML — Candle (Hugging Face minimalist ML framework, CPU-only by default)
 candle-core         = { version = "0.8", default-features = false }

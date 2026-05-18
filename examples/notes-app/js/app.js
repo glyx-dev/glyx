@@ -7321,6 +7321,74 @@ No matching component was found for:
       return __velox_ai_transcribe(String(audioPath), JSON.stringify({ language }));
     }
   };
+  var camera = {
+    async listDevices() {
+      return JSON.parse(await __velox_camera_list());
+    },
+    async open(deviceIndex = 0) {
+      return parseInt(await __velox_camera_open(deviceIndex));
+    },
+    close(handle) {
+      __velox_camera_close(String(handle));
+    },
+    async capture(handle) {
+      return __velox_camera_capture(String(handle));
+    },
+    startRecord(handle, outputPath) {
+      __velox_camera_record_start(String(handle), outputPath);
+    },
+    async stopRecord(handle) {
+      return __velox_camera_record_stop(String(handle));
+    }
+  };
+  var microphone = {
+    async listDevices() {
+      return JSON.parse(await __velox_microphone_list());
+    },
+    async record(durationMs = 3000, deviceName = null) {
+      return __velox_microphone_record(deviceName || "", durationMs);
+    }
+  };
+  var Camera = import_react.default.forwardRef(function Camera2({ mirror, style, ...rest }, ref) {
+    const [cameraHandle, setCameraHandle] = import_react.default.useState(null);
+    import_react.default.useImperativeHandle(ref, () => ({
+      get handle() {
+        return cameraHandle;
+      },
+      async start(deviceIndex = 0) {
+        const handle = parseInt(await __velox_camera_open(deviceIndex));
+        setCameraHandle(handle);
+        return handle;
+      },
+      stop() {
+        if (cameraHandle !== null) {
+          __velox_camera_close(String(cameraHandle));
+          setCameraHandle(null);
+        }
+      },
+      async capture() {
+        if (cameraHandle === null)
+          throw new Error("Camera not open");
+        return __velox_camera_capture(String(cameraHandle));
+      },
+      startRecord(outputPath) {
+        if (cameraHandle === null)
+          throw new Error("Camera not open");
+        __velox_camera_record_start(String(cameraHandle), outputPath);
+      },
+      async stopRecord() {
+        if (cameraHandle === null)
+          throw new Error("Camera not open");
+        return __velox_camera_record_stop(String(cameraHandle));
+      }
+    }), [cameraHandle]);
+    return import_react.default.createElement("camera", {
+      cameraHandle,
+      mirror: mirror === true,
+      style,
+      ...rest
+    });
+  });
   var input = {
     gamepads: {
       onInput(cb) {
@@ -8376,6 +8444,12 @@ No matching component was found for:
                   onPress: () => navigate("ai"),
                   width: 52,
                   color: C2.mauve
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "Media",
+                  onPress: () => navigate("media"),
+                  width: 64,
+                  color: C2.teal
                 })
               ]
             }),
@@ -10782,6 +10856,323 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
       ]
     });
   }
+  var MEDIA_TABS = ["Camera", "Microphone"];
+  function MediaDemoScreen() {
+    const { width: winW } = useWindowSize();
+    const inner = winW - PAD * 2;
+    const C2 = useThemeColors();
+    const [tab, setTab] = import_react3.useState(0);
+    const camRef = import_react3.default.useRef(null);
+    const [devices, setDevices] = import_react3.useState([]);
+    const [camOpen, setCamOpen] = import_react3.useState(false);
+    const [mirror, setMirror] = import_react3.useState(false);
+    const [recording, setRecording] = import_react3.useState(false);
+    const [photoPath, setPhotoPath] = import_react3.useState("");
+    const [videoPath, setVideoPath] = import_react3.useState("");
+    const [camError, setCamError] = import_react3.useState("");
+    import_react3.useEffect(() => {
+      camera.listDevices().then(setDevices).catch(() => {});
+    }, []);
+    async function startCamera() {
+      setCamError("");
+      setPhotoPath("");
+      setVideoPath("");
+      try {
+        await camRef.current.start(0);
+        setCamOpen(true);
+      } catch (e) {
+        setCamError(String(e));
+      }
+    }
+    function stopCamera() {
+      if (recording)
+        handleStopRecord().catch(() => {});
+      if (camRef.current)
+        camRef.current.stop();
+      setCamOpen(false);
+      setRecording(false);
+    }
+    async function handleCapture() {
+      setCamError("");
+      setPhotoPath("");
+      try {
+        const path = await camRef.current.capture();
+        setPhotoPath(path);
+      } catch (e) {
+        setCamError(String(e));
+      }
+    }
+    function handleStartRecord() {
+      const ts = Date.now();
+      const dir = typeof __velox_tmp_dir !== "undefined" ? __velox_tmp_dir : "/tmp";
+      const out = `${dir}/velox_rec_${ts}.mp4`;
+      setCamError("");
+      setVideoPath("");
+      try {
+        camRef.current.startRecord(out);
+        setRecording(true);
+      } catch (e) {
+        setCamError(String(e));
+      }
+    }
+    async function handleStopRecord() {
+      try {
+        const path = await camRef.current.stopRecord();
+        setVideoPath(path);
+        setRecording(false);
+      } catch (e) {
+        setCamError(String(e));
+        setRecording(false);
+      }
+    }
+    const [micLoading, setMicLoading] = import_react3.useState(false);
+    const [micPath, setMicPath] = import_react3.useState("");
+    const [micError, setMicError] = import_react3.useState("");
+    async function recordMic() {
+      setMicLoading(true);
+      setMicError("");
+      setMicPath("");
+      try {
+        const path = await microphone.record(5000);
+        setMicPath(path);
+      } catch (e) {
+        setMicError(String(e));
+      } finally {
+        setMicLoading(false);
+      }
+    }
+    async function playMic() {
+      if (!micPath)
+        return;
+      try {
+        await audio.play(micPath);
+      } catch (e) {
+        setMicError(String(e));
+      }
+    }
+    return /* @__PURE__ */ jsx_runtime.jsxs(ScrollView, {
+      width: inner,
+      height: 600,
+      children: [
+        /* @__PURE__ */ jsx_runtime.jsx(View, {
+          style: { flexDirection: "row", gap: 8, marginBottom: 16 },
+          width: inner,
+          height: 36,
+          children: MEDIA_TABS.map((t, i) => /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+            onPress: () => setTab(i),
+            width: 110,
+            height: 32,
+            style: { backgroundColor: tab === i ? C2.accent : C2.surface, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+            children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 13,
+              width: 98,
+              height: 18,
+              style: { color: tab === i ? C2.bg : C2.text },
+              children: t
+            })
+          }, i))
+        }),
+        tab === 0 && /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: { gap: 10, alignItems: "flex-start" },
+          width: inner,
+          height: 540,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Camera, {
+              ref: camRef,
+              mirror,
+              style: { width: inner, height: 300, borderRadius: 8, backgroundColor: "#000" }
+            }),
+            /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexDirection: "row", gap: 8, alignItems: "center" },
+              width: inner,
+              height: 34,
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: startCamera,
+                  width: 70,
+                  height: 30,
+                  style: { backgroundColor: camOpen ? C2.border : C2.green, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 12,
+                    width: 58,
+                    height: 16,
+                    style: { color: C2.bg },
+                    children: "Start"
+                  })
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: stopCamera,
+                  width: 70,
+                  height: 30,
+                  style: { backgroundColor: camOpen ? C2.red : C2.border, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 12,
+                    width: 58,
+                    height: 16,
+                    style: { color: C2.bg },
+                    children: "Stop"
+                  })
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: () => setMirror((m) => !m),
+                  width: 90,
+                  height: 30,
+                  style: { backgroundColor: mirror ? C2.accent : C2.surface, borderRadius: 6, borderWidth: 1, borderColor: C2.border, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 12,
+                    width: 78,
+                    height: 16,
+                    style: { color: mirror ? C2.bg : C2.text },
+                    children: mirror ? "Mirror ON" : "Mirror OFF"
+                  })
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                  fontSize: 11,
+                  width: inner - 258,
+                  height: 16,
+                  style: { color: C2.dim },
+                  children: devices.length > 0 ? devices[0].name : "No cameras"
+                })
+              ]
+            }),
+            /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexDirection: "row", gap: 8 },
+              width: inner,
+              height: 34,
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: handleCapture,
+                  width: 100,
+                  height: 30,
+                  style: { backgroundColor: camOpen ? C2.sapphire : C2.border, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 12,
+                    width: 88,
+                    height: 16,
+                    style: { color: C2.bg },
+                    children: "Take Photo"
+                  })
+                }),
+                !recording ? /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: handleStartRecord,
+                  width: 110,
+                  height: 30,
+                  style: { backgroundColor: camOpen ? C2.mauve : C2.border, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 12,
+                    width: 98,
+                    height: 16,
+                    style: { color: C2.bg },
+                    children: "Record MP4"
+                  })
+                }) : /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: handleStopRecord,
+                  width: 110,
+                  height: 30,
+                  style: { backgroundColor: C2.red, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 12,
+                    width: 98,
+                    height: 16,
+                    style: { color: C2.bg },
+                    children: "Stop Record"
+                  })
+                })
+              ]
+            }),
+            photoPath ? /* @__PURE__ */ jsx_runtime.jsxs(Text, {
+              fontSize: 11,
+              width: inner,
+              height: 16,
+              style: { color: C2.teal },
+              children: [
+                "Photo: ",
+                photoPath
+              ]
+            }) : null,
+            videoPath ? /* @__PURE__ */ jsx_runtime.jsxs(Text, {
+              fontSize: 11,
+              width: inner,
+              height: 16,
+              style: { color: C2.teal },
+              children: [
+                "Video: ",
+                videoPath
+              ]
+            }) : null,
+            camError ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: inner,
+              height: 20,
+              style: { color: C2.red },
+              children: camError
+            }) : null
+          ]
+        }),
+        tab === 1 && /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: { gap: 12, alignItems: "flex-start" },
+          width: inner,
+          height: 480,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 14,
+              width: inner,
+              height: 20,
+              style: { color: C2.text },
+              children: "Record 5 seconds from the default microphone, then play it back."
+            }),
+            /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexDirection: "row", gap: 10 },
+              width: inner,
+              height: 36,
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: recordMic,
+                  width: 110,
+                  height: 32,
+                  style: { backgroundColor: micLoading ? C2.border : C2.teal, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 13,
+                    width: 96,
+                    height: 18,
+                    style: { color: C2.bg },
+                    children: micLoading ? "Recording…" : "Record 5s"
+                  })
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: playMic,
+                  width: 70,
+                  height: 32,
+                  style: { backgroundColor: micPath ? C2.green : C2.border, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 13,
+                    width: 58,
+                    height: 18,
+                    style: { color: C2.bg },
+                    children: "Play"
+                  })
+                })
+              ]
+            }),
+            micPath ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 11,
+              width: inner,
+              height: 16,
+              style: { color: C2.dim },
+              children: micPath
+            }) : null,
+            micError ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: inner,
+              height: 20,
+              style: { color: C2.red },
+              children: micError
+            }) : null
+          ]
+        })
+      ]
+    });
+  }
   function DeeplinkHandler({ url }) {
     const navigate = useNavigate();
     import_react3.useEffect(() => {
@@ -10986,6 +11377,10 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
                 /* @__PURE__ */ jsx_runtime.jsx(Route, {
                   name: "ai",
                   component: AiDemoScreen
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Route, {
+                  name: "media",
+                  component: MediaDemoScreen
                 })
               ]
             })

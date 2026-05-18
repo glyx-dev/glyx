@@ -35,3 +35,4 @@ sysinfo        = { workspace = true }
 lru            = { workspace = true }
 smallvec       = { workspace = true }
 velox-3d       = { path = "../velox-3d" }
+nokhwa         = { workspace = true }

@@ -9,3 +9,7 @@ sysinfo    = { workspace = true }
 keepawake  = { workspace = true }
 dark-light = { workspace = true }
 keyring    = { workspace = true }
+nokhwa     = { workspace = true }
+cpal       = { workspace = true }
+hound      = { workspace = true }
+log        = { workspace = true }

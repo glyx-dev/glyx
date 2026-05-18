@@ -433,6 +433,28 @@ impl CachedLabel {
 
 // ── Application state ─────────────────────────────────────────────────────────
 
+/// Live camera capture stream. Owned by `PerWindowState`.
+/// The capture thread writes RGBA frames into `frame_buf`;
+/// the main render loop reads them and creates a `peniko::Image`.
+struct CameraStream {
+    /// Latest RGBA frame: (width, height, raw_bytes). `take()`d each frame by the render loop.
+    frame_buf:      Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>,
+    /// Last raw frame ever written — never drained. Used by CaptureCamera so a
+    /// photo can always be taken even after the render loop has already consumed frame_buf.
+    last_raw_frame: Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>,
+    /// Set to `true` to signal the capture thread to exit.
+    stop_flag:    Arc<std::sync::atomic::AtomicBool>,
+    /// Latest peniko::Image built from the most recent frame.
+    latest_image: Option<peniko::Image>,
+    // ── Recording ─────────────────────────────────────────────────────────────
+    /// When recording is active, the capture thread clones each RGBA frame and
+    /// sends it here. Dropping the sender signals the recording thread to stop.
+    record_frame_tx: Arc<Mutex<Option<std::sync::mpsc::SyncSender<(u32, u32, Vec<u8>)>>>>,
+    /// Receives `Ok(output_path)` / `Err(msg)` from the recording thread after
+    /// it finishes flushing the MP4. Consumed by `StopCameraRecord`.
+    record_done_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+}
+
 /// Per-window rendering + runtime state.
 /// One instance per open window; keyed by `window_handle` (0 = main window).
 struct PerWindowState {
@@ -485,6 +507,8 @@ struct PerWindowState {
     canvas3d_scenes: std::collections::HashMap<u32, velox_3d::Scene3D>,
     /// 3D renderer — lazy-initialised on first Canvas3D encounter.
     renderer_3d: Option<velox_3d::Renderer3D>,
+    /// Live camera streams keyed by velox handle ID.
+    camera_streams: std::collections::HashMap<u32, CameraStream>,
     /// Whether the window is frameless (decorations=false). When true, velox
     /// handles window drag via `veloxDraggable` nodes.
     decorations: bool,
@@ -1347,6 +1371,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     canvas_cmds:     std::collections::HashMap::new(),
                     canvas3d_scenes: std::collections::HashMap::new(),
                     renderer_3d:     None,
+                    camera_streams:  std::collections::HashMap::new(),
                     decorations:     window_decorations,
                     drag_window_fn,
                     #[cfg(feature = "dev")]
@@ -1532,6 +1557,15 @@ pub fn run(mut config: AppConfig) -> bool {
                 let post_commands = s.runtime.drain_scene_commands();
                 apply_scene_commands(s, post_commands);
 
+                // 5a. Pull latest camera frames and build peniko::Images.
+                for stream in s.camera_streams.values_mut() {
+                    if let Some((w, h, data)) = stream.frame_buf.lock().unwrap().take() {
+                        stream.latest_image = Some(
+                            peniko::Image::new(data.into(), peniko::Format::Rgba8, w, h)
+                        );
+                    }
+                }
+
                 // 5. Single layout pass.
                 let layout_start = Instant::now();
                 recompute_layout(s);
@@ -1576,6 +1610,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         label_cache:       &mut s.label_cache,
                         canvas_cmds:       &s.canvas_cmds,
                         canvas3d_overlays: &mut canvas3d_overlays,
+                        camera_streams:    &s.camera_streams,
                         cursor_blink_on:   s.cursor_blink_on,
                         any_cursor_active: &mut any_cursor_active,
                     };

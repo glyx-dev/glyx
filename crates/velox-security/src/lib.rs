@@ -118,6 +118,12 @@ pub struct Capabilities {
     /// Downloads model weights from HuggingFace Hub on first use (~22 MB – 1.7 GB).
     #[serde(default)]
     pub ai: bool,
+    /// Camera capture access. Enables `camera.listDevices()`, `camera.open()`, `<Camera>` component.
+    #[serde(default)]
+    pub camera: bool,
+    /// Microphone recording access. Enables `microphone.listDevices()`, `microphone.record()`.
+    #[serde(default)]
+    pub microphone: bool,
     /// Deep-link URL scheme registration.  `None` = no deep-link support.
     pub deeplink: Option<DeeplinkCapability>,
 }

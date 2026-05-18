@@ -1748,6 +1748,122 @@ export const ai = {
   },
 };
 
+// ── Camera API ────────────────────────────────────────────────────────────────
+
+export const camera = {
+  /** List connected camera devices. @returns {Promise<{index:number,name:string}[]>} */
+  async listDevices() {
+    return JSON.parse(await __velox_camera_list());
+  },
+  /** Open camera by device index. @returns {Promise<number>} handle ID */
+  async open(deviceIndex = 0) {
+    return parseInt(await __velox_camera_open(deviceIndex));
+  },
+  /** Close a previously opened camera. @param {number} handle */
+  close(handle) {
+    __velox_camera_close(String(handle));
+  },
+  /**
+   * Capture the current frame as a PNG file.
+   * @param {number} handle  Handle returned by open() or Camera.start().
+   * @returns {Promise<string>}  Absolute path to the saved PNG.
+   */
+  async capture(handle) {
+    return __velox_camera_capture(String(handle));
+  },
+  /**
+   * Start recording to an MP4 file via ffmpeg (must be in PATH).
+   * @param {number} handle
+   * @param {string} outputPath  Absolute path for the output MP4.
+   */
+  startRecord(handle, outputPath) {
+    __velox_camera_record_start(String(handle), outputPath);
+  },
+  /**
+   * Stop recording and flush the MP4.
+   * @param {number} handle
+   * @returns {Promise<string>}  Absolute path to the finished MP4.
+   */
+  async stopRecord(handle) {
+    return __velox_camera_record_stop(String(handle));
+  },
+};
+
+// ── Microphone API ────────────────────────────────────────────────────────────
+
+export const microphone = {
+  /** List connected input devices. @returns {Promise<{name:string}[]>} */
+  async listDevices() {
+    return JSON.parse(await __velox_microphone_list());
+  },
+  /**
+   * Record from the microphone to a WAV file.
+   * @param {number} [durationMs=3000] Recording duration in milliseconds.
+   * @param {string|null} [deviceName=null] Device name, or null for default.
+   * @returns {Promise<string>} Absolute path to the recorded WAV file.
+   */
+  async record(durationMs = 3000, deviceName = null) {
+    return __velox_microphone_record(deviceName || '', durationMs);
+  },
+};
+
+// ── Camera component ──────────────────────────────────────────────────────────
+//
+// Renders a live camera preview as a native node — frames NEVER cross the JS
+// bridge. JS only controls lifecycle (open / close / capture / record).
+//
+// Usage:
+//   const camRef = useRef();
+//   <Camera ref={camRef} mirror style={{ width: 640, height: 480 }} />
+//   await camRef.current.start(0);       // open device index 0
+//   const path = await camRef.current.capture();   // take photo → PNG path
+//   camRef.current.startRecord('/tmp/out.mp4');
+//   const mp4 = await camRef.current.stopRecord(); // flush → MP4 path
+//   camRef.current.stop();
+
+export const Camera = React.forwardRef(function Camera({ mirror, style, ...rest }, ref) {
+  const [cameraHandle, setCameraHandle] = React.useState(null);
+
+  React.useImperativeHandle(ref, () => ({
+    /** @returns {number|null} current handle, or null if not open */
+    get handle() { return cameraHandle; },
+
+    async start(deviceIndex = 0) {
+      const handle = parseInt(await __velox_camera_open(deviceIndex));
+      setCameraHandle(handle);
+      return handle;
+    },
+    stop() {
+      if (cameraHandle !== null) {
+        __velox_camera_close(String(cameraHandle));
+        setCameraHandle(null);
+      }
+    },
+    /** Capture current frame → PNG. @returns {Promise<string>} path */
+    async capture() {
+      if (cameraHandle === null) throw new Error('Camera not open');
+      return __velox_camera_capture(String(cameraHandle));
+    },
+    /** Start MP4 recording via ffmpeg. @param {string} outputPath */
+    startRecord(outputPath) {
+      if (cameraHandle === null) throw new Error('Camera not open');
+      __velox_camera_record_start(String(cameraHandle), outputPath);
+    },
+    /** Stop recording and flush MP4. @returns {Promise<string>} path */
+    async stopRecord() {
+      if (cameraHandle === null) throw new Error('Camera not open');
+      return __velox_camera_record_stop(String(cameraHandle));
+    },
+  }), [cameraHandle]);
+
+  return React.createElement('camera', {
+    cameraHandle: cameraHandle,
+    mirror: mirror === true,
+    style,
+    ...rest,
+  });
+});
+
 export const input = {
   gamepads: {
     /**

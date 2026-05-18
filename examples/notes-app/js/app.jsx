@@ -24,7 +24,7 @@ import {
   Checkbox, Switch, RadioGroup, Radio, FileInput, audio,
   Slider, Select, DatePicker,
   Canvas, Canvas3D,
-  ai,
+  ai, camera, microphone, Camera,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
 
@@ -457,6 +457,12 @@ function NoteListScreen() {
             onPress={() => navigate('ai')}
             width={52}
             color={C.mauve}
+          />
+          <Btn
+            label="Media"
+            onPress={() => navigate('media')}
+            width={64}
+            color={C.teal}
           />
         </View>
         <Text fontSize={11} width={isWide ? inner - 308 : inner} height={16} style={{ color: C.dim }}>
@@ -2256,6 +2262,200 @@ function AiDemoScreen() {
   );
 }
 
+// ── Screen: Media (Camera + Microphone) ───────────────────────────────────────
+
+const MEDIA_TABS = ['Camera', 'Microphone'];
+
+function MediaDemoScreen() {
+  const { width: winW } = useWindowSize();
+  const inner = winW - PAD * 2;
+  const C = useThemeColors();
+
+  const [tab, setTab] = useState(0);
+
+  // ── Camera tab ───────────────────────────────────────────────────────────────
+  const camRef = React.useRef(null);
+  const [devices,   setDevices]   = useState([]);
+  const [camOpen,   setCamOpen]   = useState(false);
+  const [mirror,    setMirror]    = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [photoPath, setPhotoPath] = useState('');
+  const [videoPath, setVideoPath] = useState('');
+  const [camError,  setCamError]  = useState('');
+
+  useEffect(() => {
+    camera.listDevices().then(setDevices).catch(() => {});
+  }, []);
+
+  async function startCamera() {
+    setCamError(''); setPhotoPath(''); setVideoPath('');
+    try {
+      await camRef.current.start(0);
+      setCamOpen(true);
+    } catch (e) { setCamError(String(e)); }
+  }
+
+  function stopCamera() {
+    if (recording) handleStopRecord().catch(() => {});
+    if (camRef.current) camRef.current.stop();
+    setCamOpen(false); setRecording(false);
+  }
+
+  async function handleCapture() {
+    setCamError(''); setPhotoPath('');
+    try {
+      const path = await camRef.current.capture();
+      setPhotoPath(path);
+    } catch (e) { setCamError(String(e)); }
+  }
+
+  function handleStartRecord() {
+    const ts  = Date.now();
+    const dir = typeof __velox_tmp_dir !== 'undefined' ? __velox_tmp_dir : '/tmp';
+    const out = `${dir}/velox_rec_${ts}.mp4`;
+    setCamError(''); setVideoPath('');
+    try {
+      camRef.current.startRecord(out);
+      setRecording(true);
+    } catch (e) { setCamError(String(e)); }
+  }
+
+  async function handleStopRecord() {
+    try {
+      const path = await camRef.current.stopRecord();
+      setVideoPath(path);
+      setRecording(false);
+      // Play back the recorded video as audio (it has audio track if mic was used;
+      // for now just open the file path — user can navigate to it).
+    } catch (e) { setCamError(String(e)); setRecording(false); }
+  }
+
+  // ── Microphone tab ───────────────────────────────────────────────────────────
+  const [micLoading, setMicLoading] = useState(false);
+  const [micPath,    setMicPath]    = useState('');
+  const [micError,   setMicError]   = useState('');
+
+  async function recordMic() {
+    setMicLoading(true); setMicError(''); setMicPath('');
+    try {
+      const path = await microphone.record(5000);
+      setMicPath(path);
+    } catch (e) { setMicError(String(e)); }
+    finally { setMicLoading(false); }
+  }
+
+  async function playMic() {
+    if (!micPath) return;
+    try { await audio.play(micPath); } catch (e) { setMicError(String(e)); }
+  }
+
+  return (
+    <ScrollView width={inner} height={600}>
+      {/* Tab row */}
+      <View style={{ flexDirection: 'row', gap: 8, marginBottom: 16 }} width={inner} height={36}>
+        {MEDIA_TABS.map((t, i) => (
+          <Pressable key={i} onPress={() => setTab(i)} width={110} height={32}
+            style={{ backgroundColor: tab === i ? C.accent : C.surface, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+            <Text fontSize={13} width={98} height={18} style={{ color: tab === i ? C.bg : C.text }}>{t}</Text>
+          </Pressable>
+        ))}
+      </View>
+
+      {/* ── Camera tab ── */}
+      {tab === 0 && (
+        <View style={{ gap: 10, alignItems: 'flex-start' }} width={inner} height={540}>
+
+          {/* Live preview */}
+          <Camera ref={camRef} mirror={mirror}
+            style={{ width: inner, height: 300, borderRadius: 8, backgroundColor: '#000' }} />
+
+          {/* Controls row 1: start/stop + mirror */}
+          <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }} width={inner} height={34}>
+            <Pressable onPress={startCamera} width={70} height={30}
+              style={{ backgroundColor: camOpen ? C.border : C.green, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+              <Text fontSize={12} width={58} height={16} style={{ color: C.bg }}>Start</Text>
+            </Pressable>
+            <Pressable onPress={stopCamera} width={70} height={30}
+              style={{ backgroundColor: camOpen ? C.red : C.border, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+              <Text fontSize={12} width={58} height={16} style={{ color: C.bg }}>Stop</Text>
+            </Pressable>
+            <Pressable onPress={() => setMirror(m => !m)} width={90} height={30}
+              style={{ backgroundColor: mirror ? C.accent : C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.border, justifyContent: 'center', alignItems: 'center' }}>
+              <Text fontSize={12} width={78} height={16} style={{ color: mirror ? C.bg : C.text }}>
+                {mirror ? 'Mirror ON' : 'Mirror OFF'}
+              </Text>
+            </Pressable>
+            <Text fontSize={11} width={inner - 258} height={16} style={{ color: C.dim }}>
+              {devices.length > 0 ? devices[0].name : 'No cameras'}
+            </Text>
+          </View>
+
+          {/* Controls row 2: photo + record */}
+          <View style={{ flexDirection: 'row', gap: 8 }} width={inner} height={34}>
+            <Pressable onPress={handleCapture} width={100} height={30}
+              style={{ backgroundColor: camOpen ? C.sapphire : C.border, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+              <Text fontSize={12} width={88} height={16} style={{ color: C.bg }}>Take Photo</Text>
+            </Pressable>
+            {!recording ? (
+              <Pressable onPress={handleStartRecord} width={110} height={30}
+                style={{ backgroundColor: camOpen ? C.mauve : C.border, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+                <Text fontSize={12} width={98} height={16} style={{ color: C.bg }}>Record MP4</Text>
+              </Pressable>
+            ) : (
+              <Pressable onPress={handleStopRecord} width={110} height={30}
+                style={{ backgroundColor: C.red, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+                <Text fontSize={12} width={98} height={16} style={{ color: C.bg }}>Stop Record</Text>
+              </Pressable>
+            )}
+          </View>
+
+          {/* Results */}
+          {photoPath ? (
+            <Text fontSize={11} width={inner} height={16} style={{ color: C.teal }}>
+              Photo: {photoPath}
+            </Text>
+          ) : null}
+          {videoPath ? (
+            <Text fontSize={11} width={inner} height={16} style={{ color: C.teal }}>
+              Video: {videoPath}
+            </Text>
+          ) : null}
+          {camError ? (
+            <Text fontSize={12} width={inner} height={20} style={{ color: C.red }}>{camError}</Text>
+          ) : null}
+        </View>
+      )}
+
+      {/* ── Microphone tab ── */}
+      {tab === 1 && (
+        <View style={{ gap: 12, alignItems: 'flex-start' }} width={inner} height={480}>
+          <Text fontSize={14} width={inner} height={20} style={{ color: C.text }}>
+            Record 5 seconds from the default microphone, then play it back.
+          </Text>
+          <View style={{ flexDirection: 'row', gap: 10 }} width={inner} height={36}>
+            <Pressable onPress={recordMic} width={110} height={32}
+              style={{ backgroundColor: micLoading ? C.border : C.teal, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+              <Text fontSize={13} width={96} height={18} style={{ color: C.bg }}>
+                {micLoading ? 'Recording…' : 'Record 5s'}
+              </Text>
+            </Pressable>
+            <Pressable onPress={playMic} width={70} height={32}
+              style={{ backgroundColor: micPath ? C.green : C.border, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+              <Text fontSize={13} width={58} height={18} style={{ color: C.bg }}>Play</Text>
+            </Pressable>
+          </View>
+          {micPath ? (
+            <Text fontSize={11} width={inner} height={16} style={{ color: C.dim }}>{micPath}</Text>
+          ) : null}
+          {micError ? (
+            <Text fontSize={12} width={inner} height={20} style={{ color: C.red }}>{micError}</Text>
+          ) : null}
+        </View>
+      )}
+    </ScrollView>
+  );
+}
+
 // ── App shell ─────────────────────────────────────────────────────────────────
 //
 // Initialises the DB and vector store once, provides them via context.
@@ -2460,6 +2660,7 @@ function App() {
               <Route name="audio"   component={AudioDemoScreen}   />
               <Route name="canvas"  component={CanvasDemoScreen}  />
               <Route name="ai"      component={AiDemoScreen}      />
+              <Route name="media"   component={MediaDemoScreen}   />
             </Router>
           </View>
 

@@ -168,6 +168,16 @@ globalThis.__velox_canvas3d_load_gltf = function() {};
 globalThis.__velox_ai_embed      = function() { return stubPromise('[]'); };
 globalThis.__velox_ai_generate   = function() { return stubPromise(''); };
 globalThis.__velox_ai_transcribe = function() { return stubPromise(''); };
+
+// Camera + Microphone bindings
+globalThis.__velox_camera_list         = function() { return stubPromise('[]'); };
+globalThis.__velox_camera_open         = function() { return stubPromise('0'); };
+globalThis.__velox_camera_close        = function() {};
+globalThis.__velox_camera_capture      = function() { return stubPromise(''); };
+globalThis.__velox_camera_record_start = function() {};
+globalThis.__velox_camera_record_stop  = function() { return stubPromise(''); };
+globalThis.__velox_microphone_list     = function() { return stubPromise('[]'); };
+globalThis.__velox_microphone_record   = function() { return stubPromise(''); };
 "#
     .to_string()
 }

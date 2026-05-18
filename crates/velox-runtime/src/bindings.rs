@@ -158,6 +158,7 @@ pub enum NodeType {
     Image,
     Canvas,
     Canvas3D,
+    Camera,
 }
 
 /// All layout + visual props that JS can set on a node.
@@ -241,6 +242,13 @@ pub struct NodeProps {
     /// initiates an OS-level window drag. Used to implement custom title bars.
     /// Only effective when `window.decorations` is `false` in the app config.
     pub draggable: Option<bool>,
+
+    // ── Camera ────────────────────────────────────────────────────────────────
+    /// Handle ID returned by `__velox_camera_open`. The render loop maps this
+    /// to a `CameraStream` in `PerWindowState` and renders the live frame.
+    pub camera_handle: Option<u32>,
+    /// When `true`, draw the camera frame mirrored horizontally (selfie mode).
+    pub mirror: Option<bool>,
 }
 
 // ── Canvas 2D draw commands ───────────────────────────────────────────────────
@@ -257,7 +265,16 @@ pub enum CanvasCmd {
     FillText   { text: String, x: f32, y: f32, #[serde(rename = "fontSize")] font_size: f32, color: [u8; 4] },
 }
 
-#[derive(Debug, Clone)]
+/// Thin wrapper around `tokio::sync::oneshot::Sender<T>` that implements `Debug`.
+/// Needed because `SceneCommand` derives `Debug` but oneshot::Sender does not.
+pub struct OneshotSender<T>(pub tokio::sync::oneshot::Sender<T>);
+impl<T> std::fmt::Debug for OneshotSender<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OneshotSender")
+    }
+}
+
+#[derive(Debug)]
 pub enum SceneCommand {
     CreateNode    { id: u32, node_type: NodeType, props: NodeProps },
     CreateImage   { id: u32, path: String },
@@ -267,6 +284,16 @@ pub enum SceneCommand {
     SetRoot       { id: u32 },
     CanvasUpdate  { id: u32, cmds: Vec<CanvasCmd> },
     Canvas3DUpdate { id: u32, scene: velox_3d::Scene3D },
+    /// Open a camera device and start the capture loop in velox-core.
+    OpenCamera  { handle_id: u32, device_index: u32 },
+    /// Stop the capture loop and release the camera device.
+    CloseCamera { handle_id: u32 },
+    /// Capture the current frame to a PNG file. Resolves with the file path.
+    CaptureCamera { handle_id: u32, tx: OneshotSender<Result<String, String>> },
+    /// Start recording the camera feed to an MP4 file via ffmpeg.
+    StartCameraRecord { handle_id: u32, output_path: String },
+    /// Stop recording and flush the MP4. Resolves with the final file path.
+    StopCameraRecord { handle_id: u32, tx: OneshotSender<Result<String, String>> },
 }
 
 // ── Registration ──────────────────────────────────────────────────────────────
@@ -327,7 +354,8 @@ pub fn register_all(
         audio_handle:  std::cell::RefCell::new(None),
         audio_sinks:   Arc::new(Mutex::new(HashMap::new())),
         audio_events:  Arc::new(Mutex::new(VecDeque::new())),
-        next_audio_id: std::sync::atomic::AtomicU32::new(1),
+        next_audio_id:  std::sync::atomic::AtomicU32::new(1),
+        next_camera_id: std::sync::atomic::AtomicU32::new(1),
         ai_embed_model:    Arc::new(Mutex::new(None)),
         ai_generate_model: Arc::new(Mutex::new(None)),
         ai_whisper_model:  Arc::new(Mutex::new(None)),
@@ -475,6 +503,16 @@ pub fn register_all(
     register!("__velox_ai_embed",      ai_embed_callback);
     register!("__velox_ai_generate",   ai_generate_callback);
     register!("__velox_ai_transcribe", ai_transcribe_callback);
+
+    // ── Camera + Microphone ───────────────────────────────────────────────────
+    register!("__velox_camera_list",         camera_list_callback);
+    register!("__velox_camera_open",         camera_open_callback);
+    register!("__velox_camera_close",        camera_close_callback);
+    register!("__velox_camera_capture",      camera_capture_callback);
+    register!("__velox_camera_record_start", camera_record_start_callback);
+    register!("__velox_camera_record_stop",  camera_record_stop_callback);
+    register!("__velox_microphone_list",     microphone_list_callback);
+    register!("__velox_microphone_record",   microphone_record_callback);
 }
 
 struct AsyncState {
@@ -528,6 +566,9 @@ struct AsyncState {
     /// Events (e.g. "ended") produced by the audio subsystem, drained each frame.
     audio_events:  Arc<Mutex<VecDeque<String>>>,
     next_audio_id: std::sync::atomic::AtomicU32,
+    // ── Camera ────────────────────────────────────────────────────────────────
+    /// Handle ID counter. CameraStream lives in velox-core; we only track IDs here.
+    next_camera_id: std::sync::atomic::AtomicU32,
     // ── Local AI model cache (velox-ai / Candle) ─────────────────────────────
     /// Lazily initialised embedding model. Locked during init, then shared.
     ai_embed_model:    Arc<Mutex<Option<velox_ai::EmbedModel>>>,
@@ -576,6 +617,7 @@ fn parse_node_type(scope: &mut v8::HandleScope, value: v8::Local<v8::Value>) -> 
         "image"    => NodeType::Image,
         "canvas"   => NodeType::Canvas,
         "canvas3d" => NodeType::Canvas3D,
+        "camera"   => NodeType::Camera,
         _          => NodeType::View,
     }
 }
@@ -700,6 +742,8 @@ fn parse_props(
     props.image_resize_mode = get_str_prop(scope, obj, "resizeMode");
     props.z_index         = get_num_prop(scope, obj, "zIndex").map(|v| v as i32);
     props.draggable       = get_bool_prop(scope, obj, "draggable");
+    props.camera_handle   = get_num_prop(scope, obj, "cameraHandle").map(|v| v as u32);
+    props.mirror          = get_bool_prop(scope, obj, "mirror");
 
     props
 }
@@ -3769,6 +3813,237 @@ fn ai_transcribe_callback(
             }
             guard.as_mut().unwrap().transcribe(&audio_path, &language)
                 .map_err(|e| format!("ai.transcribe: {e}"))
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+// ── Camera bindings ───────────────────────────────────────────────────────────
+
+/// `__velox_camera_list() → Promise<string>` — JSON array of camera devices.
+fn camera_list_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().camera {
+        rv.set(reject_cap_promise(scope, "camera").into()); return;
+    }
+
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(|| -> Result<String, String> {
+            let devices = velox_sysapi::camera::list_cameras();
+            serde_json::to_string(&devices.iter().map(|d| {
+                serde_json::json!({ "index": d.index, "name": d.name })
+            }).collect::<Vec<_>>()).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_camera_open(deviceIndex) → Promise<string>` — resolves with handle ID string.
+fn camera_open_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().camera {
+        rv.set(reject_cap_promise(scope, "camera").into()); return;
+    }
+
+    let device_index = args.get(0).number_value(scope).unwrap_or_default() as u32;
+    let handle_id = state.next_camera_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let scene = Arc::clone(&state.scene);
+
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            // Verify device exists
+            let devices = velox_sysapi::camera::list_cameras();
+            if device_index as usize >= devices.len() {
+                return Err(format!("camera device index {device_index} not found"));
+            }
+            scene.lock().unwrap().push_back(SceneCommand::OpenCamera { handle_id, device_index });
+            Ok(handle_id.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_camera_close(handleId)` — sync. Pushes CloseCamera scene command.
+fn camera_close_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle_id = args.get(0).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default()
+        .parse::<u32>().unwrap_or(0);
+
+    state.scene.lock().unwrap().push_back(SceneCommand::CloseCamera { handle_id });
+}
+
+/// `__velox_camera_capture(handleId) → Promise<string>` — saves current frame as PNG.
+/// Resolves with the absolute path to the saved PNG file.
+fn camera_capture_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().camera {
+        rv.set(reject_cap_promise(scope, "camera").into()); return;
+    }
+
+    let handle_id = args.get(0).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default()
+        .parse::<u32>().unwrap_or(0);
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+    state.scene.lock().unwrap().push_back(SceneCommand::CaptureCamera {
+        handle_id,
+        tx: OneshotSender(tx),
+    });
+
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = rx.await.unwrap_or_else(|_| Err("capture channel closed".to_string()));
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_camera_record_start(handleId, outputPath)` — sync. Starts MP4 recording via ffmpeg.
+fn camera_record_start_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle_id   = args.get(0).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default()
+        .parse::<u32>().unwrap_or(0);
+    let output_path = v8_arg_to_string(scope, &args, 1);
+
+    state.scene.lock().unwrap().push_back(SceneCommand::StartCameraRecord { handle_id, output_path });
+}
+
+/// `__velox_camera_record_stop(handleId) → Promise<string>` — stops recording.
+/// Resolves with the absolute path to the finished MP4 file.
+fn camera_record_stop_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle_id = args.get(0).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default()
+        .parse::<u32>().unwrap_or(0);
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+    state.scene.lock().unwrap().push_back(SceneCommand::StopCameraRecord {
+        handle_id,
+        tx: OneshotSender(tx),
+    });
+
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = rx.await.unwrap_or_else(|_| Err("record-stop channel closed".to_string()));
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+// ── Microphone bindings ───────────────────────────────────────────────────────
+
+/// `__velox_microphone_list() → Promise<string>` — JSON array of mic devices.
+fn microphone_list_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().microphone {
+        rv.set(reject_cap_promise(scope, "microphone").into()); return;
+    }
+
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(|| -> Result<String, String> {
+            let devices = velox_sysapi::microphone::list_microphones();
+            serde_json::to_string(&devices.iter().map(|d| {
+                serde_json::json!({ "name": d.name })
+            }).collect::<Vec<_>>()).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_microphone_record(deviceName, durationMs) → Promise<string>` — path to WAV file.
+fn microphone_record_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().microphone {
+        rv.set(reject_cap_promise(scope, "microphone").into()); return;
+    }
+
+    let device_name_raw = v8_arg_to_string(scope, &args, 0);
+    let duration_ms = args.get(1).number_value(scope).unwrap_or(3000.0) as u64;
+
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let device_name = if device_name_raw.is_empty() {
+                None
+            } else {
+                Some(device_name_raw.as_str())
+            };
+            velox_sysapi::microphone::record_wav(device_name, duration_ms)
         }).await.map_err(|e| e.to_string()).and_then(|r| r);
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });

@@ -9,6 +9,9 @@
 pub mod credentials;
 pub use credentials::{credentials_set, credentials_get, credentials_delete};
 
+pub mod camera;
+pub mod microphone;
+
 // ── Battery ───────────────────────────────────────────────────────────────────
 
 pub struct BatteryStatus {

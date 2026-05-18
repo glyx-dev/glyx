@@ -22,6 +22,8 @@
     "credentials":    true,
     "audio":          true,
     "ai":             true,
+    "camera":         true,
+    "microphone":     true,
     "deeplink": { "scheme": "notes", "singleInstance": true }
   },
   "dev": {

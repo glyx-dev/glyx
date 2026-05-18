@@ -30,11 +30,17 @@ use thiserror::Error;
 
 pub mod bindings;
 pub mod runtime;
+pub mod runtime_trait;
 pub mod snapshot;
 #[cfg(feature = "dev")]
 pub mod inspector;
 
-pub use runtime::{VeloxRuntime, HeapStats};
+pub use runtime::{V8Runtime, HeapStats};
+pub use runtime_trait::JsRuntime;
+
+/// Backward-compatible alias — all existing call sites in velox-core continue
+/// to compile unchanged. Switch to `Box<dyn JsRuntime>` when adding a second backend.
+pub type VeloxRuntime = V8Runtime;
 pub use bindings::{
     NodeProps, NodeType, CanvasCmd, SceneCommand, InputEvent, WindowController,
     IpcBus, IpcInbox, new_ipc_bus,

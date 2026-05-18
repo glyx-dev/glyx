@@ -628,23 +628,39 @@ fn start_dev_mode_worker(
 
         while watch_rx.recv().is_ok() {
             while watch_rx.recv_timeout(Duration::from_millis(180)).is_ok() {}
-            log::info!("[HMR] change detected — rebuilding…");
+            log::info!("[HMR] change detected — rebuilding… (cwd={:?})", cwd);
 
-            let output = Command::new("bun")
-                .arg("build")
-                .arg(app_jsx.as_os_str())
-                .arg("--outfile")
-                .arg(app_js.as_os_str())
-                .arg("--target")
-                .arg("browser")
-                .arg("--format")
-                .arg("iife")
-                .arg("--define")
-                .arg("process.env.NODE_ENV='production'")
-                .current_dir(&cwd)
-                .output();
+            // On Windows bun may only be resolvable through the shell (e.g.
+            // installed via scoop/winget which adds a .cmd shim).  Try the
+            // direct exe first; fall back to a cmd /C wrapper on failure.
+            let run_bun = |cwd: &std::path::Path| -> std::io::Result<std::process::Output> {
+                let bun_args = [
+                    "build",
+                    app_jsx.to_str().unwrap_or(""),
+                    "--outfile",
+                    app_js.to_str().unwrap_or(""),
+                    "--target", "browser",
+                    "--format",  "iife",
+                    "--define",  "process.env.NODE_ENV='production'",
+                ];
+                #[cfg(target_os = "windows")]
+                {
+                    // First attempt: bun.exe directly.
+                    match Command::new("bun").args(&bun_args).current_dir(cwd).output() {
+                        Ok(o) => return Ok(o),
+                        Err(_) => {
+                            // Second attempt: through cmd /C so .cmd shims are resolved.
+                            let mut cmd_args = vec!["/C", "bun"];
+                            cmd_args.extend_from_slice(&bun_args);
+                            return Command::new("cmd").args(&cmd_args).current_dir(cwd).output();
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                Command::new("bun").args(&bun_args).current_dir(cwd).output()
+            };
 
-            match output {
+            match run_bun(&cwd) {
                 Ok(out) if out.status.success() => {
                     match std::fs::read_to_string(&app_js) {
                         Ok(js) => {
@@ -669,12 +685,13 @@ fn start_dev_mode_worker(
                         msg.push_str(&String::from_utf8_lossy(&out.stdout));
                     }
                     if msg.is_empty() {
-                        msg = "bun build failed".to_string();
+                        msg = format!("bun build failed (exit {:?})", out.status.code());
                     }
                     log::warn!("[HMR] build error: {msg}");
                     let _ = out_tx.send(DevBuildEvent::BuildErr(msg));
                 }
                 Err(e) => {
+                    log::warn!("[HMR] failed to run bun: {e}  (is bun installed and in PATH?)");
                     let _ = out_tx.send(DevBuildEvent::BuildErr(e.to_string()));
                 }
             }
@@ -687,9 +704,11 @@ fn start_dev_mode_worker(
 
 #[cfg(feature = "dev")]
 fn handle_dev_build_events(state: &mut PerWindowState) {
-    let Some(dev) = state.dev_mode.as_mut() else { return };
+    if state.dev_mode.is_none() { return; }
     loop {
-        match dev.rx.try_recv() {
+        // Borrow dev_mode only long enough to try_recv — released before apply_scene_commands.
+        let event = state.dev_mode.as_mut().unwrap().rx.try_recv();
+        match event {
             Ok(DevBuildEvent::BuildOk(js)) => {
                 state.js_nodes.clear();
                 state.js_root = None;
@@ -701,25 +720,44 @@ fn handle_dev_build_events(state: &mut PerWindowState) {
                 state.resolved.clear();
                 state.layout = LayoutTree::new();
                 state.runtime.layout_cache.lock().unwrap().clear();
+                state.canvas_cmds.clear();
+                state.canvas3d_scenes.clear();
+                // Discard any stale commands that accumulated before the reload.
                 let _ = state.runtime.drain_scene_commands();
                 match state.runtime.eval(&js) {
                     Ok(_) => {
-                        dev.last_reload = Some(Instant::now());
-                        dev.last_build_message = "reload ok".to_string();
-                        dev.last_js_error = None;  // clear error on successful reload
+                        // Flush V8 microtasks so any React work deferred via
+                        // Promise/queueMicrotask during eval() is committed now.
+                        state.runtime.flush_microtasks();
+                        // Apply the new scene commands immediately rather than
+                        // waiting for the frame loop's pre_commands drain — this
+                        // guarantees js_root and js_nodes are populated before
+                        // recompute_layout runs later in the same frame.
+                        let reload_cmds = state.runtime.drain_scene_commands();
+                        log::info!("[HMR] eval ok — {} scene commands", reload_cmds.len());
+                        apply_scene_commands(state, reload_cmds);
                         state.layout_dirty = true;
+                        if let Some(dev) = state.dev_mode.as_mut() {
+                            dev.last_reload = Some(Instant::now());
+                            dev.last_build_message = "reload ok".to_string();
+                            dev.last_js_error = None;
+                        }
                     }
                     Err(e) => {
-                        dev.last_build_message = format!("reload error: {}", e);
-                        dev.last_js_error = Some(format!("Eval error: {}", e));
+                        log::warn!("[HMR] eval error: {e}");
+                        if let Some(dev) = state.dev_mode.as_mut() {
+                            dev.last_build_message = format!("reload error: {}", e);
+                            dev.last_js_error = Some(format!("Eval error: {}", e));
+                        }
                     }
                 }
             }
             Ok(DevBuildEvent::BuildErr(msg)) => {
-                dev.last_build_message = format!("build error: {}", msg);
+                if let Some(dev) = state.dev_mode.as_mut() {
+                    dev.last_build_message = format!("build error: {}", msg);
+                }
             }
-            Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
         }
     }
 }

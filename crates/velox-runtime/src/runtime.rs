@@ -1,4 +1,4 @@
-//! `VeloxRuntime` — the public API for the V8-based JS engine.
+//! `V8Runtime` — the V8-based implementation of `JsRuntime`.
 
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -10,7 +10,8 @@ use crate::{
         CompletionQueue, DbPools, EventQueue, InputEvent, IpcBus, LayoutCache, SceneCommand,
         SceneQueue, WindowController,
     },
-    RuntimeError,
+    runtime_trait::JsRuntime,
+    RuntimeError, VeloxExtension,
 };
 
 #[cfg(feature = "dev")]
@@ -38,7 +39,7 @@ fn velox_create_params(snapshot: Option<Vec<u8>>) -> v8::CreateParams {
     }
 }
 
-pub struct VeloxRuntime {
+pub struct V8Runtime {
     // ⚠ DROP ORDER MATTERS: inspector holds V8 references; it must be
     //   dropped before `isolate`. Rust drops fields in declaration order.
     /// CDP inspector — present only in dev mode when VELOX_INSPECT_PORT is set.
@@ -64,8 +65,8 @@ pub struct HeapStats {
     pub total_heap_size: usize,
 }
 
-impl VeloxRuntime {
-    /// Create a new VeloxRuntime with a fresh isolate.
+impl V8Runtime {
+    /// Create a new V8Runtime with a fresh isolate.
     ///
     /// Uses a private IPC bus and handle 0 — suitable for single-window apps
     /// and for the snapshot tool.  For multi-window use `new_with_ipc`.
@@ -419,6 +420,17 @@ impl VeloxRuntime {
         q.drain(..).collect()
     }
 
+    /// Flush V8's microtask queue (Promise continuations, queueMicrotask callbacks).
+    /// Call this after `eval()` to ensure any React work scheduled via microtasks
+    /// (e.g. initial render deferred via Promise.resolve().then()) is committed
+    /// and its scene commands are in the queue before `drain_scene_commands()`.
+    pub fn flush_microtasks(&mut self) {
+        let scope = &mut v8::HandleScope::new(&mut self.isolate);
+        let ctx   = v8::Local::new(scope, &self.context);
+        let scope = &mut v8::ContextScope::new(scope, ctx);
+        scope.perform_microtask_checkpoint();
+    }
+
     /// Close all open SQLite pools — called by velox-core when the window is closing.
     ///
     /// Clearing the map drops the `SqlitePool` values, which triggers SQLx's
@@ -434,5 +446,69 @@ impl VeloxRuntime {
             used_heap_size: stats.used_heap_size(),
             total_heap_size: stats.total_heap_size(),
         }
+    }
+}
+
+// ── JsRuntime impl ────────────────────────────────────────────────────────────
+
+impl JsRuntime for V8Runtime {
+    fn register_extensions(&mut self, extensions: &[Box<dyn VeloxExtension>]) {
+        self.register_extensions(extensions);
+    }
+
+    fn eval(&mut self, source: &str) -> Result<String, RuntimeError> {
+        self.eval(source)
+    }
+
+    fn tick(&mut self) {
+        self.tick();
+    }
+
+    fn frame_tick(&mut self) -> Option<String> {
+        self.frame_tick()
+    }
+
+    fn push_event(&self, event: InputEvent) {
+        self.push_event(event);
+    }
+
+    fn update_layout(&self, js_id: u32, x: f32, y: f32, width: f32, height: f32) {
+        self.update_layout(js_id, x, y, width, height);
+    }
+
+    fn drain_scene_commands(&mut self) -> Vec<SceneCommand> {
+        self.drain_scene_commands()
+    }
+
+    fn flush_microtasks(&mut self) {
+        self.flush_microtasks();
+    }
+
+    fn shutdown_db_pools(&self) {
+        self.shutdown_db_pools();
+    }
+
+    fn heap_stats(&mut self) -> HeapStats {
+        self.heap_stats()
+    }
+
+    fn layout_cache(&self) -> LayoutCache {
+        Arc::clone(&self.layout_cache)
+    }
+
+    fn events(&self) -> EventQueue {
+        Arc::clone(&self.events)
+    }
+
+    fn perf_state(&self) -> Arc<std::sync::Mutex<velox_perf::PerfState>> {
+        Arc::clone(&self.perf_state)
+    }
+
+    fn deeplink_url_queue(&self) -> Arc<std::sync::Mutex<std::collections::VecDeque<String>>> {
+        Arc::clone(&self.deeplink_url_queue)
+    }
+
+    fn db_pools(&self) -> DbPools {
+        Arc::clone(&self.db_pools)
     }
 }

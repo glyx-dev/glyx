@@ -35,4 +35,8 @@ velox-3d            = { path = "../velox-3d" }
 velox-ai            = { path = "../velox-ai" }
 
 [features]
-dev = []
+default = ["v8"]
+v8 = []       # V8 backend (current only backend; rusty_v8 dep is always required for now)
+dev = []      # dev overlay, hot-reload, CDP inspector
+# jsc = []    # future: JavaScriptCore (iOS/macOS)
+# quickjs = [] # future: QuickJS (embedded/WASM)

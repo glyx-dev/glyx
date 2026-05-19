@@ -64,7 +64,19 @@ enum Commands {
         #[arg(long, default_value = "10")]
         perf_duration: u64,
     },
-    Package { target: Option<String> },
+    /// Create a distributable package or installer.
+    ///
+    /// Default: zip (Windows), tar.gz (Linux), .app (macOS).
+    /// With --installer: Inno Setup .exe (Windows, requires iscc),
+    ///                   AppImage (Linux, requires appimagetool),
+    ///                   DMG (macOS, requires hdiutil — built-in).
+    Package {
+        /// Target OS (windows, macos, linux). Defaults to host OS.
+        target: Option<String>,
+        /// Build a native installer instead of a zip/tarball.
+        #[arg(long)]
+        installer: bool,
+    },
     /// Manage cached velox-runner binaries.
     Runtime {
         #[command(subcommand)]
@@ -101,7 +113,7 @@ fn run() -> Result<()> {
         Commands::Dev { inspect }         => cmd_dev(inspect),
         Commands::Build { target, mode, check_performance, perf_budget, perf_duration } =>
             cmd_build(target.as_deref(), &mode, check_performance, perf_budget, perf_duration),
-        Commands::Package { target }      => cmd_package(target.as_deref()),
+        Commands::Package { target, installer } => cmd_package(target.as_deref(), installer),
         Commands::Runtime { cmd }         => cmd_runtime(cmd),
     }
 }
@@ -772,18 +784,27 @@ fn cmd_runtime(cmd: RuntimeCommands) -> Result<()> {
 
 // ── velox package ─────────────────────────────────────────────────────────────
 
-fn cmd_package(target: Option<&str>) -> Result<()> {
+fn cmd_package(target: Option<&str>, installer: bool) -> Result<()> {
     let project_name = read_project_name()
         .context("Run `velox package` from the project root")?;
     let os = target.unwrap_or(host_os());
     let rust_target = platform_to_rust_target(os)?;
     let bin_src = resolve_packaged_binary(&project_name, &rust_target, target.is_some())?;
     std::fs::create_dir_all("target/velox/dist")?;
-    match os {
-        "windows" => package_windows(&project_name, &bin_src)?,
-        "macos"   => package_macos(&project_name, &bin_src)?,
-        "linux"   => package_linux(&project_name, &bin_src)?,
-        other     => bail!("Unknown target OS: {other}. Use: windows, macos, linux"),
+    if installer {
+        match os {
+            "windows" => installer_windows(&project_name, &bin_src)?,
+            "macos"   => installer_macos(&project_name, &bin_src)?,
+            "linux"   => installer_linux(&project_name, &bin_src)?,
+            other     => bail!("Unknown target OS: {other}. Use: windows, macos, linux"),
+        }
+    } else {
+        match os {
+            "windows" => package_windows(&project_name, &bin_src)?,
+            "macos"   => package_macos(&project_name, &bin_src)?,
+            "linux"   => package_linux(&project_name, &bin_src)?,
+            other     => bail!("Unknown target OS: {other}. Use: windows, macos, linux"),
+        }
     }
     Ok(())
 }
@@ -817,6 +838,15 @@ fn package_windows(name: &str, bin: &Path) -> Result<()> {
     let exe_dest = app_dir.join(&exe_name);
     std::fs::copy(bin, &exe_dest).with_context(|| format!("copy {}", bin.display()))?;
     copy_runtime_files(&app_dir)?;
+
+    // Generate icon.ico from app icon PNG if declared in velox.config.json.
+    if let Some(icon_png) = read_icon_path() {
+        let ico_dest = app_dir.join("icon.ico");
+        match png_to_ico(&icon_png, &ico_dest) {
+            Ok(()) => println!("  Icon: {}", ico_dest.display()),
+            Err(e) => println!("  Warning: icon.ico not generated: {e}"),
+        }
+    }
 
     if let Some(scheme) = read_deeplink_scheme() {
         let exe_abs = exe_dest.canonicalize()
@@ -854,10 +884,12 @@ fn package_windows(name: &str, bin: &Path) -> Result<()> {
 }
 
 fn package_macos(name: &str, bin: &Path) -> Result<()> {
-    let app_dir = format!("target/velox/dist/{name}.app/Contents/MacOS");
+    let bundle_root = PathBuf::from(format!("target/velox/dist/{name}.app"));
+    let app_dir = bundle_root.join("Contents/MacOS");
+    let res_dir = bundle_root.join("Contents/Resources");
     std::fs::create_dir_all(&app_dir)?;
-    let dest = format!("{app_dir}/{name}");
-    std::fs::copy(bin, &dest)?;
+    std::fs::create_dir_all(&res_dir)?;
+    std::fs::copy(bin, app_dir.join(name))?;
 
     let scheme_xml = if let Some(scheme) = read_deeplink_scheme() {
         println!("  Deep-link scheme '{scheme}://' → CFBundleURLTypes in Info.plist");
@@ -874,6 +906,22 @@ fn package_macos(name: &str, bin: &Path) -> Result<()> {
         String::new()
     };
 
+    // Generate icon.icns from app icon PNG if on macOS.
+    let icon_xml = if let Some(icon_png) = read_icon_path() {
+        match png_to_icns(&icon_png, &res_dir) {
+            Ok(icns_path) => {
+                println!("  Icon: {}", icns_path.display());
+                "\n    <key>CFBundleIconFile</key><string>icon</string>".to_string()
+            }
+            Err(e) => {
+                println!("  Warning: icon.icns not generated: {e}");
+                String::new()
+            }
+        }
+    } else {
+        String::new()
+    };
+
     let plist = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -881,24 +929,39 @@ fn package_macos(name: &str, bin: &Path) -> Result<()> {
     <key>CFBundleExecutable</key><string>{name}</string>
     <key>CFBundleIdentifier</key><string>com.velox.{name}</string>
     <key>CFBundleName</key><string>{name}</string>
-    <key>CFBundleVersion</key><string>1.0</string>{scheme_xml}
+    <key>CFBundleVersion</key><string>1.0</string>{icon_xml}{scheme_xml}
 </dict>
 </plist>"#);
-    write_file(format!("target/velox/dist/{name}.app/Contents/Info.plist"), &plist)?;
-    println!("✓ Package: target/velox/dist/{name}.app");
+    write_file(bundle_root.join("Contents/Info.plist"), &plist)?;
+    println!("✓ Package: {}", bundle_root.display());
     Ok(())
 }
 
 fn package_linux(name: &str, bin: &Path) -> Result<()> {
+    std::fs::create_dir_all("target/velox/dist")?;
+
+    // Copy icon PNG alongside binary so xdg-icon-resource / AppImage can use it.
+    let icon_field = if let Some(icon_png) = read_icon_path() {
+        let icon_dest = format!("target/velox/dist/{name}.png");
+        if let Err(e) = std::fs::copy(&icon_png, &icon_dest) {
+            println!("  Warning: could not copy icon: {e}");
+            name.to_string()
+        } else {
+            println!("  Icon: {icon_dest}");
+            format!("target/velox/dist/{name}")
+        }
+    } else {
+        name.to_string()
+    };
+
     if let Some(scheme) = read_deeplink_scheme() {
         let mime_type = format!("x-scheme-handler/{scheme}");
         let desktop = format!(
             "[Desktop Entry]\nType=Application\nName={name}\n\
-             Exec={name} %u\nMimeType={mime_type};\n\
+             Exec={name} %u\nIcon={icon_field}\nMimeType={mime_type};\n\
              NoDisplay=false\nCategories=Application;\n"
         );
         let desktop_path = format!("target/velox/dist/{name}.desktop");
-        std::fs::create_dir_all("target/velox/dist")?;
         std::fs::write(&desktop_path, desktop)?;
         println!("  Deep-link scheme '{scheme}://' → {desktop_path}");
         println!("  To activate: xdg-desktop-menu install --novendor {name}.desktop");
@@ -918,6 +981,208 @@ fn package_linux(name: &str, bin: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ── Installer builders ────────────────────────────────────────────────────────
+
+/// Windows installer via Inno Setup (`iscc` must be in PATH).
+/// Falls back to printing setup instructions if iscc is not found.
+fn installer_windows(name: &str, bin: &Path) -> Result<()> {
+    // First build the portable folder so Inno has something to package.
+    package_windows(name, bin)?;
+
+    let app_dir    = PathBuf::from(format!("target/velox/dist/{name}-windows"));
+    let exe_name   = binary_name(name);
+    let out_dir    = PathBuf::from("target/velox/dist");
+    let iss_path   = out_dir.join(format!("{name}.iss"));
+    let output_exe = out_dir.join(format!("{name}-Setup.exe"));
+
+    // If icon.ico was generated by package_windows, reference it in the installer.
+    let ico_path = app_dir.join("icon.ico");
+    let setup_icon_line = if ico_path.exists() {
+        format!("SetupIconFile={}\n", ico_path.display())
+    } else {
+        String::new()
+    };
+
+    let iss = format!(
+r#"[Setup]
+AppName={name}
+AppVersion=1.0
+DefaultDirName={{autopf}}\{name}
+DefaultGroupName={name}
+OutputDir={out_dir}
+OutputBaseFilename={name}-Setup
+Compression=lzma
+SolidCompression=yes
+DisableProgramGroupPage=yes
+{setup_icon_line}
+[Files]
+Source: "{app_dir}\{exe_name}"; DestDir: "{{app}}"; Flags: ignoreversion
+Source: "{app_dir}\*"; DestDir: "{{app}}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "{exe_name}"
+
+[Icons]
+Name: "{{autoprograms}}\{name}"; Filename: "{{app}}\{exe_name}"
+Name: "{{autodesktop}}\{name}";  Filename: "{{app}}\{exe_name}"; Tasks: desktopicon
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"
+
+[Run]
+Filename: "{{app}}\{exe_name}"; Description: "Launch {name}"; Flags: nowait postinstall skipifsilent
+"#,
+        name            = name,
+        exe_name        = exe_name,
+        app_dir         = app_dir.display(),
+        out_dir         = out_dir.display(),
+        setup_icon_line = setup_icon_line,
+    );
+
+    std::fs::write(&iss_path, &iss)?;
+    println!("  Generated: {}", iss_path.display());
+
+    // Try to find iscc (Inno Setup Compiler)
+    let iscc_candidates = [
+        "iscc".to_string(),
+        r"C:\Program Files (x86)\Inno Setup 6\iscc.exe".to_string(),
+        r"C:\Program Files\Inno Setup 6\iscc.exe".to_string(),
+    ];
+    let iscc = iscc_candidates.iter().find(|c| {
+        Command::new(c).arg("/?").output().is_ok()
+    });
+
+    match iscc {
+        Some(compiler) => {
+            println!("Compiling installer with Inno Setup…");
+            let status = Command::new(compiler).arg(iss_path.to_str().unwrap()).status()?;
+            if status.success() {
+                println!("✓ Installer: {}", output_exe.display());
+            } else {
+                bail!("iscc exited with non-zero status. Check the .iss file.");
+            }
+        }
+        None => {
+            println!();
+            println!("Inno Setup (iscc) not found. Install it from https://jrsoftware.org/isinfo.php");
+            println!("Then run manually:");
+            println!("  iscc \"{}\"", iss_path.display());
+            println!();
+            println!("✓ Script generated: {}", iss_path.display());
+        }
+    }
+    Ok(())
+}
+
+/// macOS DMG via hdiutil (built-in on macOS).
+fn installer_macos(name: &str, bin: &Path) -> Result<()> {
+    // Build the .app first.
+    package_macos(name, bin)?;
+
+    let app_path = format!("target/velox/dist/{name}.app");
+    let dmg_path = format!("target/velox/dist/{name}.dmg");
+
+    println!("Creating DMG: {dmg_path}");
+    let status = Command::new("hdiutil")
+        .args([
+            "create",
+            "-volname", name,
+            "-srcfolder", &app_path,
+            "-ov",
+            "-format", "UDZO",
+            &dmg_path,
+        ])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => println!("✓ Installer: {dmg_path}"),
+        Ok(_)  => bail!("hdiutil create failed"),
+        Err(e) => bail!("hdiutil not found ({e}). This command must run on macOS."),
+    }
+    Ok(())
+}
+
+/// Linux AppImage via appimagetool.
+/// Falls back to tar.gz with instructions if appimagetool is not in PATH.
+fn installer_linux(name: &str, bin: &Path) -> Result<()> {
+    let dist     = PathBuf::from("target/velox/dist");
+    let app_dir  = dist.join(format!("{name}.AppDir"));
+    let usr_bin  = app_dir.join("usr/bin");
+    std::fs::create_dir_all(&usr_bin)?;
+
+    // Copy binary
+    let bin_dest = usr_bin.join(name);
+    std::fs::copy(bin, &bin_dest)?;
+
+    // AppRun script
+    let apprun = format!("#!/bin/sh\nexec \"$(dirname \"$0\")/usr/bin/{name}\" \"$@\"\n");
+    let apprun_path = app_dir.join("AppRun");
+    std::fs::write(&apprun_path, apprun)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&apprun_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    // Minimal desktop file (required by appimagetool)
+    let desktop = format!(
+        "[Desktop Entry]\nType=Application\nName={name}\nExec={name}\nIcon={name}\n\
+         Categories=Utility;\n"
+    );
+    std::fs::write(app_dir.join(format!("{name}.desktop")), desktop)?;
+
+    // Copy app icon PNG into AppDir (required by appimagetool).
+    let icon_dest = app_dir.join(format!("{name}.png"));
+    if let Some(icon_png) = read_icon_path() {
+        if let Err(e) = std::fs::copy(&icon_png, &icon_dest) {
+            println!("  Warning: could not copy icon: {e}");
+        } else {
+            println!("  Icon: {}", icon_dest.display());
+        }
+    } else {
+        // Placeholder 1×1 transparent PNG so appimagetool doesn't abort.
+        let tiny_png: &[u8] = &[
+            0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,
+            0x00,0x00,0x00,0x0D,0x49,0x48,0x44,0x52,
+            0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,
+            0x08,0x02,0x00,0x00,0x00,0x90,0x77,0x53,
+            0xDE,0x00,0x00,0x00,0x0C,0x49,0x44,0x41,
+            0x54,0x08,0xD7,0x63,0xF8,0xFF,0xFF,0x3F,
+            0x00,0x05,0xFE,0x02,0xFE,0xDC,0xCC,0x59,
+            0xE7,0x00,0x00,0x00,0x00,0x49,0x45,0x4E,
+            0x44,0xAE,0x42,0x60,0x82,
+        ];
+        if let Err(e) = std::fs::write(&icon_dest, tiny_png) {
+            println!("  Warning: could not write placeholder icon: {e}");
+        }
+    }
+
+    let output_ai = dist.join(format!("{name}-x86_64.AppImage"));
+    println!("Building AppImage: {}", output_ai.display());
+
+    let status = Command::new("appimagetool")
+        .arg(app_dir.to_str().unwrap())
+        .arg(output_ai.to_str().unwrap())
+        .status();
+
+    match status {
+        Ok(s) if s.success() => println!("✓ Installer: {}", output_ai.display()),
+        Ok(_) => bail!("appimagetool exited with non-zero status"),
+        Err(_) => {
+            println!();
+            println!("appimagetool not found. Download it from https://appimage.github.io/appimagetool/");
+            println!("Then run manually:");
+            println!("  appimagetool \"{}\" \"{}\"", app_dir.display(), output_ai.display());
+            println!();
+            println!("AppDir prepared: {}", app_dir.display());
+            // Fall back to tar.gz
+            installer_linux_fallback(name, bin)?;
+        }
+    }
+    Ok(())
+}
+
+fn installer_linux_fallback(name: &str, bin: &Path) -> Result<()> {
+    package_linux(name, bin)
 }
 
 // ── Runner management ─────────────────────────────────────────────────────────
@@ -1115,6 +1380,76 @@ fn resolve_config_json() -> Result<String> {
     }
     std::fs::read_to_string("velox.config.json")
         .context("neither velox.config.ts nor velox.config.json found")
+}
+
+// ── Icon helpers ──────────────────────────────────────────────────────────────
+
+/// Read the `icon` field from velox.config.json, if declared.
+fn read_icon_path() -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Cfg { icon: Option<String> }
+    let src = resolve_config_json().ok()?;
+    let cfg: Cfg = serde_json::from_str(&src).ok()?;
+    cfg.icon
+}
+
+/// Convert a PNG file to a multi-size `.ico` file (16, 32, 48, 256 px).
+/// Returns the path to the generated `.ico`, or `None` if the source PNG is missing.
+fn png_to_ico(png_path: &str, out_path: &Path) -> Result<()> {
+    let img = image::open(png_path)
+        .with_context(|| format!("Cannot open icon: {png_path}"))?;
+
+    let mut icon_dir = ico::IconDir::new(ico::ResourceType::Icon);
+    for size in [256u32, 48, 32, 16] {
+        let resized  = img.resize_exact(size, size, image::imageops::FilterType::Lanczos3);
+        let rgba     = resized.into_rgba8();
+        let (w, h)   = rgba.dimensions();
+        let icon_img = ico::IconImage::from_rgba_data(w, h, rgba.into_raw());
+        let entry    = ico::IconDirEntry::encode(&icon_img)
+            .map_err(|e| anyhow::anyhow!("ico entry {size}px: {e}"))?;
+        icon_dir.add_entry(entry);
+    }
+    let f = std::fs::File::create(out_path)
+        .with_context(|| format!("Cannot create {}", out_path.display()))?;
+    icon_dir.write(f).map_err(|e| anyhow::anyhow!("ico write: {e}"))?;
+    Ok(())
+}
+
+/// Build `icon.icns` from a PNG using macOS built-in tools (sips + iconutil).
+/// No-ops silently if not running on macOS.
+#[cfg(target_os = "macos")]
+fn png_to_icns(png_path: &str, out_dir: &Path) -> Result<PathBuf> {
+    let iconset = out_dir.join("icon.iconset");
+    std::fs::create_dir_all(&iconset)?;
+    // sips produces the required resolution set
+    let sizes: &[(u32, &str)] = &[
+        (16,  "icon_16x16"),   (32,  "icon_16x16@2x"),
+        (32,  "icon_32x32"),   (64,  "icon_32x32@2x"),
+        (128, "icon_128x128"), (256, "icon_128x128@2x"),
+        (256, "icon_256x256"), (512, "icon_256x256@2x"),
+        (512, "icon_512x512"), (1024,"icon_512x512@2x"),
+    ];
+    for (px, name) in sizes {
+        let dest = iconset.join(format!("{name}.png"));
+        Command::new("sips")
+            .args(["-z", &px.to_string(), &px.to_string(), png_path,
+                   "--out", dest.to_str().unwrap()])
+            .output()
+            .context("sips failed — are you on macOS?")?;
+    }
+    let icns = out_dir.join("icon.icns");
+    let status = Command::new("iconutil")
+        .args(["-c", "icns", iconset.to_str().unwrap(),
+               "-o", icns.to_str().unwrap()])
+        .status()?;
+    if !status.success() { bail!("iconutil failed"); }
+    std::fs::remove_dir_all(&iconset)?;
+    Ok(icns)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn png_to_icns(_png_path: &str, _out_dir: &Path) -> Result<PathBuf> {
+    bail!("icns generation requires macOS (sips + iconutil)")
 }
 
 /// Read the deep-link scheme from velox config, if declared.

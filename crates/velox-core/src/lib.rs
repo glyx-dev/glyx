@@ -82,6 +82,10 @@ include!(concat!(env!("OUT_DIR"), "/embedded_snapshot.rs"));
 struct VeloxConfigFile {
     window:       Option<WindowCfgJson>,
     capabilities: Option<Capabilities>,
+    /// Path to the app icon (PNG, 512×512 or 1024×1024 recommended).
+    /// Used for the window icon (all platforms), taskbar (Windows/Linux),
+    /// Dock (macOS), and installer icon (velox package --installer).
+    icon:         Option<String>,
 }
 
 /// Window settings from `velox.config.json`.
@@ -155,7 +159,29 @@ fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> Capabilities {
         };
     }
 
+    // Load icon PNG → RGBA bytes for winit window icon.
+    if let Some(icon_path) = file.as_ref().and_then(|f| f.icon.as_ref()) {
+        cfg.icon_rgba = load_icon_png(icon_path);
+    }
+
     file.and_then(|f| f.capabilities).unwrap_or_default()
+}
+
+/// Decode a PNG at `path` to raw RGBA bytes for use as a winit window icon.
+/// Returns `None` and logs a warning on failure.
+fn load_icon_png(path: &str) -> Option<(Vec<u8>, u32, u32)> {
+    match image::open(path) {
+        Ok(img) => {
+            let rgba = img.into_rgba8();
+            let (w, h) = rgba.dimensions();
+            log::info!("[icon] loaded {path} ({w}×{h})");
+            Some((rgba.into_raw(), w, h))
+        }
+        Err(e) => {
+            log::warn!("[icon] failed to load '{path}': {e}");
+            None
+        }
+    }
 }
 
 /// Load the Velox config from the current working directory.
@@ -1398,6 +1424,14 @@ pub fn run(mut config: AppConfig) -> bool {
                 };
                 windows.insert(window_handle, ws);
                 window.request_redraw();
+
+                // Kick off ffmpeg-sidecar download in the background once, on the
+                // main window only.  The download is a no-op when ffmpeg is already
+                // reachable via PATH or the sidecar dir.
+                #[cfg(feature = "dev")]
+                if window_handle == 0 {
+                    crate::scene::ensure_dev_ffmpeg();
+                }
             }
 
             // ── Resize ────────────────────────────────────────────────────

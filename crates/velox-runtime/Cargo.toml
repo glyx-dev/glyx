@@ -30,6 +30,8 @@ keepawake           = { workspace = true }
 gilrs               = { workspace = true }
 global-hotkey       = { workspace = true }
 rodio               = { workspace = true }
+hidapi              = { workspace = true }
+self_update         = { workspace = true }
 serde               = { workspace = true }
 velox-3d            = { path = "../velox-3d" }
 velox-ai            = { path = "../velox-ai" }

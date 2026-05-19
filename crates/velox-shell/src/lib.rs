@@ -113,6 +113,10 @@ pub struct ShellConfig {
     /// `true` = OS title bar + borders (default). `false` = frameless; Velox
     /// renders its own title bar and handles resize/drag hit zones.
     pub decorations:  bool,
+    /// Raw RGBA icon pixels + dimensions decoded from the app's icon PNG.
+    /// Used to set the window icon (taskbar on Windows/Linux, Dock on macOS).
+    /// `None` = no icon set (system default).
+    pub icon_rgba:    Option<(Vec<u8>, u32, u32)>,
 }
 
 impl Default for ShellConfig {
@@ -124,6 +128,7 @@ impl Default for ShellConfig {
             continuous:   false,
             startup_mode: StartupMode::Windowed,
             decorations:  true,
+            icon_rgba:    None,
         }
     }
 }
@@ -256,6 +261,12 @@ impl ApplicationHandler<VeloxUserEvent> for ShellApp {
             .with_title(&self.config.title)
             .with_visible(true)
             .with_decorations(self.config.decorations);
+
+        if let Some((ref rgba, w, h)) = self.config.icon_rgba {
+            if let Ok(icon) = winit::window::Icon::from_rgba(rgba.clone(), w, h) {
+                attrs = attrs.with_window_icon(Some(icon));
+            }
+        }
 
         match self.config.startup_mode {
             StartupMode::Fullscreen => {

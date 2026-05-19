@@ -1807,6 +1807,96 @@ export const microphone = {
   },
 };
 
+// ── HID API ───────────────────────────────────────────────────────────────────
+
+/**
+ * Human Interface Device (HID) API — USB gamepads, custom hardware, etc.
+ *
+ * Requires `hid: true` in velox.config.json.
+ */
+export const hid = {
+  /**
+   * List all connected HID devices.
+   * @returns {Promise<{vendorId,productId,manufacturer,product,serialNumber,interfaceNumber,path}[]>}
+   */
+  async enumerate() {
+    return JSON.parse(await __velox_hid_enumerate());
+  },
+  /**
+   * Open a HID device by vendor + product ID.
+   * @param {number} vendorId
+   * @param {number} productId
+   * @returns {Promise<number>} Handle ID.
+   */
+  async open(vendorId, productId) {
+    return parseInt(await __velox_hid_open(vendorId, productId));
+  },
+  /**
+   * Read bytes from an open HID device.
+   * @param {number} handle   Handle returned by open().
+   * @param {number} [timeoutMs=100]
+   * @returns {Promise<number[]>} Array of byte values (up to 64).
+   */
+  async read(handle, timeoutMs = 100) {
+    return JSON.parse(await __velox_hid_read(handle, timeoutMs));
+  },
+  /**
+   * Write bytes to an open HID device.
+   * @param {number} handle   Handle returned by open().
+   * @param {number[]} data   Array of byte values.
+   * @returns {Promise<number>} Number of bytes written.
+   */
+  async write(handle, data) {
+    return parseInt(await __velox_hid_write(handle, JSON.stringify(data)));
+  },
+  /**
+   * Close a HID device handle.
+   * @param {number} handle
+   */
+  close(handle) {
+    __velox_hid_close(handle);
+  },
+};
+
+// ── Auto-updater API ──────────────────────────────────────────────────────────
+
+/**
+ * Auto-updater — check for and apply GitHub release updates.
+ *
+ * Requires `updater: true` in velox.config.json.
+ *
+ * Flow:
+ *   const info = await updater.check('myorg', 'myapp', '1.0.0');
+ *   if (info.hasUpdate) {
+ *     const result = await updater.update('myorg', 'myapp', 'myapp', '1.0.0');
+ *     if (result.updated) { // show "restart required" dialog }
+ *   }
+ */
+export const updater = {
+  /**
+   * Check GitHub releases for a newer version.
+   * @param {string} owner          GitHub owner (user or org).
+   * @param {string} repo           Repository name.
+   * @param {string} currentVersion Current semver string (e.g. "1.0.0").
+   * @returns {Promise<{hasUpdate:boolean, latestVersion:string, body:string}>}
+   */
+  async check(owner, repo, currentVersion) {
+    return JSON.parse(await __velox_updater_check(owner, repo, currentVersion));
+  },
+  /**
+   * Download the latest GitHub release and replace the running binary.
+   * The caller should prompt the user to restart the app after this resolves.
+   * @param {string} owner          GitHub owner.
+   * @param {string} repo           Repository name.
+   * @param {string} binName        Binary asset name (without .exe — added automatically on Windows).
+   * @param {string} currentVersion Current semver string.
+   * @returns {Promise<{updated:boolean, latestVersion:string}>}
+   */
+  async update(owner, repo, binName, currentVersion) {
+    return JSON.parse(await __velox_updater_update(owner, repo, binName, currentVersion));
+  },
+};
+
 // ── Camera component ──────────────────────────────────────────────────────────
 //
 // Renders a live camera preview as a native node — frames NEVER cross the JS

@@ -124,6 +124,14 @@ pub struct Capabilities {
     /// Microphone recording access. Enables `microphone.listDevices()`, `microphone.record()`.
     #[serde(default)]
     pub microphone: bool,
+    /// HID (Human Interface Device) access. Enables `hid.enumerate()`, `hid.open()`.
+    /// Required for gamepads, custom USB HID devices, MIDI controllers, etc.
+    #[serde(default)]
+    pub hid: bool,
+    /// Auto-updater — check for and apply GitHub release updates.
+    /// Enables `updater.check()` and `updater.update()`.
+    #[serde(default)]
+    pub updater: bool,
     /// Deep-link URL scheme registration.  `None` = no deep-link support.
     pub deeplink: Option<DeeplinkCapability>,
 }

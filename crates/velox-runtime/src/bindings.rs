@@ -356,6 +356,9 @@ pub fn register_all(
         audio_events:  Arc::new(Mutex::new(VecDeque::new())),
         next_audio_id:  std::sync::atomic::AtomicU32::new(1),
         next_camera_id: std::sync::atomic::AtomicU32::new(1),
+        hid_api:     Arc::new(Mutex::new(None)),
+        hid_devices: Arc::new(Mutex::new(HashMap::new())),
+        next_hid_id: std::sync::atomic::AtomicU32::new(1),
         ai_embed_model:    Arc::new(Mutex::new(None)),
         ai_generate_model: Arc::new(Mutex::new(None)),
         ai_whisper_model:  Arc::new(Mutex::new(None)),
@@ -513,6 +516,16 @@ pub fn register_all(
     register!("__velox_camera_record_stop",  camera_record_stop_callback);
     register!("__velox_microphone_list",     microphone_list_callback);
     register!("__velox_microphone_record",   microphone_record_callback);
+
+    // ── HID devices ──────────────────────────────────────────────────────────
+    register!("__velox_hid_enumerate", hid_enumerate_callback);
+    register!("__velox_hid_open",      hid_open_callback);
+    register!("__velox_hid_read",      hid_read_callback);
+    register!("__velox_hid_write",     hid_write_callback);
+    register!("__velox_hid_close",     hid_close_callback);
+    // ── Updater ──────────────────────────────────────────────────────────────
+    register!("__velox_updater_check",  updater_check_callback);
+    register!("__velox_updater_update", updater_update_callback);
 }
 
 struct AsyncState {
@@ -576,6 +589,12 @@ struct AsyncState {
     ai_generate_model: Arc<Mutex<Option<velox_ai::GenerateModel>>>,
     /// Whisper transcription model (requires &mut self for decoder state).
     ai_whisper_model:  Arc<Mutex<Option<velox_ai::WhisperModel>>>,
+    // ── HID devices ──────────────────────────────────────────────────────────
+    /// Lazily initialised HidApi context (singleton, guarded by Mutex).
+    hid_api:     Arc<Mutex<Option<hidapi::HidApi>>>,
+    /// Open HID device handles keyed by velox handle ID.
+    hid_devices: Arc<Mutex<HashMap<u32, hidapi::HidDevice>>>,
+    next_hid_id: std::sync::atomic::AtomicU32,
     // ── CDP Inspector console bridge ──────────────────────────────────────────
     /// When the CDP inspector is active, this holds the outbox sender so
     /// __velox_log can forward console messages as Runtime.consoleAPICalled events.
@@ -4044,6 +4063,272 @@ fn microphone_record_callback(
                 Some(device_name_raw.as_str())
             };
             velox_sysapi::microphone::record_wav(device_name, duration_ms)
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+// ── HID callbacks ─────────────────────────────────────────────────────────────
+
+/// `__velox_hid_enumerate() → Promise<JSON>` — list HID devices.
+fn hid_enumerate_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().hid {
+        rv.set(reject_cap_promise(scope, "hid").into()); return;
+    }
+
+    let hid_api = Arc::clone(&state.hid_api);
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut guard = hid_api.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(hidapi::HidApi::new().map_err(|e| e.to_string())?);
+            }
+            let api = guard.as_ref().unwrap();
+            let devices: Vec<serde_json::Value> = api.device_list()
+                .map(|info| serde_json::json!({
+                    "vendorId":        info.vendor_id(),
+                    "productId":       info.product_id(),
+                    "manufacturer":    info.manufacturer_string().unwrap_or(""),
+                    "product":         info.product_string().unwrap_or(""),
+                    "serialNumber":    info.serial_number().unwrap_or(""),
+                    "interfaceNumber": info.interface_number(),
+                    "path":            info.path().to_str().unwrap_or(""),
+                }))
+                .collect();
+            serde_json::to_string(&devices).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_hid_open(vendorId, productId) → Promise<handleId>` — open a HID device.
+fn hid_open_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().hid {
+        rv.set(reject_cap_promise(scope, "hid").into()); return;
+    }
+
+    let vendor_id  = args.get(0).number_value(scope).unwrap_or(0.0) as u16;
+    let product_id = args.get(1).number_value(scope).unwrap_or(0.0) as u16;
+
+    let hid_api     = Arc::clone(&state.hid_api);
+    let hid_devices = Arc::clone(&state.hid_devices);
+    let handle_id   = state.next_hid_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut guard = hid_api.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(hidapi::HidApi::new().map_err(|e| e.to_string())?);
+            }
+            let api = guard.as_ref().unwrap();
+            let device = api.open(vendor_id, product_id).map_err(|e| e.to_string())?;
+            hid_devices.lock().unwrap().insert(handle_id, device);
+            Ok(handle_id.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_hid_read(handleId, timeoutMs) → Promise<JSON>` — read bytes from device.
+fn hid_read_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().hid {
+        rv.set(reject_cap_promise(scope, "hid").into()); return;
+    }
+
+    let handle_id  = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let timeout_ms = args.get(1).number_value(scope).unwrap_or(100.0) as i32;
+
+    let hid_devices = Arc::clone(&state.hid_devices);
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let devices = hid_devices.lock().unwrap();
+            let device  = devices.get(&handle_id)
+                .ok_or_else(|| format!("HID handle {} not found", handle_id))?;
+            let mut buf = vec![0u8; 64];
+            let n = device.read_timeout(&mut buf, timeout_ms)
+                .map_err(|e| e.to_string())?;
+            buf.truncate(n);
+            serde_json::to_string(&buf).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_hid_write(handleId, dataJson) → Promise<bytesWritten>` — write bytes to device.
+fn hid_write_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().hid {
+        rv.set(reject_cap_promise(scope, "hid").into()); return;
+    }
+
+    let handle_id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let data_json = v8_arg_to_string(scope, &args, 1);
+
+    let hid_devices = Arc::clone(&state.hid_devices);
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let bytes: Vec<u8> = serde_json::from_str(&data_json)
+                .map_err(|e| format!("Invalid data JSON: {e}"))?;
+            let devices = hid_devices.lock().unwrap();
+            let device  = devices.get(&handle_id)
+                .ok_or_else(|| format!("HID handle {} not found", handle_id))?;
+            let n = device.write(&bytes).map_err(|e| e.to_string())?;
+            Ok(n.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_hid_close(handleId)` — close a HID device handle (sync, no promise).
+fn hid_close_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle_id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    state.hid_devices.lock().unwrap().remove(&handle_id);
+}
+
+// ── Updater callbacks ──────────────────────────────────────────────────────────
+
+/// `__velox_updater_check(owner, repo, currentVersion) → Promise<JSON>`
+///
+/// Fetches the latest GitHub release and returns:
+///   `{ hasUpdate: bool, latestVersion: string, body: string }`
+fn updater_check_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().updater {
+        rv.set(reject_cap_promise(scope, "updater").into()); return;
+    }
+
+    let owner   = v8_arg_to_string(scope, &args, 0);
+    let repo    = v8_arg_to_string(scope, &args, 1);
+    let current = v8_arg_to_string(scope, &args, 2);
+
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let releases = self_update::backends::github::ReleaseList::configure()
+                .repo_owner(&owner)
+                .repo_name(&repo)
+                .build().map_err(|e| e.to_string())?
+                .fetch().map_err(|e| e.to_string())?;
+
+            let latest = releases.first();
+            let has_update = latest.map(|r| {
+                self_update::version::bump_is_greater(&current, &r.version)
+                    .unwrap_or(false)
+            }).unwrap_or(false);
+            let latest_version = latest.map(|r| r.version.as_str()).unwrap_or(&current).to_string();
+            let body = latest.and_then(|r| r.body.as_deref()).unwrap_or("").to_string();
+
+            serde_json::to_string(&serde_json::json!({
+                "hasUpdate":     has_update,
+                "latestVersion": latest_version,
+                "body":          body,
+            })).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_updater_update(owner, repo, binName, currentVersion) → Promise<JSON>`
+///
+/// Downloads the latest GitHub release for this binary and replaces the running executable.
+/// Returns `{ updated: bool, latestVersion: string }`.
+/// The caller should prompt the user to restart.
+fn updater_update_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().updater {
+        rv.set(reject_cap_promise(scope, "updater").into()); return;
+    }
+
+    let owner    = v8_arg_to_string(scope, &args, 0);
+    let repo     = v8_arg_to_string(scope, &args, 1);
+    let bin_name = v8_arg_to_string(scope, &args, 2);
+    let current  = v8_arg_to_string(scope, &args, 3);
+
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let status = self_update::backends::github::Update::configure()
+                .repo_owner(&owner)
+                .repo_name(&repo)
+                .bin_name(&bin_name)
+                .show_output(false)
+                .no_confirm(true)
+                .current_version(&current)
+                .build().map_err(|e| e.to_string())?
+                .update().map_err(|e| e.to_string())?;
+
+            serde_json::to_string(&serde_json::json!({
+                "updated":       status.updated(),
+                "latestVersion": status.version(),
+            })).map_err(|e| e.to_string())
         }).await.map_err(|e| e.to_string()).and_then(|r| r);
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });

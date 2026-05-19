@@ -15,3 +15,5 @@ serde_json = { workspace = true }
 env_logger = { workspace = true }
 log        = { workspace = true }
 crc32fast  = { workspace = true }
+image      = { workspace = true }
+ico        = { workspace = true }

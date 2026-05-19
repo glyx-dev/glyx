@@ -178,6 +178,13 @@ globalThis.__velox_camera_record_start = function() {};
 globalThis.__velox_camera_record_stop  = function() { return stubPromise(''); };
 globalThis.__velox_microphone_list     = function() { return stubPromise('[]'); };
 globalThis.__velox_microphone_record   = function() { return stubPromise(''); };
+globalThis.__velox_hid_enumerate       = function() { return stubPromise('[]'); };
+globalThis.__velox_hid_open            = function() { return stubPromise('0'); };
+globalThis.__velox_hid_read            = function() { return stubPromise('[]'); };
+globalThis.__velox_hid_write           = function() { return stubPromise('0'); };
+globalThis.__velox_hid_close           = function() {};
+globalThis.__velox_updater_check       = function() { return stubPromise('{"hasUpdate":false,"latestVersion":"","body":""}'); };
+globalThis.__velox_updater_update      = function() { return stubPromise('{"updated":false,"latestVersion":""}'); };
 "#
     .to_string()
 }

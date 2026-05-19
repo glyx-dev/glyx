@@ -3,13 +3,22 @@ use smallvec::SmallVec;
 use crate::layout::layout_props_changed;
 
 /// Locate the ffmpeg binary.
-/// Priority: `FFMPEG_PATH` env var → `ffmpeg` in PATH → common install locations.
+/// Priority: `FFMPEG_PATH` env var → ffmpeg-sidecar (dev) → common install locations → PATH.
 fn find_ffmpeg() -> String {
     // 1. Explicit override.
     if let Ok(p) = std::env::var("FFMPEG_PATH") {
         if !p.is_empty() { return p; }
     }
-    // 2. Common Windows install locations (winget, scoop, choco, manual).
+    // 2. Dev mode: check ffmpeg-sidecar binary (downloaded to dir next to the executable).
+    //    ffmpeg_path() checks the sidecar first, then falls back to system PATH automatically.
+    #[cfg(feature = "dev")]
+    {
+        let p = ffmpeg_sidecar::paths::ffmpeg_path();
+        if p.exists() {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+    // 3. Common Windows install locations (winget, scoop, choco, manual).
     #[cfg(target_os = "windows")]
     {
         let candidates = [
@@ -17,7 +26,6 @@ fn find_ffmpeg() -> String {
             r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
             r"C:\ProgramData\chocolatey\bin\ffmpeg.exe",
         ];
-        // Also check %LOCALAPPDATA%\Microsoft\WinGet\Links
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
             let winget = format!(r"{local}\Microsoft\WinGet\Links\ffmpeg.exe");
             if std::path::Path::new(&winget).exists() { return winget; }
@@ -25,14 +33,34 @@ fn find_ffmpeg() -> String {
         for c in &candidates {
             if std::path::Path::new(c).exists() { return c.to_string(); }
         }
-        // Scoop installs to %USERPROFILE%\scoop\apps\ffmpeg\current\bin\ffmpeg.exe
         if let Ok(home) = std::env::var("USERPROFILE") {
             let scoop = format!(r"{home}\scoop\apps\ffmpeg\current\bin\ffmpeg.exe");
             if std::path::Path::new(&scoop).exists() { return scoop; }
         }
     }
-    // 3. Fall back to PATH lookup — works on all platforms when installed properly.
+    // 4. Fall back to PATH lookup — works on all platforms when installed properly.
     "ffmpeg".to_string()
+}
+
+/// In dev mode, ensure an ffmpeg binary is available by downloading via ffmpeg-sidecar
+/// if it is not already present in PATH or the sidecar directory.
+/// The download is run on a background thread so it never blocks the render loop.
+#[cfg(feature = "dev")]
+pub(crate) fn ensure_dev_ffmpeg() {
+    // ffmpeg_sidecar::download::auto_download() checks PATH + sidecar dir itself;
+    // it is a no-op when ffmpeg is already reachable.
+    std::thread::spawn(|| {
+        match ffmpeg_sidecar::download::auto_download() {
+            Ok(_) => log::info!(
+                "[dev] ffmpeg-sidecar: binary ready at {:?}",
+                ffmpeg_sidecar::paths::ffmpeg_path()
+            ),
+            Err(e) => log::warn!(
+                "[dev] ffmpeg-sidecar: auto-download failed: {e}. \
+                 Install ffmpeg in PATH or set FFMPEG_PATH to use camera recording."
+            ),
+        }
+    });
 }
 
 fn srgb_to_linear_u8(v: u8) -> u8 {

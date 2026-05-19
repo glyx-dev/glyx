@@ -88,6 +88,10 @@ rodio               = { version = "0.17", features = ["symphonia-mp3", "symphoni
 glam                = "0.28"
 gltf                = { version = "1" }
 nokhwa              = { version = "0.10", features = ["input-native", "output-threaded"] }
+ffmpeg-sidecar      = "2"
+hidapi              = "2"
+self_update         = { version = "0.41", default-features = false, features = ["archive-zip", "archive-tar", "compression-flate2", "compression-zip-deflate"] }
+ico                 = "0.3"
 cpal                = "0.15"
 hound               = "3"
 

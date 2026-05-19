@@ -192,6 +192,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 let raw_clone      = Arc::clone(&last_raw_frame);
                 let stop_clone     = Arc::clone(&stop_flag);
                 let rec_tx_clone   = Arc::clone(&record_frame_tx);
+                let redraw         = Arc::clone(&state.request_redraw);
 
                 std::thread::spawn(move || {
                     use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
@@ -218,6 +219,9 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                                 }
                                 // Render loop uses take() to detect new frames.
                                 *buf_clone.lock().unwrap() = Some((w, h, data));
+                                // Wake the winit event loop so the new frame is painted
+                                // even when the user is not moving the mouse.
+                                redraw();
                             }
                         }
                         std::thread::sleep(std::time::Duration::from_millis(33)); // ~30fps

@@ -21,6 +21,7 @@ members = [
     "examples/cli-test",
     "examples/notes-app",
     "crates/velox-snapshot",
+    "crates/velox-media",
 ]
 
 [workspace.dependencies]
@@ -84,7 +85,7 @@ gilrs               = "0.11"
 global-hotkey       = "0.6"
 lru                 = "0.12"
 dark-light          = "1"
-rodio               = { version = "0.17", features = ["symphonia-mp3", "symphonia-flac", "symphonia-vorbis", "symphonia-wav"] }
+rodio               = { version = "0.17", features = ["symphonia-mp3", "symphonia-flac", "symphonia-vorbis", "symphonia-wav", "symphonia-aac"] }
 glam                = "0.28"
 gltf                = { version = "1" }
 nokhwa              = { version = "0.10", features = ["input-native", "output-threaded"] }
@@ -92,6 +93,9 @@ ffmpeg-sidecar      = "2"
 hidapi              = "2"
 self_update         = { version = "0.41", default-features = false, features = ["archive-zip", "archive-tar", "compression-flate2", "compression-zip-deflate"] }
 ico                 = "0.3"
+libloading          = "0.8"
+sha2                = "0.10"
+ed25519-dalek       = { version = "2", default-features = false, features = ["std"] }
 cpal                = "0.15"
 hound               = "3"
 

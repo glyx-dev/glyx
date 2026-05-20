@@ -6429,6 +6429,7 @@ No matching component was found for:
       _pollPerfViolations();
       _pollLeakWarnings();
       _pollAudio();
+      _pollVideo();
       dispatchEvents();
     });
   };
@@ -7349,6 +7350,35 @@ No matching component was found for:
       return __velox_microphone_record(deviceName || "", durationMs);
     }
   };
+  var _videoCallbacks = new Map;
+  function _pollVideo() {
+    const events = JSON.parse(__velox_video_poll());
+    for (const ev of events) {
+      const cbs = _videoCallbacks.get(ev.id);
+      if (!cbs)
+        continue;
+      if (ev.type === "ended" && cbs.onEnded)
+        cbs.onEnded();
+      else if (ev.type === "metadata" && cbs.onMetadata)
+        cbs.onMetadata(ev);
+      else if (ev.type === "error" && cbs.onError)
+        cbs.onError(ev.message);
+    }
+  }
+  var video = {
+    async open(url, { onEnded, onMetadata, onError } = {}) {
+      const handleId = parseInt(await __velox_video_open(url));
+      _videoCallbacks.set(handleId, { onEnded, onMetadata, onError });
+      return handleId;
+    },
+    seek(handleId, seconds) {
+      __velox_video_seek(String(handleId), seconds);
+    },
+    close(handleId) {
+      __velox_video_close(String(handleId));
+      _videoCallbacks.delete(handleId);
+    }
+  };
   var Camera = import_react.default.forwardRef(function Camera2({ mirror, style, ...rest }, ref) {
     const [cameraHandle, setCameraHandle] = import_react.default.useState(null);
     import_react.default.useImperativeHandle(ref, () => ({
@@ -7385,6 +7415,61 @@ No matching component was found for:
     return import_react.default.createElement("camera", {
       cameraHandle,
       mirror: mirror === true,
+      style,
+      ...rest
+    });
+  });
+  var Video = import_react.default.forwardRef(function Video2({ src, autoPlay = true, loop = false, onEnded, onMetadata, onError, style, ...rest }, ref) {
+    const [videoHandle, setVideoHandle] = import_react.default.useState(null);
+    import_react.default.useEffect(() => {
+      if (!src)
+        return;
+      let handle = null;
+      let cancelled = false;
+      video.open(src, {
+        onEnded: loop ? () => {
+          if (handle !== null)
+            video.seek(handle, 0);
+        } : onEnded,
+        onMetadata,
+        onError
+      }).then((h) => {
+        if (cancelled) {
+          video.close(h);
+          return;
+        }
+        handle = h;
+        setVideoHandle(h);
+      }).catch((e) => {
+        if (onError)
+          onError(e instanceof Error ? e.message : String(e));
+      });
+      return () => {
+        cancelled = true;
+        if (handle !== null) {
+          video.close(handle);
+          handle = null;
+          setVideoHandle(null);
+        }
+      };
+    }, [src]);
+    import_react.default.useImperativeHandle(ref, () => ({
+      get handle() {
+        return videoHandle;
+      },
+      seek(seconds) {
+        if (videoHandle !== null)
+          video.seek(videoHandle, seconds);
+      },
+      close() {
+        if (videoHandle !== null) {
+          video.close(videoHandle);
+          setVideoHandle(null);
+        }
+      }
+    }), [videoHandle]);
+    return import_react.default.createElement("video", {
+      videoHandle,
       style,
       ...rest
     });
@@ -14508,7 +14593,7 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
       ]
     });
   }
-  var MEDIA_TABS = ["Camera", "Microphone"];
+  var MEDIA_TABS = ["Camera", "Microphone", "Video"];
   function MediaDemoScreen() {
     const { width: winW } = useWindowSize();
     const inner = winW - PAD * 2;
@@ -14580,6 +14665,12 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
     const [micLoading, setMicLoading] = import_react3.useState(false);
     const [micPath, setMicPath] = import_react3.useState("");
     const [micError, setMicError] = import_react3.useState("");
+    const vidRef = import_react3.default.useRef(null);
+    const [vidSrc, setVidSrc] = import_react3.useState("");
+    const [vidInput, setVidInput] = import_react3.useState("");
+    const [vidStatus, setVidStatus] = import_react3.useState("");
+    const [vidError, setVidError] = import_react3.useState("");
+    const [vidMeta, setVidMeta] = import_react3.useState(null);
     async function recordMic() {
       setMicLoading(true);
       setMicError("");
@@ -14627,12 +14718,12 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
         tab === 0 && /* @__PURE__ */ jsx_runtime.jsxs(View, {
           style: { gap: 10, alignItems: "flex-start" },
           width: inner,
-          height: 540,
+          height: 620,
           children: [
             /* @__PURE__ */ jsx_runtime.jsx(Camera, {
               ref: camRef,
               mirror,
-              style: { width: inner, height: 300, borderRadius: 8, backgroundColor: "#000" }
+              style: { width: inner, height: 400, borderRadius: 8, backgroundColor: "#000" }
             }),
             /* @__PURE__ */ jsx_runtime.jsxs(View, {
               style: { flexDirection: "row", gap: 8, alignItems: "center" },
@@ -14819,6 +14910,165 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
               height: 20,
               style: { color: C2.red },
               children: micError
+            }) : null
+          ]
+        }),
+        tab === 2 && /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          style: { gap: 10, alignItems: "flex-start" },
+          width: inner,
+          height: 620,
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 13,
+              width: inner,
+              height: 18,
+              style: { color: C2.dim },
+              children: "Pick a video file or type a URL. Requires velox-media DLL."
+            }),
+            /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexDirection: "row", gap: 8, alignItems: "center" },
+              width: inner,
+              height: 36,
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: async () => {
+                    try {
+                      const paths = await dialog.openFile({
+                        filters: [
+                          { name: "Video", extensions: ["mp4", "mkv", "avi", "mov", "webm", "m4v"] },
+                          { name: "All files", extensions: ["*"] }
+                        ]
+                      });
+                      if (paths && paths.length > 0) {
+                        setVidError("");
+                        setVidStatus("");
+                        setVidMeta(null);
+                        setVidInput(paths[0]);
+                        setVidSrc(paths[0]);
+                      }
+                    } catch (e) {
+                      setVidError(String(e));
+                    }
+                  },
+                  width: 90,
+                  height: 32,
+                  style: { backgroundColor: C2.sapphire, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 13,
+                    width: 78,
+                    height: 18,
+                    style: { color: C2.bg },
+                    children: "Browse…"
+                  })
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
+                  value: vidInput,
+                  onChange: (v) => {
+                    setVidInput(v);
+                  },
+                  placeholder: "or paste a URL / path",
+                  width: inner - 186,
+                  height: 32,
+                  style: { backgroundColor: C2.surface, borderRadius: 6, borderWidth: 1, borderColor: C2.border, paddingHorizontal: 8 }
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: () => {
+                    setVidError("");
+                    setVidStatus("");
+                    setVidMeta(null);
+                    setVidSrc(vidInput.trim());
+                  },
+                  width: 78,
+                  height: 32,
+                  style: { backgroundColor: C2.accent, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 13,
+                    width: 66,
+                    height: 18,
+                    style: { color: C2.bg },
+                    children: "Load"
+                  })
+                })
+              ]
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(Video, {
+              ref: vidRef,
+              src: vidSrc || undefined,
+              autoPlay: true,
+              loop: false,
+              onMetadata: (m) => setVidMeta(m),
+              onEnded: () => setVidStatus("Playback ended"),
+              onError: (e) => setVidError(String(e)),
+              style: { width: inner, height: 400, borderRadius: 8, backgroundColor: "#000" }
+            }),
+            /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexDirection: "row", gap: 8, alignItems: "center" },
+              width: inner,
+              height: 34,
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                  fontSize: 12,
+                  width: 36,
+                  height: 16,
+                  style: { color: C2.dim },
+                  children: "Seek:"
+                }),
+                [0, 10, 30, 60].map((s) => /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: () => vidRef.current && vidRef.current.seek(s),
+                  width: 52,
+                  height: 30,
+                  style: { backgroundColor: C2.surface, borderRadius: 6, borderWidth: 1, borderColor: C2.border, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsxs(Text, {
+                    fontSize: 12,
+                    width: 40,
+                    height: 16,
+                    style: { color: C2.text },
+                    children: [
+                      s,
+                      "s"
+                    ]
+                  })
+                }, s)),
+                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: () => {
+                    vidRef.current && vidRef.current.close();
+                    setVidSrc("");
+                    setVidStatus("");
+                    setVidMeta(null);
+                  },
+                  width: 60,
+                  height: 30,
+                  style: { backgroundColor: C2.red, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 12,
+                    width: 48,
+                    height: 16,
+                    style: { color: C2.bg },
+                    children: "Close"
+                  })
+                })
+              ]
+            }),
+            vidMeta ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 11,
+              width: inner,
+              height: 16,
+              style: { color: C2.dim },
+              children: `${vidMeta.width ?? "?"}×${vidMeta.height ?? "?"}  ${vidMeta.fps ?? "?"} fps  ${vidMeta.duration_secs != null ? vidMeta.duration_secs.toFixed(1) + "s" : "?"}`
+            }) : null,
+            vidStatus ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: inner,
+              height: 18,
+              style: { color: C2.teal },
+              children: vidStatus
+            }) : null,
+            vidError ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 12,
+              width: inner,
+              height: 20,
+              style: { color: C2.red },
+              children: vidError
             }) : null
           ]
         })

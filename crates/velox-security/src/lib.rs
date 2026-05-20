@@ -132,6 +132,11 @@ pub struct Capabilities {
     /// Enables `updater.check()` and `updater.update()`.
     #[serde(default)]
     pub updater: bool,
+    /// Video playback via the velox-media DLL (ffmpeg-backed decoder/encoder).
+    /// Enables `video.open()`, `<Video>` component.
+    /// Gracefully degrades to "not available" if the DLL has not been downloaded.
+    #[serde(default)]
+    pub video: bool,
     /// Deep-link URL scheme registration.  `None` = no deep-link support.
     pub deeplink: Option<DeeplinkCapability>,
 }

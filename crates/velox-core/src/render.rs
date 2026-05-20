@@ -12,6 +12,8 @@ pub(crate) struct RenderCtx<'a> {
     pub canvas3d_overlays: &'a mut Vec<(u32, f32, f32, f32, f32)>,
     /// Live camera streams — read-only; latest_image drawn directly via Vello.
     pub camera_streams: &'a std::collections::HashMap<u32, CameraStream>,
+    /// Video playback streams — read-only; latest_image drawn directly via Vello.
+    pub video_streams: &'a std::collections::HashMap<u32, VideoStream>,
     pub cursor_blink_on: bool,
     pub any_cursor_active: &'a mut bool,
 }
@@ -267,6 +269,28 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
                         ctx.frame.pop_layer();
                     } else {
                         // No frame yet — draw a placeholder background.
+                        ctx.frame.fill_rect(rx, ry, rw, rh,
+                            peniko::Color::rgba8(0, 0, 0, 255));
+                    }
+                }
+            }
+        }
+        NodeType::Video => {
+            // Draw the latest decoded video frame. Frames are pushed by the decode thread
+            // at the video's natural FPS via the velox-media DLL decoder.
+            if let Some(handle_id) = node.props.video_handle {
+                if let Some(stream) = ctx.video_streams.get(&handle_id) {
+                    if let Some(img) = &stream.latest_image {
+                        let iw = img.width  as f64;
+                        let ih = img.height as f64;
+                        let sx = rw / iw;
+                        let sy = rh / ih;
+                        let transform = velox_renderer::peniko::kurbo::Affine::new([sx, 0.0, 0.0, sy, rx, ry]);
+                        ctx.frame.push_layer(rx, ry, rw, rh);
+                        ctx.frame.draw_image_with_transform(img, transform);
+                        ctx.frame.pop_layer();
+                    } else {
+                        // No frame yet — draw a black placeholder.
                         ctx.frame.fill_rect(rx, ry, rw, rh,
                             peniko::Color::rgba8(0, 0, 0, 255));
                     }

@@ -25,6 +25,7 @@ import {
   Slider, Select, DatePicker,
   Canvas, Canvas3D,
   ai, camera, microphone, Camera,
+  Video,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
 import { createDrizzle } from '@velox/drizzle';
@@ -2281,7 +2282,7 @@ function AiDemoScreen() {
 
 // ── Screen: Media (Camera + Microphone) ───────────────────────────────────────
 
-const MEDIA_TABS = ['Camera', 'Microphone'];
+const MEDIA_TABS = ['Camera', 'Microphone', 'Video'];
 
 function MediaDemoScreen() {
   const { width: winW } = useWindowSize();
@@ -2352,6 +2353,14 @@ function MediaDemoScreen() {
   const [micPath,    setMicPath]    = useState('');
   const [micError,   setMicError]   = useState('');
 
+  // ── Video tab ─────────────────────────────────────────────────────────────────
+  const vidRef       = React.useRef(null);
+  const [vidSrc,     setVidSrc]     = useState('');
+  const [vidInput,   setVidInput]   = useState('');
+  const [vidStatus,  setVidStatus]  = useState('');
+  const [vidError,   setVidError]   = useState('');
+  const [vidMeta,    setVidMeta]    = useState(null);
+
   async function recordMic() {
     setMicLoading(true); setMicError(''); setMicPath('');
     try {
@@ -2380,11 +2389,11 @@ function MediaDemoScreen() {
 
       {/* ── Camera tab ── */}
       {tab === 0 && (
-        <View style={{ gap: 10, alignItems: 'flex-start' }} width={inner} height={540}>
+        <View style={{ gap: 10, alignItems: 'flex-start' }} width={inner} height={620}>
 
           {/* Live preview */}
           <Camera ref={camRef} mirror={mirror}
-            style={{ width: inner, height: 300, borderRadius: 8, backgroundColor: '#000' }} />
+            style={{ width: inner, height: 400, borderRadius: 8, backgroundColor: '#000' }} />
 
           {/* Controls row 1: start/stop + mirror */}
           <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }} width={inner} height={34}>
@@ -2466,6 +2475,94 @@ function MediaDemoScreen() {
           ) : null}
           {micError ? (
             <Text fontSize={12} width={inner} height={20} style={{ color: C.red }}>{micError}</Text>
+          ) : null}
+        </View>
+      )}
+
+      {/* ── Video tab ── */}
+      {tab === 2 && (
+        <View style={{ gap: 10, alignItems: 'flex-start' }} width={inner} height={620}>
+          <Text fontSize={13} width={inner} height={18} style={{ color: C.dim }}>
+            Pick a video file or type a URL. Requires velox-media DLL.
+          </Text>
+
+          {/* File picker + URL input row */}
+          <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }} width={inner} height={36}>
+            <Pressable
+              onPress={async () => {
+                try {
+                  const paths = await dialog.openFile({
+                    filters: [
+                      { name: 'Video', extensions: ['mp4', 'mkv', 'avi', 'mov', 'webm', 'm4v'] },
+                      { name: 'All files', extensions: ['*'] },
+                    ],
+                  });
+                  if (paths && paths.length > 0) {
+                    setVidError(''); setVidStatus(''); setVidMeta(null);
+                    setVidInput(paths[0]);
+                    setVidSrc(paths[0]);
+                  }
+                } catch (e) { setVidError(String(e)); }
+              }}
+              width={90} height={32}
+              style={{ backgroundColor: C.sapphire, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+              <Text fontSize={13} width={78} height={18} style={{ color: C.bg }}>Browse…</Text>
+            </Pressable>
+            <TextInput
+              value={vidInput}
+              onChange={v => { setVidInput(v); }}
+              placeholder="or paste a URL / path"
+              width={inner - 186} height={32}
+              style={{ backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.border, paddingHorizontal: 8 }}
+            />
+            <Pressable
+              onPress={() => { setVidError(''); setVidStatus(''); setVidMeta(null); setVidSrc(vidInput.trim()); }}
+              width={78} height={32}
+              style={{ backgroundColor: C.accent, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+              <Text fontSize={13} width={66} height={18} style={{ color: C.bg }}>Load</Text>
+            </Pressable>
+          </View>
+
+          {/* Native video node — frames stay in Rust, JS only manages lifecycle */}
+          <Video
+            ref={vidRef}
+            src={vidSrc || undefined}
+            autoPlay
+            loop={false}
+            onMetadata={m => setVidMeta(m)}
+            onEnded={() => setVidStatus('Playback ended')}
+            onError={e => setVidError(String(e))}
+            style={{ width: inner, height: 400, borderRadius: 8, backgroundColor: '#000' }}
+          />
+
+          {/* Seek row */}
+          <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }} width={inner} height={34}>
+            <Text fontSize={12} width={36} height={16} style={{ color: C.dim }}>Seek:</Text>
+            {[0, 10, 30, 60].map(s => (
+              <Pressable key={s} onPress={() => vidRef.current && vidRef.current.seek(s)}
+                width={52} height={30}
+                style={{ backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.border, justifyContent: 'center', alignItems: 'center' }}>
+                <Text fontSize={12} width={40} height={16} style={{ color: C.text }}>{s}s</Text>
+              </Pressable>
+            ))}
+            <Pressable onPress={() => { vidRef.current && vidRef.current.close(); setVidSrc(''); setVidStatus(''); setVidMeta(null); }}
+              width={60} height={30}
+              style={{ backgroundColor: C.red, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+              <Text fontSize={12} width={48} height={16} style={{ color: C.bg }}>Close</Text>
+            </Pressable>
+          </View>
+
+          {/* Metadata / status */}
+          {vidMeta ? (
+            <Text fontSize={11} width={inner} height={16} style={{ color: C.dim }}>
+              {`${vidMeta.width ?? '?'}×${vidMeta.height ?? '?'}  ${vidMeta.fps ?? '?'} fps  ${vidMeta.duration_secs != null ? vidMeta.duration_secs.toFixed(1) + 's' : '?'}`}
+            </Text>
+          ) : null}
+          {vidStatus ? (
+            <Text fontSize={12} width={inner} height={18} style={{ color: C.teal }}>{vidStatus}</Text>
+          ) : null}
+          {vidError ? (
+            <Text fontSize={12} width={inner} height={20} style={{ color: C.red }}>{vidError}</Text>
           ) : null}
         </View>
       )}

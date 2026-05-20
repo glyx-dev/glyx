@@ -59,6 +59,11 @@ pub type RedrawRequest   = Arc<dyn Fn() + Send + Sync>;
 pub type DbPools = Arc<Mutex<HashMap<u32, velox_db::SqlitePool>>>;
 pub fn new_db_pools() -> DbPools { Arc::new(Mutex::new(HashMap::new())) }
 
+/// Shared video event queue — video decode threads push events here;
+/// `__velox_video_poll` drains them; velox-core forwards them each frame.
+pub type VideoEvents = Arc<Mutex<VecDeque<String>>>;
+pub fn new_video_events() -> VideoEvents { Arc::new(Mutex::new(VecDeque::new())) }
+
 /// An input event pushed by the Rust side and consumed by JS via __velox_pollEvents.
 #[derive(Debug, Clone)]
 pub enum InputEvent {
@@ -159,6 +164,7 @@ pub enum NodeType {
     Canvas,
     Canvas3D,
     Camera,
+    Video,
 }
 
 /// All layout + visual props that JS can set on a node.
@@ -249,6 +255,10 @@ pub struct NodeProps {
     pub camera_handle: Option<u32>,
     /// When `true`, draw the camera frame mirrored horizontally (selfie mode).
     pub mirror: Option<bool>,
+    // ── Video ─────────────────────────────────────────────────────────────────
+    /// Handle ID returned by `__velox_video_open`. The render loop maps this
+    /// to a `VideoStream` in `PerWindowState` and renders the current decoded frame.
+    pub video_handle: Option<u32>,
 }
 
 // ── Canvas 2D draw commands ───────────────────────────────────────────────────
@@ -294,6 +304,13 @@ pub enum SceneCommand {
     StartCameraRecord { handle_id: u32, output_path: String },
     /// Stop recording and flush the MP4. Resolves with the final file path.
     StopCameraRecord { handle_id: u32, tx: OneshotSender<Result<String, String>> },
+    // ── Video player ──────────────────────────────────────────────────────────
+    /// Open a video file/URL for playback. velox-core spawns a decode thread.
+    OpenVideo  { handle_id: u32, url: String },
+    /// Seek the video to `seconds`. The decode thread resyncs from the new position.
+    SeekVideo  { handle_id: u32, seconds: f64 },
+    /// Stop playback and release all resources for this video handle.
+    CloseVideo { handle_id: u32 },
 }
 
 // ── Registration ──────────────────────────────────────────────────────────────
@@ -313,6 +330,7 @@ pub fn register_all(
     perf_state:   Arc<Mutex<velox_perf::PerfState>>,
     deeplink_url_queue: Arc<Mutex<VecDeque<String>>>,
     db_pools:     DbPools,
+    video_events: VideoEvents,
     cdp_log_tx:   Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
 ) {
     set_func(scope, global, "__velox_getTime", get_time);
@@ -356,6 +374,8 @@ pub fn register_all(
         audio_events:  Arc::new(Mutex::new(VecDeque::new())),
         next_audio_id:  std::sync::atomic::AtomicU32::new(1),
         next_camera_id: std::sync::atomic::AtomicU32::new(1),
+        next_video_id:  std::sync::atomic::AtomicU32::new(1),
+        video_events,
         hid_api:     Arc::new(Mutex::new(None)),
         hid_devices: Arc::new(Mutex::new(HashMap::new())),
         next_hid_id: std::sync::atomic::AtomicU32::new(1),
@@ -517,6 +537,12 @@ pub fn register_all(
     register!("__velox_microphone_list",     microphone_list_callback);
     register!("__velox_microphone_record",   microphone_record_callback);
 
+    // ── Video player ─────────────────────────────────────────────────────────
+    register!("__velox_video_open",  video_open_callback);
+    register!("__velox_video_seek",  video_seek_callback);
+    register!("__velox_video_close", video_close_callback);
+    register!("__velox_video_poll",  video_poll_callback);
+
     // ── HID devices ──────────────────────────────────────────────────────────
     register!("__velox_hid_enumerate", hid_enumerate_callback);
     register!("__velox_hid_open",      hid_open_callback);
@@ -582,6 +608,11 @@ struct AsyncState {
     // ── Camera ────────────────────────────────────────────────────────────────
     /// Handle ID counter. CameraStream lives in velox-core; we only track IDs here.
     next_camera_id: std::sync::atomic::AtomicU32,
+    // ── Video player ──────────────────────────────────────────────────────────
+    /// Handle ID counter. VideoStream lives in velox-core; we only track IDs here.
+    next_video_id: std::sync::atomic::AtomicU32,
+    /// Events from VideoStream threads: `{"type":"ended","id":N}` / `{"type":"metadata","id":N,...}`.
+    video_events: Arc<Mutex<VecDeque<String>>>,
     // ── Local AI model cache (velox-ai / Candle) ─────────────────────────────
     /// Lazily initialised embedding model. Locked during init, then shared.
     ai_embed_model:    Arc<Mutex<Option<velox_ai::EmbedModel>>>,
@@ -637,6 +668,7 @@ fn parse_node_type(scope: &mut v8::HandleScope, value: v8::Local<v8::Value>) -> 
         "canvas"   => NodeType::Canvas,
         "canvas3d" => NodeType::Canvas3D,
         "camera"   => NodeType::Camera,
+        "video"    => NodeType::Video,
         _          => NodeType::View,
     }
 }
@@ -763,6 +795,7 @@ fn parse_props(
     props.draggable       = get_bool_prop(scope, obj, "draggable");
     props.camera_handle   = get_num_prop(scope, obj, "cameraHandle").map(|v| v as u32);
     props.mirror          = get_bool_prop(scope, obj, "mirror");
+    props.video_handle    = get_num_prop(scope, obj, "videoHandle").map(|v| v as u32);
 
     props
 }
@@ -1905,30 +1938,18 @@ fn clipboard_read_text_callback(
         rv.set(reject_cap_promise(scope, "clipboard").into());
         return;
     }
-    let data  = args.data().unwrap();
-    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
-    let state = unsafe { &*(ext.value() as *const AsyncState) };
-
-    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    // Read synchronously on the V8 thread. clipboard_win calls Win32 OpenClipboard/
+    // GetClipboardData which require a thread with a message pump — the main thread
+    // qualifies, but spawn_blocking worker threads do not (causes silent failures when
+    // pasting from external apps). The clipboard read is ~0ms so blocking is fine.
+    let text = clipboard_win::get_clipboard::<String, _>(clipboard_win::formats::Unicode)
+        .unwrap_or_else(|e| { log::warn!("[clipboard] read failed: {e}"); String::new() });
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise  = resolver.get_promise(scope);
+    let v8_str   = v8::String::new(scope, &text)
+        .unwrap_or_else(|| v8::String::new(scope, "").unwrap());
+    resolver.resolve(scope, v8_str.into());
     rv.set(promise.into());
-
-    state.tokio.spawn(async move {
-        log::info!("[clipboard_readText] starting");
-        let result: Result<String, String> = tokio::task::spawn_blocking(|| {
-            log::info!("[clipboard_readText::spawn_blocking] about to read clipboard");
-            let res = clipboard_win::get_clipboard::<String, _>(clipboard_win::formats::Unicode);
-            log::info!("[clipboard_readText::spawn_blocking] result: {:?}", res);
-            res.map_err(|e| e.to_string())
-        })
-        .await
-        .map_err(|e| {
-            log::error!("[clipboard_readText::await_error] {}", e);
-            e.to_string()
-        })
-        .and_then(|r| r);
-        log::info!("[clipboard_readText] final result: {:?}", result);
-        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
-    });
 }
 
 /// `__velox_clipboard_writeText(text) -> Promise<void>`
@@ -1941,34 +1962,16 @@ fn clipboard_write_text_callback(
         rv.set(reject_cap_promise(scope, "clipboard").into());
         return;
     }
-    let data  = args.data().unwrap();
-    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
-    let state = unsafe { &*(ext.value() as *const AsyncState) };
-
-    let text = v8_arg_to_string(scope, &args, 0);
-    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    let text     = v8_arg_to_string(scope, &args, 0);
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise  = resolver.get_promise(scope);
+    // Write synchronously — same reason as readText (Win32 clipboard needs message pump thread).
+    if let Err(e) = clipboard_win::set_clipboard(clipboard_win::formats::Unicode, &text) {
+        log::warn!("[clipboard] write failed: {e}");
+    }
+    let undef = v8::undefined(scope);
+    resolver.resolve(scope, undef.into());
     rv.set(promise.into());
-
-    state.tokio.spawn(async move {
-        log::info!("[clipboard_writeText] starting, text.len()={}", text.len());
-        let result: Result<String, String> = tokio::task::spawn_blocking(move || {
-            log::info!("[clipboard_writeText::spawn_blocking] setting clipboard");
-            clipboard_win::set_clipboard(clipboard_win::formats::Unicode, &text)
-                .map_err(|e| {
-                    log::error!("[clipboard_writeText] set_clipboard failed: {}", e);
-                    e.to_string()
-                })
-                .map(|_| String::new())
-        })
-        .await
-        .map_err(|e| {
-            log::error!("[clipboard_writeText] spawn_blocking error: {}", e);
-            e.to_string()
-        })
-        .and_then(|r| r);
-        log::info!("[clipboard_writeText] final result: {:?}", result);
-        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
-    });
 }
 
 // ── Notification callback ──────────────────────────────────────────────────────
@@ -4332,6 +4335,113 @@ fn updater_update_callback(
         }).await.map_err(|e| e.to_string()).and_then(|r| r);
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
+}
+
+// ── Video player bindings ─────────────────────────────────────────────────────
+
+/// `__velox_video_open(url) → Promise<handleId: string>`
+///
+/// Opens a video file or URL for playback. velox-core spawns a decode thread via
+/// the velox-media DLL. Gracefully degrades: if the DLL is unavailable the promise
+/// rejects with `"VeloxMediaNotAvailable"`.
+/// Requires `video: true` in velox.config.json.
+fn video_open_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().video {
+        rv.set(reject_cap_promise(scope, "video").into()); return;
+    }
+
+    let url       = v8_arg_to_string(scope, &args, 0);
+    let handle_id = state.next_video_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let scene     = Arc::clone(&state.scene);
+
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            // Verify the DLL is available before pushing the scene command.
+            if velox_media::get_media().is_none() {
+                return Err("VeloxMediaNotAvailable: velox-media DLL not loaded. \
+                    Run `velox runtime build` to download and cache the media DLL.".to_string());
+            }
+            scene.lock().unwrap().push_back(SceneCommand::OpenVideo { handle_id, url });
+            Ok(handle_id.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_video_seek(handleId: string, seconds: number)` — sync
+///
+/// Seeks the video to `seconds`. No-op if the handle is not active.
+fn video_seek_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle_id = v8_arg_to_string(scope, &args, 0)
+        .parse::<u32>().unwrap_or(0);
+    let seconds   = args.get(1).number_value(scope).unwrap_or(0.0);
+
+    state.scene.lock().unwrap()
+        .push_back(SceneCommand::SeekVideo { handle_id, seconds });
+}
+
+/// `__velox_video_close(handleId: string)` — sync
+///
+/// Stops playback and releases all resources for this video handle.
+fn video_close_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle_id = v8_arg_to_string(scope, &args, 0)
+        .parse::<u32>().unwrap_or(0);
+
+    state.scene.lock().unwrap()
+        .push_back(SceneCommand::CloseVideo { handle_id });
+}
+
+/// `__velox_video_poll() → JSON`
+///
+/// Returns a JSON array of pending video events since the last poll.
+/// Each event: `{type:"ended",id:N}` or `{type:"metadata",id:N,width:W,height:H,fps:F,durationSecs:D}`.
+/// Called each frame from JS (inside `__velox_frameCallback`).
+fn video_poll_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let _ = args; // no arguments
+
+    let mut events = state.video_events.lock().unwrap();
+    let json = if events.is_empty() {
+        "[]".to_string()
+    } else {
+        let items: Vec<_> = events.drain(..).collect();
+        format!("[{}]", items.join(","))
+    };
+    let s = v8::String::new(scope, &json).unwrap();
+    rv.set(s.into());
 }
 
 /// Throw a generic JS Error with the given message.

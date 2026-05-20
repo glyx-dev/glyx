@@ -216,6 +216,7 @@ globalThis.__velox_frameCallback = function veloxFrameCallback() {
     _pollPerfViolations();
     _pollLeakWarnings();
     _pollAudio();
+    _pollVideo();
     dispatchEvents();
   });
 };
@@ -1897,6 +1898,54 @@ export const updater = {
   },
 };
 
+// ── Video API ─────────────────────────────────────────────────────────────────
+//
+// Low-level bindings for the velox-media DLL decoder.
+// Requires `video: true` in velox.config.json.
+// For a ready-made component, use the `<Video>` component (Phase 16H v3).
+//
+// Usage:
+//   const handleId = await video.open('/path/to/movie.mp4');
+//   // pass handleId as `videoHandle` prop to a <View nodeType="video"> node
+//   video.seek(handleId, 30.0);  // jump to 30 seconds
+//   video.close(handleId);
+
+// Internal: video event listeners
+const _videoCallbacks = new Map(); // handleId → { onEnded, onMetadata, onError }
+function _pollVideo() {
+  const events = JSON.parse(__velox_video_poll());
+  for (const ev of events) {
+    const cbs = _videoCallbacks.get(ev.id);
+    if (!cbs) continue;
+    if (ev.type === 'ended' && cbs.onEnded) cbs.onEnded();
+    else if (ev.type === 'metadata' && cbs.onMetadata) cbs.onMetadata(ev);
+    else if (ev.type === 'error' && cbs.onError) cbs.onError(ev.message);
+  }
+}
+
+export const video = {
+  /**
+   * Open a video file or URL for playback.
+   * @param {string} url  Local path or network URL supported by ffmpeg.
+   * @param {{ onEnded?: ()=>void, onMetadata?: (m:object)=>void, onError?: (msg:string)=>void }} opts
+   * @returns {Promise<number>} Resolves with the video handle ID.
+   */
+  async open(url, { onEnded, onMetadata, onError } = {}) {
+    const handleId = parseInt(await __velox_video_open(url));
+    _videoCallbacks.set(handleId, { onEnded, onMetadata, onError });
+    return handleId;
+  },
+  /** Seek to `seconds` in the currently playing video. */
+  seek(handleId, seconds) {
+    __velox_video_seek(String(handleId), seconds);
+  },
+  /** Close and release the video handle. */
+  close(handleId) {
+    __velox_video_close(String(handleId));
+    _videoCallbacks.delete(handleId);
+  },
+};
+
 // ── Camera component ──────────────────────────────────────────────────────────
 //
 // Renders a live camera preview as a native node — frames NEVER cross the JS
@@ -1949,6 +1998,75 @@ export const Camera = React.forwardRef(function Camera({ mirror, style, ...rest 
   return React.createElement('camera', {
     cameraHandle: cameraHandle,
     mirror: mirror === true,
+    style,
+    ...rest,
+  });
+});
+
+// ── Video component ───────────────────────────────────────────────────────────
+//
+// Renders a video file / URL as a native node — frames NEVER cross the JS
+// bridge. Requires `video: true` in velox.config.json AND the velox-media DLL
+// to be present in ~/.velox/cache/media/.
+//
+// Usage:
+//   const vidRef = useRef();
+//   <Video ref={vidRef} src="/path/to/movie.mp4"
+//          style={{ width: 640, height: 360 }}
+//          onEnded={() => console.log('done')} />
+//   await vidRef.current.seek(30);   // jump to 30 s
+//   vidRef.current.close();          // release handle early
+
+export const Video = React.forwardRef(function Video(
+  { src, autoPlay = true, loop = false, onEnded, onMetadata, onError, style, ...rest },
+  ref
+) {
+  const [videoHandle, setVideoHandle] = React.useState(null);
+
+  // Open / close whenever src changes
+  React.useEffect(() => {
+    if (!src) return;
+    let handle = null;
+    let cancelled = false;
+    video.open(src, {
+      onEnded:    loop ? () => { if (handle !== null) video.seek(handle, 0); } : onEnded,
+      onMetadata,
+      onError,
+    }).then(h => {
+      if (cancelled) { video.close(h); return; }
+      handle = h;
+      setVideoHandle(h);
+    }).catch(e => {
+      if (onError) onError(e instanceof Error ? e.message : String(e));
+    });
+    return () => {
+      cancelled = true;
+      if (handle !== null) {
+        video.close(handle);
+        handle = null;
+        setVideoHandle(null);
+      }
+    };
+  }, [src]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  React.useImperativeHandle(ref, () => ({
+    /** Current video handle (null when not open). */
+    get handle() { return videoHandle; },
+    /** Seek to the given time in seconds. */
+    seek(seconds) {
+      if (videoHandle !== null) video.seek(videoHandle, seconds);
+    },
+    /** Close the video early (src change also closes automatically). */
+    close() {
+      if (videoHandle !== null) {
+        video.close(videoHandle);
+        setVideoHandle(null);
+      }
+    },
+  }), [videoHandle]);
+
+  return React.createElement('video', {
+    videoHandle: videoHandle,
     style,
     ...rest,
   });

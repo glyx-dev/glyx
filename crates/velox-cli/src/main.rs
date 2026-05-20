@@ -267,6 +267,12 @@ fn velox_config_ts_template(name: &str) -> String {
     format!(r#"import {{ defineConfig }} from '@velox/config';
 
 export default defineConfig({{
+  app: {{
+    version:     '1.0.0',
+    publisher:   '',        // Company or author name (used in installer)
+    description: '',        // Short app description
+    website:     '',        // https://yoursite.com
+  }},
   window: {{
     title:       '{name}',
     width:       1280,
@@ -325,6 +331,9 @@ fn cmd_dev(inspect: Option<u16>) -> Result<()> {
         log::info!("Using runner: {}", runner.display());
         let mut cmd = Command::new(&runner);
         cmd.env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()));
+        // In dev mode, allow locally-built media DLLs with stub signatures.
+        // Production runners verify the Ed25519 signature; dev runners skip it.
+        cmd.env("VELOX_MEDIA_SKIP_VERIFY", "1");
         if let Some(port) = inspect {
             cmd.env("VELOX_INSPECT_PORT", port.to_string());
         }
@@ -838,6 +847,9 @@ fn package_windows(name: &str, bin: &Path) -> Result<()> {
     let exe_dest = app_dir.join(&exe_name);
     std::fs::copy(bin, &exe_dest).with_context(|| format!("copy {}", bin.display()))?;
     copy_runtime_files(&app_dir)?;
+    copy_media_dll_if_needed(&app_dir)?;
+    let win_meta = read_app_metadata();
+    install_license_files(&app_dir.join("LICENSES"), win_meta.license.as_deref())?;
 
     // Generate icon.ico from app icon PNG if declared in velox.config.json.
     if let Some(icon_png) = read_icon_path() {
@@ -933,6 +945,9 @@ fn package_macos(name: &str, bin: &Path) -> Result<()> {
 </dict>
 </plist>"#);
     write_file(bundle_root.join("Contents/Info.plist"), &plist)?;
+    copy_media_dll_if_needed(&app_dir)?;
+    let macos_meta = read_app_metadata();
+    install_license_files(&res_dir.join("LICENSES"), macos_meta.license.as_deref())?;
     println!("✓ Package: {}", bundle_root.display());
     Ok(())
 }
@@ -980,6 +995,9 @@ fn package_linux(name: &str, bin: &Path) -> Result<()> {
             println!("✓ Binary: {dest}");
         }
     }
+    copy_media_dll_if_needed(&PathBuf::from("target/velox/dist"))?;
+    let linux_meta = read_app_metadata();
+    install_license_files(&PathBuf::from("target/velox/dist/LICENSES"), linux_meta.license.as_deref())?;
     Ok(())
 }
 
@@ -991,6 +1009,7 @@ fn installer_windows(name: &str, bin: &Path) -> Result<()> {
     // First build the portable folder so Inno has something to package.
     package_windows(name, bin)?;
 
+    let meta       = read_app_metadata();
     let app_dir    = PathBuf::from(format!("target/velox/dist/{name}-windows"));
     let exe_name   = binary_name(name);
     let out_dir    = PathBuf::from("target/velox/dist");
@@ -1004,19 +1023,37 @@ fn installer_windows(name: &str, bin: &Path) -> Result<()> {
     } else {
         String::new()
     };
+    let publisher_line = if meta.publisher.is_empty() {
+        String::new()
+    } else {
+        format!("AppPublisher={}\n", meta.publisher)
+    };
+    let website_line = if meta.website.is_empty() {
+        String::new()
+    } else {
+        format!("AppPublisherURL={}\nAppSupportURL={}\nAppUpdatesURL={}\n",
+            meta.website, meta.website, meta.website)
+    };
+    // License file for Inno Setup EULA screen (app license takes priority if present).
+    let license_line = {
+        let app_lic   = app_dir.join("LICENSES/app.txt");
+        let velox_lic = app_dir.join("LICENSES/velox.txt");
+        let lic = if app_lic.exists() { app_lic } else { velox_lic };
+        if lic.exists() { format!("LicenseFile={}\n", lic.display()) } else { String::new() }
+    };
 
     let iss = format!(
 r#"[Setup]
 AppName={name}
-AppVersion=1.0
-DefaultDirName={{autopf}}\{name}
+AppVersion={version}
+{publisher_line}{website_line}DefaultDirName={{autopf}}\{name}
 DefaultGroupName={name}
 OutputDir={out_dir}
 OutputBaseFilename={name}-Setup
 Compression=lzma
 SolidCompression=yes
 DisableProgramGroupPage=yes
-{setup_icon_line}
+{setup_icon_line}{license_line}
 [Files]
 Source: "{app_dir}\{exe_name}"; DestDir: "{{app}}"; Flags: ignoreversion
 Source: "{app_dir}\*"; DestDir: "{{app}}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "{exe_name}"
@@ -1032,10 +1069,14 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Filename: "{{app}}\{exe_name}"; Description: "Launch {name}"; Flags: nowait postinstall skipifsilent
 "#,
         name            = name,
+        version         = meta.version,
+        publisher_line  = publisher_line,
+        website_line    = website_line,
         exe_name        = exe_name,
         app_dir         = app_dir.display(),
         out_dir         = out_dir.display(),
         setup_icon_line = setup_icon_line,
+        license_line    = license_line,
     );
 
     std::fs::write(&iss_path, &iss)?;
@@ -1104,6 +1145,7 @@ fn installer_macos(name: &str, bin: &Path) -> Result<()> {
 /// Linux AppImage via appimagetool.
 /// Falls back to tar.gz with instructions if appimagetool is not in PATH.
 fn installer_linux(name: &str, bin: &Path) -> Result<()> {
+    let meta     = read_app_metadata();
     let dist     = PathBuf::from("target/velox/dist");
     let app_dir  = dist.join(format!("{name}.AppDir"));
     let usr_bin  = app_dir.join("usr/bin");
@@ -1123,10 +1165,16 @@ fn installer_linux(name: &str, bin: &Path) -> Result<()> {
         std::fs::set_permissions(&apprun_path, std::fs::Permissions::from_mode(0o755))?;
     }
 
-    // Minimal desktop file (required by appimagetool)
+    // .desktop file (required by appimagetool)
+    let comment_line = if meta.description.is_empty() {
+        String::new()
+    } else {
+        format!("Comment={}\n", meta.description)
+    };
     let desktop = format!(
         "[Desktop Entry]\nType=Application\nName={name}\nExec={name}\nIcon={name}\n\
-         Categories=Utility;\n"
+         {comment_line}Categories=Utility;\n",
+        name = name, comment_line = comment_line,
     );
     std::fs::write(app_dir.join(format!("{name}.desktop")), desktop)?;
 
@@ -1393,6 +1441,94 @@ fn read_icon_path() -> Option<String> {
     cfg.icon
 }
 
+/// Publisher / product metadata read from the `app` section of velox.config.
+#[derive(Default)]
+struct AppMeta {
+    version:     String,
+    publisher:   String,
+    description: String,
+    website:     String,
+    /// Path to the app's own license file (relative to project root), e.g. "LICENSE.txt".
+    license:     Option<String>,
+}
+
+fn read_app_metadata() -> AppMeta {
+    #[derive(serde::Deserialize, Default)]
+    struct AppSection {
+        version:     Option<String>,
+        publisher:   Option<String>,
+        description: Option<String>,
+        website:     Option<String>,
+        license:     Option<String>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Cfg { app: Option<AppSection> }
+
+    let src  = resolve_config_json().unwrap_or_default();
+    let cfg: Cfg = serde_json::from_str(&src).unwrap_or_default();
+    let a = cfg.app.unwrap_or_default();
+    AppMeta {
+        version:     a.version.unwrap_or_else(|| "1.0.0".into()),
+        publisher:   a.publisher.unwrap_or_default(),
+        description: a.description.unwrap_or_default(),
+        website:     a.website.unwrap_or_default(),
+        license:     a.license,
+    }
+}
+
+/// The Velox framework MIT license — always included in the installation folder.
+const VELOX_LICENSE_TEXT: &str = "\
+MIT License
+
+Copyright (c) 2024 Velox Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the \"Software\"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+";
+
+/// Write license files into `licenses_dir` (created if needed).
+/// Always writes `velox.txt`. Copies the app license as `app.txt` if specified.
+/// Returns the path to the primary license file to show in the installer EULA screen
+/// (app license takes priority over the Velox license).
+fn install_license_files(licenses_dir: &Path, app_license: Option<&str>) -> Result<PathBuf> {
+    std::fs::create_dir_all(licenses_dir)?;
+
+    // Velox framework license — always present
+    let velox_lic = licenses_dir.join("velox.txt");
+    std::fs::write(&velox_lic, VELOX_LICENSE_TEXT)?;
+    println!("  License (Velox): {}", velox_lic.display());
+
+    // App license — optional
+    if let Some(src) = app_license {
+        let src_path = Path::new(src);
+        if src_path.exists() {
+            let app_lic = licenses_dir.join("app.txt");
+            std::fs::copy(src_path, &app_lic)?;
+            println!("  License (App):   {}", app_lic.display());
+            return Ok(app_lic);  // App license is shown as EULA
+        } else {
+            println!("  Warning: app.license '{src}' not found — only Velox license included");
+        }
+    }
+
+    Ok(velox_lic)  // Fall back to Velox license for EULA screen
+}
+
 /// Convert a PNG file to a multi-size `.ico` file (16, 32, 48, 256 px).
 /// Returns the path to the generated `.ico`, or `None` if the source PNG is missing.
 fn png_to_ico(png_path: &str, out_path: &Path) -> Result<()> {
@@ -1561,6 +1697,47 @@ fn copy_runtime_files(dest_root: &Path) -> Result<()> {
     if assets_dir.exists() { copy_dir_all(&assets_dir, &dest_root.join("assets"))?; }
     let migrations_dir = PathBuf::from("migrations");
     if migrations_dir.exists() { copy_dir_all(&migrations_dir, &dest_root.join("migrations"))?; }
+    Ok(())
+}
+
+/// Copy the cached velox-media DLL into `dest_root` when `video: true` is declared
+/// in velox.config.json. Logs a warning if the DLL has not been downloaded yet.
+fn copy_media_dll_if_needed(dest_root: &Path) -> Result<()> {
+    // Check if video capability is declared.
+    let config_str = std::fs::read_to_string("velox.config.json").unwrap_or_default();
+    let video_enabled: bool = serde_json::from_str::<serde_json::Value>(&config_str)
+        .ok()
+        .and_then(|v| v.get("video").and_then(|b| b.as_bool()))
+        .unwrap_or(false);
+    if !video_enabled { return Ok(()); }
+
+    // Locate the cached DLL at ~/.velox/cache/media/velox-media-{version}-{platform}-{arch}.{ext}
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    let version = "1.0.0";
+    let platform = if cfg!(target_os = "windows") { "windows" }
+                   else if cfg!(target_os = "macos") { "macos" }
+                   else { "linux" };
+    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
+    let ext  = if cfg!(target_os = "windows") { "dll" }
+               else if cfg!(target_os = "macos") { "dylib" }
+               else { "so" };
+    let stem = format!("velox-media-{version}-{platform}-{arch}");
+    let dll_path = PathBuf::from(&home)
+        .join(".velox").join("cache").join("media")
+        .join(format!("{stem}.{ext}"));
+
+    if !dll_path.exists() {
+        println!("  ⚠ velox-media DLL not found at {}", dll_path.display());
+        println!("    Video features require the DLL. Run: velox runtime install-media");
+        return Ok(());
+    }
+
+    let dest = dest_root.join(format!("{stem}.{ext}"));
+    std::fs::copy(&dll_path, &dest)
+        .with_context(|| format!("copy velox-media DLL → {}", dest.display()))?;
+    println!("  Media DLL: {}", dest.display());
     Ok(())
 }
 

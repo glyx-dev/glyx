@@ -6,9 +6,9 @@ use tokio::runtime::Handle;
 use crate::{
     bindings::{
         new_completion_queue, new_event_queue, new_layout_cache, new_scene_queue,
-        new_ipc_bus, new_db_pools, register_all,
+        new_ipc_bus, new_db_pools, new_video_events, register_all,
         CompletionQueue, DbPools, EventQueue, InputEvent, IpcBus, LayoutCache, SceneCommand,
-        SceneQueue, WindowController,
+        SceneQueue, VideoEvents, WindowController,
     },
     runtime_trait::JsRuntime,
     RuntimeError, VeloxExtension,
@@ -58,6 +58,8 @@ pub struct V8Runtime {
     pub deeplink_url_queue: Arc<std::sync::Mutex<VecDeque<String>>>,
     /// Shared SQLite pool map. Cleared on window close for graceful shutdown.
     pub db_pools: DbPools,
+    /// Video events pushed by decode threads and forwarded to JS via `__velox_video_poll`.
+    pub video_events: VideoEvents,
 }
 
 pub struct HeapStats {
@@ -100,6 +102,7 @@ impl V8Runtime {
         let layout_cache       = new_layout_cache();
         let deeplink_url_queue = Arc::new(std::sync::Mutex::new(VecDeque::new()));
         let db_pools           = new_db_pools();
+        let video_events       = new_video_events();
         let cdp_log_tx         = Arc::new(std::sync::Mutex::new(None::<tokio::sync::mpsc::UnboundedSender<String>>));
 
         // Clone handle before moving into register_all; keep one for inspector.
@@ -128,6 +131,7 @@ impl V8Runtime {
                 Arc::clone(&perf_state),
                 Arc::clone(&deeplink_url_queue),
                 Arc::clone(&db_pools),
+                Arc::clone(&video_events),
                 Arc::clone(&cdp_log_tx),
             );
 
@@ -145,7 +149,7 @@ impl V8Runtime {
             #[cfg(feature = "dev")]
             inspector,
             isolate, context, queue, scene, events, layout_cache,
-            perf_state, deeplink_url_queue, db_pools,
+            perf_state, deeplink_url_queue, db_pools, video_events,
         }
     }
 
@@ -185,6 +189,7 @@ impl V8Runtime {
         let layout_cache       = new_layout_cache();
         let deeplink_url_queue = Arc::new(std::sync::Mutex::new(VecDeque::new()));
         let db_pools           = new_db_pools();
+        let video_events       = new_video_events();
         let cdp_log_tx         = Arc::new(std::sync::Mutex::new(None::<tokio::sync::mpsc::UnboundedSender<String>>));
 
         // Clone handle before moving into register_all; keep one for inspector.
@@ -216,6 +221,7 @@ impl V8Runtime {
                 Arc::clone(&perf_state),
                 Arc::clone(&deeplink_url_queue),
                 Arc::clone(&db_pools),
+                Arc::clone(&video_events),
                 Arc::clone(&cdp_log_tx),
             );
 
@@ -232,7 +238,7 @@ impl V8Runtime {
             #[cfg(feature = "dev")]
             inspector,
             isolate, context, queue, scene, events, layout_cache,
-            perf_state, deeplink_url_queue, db_pools,
+            perf_state, deeplink_url_queue, db_pools, video_events,
         })
     }
 

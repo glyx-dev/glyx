@@ -1,0 +1,19 @@
+# ── Compiled output ──────────────────────────────────────────────────────────
+*.dll
+*.so
+*.dylib
+*.exp
+*.lib
+*.pdb
+
+# ── Build intermediates ───────────────────────────────────────────────────────
+obj-windows/
+obj-macos/
+obj-linux/
+
+# ── Downloaded ffmpeg (re-downloaded automatically by build scripts) ──────────
+ffmpeg-windows-x64/
+ffmpeg-macos-x64/
+ffmpeg-macos-arm64/
+ffmpeg-linux-x64/
+ffmpeg-linux-arm64/

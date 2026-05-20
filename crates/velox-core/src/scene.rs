@@ -292,27 +292,47 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
             }
             SceneCommand::StartCameraRecord { handle_id, output_path } => {
                 if let Some(stream) = state.camera_streams.get_mut(&handle_id) {
-                    // Bounded channel: at most 4 buffered frames so we don't OOM on slow ffmpeg.
+                    // Bounded channel: at most 4 buffered frames so we don't OOM on slow encoder.
                     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(u32, u32, Vec<u8>)>(4);
                     let (done_tx, done_rx)   = std::sync::mpsc::channel::<Result<String, String>>();
                     *stream.record_frame_tx.lock().unwrap() = Some(frame_tx);
                     stream.record_done_rx = Some(done_rx);
 
-                    // Spawn the ffmpeg recording thread.
                     std::thread::spawn(move || {
-                        use std::process::{Command, Stdio};
-                        use std::io::Write;
-
                         // Wait for the first frame to learn dimensions.
                         let (w, h, first_data) = match frame_rx.recv() {
                             Ok(f)  => f,
                             Err(_) => { let _ = done_tx.send(Err("no frames received".to_string())); return; }
                         };
 
-                        // Resolve ffmpeg binary: FFMPEG_PATH env > PATH > common Windows installs.
-                        let ffmpeg_bin = find_ffmpeg();
+                        // ── Try velox-media DLL encoder first ────────────────────────────────
+                        if let Some(media) = velox_media::get_media() {
+                            match media.encoder_open(&output_path, w, h, 30) {
+                                Ok(enc) => {
+                                    let ok = media.encoder_write_rgba(&enc, &first_data).is_ok()
+                                        && frame_rx.iter().all(|(_, _, data)| {
+                                            media.encoder_write_rgba(&enc, &data).is_ok()
+                                        });
+                                    media.encoder_close(enc);
+                                    let result = if ok {
+                                        Ok(output_path)
+                                    } else {
+                                        Err("velox-media encoder write failed".to_string())
+                                    };
+                                    let _ = done_tx.send(result);
+                                    return;
+                                }
+                                Err(e) => {
+                                    log::warn!("[camera] velox-media encoder unavailable: {e}, falling back to ffmpeg");
+                                }
+                            }
+                        }
 
-                        // Spawn ffmpeg: read raw RGBA from stdin, write H.264 MP4.
+                        // ── Fallback: subprocess ffmpeg ───────────────────────────────────────
+                        use std::process::{Command, Stdio};
+                        use std::io::Write;
+
+                        let ffmpeg_bin = find_ffmpeg();
                         let child = Command::new(&ffmpeg_bin)
                             .args([
                                 "-y",
@@ -345,7 +365,6 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         };
 
                         let mut stdin = child.stdin.take().unwrap();
-                        // Write first frame, then drain the channel.
                         let _ = stdin.write_all(&first_data);
                         while let Ok((_, _, data)) = frame_rx.recv() {
                             if stdin.write_all(&data).is_err() { break; }
@@ -379,9 +398,154 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     let _ = tx.0.send(Err(format!("camera handle {handle_id} not found")));
                 }
             }
+
+            // ── Video player ──────────────────────────────────────────────────
+            SceneCommand::OpenVideo { handle_id, url } => {
+                let frame_buf = Arc::new(Mutex::new(None::<(u32, u32, Vec<u8>)>));
+                let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let (seek_tx, seek_rx) = std::sync::mpsc::sync_channel::<f64>(4);
+                let events    = Arc::new(Mutex::new(std::collections::VecDeque::<String>::new()));
+
+                // Open audio BEFORE the thread spawn which moves `url`.
+                let (audio_sink, _audio_stream) = open_video_audio(&url);
+
+                let buf_clone   = Arc::clone(&frame_buf);
+                let stop_clone  = Arc::clone(&stop_flag);
+                let ev_clone    = Arc::clone(&events);
+
+                std::thread::spawn(move || {
+                    let media = match velox_media::get_media() {
+                        Some(m) => m,
+                        None => {
+                            let msg = format!(
+                                r#"{{"type":"error","id":{handle_id},"message":"VeloxMediaNotAvailable"}}"#
+                            );
+                            ev_clone.lock().unwrap().push_back(msg);
+                            return;
+                        }
+                    };
+
+                    let dec = match media.decoder_open(&url) {
+                        Ok(d)  => d,
+                        Err(e) => {
+                            let msg = format!(
+                                r#"{{"type":"error","id":{handle_id},"message":{}}}"#,
+                                serde_json::to_string(&e).unwrap_or_else(|_| format!("\"{e}\""))
+                            );
+                            ev_clone.lock().unwrap().push_back(msg);
+                            return;
+                        }
+                    };
+
+                    let (w, h, fps) = (dec.width, dec.height, dec.fps);
+                    let rgba_size   = (w * h * 4) as usize;
+                    let meta_msg = format!(
+                        r#"{{"type":"metadata","id":{handle_id},"width":{w},"height":{h},"fps":{fps:.3}}}"#
+                    );
+                    ev_clone.lock().unwrap().push_back(meta_msg);
+
+                    let frame_interval = std::time::Duration::from_secs_f64(1.0 / fps.max(1.0));
+                    let mut rgba_buf   = vec![0u8; rgba_size];
+
+                    loop {
+                        if stop_clone.load(std::sync::atomic::Ordering::Relaxed) { break; }
+
+                        // Handle seek requests (non-blocking drain).
+                        while let Ok(secs) = seek_rx.try_recv() {
+                            media.decoder_seek(&dec, secs);
+                        }
+
+                        match media.decoder_next_frame(&dec, &mut rgba_buf) {
+                            Ok(Some(_pts)) => {
+                                *buf_clone.lock().unwrap() = Some((w, h, rgba_buf.clone()));
+                            }
+                            Ok(None) => {
+                                // End of stream.
+                                let msg = format!(r#"{{"type":"ended","id":{handle_id}}}"#);
+                                ev_clone.lock().unwrap().push_back(msg);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+
+                        std::thread::sleep(frame_interval);
+                    }
+
+                    media.decoder_close(dec);
+                });
+
+                state.video_streams.insert(handle_id, VideoStream {
+                    frame_buf,
+                    stop_flag,
+                    seek_tx,
+                    events,
+                    latest_image: None,
+                    audio_sink,
+                    _audio_stream,
+                });
+            }
+
+            SceneCommand::SeekVideo { handle_id, seconds } => {
+                if let Some(stream) = state.video_streams.get(&handle_id) {
+                    let _ = stream.seek_tx.try_send(seconds);
+                    // Audio seek requires rodio 0.18+; skip for now (audio continues from
+                    // current position). Seeking to 0 restarts audio to minimize drift.
+                    if seconds == 0.0 {
+                        if let Some(sink) = &stream.audio_sink {
+                            sink.stop();  // stops this source; audio will be silent after seek to 0
+                        }
+                    }
+                }
+            }
+
+            SceneCommand::CloseVideo { handle_id } => {
+                if let Some(stream) = state.video_streams.remove(&handle_id) {
+                    stream.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
         }
     }
     if layout_changed   { state.layout_dirty           = true; }
     if structure_changed { state.layout_structure_dirty = true; }
     true
+}
+
+/// Try to open the audio track of a local video file via rodio.
+/// Returns `(None, None)` for network URLs or if no audio is found.
+fn open_video_audio(url: &str) -> (Option<rodio::Sink>, Option<rodio::OutputStream>) {
+    // Only handle local paths / file:// URIs
+    let path = if url.starts_with("file:///") {
+        url.trim_start_matches("file:///")
+    } else if url.starts_with("file://") {
+        url.trim_start_matches("file://")
+    } else if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("rtsp://") {
+        return (None, None);
+    } else {
+        url
+    };
+
+    let file = match std::fs::File::open(path) {
+        Ok(f)  => f,
+        Err(e) => { log::debug!("[video-audio] cannot open {path}: {e}"); return (None, None); }
+    };
+
+    let (stream, handle) = match rodio::OutputStream::try_default() {
+        Ok(pair) => pair,
+        Err(e)   => { log::warn!("[video-audio] no audio output device: {e}"); return (None, None); }
+    };
+
+    let sink = match rodio::Sink::try_new(&handle) {
+        Ok(s)  => s,
+        Err(e) => { log::warn!("[video-audio] cannot create sink: {e}"); return (None, None); }
+    };
+
+    let source = match rodio::Decoder::new(std::io::BufReader::new(file)) {
+        Ok(s)  => s,
+        Err(e) => { log::debug!("[video-audio] no decodable audio track: {e}"); return (None, None); }
+    };
+
+    sink.append(source);
+    sink.play();
+    log::debug!("[video-audio] audio playing for {path}");
+    (Some(sink), Some(stream))
 }

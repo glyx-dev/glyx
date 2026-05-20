@@ -70,6 +70,7 @@ use velox_runtime::{
 
 pub use velox_runtime::VeloxExtension;
 use velox_security::Capabilities;
+use velox_media;
 use velox_shell::{ShellEvent, VeloxUserEvent};
 use velox_text::{TextLayout, TextSystem};
 use velox_layout::NodeId;
@@ -481,6 +482,27 @@ struct CameraStream {
     record_done_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
 }
 
+/// Live video playback stream. Owned by `PerWindowState`.
+/// The decode thread reads frames from the velox-media DLL and writes RGBA frames
+/// into `frame_buf`; the main render loop consumes them and builds a `peniko::Image`.
+struct VideoStream {
+    /// Latest decoded RGBA frame: (width, height, raw_bytes). `take()`d by the render loop.
+    frame_buf:    Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>,
+    /// Signal the decode thread to stop.
+    stop_flag:    Arc<std::sync::atomic::AtomicBool>,
+    /// Send seek-to-seconds requests to the decode thread.
+    seek_tx:      std::sync::mpsc::SyncSender<f64>,
+    /// Pending events (ended, metadata). Drained into velox-runtime's video_events each frame.
+    events:       Arc<Mutex<std::collections::VecDeque<String>>>,
+    /// Most recent peniko::Image built from the decoded frame. Used by render.rs.
+    latest_image: Option<peniko::Image>,
+    /// Audio sink — plays the audio track in parallel with the video decode thread.
+    /// `None` if no audio track, the file is a network URL, or rodio init failed.
+    audio_sink:    Option<rodio::Sink>,
+    /// Keeps the audio output device alive for the lifetime of this stream.
+    _audio_stream: Option<rodio::OutputStream>,
+}
+
 /// Per-window rendering + runtime state.
 /// One instance per open window; keyed by `window_handle` (0 = main window).
 struct PerWindowState {
@@ -535,6 +557,8 @@ struct PerWindowState {
     renderer_3d: Option<velox_3d::Renderer3D>,
     /// Live camera streams keyed by velox handle ID.
     camera_streams: std::collections::HashMap<u32, CameraStream>,
+    /// Video playback streams keyed by velox handle ID.
+    video_streams: std::collections::HashMap<u32, VideoStream>,
     /// Whether the window is frameless (decorations=false). When true, velox
     /// handles window drag via `veloxDraggable` nodes.
     decorations: bool,
@@ -1398,6 +1422,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     canvas3d_scenes: std::collections::HashMap::new(),
                     renderer_3d:     None,
                     camera_streams:  std::collections::HashMap::new(),
+                    video_streams:   std::collections::HashMap::new(),
                     decorations:     window_decorations,
                     drag_window_fn,
                     #[cfg(feature = "dev")]
@@ -1600,6 +1625,21 @@ pub fn run(mut config: AppConfig) -> bool {
                     }
                 }
 
+                // 5b. Pull latest video frames and build peniko::Images.
+                // Also drain video events into the runtime's video_events queue.
+                for stream in s.video_streams.values_mut() {
+                    if let Some((w, h, data)) = stream.frame_buf.lock().unwrap().take() {
+                        stream.latest_image = Some(
+                            peniko::Image::new(data.into(), peniko::Format::Rgba8, w, h)
+                        );
+                    }
+                    let pending: Vec<_> = stream.events.lock().unwrap().drain(..).collect();
+                    if !pending.is_empty() {
+                        let mut ve = s.runtime.video_events.lock().unwrap();
+                        ve.extend(pending);
+                    }
+                }
+
                 // 5. Single layout pass.
                 let layout_start = Instant::now();
                 recompute_layout(s);
@@ -1645,6 +1685,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         canvas_cmds:       &s.canvas_cmds,
                         canvas3d_overlays: &mut canvas3d_overlays,
                         camera_streams:    &s.camera_streams,
+                        video_streams:     &s.video_streams,
                         cursor_blink_on:   s.cursor_blink_on,
                         any_cursor_active: &mut any_cursor_active,
                     };

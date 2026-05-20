@@ -1,4 +1,10 @@
 {
+  "app": {
+    "version":     "1.0.0",
+    "publisher":   "Velox Examples",
+    "description": "A demo notes application built with Velox",
+    "website":     "https://velox.dev"
+  },
   "window": {
     "title":       "Notes",
     "width":       1100,
@@ -24,6 +30,7 @@
     "ai":             true,
     "camera":         true,
     "microphone":     true,
+    "video":          true,
     "deeplink": { "scheme": "notes", "singleInstance": true }
   },
   "dev": {

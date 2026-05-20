@@ -6468,6 +6468,7 @@ dependencies = [
  "lazy_static",
  "symphonia-bundle-flac",
  "symphonia-bundle-mp3",
+ "symphonia-codec-aac",
  "symphonia-codec-adpcm",
  "symphonia-codec-pcm",
  "symphonia-codec-vorbis",
@@ -6498,6 +6499,17 @@ dependencies = [
  "log",
  "symphonia-core",
  "symphonia-metadata",
+]
+
+[[package]]
+name = "symphonia-codec-aac"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c263845aa86881416849c1729a54c7f55164f8b96111dba59de46849e73a790"
+dependencies = [
+ "lazy_static",
+ "log",
+ "symphonia-core",
 ]
 
 [[package]]
@@ -7515,6 +7527,7 @@ dependencies = [
  "nokhwa",
  "notify",
  "pollster",
+ "rodio",
  "serde",
  "serde_json",
  "smallvec",
@@ -7525,6 +7538,7 @@ dependencies = [
  "velox-3d",
  "velox-gpu",
  "velox-layout",
+ "velox-media",
  "velox-perf",
  "velox-renderer",
  "velox-runtime",
@@ -7564,6 +7578,20 @@ dependencies = [
  "log",
  "taffy",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "velox-media"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "libloading",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]
@@ -7627,6 +7655,7 @@ dependencies = [
  "velox-3d",
  "velox-ai",
  "velox-db",
+ "velox-media",
  "velox-perf",
  "velox-security",
  "velox-sysapi",

@@ -185,6 +185,10 @@ globalThis.__velox_hid_write           = function() { return stubPromise('0'); }
 globalThis.__velox_hid_close           = function() {};
 globalThis.__velox_updater_check       = function() { return stubPromise('{"hasUpdate":false,"latestVersion":"","body":""}'); };
 globalThis.__velox_updater_update      = function() { return stubPromise('{"updated":false,"latestVersion":""}'); };
+globalThis.__velox_video_open          = function() { return stubPromise('0'); };
+globalThis.__velox_video_seek          = function() {};
+globalThis.__velox_video_close         = function() {};
+globalThis.__velox_video_poll          = function() { return '[]'; };
 "#
     .to_string()
 }

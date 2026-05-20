@@ -6528,6 +6528,7 @@ No matching component was found for:
   function TextInput({
     value = "",
     onChangeText,
+    onSubmitEditing,
     placeholder = "",
     fontSize = 16,
     multiline = false,

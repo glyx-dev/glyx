@@ -402,6 +402,7 @@ export function ScrollView({
 export function TextInput({
   value = '',
   onChangeText,
+  onSubmitEditing,
   placeholder = '',
   fontSize = 16,
   multiline = false,

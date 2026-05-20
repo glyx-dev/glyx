@@ -318,7 +318,9 @@ fn cmd_dev(inspect: Option<u16>) -> Result<()> {
         // Native project: custom Rust extensions compiled in — use cargo run
         let mut cmd = Command::new("cargo");
         cmd.args(["run", "-p", &project_name])
-            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()));
+            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
+            // Allow locally-built media DLLs with stub signatures in dev mode.
+            .env("VELOX_MEDIA_SKIP_VERIFY", "1");
         if let Some(port) = inspect {
             cmd.env("VELOX_INSPECT_PORT", port.to_string());
         }

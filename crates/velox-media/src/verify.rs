@@ -28,13 +28,23 @@ pub fn sha256_hex(data: &[u8]) -> String {
     format!("{:x}", h.finalize())
 }
 
-/// Returns `true` when the `VELOX_MEDIA_SKIP_VERIFY` env var is set to `"1"`.
+/// Returns `true` when signature verification should be skipped.
 ///
-/// **Dev-only escape hatch** — allows locally-built DLLs with a zero-byte stub
-/// signature to be loaded without a valid Ed25519 key.  Never set this in
-/// production or in any user-facing release.
+/// Two cases:
+///  1. `VELOX_MEDIA_SKIP_VERIFY=1` env var — explicit dev override.
+///  2. Debug build (`cfg!(debug_assertions)`) — allows locally-built DLLs with
+///     stub signatures when developing without a CI signing key.
+///
+/// **Never** skip in release builds without the env var.
 fn skip_verify() -> bool {
-    std::env::var("VELOX_MEDIA_SKIP_VERIFY").as_deref() == Ok("1")
+    if std::env::var("VELOX_MEDIA_SKIP_VERIFY").as_deref() == Ok("1") {
+        return true;
+    }
+    if cfg!(debug_assertions) {
+        log::debug!("[velox-media] debug build — Ed25519 verification skipped");
+        return true;
+    }
+    false
 }
 
 /// Verify the Ed25519 signature on a manifest.

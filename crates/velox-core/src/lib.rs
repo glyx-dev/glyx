@@ -488,7 +488,7 @@ struct CameraStream {
 struct VideoStream {
     /// Latest decoded RGBA frame: (width, height, raw_bytes). `take()`d by the render loop.
     frame_buf:    Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>,
-    /// Signal the decode thread to stop.
+    /// Signal the decode thread to stop (also stops the audio thread).
     stop_flag:    Arc<std::sync::atomic::AtomicBool>,
     /// Send seek-to-seconds requests to the decode thread.
     seek_tx:      std::sync::mpsc::SyncSender<f64>,
@@ -496,11 +496,8 @@ struct VideoStream {
     events:       Arc<Mutex<std::collections::VecDeque<String>>>,
     /// Most recent peniko::Image built from the decoded frame. Used by render.rs.
     latest_image: Option<peniko::Image>,
-    /// Audio sink — plays the audio track in parallel with the video decode thread.
-    /// `None` if no audio track, the file is a network URL, or rodio init failed.
-    audio_sink:    Option<rodio::Sink>,
-    /// Keeps the audio output device alive for the lifetime of this stream.
-    _audio_stream: Option<rodio::OutputStream>,
+    // Audio is played by a self-contained background thread that owns the
+    // OutputStream + Sink — no audio fields needed here.
 }
 
 /// Per-window rendering + runtime state.

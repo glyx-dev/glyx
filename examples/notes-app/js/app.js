@@ -14963,7 +14963,7 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
                   value: vidInput,
-                  onChange: (v) => {
+                  onChangeText: (v) => {
                     setVidInput(v);
                   },
                   placeholder: "or paste a URL / path",

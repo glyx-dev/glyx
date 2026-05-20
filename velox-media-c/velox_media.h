@@ -74,6 +74,43 @@ VELOX_EXPORT void vm_decoder_seek(VmDecoder* dec, double seconds);
 /** Close the decoder and free all resources. */
 VELOX_EXPORT void vm_decoder_close(VmDecoder* dec);
 
+/* ── Audio Decoder ──────────────────────────────────────────────────────── */
+
+typedef struct VmAudioDecoder VmAudioDecoder;
+
+/**
+ * Open the audio stream of a media source (local file or URL).
+ * Decodes any audio track to interleaved signed 16-bit PCM at the source's
+ * native sample rate and channel count.
+ *
+ * Returns an opaque VmAudioDecoder* on success, NULL if the source has no
+ * audio track or opening fails.  Must be closed with vm_audio_decoder_close().
+ */
+VELOX_EXPORT VmAudioDecoder* vm_audio_decoder_open(
+    const char* source_url,
+    int*        out_sample_rate,
+    int*        out_channels
+);
+
+/**
+ * Decode the next chunk of audio samples into buf (interleaved i16 PCM).
+ *
+ * max_samples: capacity of buf in i16 values (includes all channels).
+ *
+ * Returns:
+ *   > 0  — number of i16 values written
+ *     0  — end of stream
+ *    -1  — decode error
+ */
+VELOX_EXPORT int vm_audio_decoder_next_samples(
+    VmAudioDecoder* dec,
+    int16_t*        buf,
+    int             max_samples
+);
+
+/** Close the audio decoder and free all resources. */
+VELOX_EXPORT void vm_audio_decoder_close(VmAudioDecoder* dec);
+
 /* ── Encoder (camera MP4 recording) ─────────────────────────────────────── */
 
 typedef struct VmEncoder VmEncoder;

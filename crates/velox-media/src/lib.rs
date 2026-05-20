@@ -45,28 +45,34 @@ pub fn get_media() -> Option<Arc<VeloxMedia>> {
 // ── VeloxMedia struct ─────────────────────────────────────────────────────────
 
 /// Raw function pointer types matching `velox_media.h`.
-type FnVersion          = unsafe extern "C" fn() -> *const c_char;
-type FnDecoderOpen      = unsafe extern "C" fn(*const c_char, *mut c_int, *mut c_int, *mut f64) -> *mut c_void;
-type FnDecoderNextFrame = unsafe extern "C" fn(*mut c_void, *mut u8, *mut f64) -> c_int;
-type FnDecoderSeek      = unsafe extern "C" fn(*mut c_void, f64);
-type FnDecoderClose     = unsafe extern "C" fn(*mut c_void);
-type FnEncoderOpen      = unsafe extern "C" fn(*const c_char, c_int, c_int, c_int) -> *mut c_void;
-type FnEncoderWriteRgba = unsafe extern "C" fn(*mut c_void, *const u8, c_int) -> c_int;
-type FnEncoderClose     = unsafe extern "C" fn(*mut c_void);
+type FnVersion               = unsafe extern "C" fn() -> *const c_char;
+type FnDecoderOpen           = unsafe extern "C" fn(*const c_char, *mut c_int, *mut c_int, *mut f64) -> *mut c_void;
+type FnDecoderNextFrame      = unsafe extern "C" fn(*mut c_void, *mut u8, *mut f64) -> c_int;
+type FnDecoderSeek           = unsafe extern "C" fn(*mut c_void, f64);
+type FnDecoderClose          = unsafe extern "C" fn(*mut c_void);
+type FnEncoderOpen           = unsafe extern "C" fn(*const c_char, c_int, c_int, c_int) -> *mut c_void;
+type FnEncoderWriteRgba      = unsafe extern "C" fn(*mut c_void, *const u8, c_int) -> c_int;
+type FnEncoderClose          = unsafe extern "C" fn(*mut c_void);
+type FnAudioDecoderOpen      = unsafe extern "C" fn(*const c_char, *mut c_int, *mut c_int) -> *mut c_void;
+type FnAudioDecoderNextSamples = unsafe extern "C" fn(*mut c_void, *mut i16, c_int) -> c_int;
+type FnAudioDecoderClose     = unsafe extern "C" fn(*mut c_void);
 
 /// Safe wrapper around the velox-media dynamic library.
 ///
 /// **Drop order matters**: function pointer fields borrow from `_lib`,
 /// so `_lib` is declared last and dropped last.
 pub struct VeloxMedia {
-    version:            FnVersion,
-    decoder_open:       FnDecoderOpen,
-    decoder_next_frame: FnDecoderNextFrame,
-    decoder_seek:       FnDecoderSeek,
-    decoder_close:      FnDecoderClose,
-    encoder_open:       FnEncoderOpen,
-    encoder_write_rgba: FnEncoderWriteRgba,
-    encoder_close:      FnEncoderClose,
+    version:                  FnVersion,
+    decoder_open:             FnDecoderOpen,
+    decoder_next_frame:       FnDecoderNextFrame,
+    decoder_seek:             FnDecoderSeek,
+    decoder_close:            FnDecoderClose,
+    encoder_open:             FnEncoderOpen,
+    encoder_write_rgba:       FnEncoderWriteRgba,
+    encoder_close:            FnEncoderClose,
+    audio_decoder_open:       FnAudioDecoderOpen,
+    audio_decoder_next_samp:  FnAudioDecoderNextSamples,
+    audio_decoder_close:      FnAudioDecoderClose,
     _lib: Library,  // ← LAST — must be dropped after function pointers
 }
 
@@ -107,14 +113,17 @@ impl VeloxMedia {
         }
 
         Ok(Self {
-            version:            sym!(lib, b"velox_media_version\0",    FnVersion),
-            decoder_open:       sym!(lib, b"vm_decoder_open\0",        FnDecoderOpen),
-            decoder_next_frame: sym!(lib, b"vm_decoder_next_frame\0",  FnDecoderNextFrame),
-            decoder_seek:       sym!(lib, b"vm_decoder_seek\0",        FnDecoderSeek),
-            decoder_close:      sym!(lib, b"vm_decoder_close\0",       FnDecoderClose),
-            encoder_open:       sym!(lib, b"vm_encoder_open\0",        FnEncoderOpen),
-            encoder_write_rgba: sym!(lib, b"vm_encoder_write_rgba\0",  FnEncoderWriteRgba),
-            encoder_close:      sym!(lib, b"vm_encoder_close\0",       FnEncoderClose),
+            version:                 sym!(lib, b"velox_media_version\0",             FnVersion),
+            decoder_open:            sym!(lib, b"vm_decoder_open\0",                 FnDecoderOpen),
+            decoder_next_frame:      sym!(lib, b"vm_decoder_next_frame\0",           FnDecoderNextFrame),
+            decoder_seek:            sym!(lib, b"vm_decoder_seek\0",                 FnDecoderSeek),
+            decoder_close:           sym!(lib, b"vm_decoder_close\0",                FnDecoderClose),
+            encoder_open:            sym!(lib, b"vm_encoder_open\0",                 FnEncoderOpen),
+            encoder_write_rgba:      sym!(lib, b"vm_encoder_write_rgba\0",           FnEncoderWriteRgba),
+            encoder_close:           sym!(lib, b"vm_encoder_close\0",                FnEncoderClose),
+            audio_decoder_open:      sym!(lib, b"vm_audio_decoder_open\0",           FnAudioDecoderOpen),
+            audio_decoder_next_samp: sym!(lib, b"vm_audio_decoder_next_samples\0",   FnAudioDecoderNextSamples),
+            audio_decoder_close:     sym!(lib, b"vm_audio_decoder_close\0",          FnAudioDecoderClose),
             _lib: lib,
         })
     }
@@ -198,6 +207,34 @@ impl VeloxMedia {
         unsafe { (self.encoder_close)(enc.ptr) }
         std::mem::forget(enc);
     }
+
+    /// Open an audio-only decoder for the given source URL.
+    /// Returns `(VmAudioDecoder, sample_rate, channels)` on success.
+    pub fn audio_decoder_open(&self, url: &str) -> Result<VmAudioDecoder, String> {
+        let c_url = CString::new(url).map_err(|e| e.to_string())?;
+        let (mut sample_rate, mut channels) = (0i32, 0i32);
+        let ptr = unsafe {
+            (self.audio_decoder_open)(c_url.as_ptr(), &mut sample_rate, &mut channels)
+        };
+        if ptr.is_null() {
+            return Err(format!("velox-media: vm_audio_decoder_open returned null for '{url}'"));
+        }
+        Ok(VmAudioDecoder { ptr, sample_rate: sample_rate as u32, channels: channels as u16 })
+    }
+
+    /// Decode the next chunk of audio into `buf` (interleaved i16 PCM).
+    /// Returns the number of i16 values written, 0 for EOF, negative for error.
+    pub fn audio_decoder_next_samples(&self, dec: &VmAudioDecoder, buf: &mut [i16]) -> i32 {
+        unsafe {
+            (self.audio_decoder_next_samp)(dec.ptr, buf.as_mut_ptr(), buf.len() as c_int) as i32
+        }
+    }
+
+    /// Close the audio decoder and free its resources.
+    pub fn audio_decoder_close(&self, dec: VmAudioDecoder) {
+        unsafe { (self.audio_decoder_close)(dec.ptr) }
+        std::mem::forget(dec);
+    }
 }
 
 // ── Opaque handle types ───────────────────────────────────────────────────────
@@ -220,3 +257,14 @@ pub struct VmEncoder {
 }
 
 unsafe impl Send for VmEncoder {}
+
+/// Opaque audio-decoder handle. Created by `VeloxMedia::audio_decoder_open`.
+pub struct VmAudioDecoder {
+    pub ptr:         *mut c_void,
+    pub sample_rate: u32,
+    pub channels:    u16,
+}
+
+// SAFETY: VmAudioDecoder is a raw pointer to C data with no thread-local state.
+// Access is single-threaded (owned by FfmpegAudioSource which is Send).
+unsafe impl Send for VmAudioDecoder {}

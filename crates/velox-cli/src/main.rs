@@ -330,7 +330,12 @@ fn cmd_dev(inspect: Option<u16>) -> Result<()> {
             .context("Could not find or build velox-runner. Run `velox runtime build`.")?;
         log::info!("Using runner: {}", runner.display());
         let mut cmd = Command::new(&runner);
-        cmd.env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()));
+        // Suppress noisy symphonia probe warnings (emitted when probing MKV/other
+        // containers if the matching demuxer feature isn't compiled in).
+        let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());
+        let rust_log = if rust_log.contains("symphonia") { rust_log }
+                       else { format!("{rust_log},symphonia_bundle_mp3=off,symphonia_codec_aac=off") };
+        cmd.env("RUST_LOG", rust_log);
         // In dev mode, allow locally-built media DLLs with stub signatures.
         // Production runners verify the Ed25519 signature; dev runners skip it.
         cmd.env("VELOX_MEDIA_SKIP_VERIFY", "1");

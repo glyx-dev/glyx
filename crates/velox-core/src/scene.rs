@@ -406,8 +406,9 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 let (seek_tx, seek_rx) = std::sync::mpsc::sync_channel::<f64>(4);
                 let events    = Arc::new(Mutex::new(std::collections::VecDeque::<String>::new()));
 
-                // Open audio BEFORE the thread spawn which moves `url`.
-                let (audio_sink, _audio_stream) = open_video_audio(&url);
+                // Spawn a self-contained audio thread (non-blocking). The thread owns its
+                // OutputStream + Sink so !Send is not an issue. It exits when stop_flag is set.
+                spawn_video_audio(&url, Arc::clone(&stop_flag));
 
                 let buf_clone   = Arc::clone(&frame_buf);
                 let stop_clone  = Arc::clone(&stop_flag);
@@ -444,8 +445,15 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     );
                     ev_clone.lock().unwrap().push_back(meta_msg);
 
-                    let frame_interval = std::time::Duration::from_secs_f64(1.0 / fps.max(1.0));
-                    let mut rgba_buf   = vec![0u8; rgba_size];
+                    let mut rgba_buf = vec![0u8; rgba_size];
+
+                    // PTS-based A/V sync: we record the wall-clock time and the
+                    // PTS of the first decoded frame, then for every subsequent
+                    // frame we sleep until (wall_start + (pts - pts_start)).
+                    // This accounts for variable decode time and keeps video in
+                    // lock-step with the audio thread (which plays at real time).
+                    let mut wall_start: Option<std::time::Instant> = None;
+                    let mut pts_start  = 0f64;
 
                     loop {
                         if stop_clone.load(std::sync::atomic::Ordering::Relaxed) { break; }
@@ -453,11 +461,27 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         // Handle seek requests (non-blocking drain).
                         while let Ok(secs) = seek_rx.try_recv() {
                             media.decoder_seek(&dec, secs);
+                            wall_start = None; // reset clock so timing resumes from new position
                         }
 
                         match media.decoder_next_frame(&dec, &mut rgba_buf) {
-                            Ok(Some(_pts)) => {
+                            Ok(Some(pts)) => {
                                 *buf_clone.lock().unwrap() = Some((w, h, rgba_buf.clone()));
+
+                                // Initialise the sync clock on the first frame.
+                                let ws = wall_start.get_or_insert_with(|| {
+                                    pts_start = pts;
+                                    std::time::Instant::now()
+                                });
+
+                                // Sleep until this frame's display time.
+                                // If we're already late (decode took too long) skip the sleep.
+                                let video_pos = pts - pts_start;
+                                let to_sleep  = video_pos - ws.elapsed().as_secs_f64();
+                                if to_sleep > 0.001 {
+                                    std::thread::sleep(
+                                        std::time::Duration::from_secs_f64(to_sleep));
+                                }
                             }
                             Ok(None) => {
                                 // End of stream.
@@ -467,8 +491,6 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                             }
                             Err(_) => break,
                         }
-
-                        std::thread::sleep(frame_interval);
                     }
 
                     media.decoder_close(dec);
@@ -480,21 +502,14 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     seek_tx,
                     events,
                     latest_image: None,
-                    audio_sink,
-                    _audio_stream,
                 });
             }
 
             SceneCommand::SeekVideo { handle_id, seconds } => {
                 if let Some(stream) = state.video_streams.get(&handle_id) {
                     let _ = stream.seek_tx.try_send(seconds);
-                    // Audio seek requires rodio 0.18+; skip for now (audio continues from
-                    // current position). Seeking to 0 restarts audio to minimize drift.
-                    if seconds == 0.0 {
-                        if let Some(sink) = &stream.audio_sink {
-                            sink.stop();  // stops this source; audio will be silent after seek to 0
-                        }
-                    }
+                    // Audio seek requires rodio 0.18+; not available in 0.17.3.
+                    // Audio will continue from its current position after a seek.
                 }
             }
 
@@ -510,42 +525,131 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
     true
 }
 
-/// Try to open the audio track of a local video file via rodio.
-/// Returns `(None, None)` for network URLs or if no audio is found.
-fn open_video_audio(url: &str) -> (Option<rodio::Sink>, Option<rodio::OutputStream>) {
-    // Only handle local paths / file:// URIs
-    let path = if url.starts_with("file:///") {
-        url.trim_start_matches("file:///")
-    } else if url.starts_with("file://") {
-        url.trim_start_matches("file://")
-    } else if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("rtsp://") {
-        return (None, None);
-    } else {
-        url
-    };
+/// Spawn a self-contained audio thread for a video file.
+///
+/// Uses the velox-media C library (ffmpeg) to decode the audio track, feeding
+/// interleaved i16 PCM into a rodio Sink via `FfmpegAudioSource`.  This
+/// handles any container/codec that ffmpeg supports (MKV+AAC, MP4+AAC,
+/// MKV+AC3, etc.) without rodio/symphonia trying to probe the container.
+///
+/// Non-blocking: returns immediately.
+fn spawn_video_audio(url: &str, stop_flag: Arc<std::sync::atomic::AtomicBool>) {
+    // Only local files — skip network streams.
+    if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("rtsp://") {
+        return;
+    }
+    let path = url
+        .trim_start_matches("file:///")
+        .trim_start_matches("file://")
+        .to_string();
 
-    let file = match std::fs::File::open(path) {
-        Ok(f)  => f,
-        Err(e) => { log::debug!("[video-audio] cannot open {path}: {e}"); return (None, None); }
-    };
+    std::thread::spawn(move || {
+        let Some(media) = velox_media::get_media() else {
+            log::debug!("[video-audio] velox-media not available");
+            return;
+        };
 
-    let (stream, handle) = match rodio::OutputStream::try_default() {
-        Ok(pair) => pair,
-        Err(e)   => { log::warn!("[video-audio] no audio output device: {e}"); return (None, None); }
-    };
+        let audio_dec = match media.audio_decoder_open(&path) {
+            Ok(d)  => d,
+            Err(e) => { log::debug!("[video-audio] no audio track: {e}"); return; }
+        };
 
-    let sink = match rodio::Sink::try_new(&handle) {
-        Ok(s)  => s,
-        Err(e) => { log::warn!("[video-audio] cannot create sink: {e}"); return (None, None); }
-    };
+        let sample_rate = audio_dec.sample_rate;
+        let channels    = audio_dec.channels;
 
-    let source = match rodio::Decoder::new(std::io::BufReader::new(file)) {
-        Ok(s)  => s,
-        Err(e) => { log::debug!("[video-audio] no decodable audio track: {e}"); return (None, None); }
-    };
+        let (_stream, handle) = match rodio::OutputStream::try_default() {
+            Ok(pair) => pair,
+            Err(e)   => { log::warn!("[video-audio] no audio output device: {e}"); return; }
+        };
+        let sink = match rodio::Sink::try_new(&handle) {
+            Ok(s)  => s,
+            Err(e) => { log::warn!("[video-audio] cannot create sink: {e}"); return; }
+        };
 
-    sink.append(source);
-    sink.play();
-    log::debug!("[video-audio] audio playing for {path}");
-    (Some(sink), Some(stream))
+        let source = FfmpegAudioSource {
+            media:       media.clone(),
+            dec:         Some(audio_dec),
+            sample_rate,
+            channels,
+            buf:         vec![0i16; 4096],
+            buf_pos:     0,
+            buf_valid:   0,
+            done:        false,
+        };
+
+        sink.append(source);
+        sink.play();
+        log::debug!("[video-audio] audio playing via ffmpeg ({sample_rate}Hz/{channels}ch)");
+
+        // Keep the thread (and thus the OutputStream) alive until video closes or audio ends.
+        while !stop_flag.load(std::sync::atomic::Ordering::Relaxed) && !sink.empty() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        sink.stop();
+        log::debug!("[video-audio] audio thread exiting for '{path}'");
+    });
+}
+
+/// A `rodio::Source` backed by the velox-media C audio decoder (ffmpeg).
+/// Calls `vm_audio_decoder_next_samples` in 4096-sample chunks, so ffmpeg
+/// runs in rodio's audio thread — never blocks the main render loop.
+struct FfmpegAudioSource {
+    media:      std::sync::Arc<velox_media::VeloxMedia>,
+    dec:        Option<velox_media::VmAudioDecoder>,  // Some until dropped
+    sample_rate: u32,
+    channels:   u16,
+    buf:        Vec<i16>,
+    buf_pos:    usize,
+    buf_valid:  usize,
+    done:       bool,
+}
+
+// SAFETY: FfmpegAudioSource owns a VmAudioDecoder (opaque C pointer, no TLS).
+// It is only ever accessed from rodio's single audio thread.
+unsafe impl Send for FfmpegAudioSource {}
+
+impl Drop for FfmpegAudioSource {
+    fn drop(&mut self) {
+        if let Some(dec) = self.dec.take() {
+            self.media.audio_decoder_close(dec);
+        }
+    }
+}
+
+impl FfmpegAudioSource {
+    fn fill_buf(&mut self) {
+        if self.done { return; }
+        if let Some(ref dec) = self.dec {
+            let n = self.media.audio_decoder_next_samples(dec, &mut self.buf);
+            if n <= 0 {
+                self.done      = true;
+                self.buf_valid = 0;
+            } else {
+                self.buf_valid = n as usize;
+            }
+            self.buf_pos = 0;
+        }
+    }
+}
+
+impl Iterator for FfmpegAudioSource {
+    type Item = i16;
+    fn next(&mut self) -> Option<i16> {
+        if self.buf_pos >= self.buf_valid {
+            self.fill_buf();
+        }
+        if self.done || self.buf_pos >= self.buf_valid {
+            return None;
+        }
+        let s = self.buf[self.buf_pos];
+        self.buf_pos += 1;
+        Some(s)
+    }
+}
+
+impl rodio::Source for FfmpegAudioSource {
+    fn current_frame_len(&self) -> Option<usize> { None }
+    fn channels(&self)         -> u16  { self.channels }
+    fn sample_rate(&self)      -> u32  { self.sample_rate }
+    fn total_duration(&self)   -> Option<std::time::Duration> { None }
 }

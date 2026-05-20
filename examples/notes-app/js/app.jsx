@@ -2510,7 +2510,7 @@ function MediaDemoScreen() {
             </Pressable>
             <TextInput
               value={vidInput}
-              onChange={v => { setVidInput(v); }}
+              onChangeText={v => { setVidInput(v); }}
               placeholder="or paste a URL / path"
               width={inner - 186} height={32}
               style={{ backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.border, paddingHorizontal: 8 }}

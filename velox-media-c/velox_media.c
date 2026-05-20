@@ -316,3 +316,156 @@ void vm_encoder_close(VmEncoder* enc) {
     avformat_free_context(enc->fmt_ctx);
     free(enc);
 }
+
+/* ── Audio Decoder ───────────────────────────────────────────────────────── */
+
+struct VmAudioDecoder {
+    AVFormatContext*   fmt_ctx;
+    AVCodecContext*    codec_ctx;
+    struct SwrContext* swr_ctx;
+    AVFrame*           frame;
+    AVPacket*          packet;
+    int                audio_stream_idx;
+    int                sample_rate;
+    int                channels;
+    /* Overflow samples from the previous call that didn't fit in the caller's buf. */
+    int16_t*           overflow;
+    int                overflow_count;  /* total i16 values stored   */
+    int                overflow_pos;    /* next i16 index to read    */
+};
+
+VmAudioDecoder* vm_audio_decoder_open(const char* source_url,
+                                       int*        out_sample_rate,
+                                       int*        out_channels)
+{
+    VmAudioDecoder* dec = (VmAudioDecoder*)calloc(1, sizeof(VmAudioDecoder));
+    if (!dec) return NULL;
+
+    if (avformat_open_input(&dec->fmt_ctx, source_url, NULL, NULL) < 0)
+        { free(dec); return NULL; }
+    if (avformat_find_stream_info(dec->fmt_ctx, NULL) < 0)
+        { avformat_close_input(&dec->fmt_ctx); free(dec); return NULL; }
+
+    dec->audio_stream_idx = av_find_best_stream(
+        dec->fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+    if (dec->audio_stream_idx < 0)
+        { avformat_close_input(&dec->fmt_ctx); free(dec); return NULL; }
+
+    AVStream* stream = dec->fmt_ctx->streams[dec->audio_stream_idx];
+    const AVCodec* codec = avcodec_find_decoder(stream->codecpar->codec_id);
+    if (!codec)
+        { avformat_close_input(&dec->fmt_ctx); free(dec); return NULL; }
+
+    dec->codec_ctx = avcodec_alloc_context3(codec);
+    if (!dec->codec_ctx ||
+        avcodec_parameters_to_context(dec->codec_ctx, stream->codecpar) < 0 ||
+        avcodec_open2(dec->codec_ctx, codec, NULL) < 0) {
+        avcodec_free_context(&dec->codec_ctx);
+        avformat_close_input(&dec->fmt_ctx); free(dec); return NULL;
+    }
+
+    dec->sample_rate = dec->codec_ctx->sample_rate;
+    dec->channels    = dec->codec_ctx->ch_layout.nb_channels;
+
+    /* Resampler: native sample format → interleaved S16 at the same rate. */
+    AVChannelLayout out_layout = {0};
+    av_channel_layout_copy(&out_layout, &dec->codec_ctx->ch_layout);
+    int swr_ret = swr_alloc_set_opts2(&dec->swr_ctx,
+        &out_layout,                    AV_SAMPLE_FMT_S16, dec->sample_rate,
+        &dec->codec_ctx->ch_layout,     dec->codec_ctx->sample_fmt, dec->sample_rate,
+        0, NULL);
+    av_channel_layout_uninit(&out_layout);
+    if (swr_ret < 0 || !dec->swr_ctx || swr_init(dec->swr_ctx) < 0) {
+        if (dec->swr_ctx) swr_free(&dec->swr_ctx);
+        avcodec_free_context(&dec->codec_ctx);
+        avformat_close_input(&dec->fmt_ctx); free(dec); return NULL;
+    }
+
+    dec->frame  = av_frame_alloc();
+    dec->packet = av_packet_alloc();
+
+    *out_sample_rate = dec->sample_rate;
+    *out_channels    = dec->channels;
+    return dec;
+}
+
+int vm_audio_decoder_next_samples(VmAudioDecoder* dec, int16_t* buf, int max_samples)
+{
+    int written = 0;
+
+    /* Drain overflow from the previous call first. */
+    if (dec->overflow && dec->overflow_pos < dec->overflow_count) {
+        int avail = dec->overflow_count - dec->overflow_pos;
+        int copy  = (avail < max_samples) ? avail : max_samples;
+        memcpy(buf, dec->overflow + dec->overflow_pos, copy * sizeof(int16_t));
+        dec->overflow_pos += copy;
+        written           += copy;
+        buf               += copy;
+        max_samples       -= copy;
+        if (max_samples == 0) return written;
+    }
+
+    while (max_samples > 0) {
+        int ret = avcodec_receive_frame(dec->codec_ctx, dec->frame);
+        if (ret == 0) {
+            int nb = dec->frame->nb_samples;
+            /* Allocate temporary packed S16 buffer for this frame. */
+            int alloc = nb * dec->channels;
+            int16_t* tmp = (int16_t*)av_malloc(alloc * sizeof(int16_t));
+            if (!tmp) { av_frame_unref(dec->frame); break; }
+
+            uint8_t* out_plane = (uint8_t*)tmp;
+            int converted = swr_convert(dec->swr_ctx,
+                                        &out_plane, nb,
+                                        (const uint8_t**)dec->frame->data, nb);
+            av_frame_unref(dec->frame);
+            if (converted <= 0) { av_free(tmp); continue; }
+
+            int total = converted * dec->channels;
+            int copy  = (total < max_samples) ? total : max_samples;
+            memcpy(buf, tmp, copy * sizeof(int16_t));
+            written     += copy;
+            buf         += copy;
+            max_samples -= copy;
+
+            /* Save any overflow for the next call. */
+            if (copy < total) {
+                if (dec->overflow) av_free(dec->overflow);
+                int remain            = total - copy;
+                dec->overflow         = (int16_t*)av_malloc(remain * sizeof(int16_t));
+                dec->overflow_count   = remain;
+                dec->overflow_pos     = 0;
+                if (dec->overflow)
+                    memcpy(dec->overflow, tmp + copy, remain * sizeof(int16_t));
+            }
+            av_free(tmp);
+            continue;
+        }
+        if (ret == AVERROR_EOF) return written > 0 ? written : 0;
+        if (ret != AVERROR(EAGAIN)) return written > 0 ? written : -1;
+
+        /* Need more packets from the container. */
+        ret = av_read_frame(dec->fmt_ctx, dec->packet);
+        if (ret == AVERROR_EOF) {
+            avcodec_send_packet(dec->codec_ctx, NULL); /* flush */
+            continue;
+        }
+        if (ret < 0) return written > 0 ? written : -1;
+        if (dec->packet->stream_index == dec->audio_stream_idx)
+            avcodec_send_packet(dec->codec_ctx, dec->packet);
+        av_packet_unref(dec->packet);
+    }
+    return written;
+}
+
+void vm_audio_decoder_close(VmAudioDecoder* dec)
+{
+    if (!dec) return;
+    if (dec->swr_ctx)   swr_free(&dec->swr_ctx);
+    if (dec->frame)     av_frame_free(&dec->frame);
+    if (dec->packet)    av_packet_free(&dec->packet);
+    if (dec->overflow)  av_free(dec->overflow);
+    if (dec->codec_ctx) avcodec_free_context(&dec->codec_ctx);
+    if (dec->fmt_ctx)   avformat_close_input(&dec->fmt_ctx);
+    free(dec);
+}

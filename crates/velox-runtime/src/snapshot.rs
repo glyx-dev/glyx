@@ -189,6 +189,14 @@ globalThis.__velox_video_open          = function() { return stubPromise('0'); }
 globalThis.__velox_video_seek          = function() {};
 globalThis.__velox_video_close         = function() {};
 globalThis.__velox_video_poll          = function() { return '[]'; };
+
+// Crash reporter bindings
+globalThis.__velox_crash_report_js    = function() {};
+globalThis.__velox_crash_get_reports  = function() { return stubPromise('[]'); };
+globalThis.__velox_crash_clear_reports = function() {};
+
+// Splash screen binding
+globalThis.__velox_splash_hide = function() {};
 "#
     .to_string()
 }

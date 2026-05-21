@@ -518,6 +518,11 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     stream.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
+            SceneCommand::HideSplash => {
+                if let Some(sp) = state.splash_state.as_mut() {
+                    sp.hidden = true;
+                }
+            }
         }
     }
     if layout_changed   { state.layout_dirty           = true; }

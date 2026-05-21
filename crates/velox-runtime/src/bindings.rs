@@ -311,6 +311,8 @@ pub enum SceneCommand {
     SeekVideo  { handle_id: u32, seconds: f64 },
     /// Stop playback and release all resources for this video handle.
     CloseVideo { handle_id: u32 },
+    /// Signal velox-core to hide the splash screen overlay.
+    HideSplash,
 }
 
 // ── Registration ──────────────────────────────────────────────────────────────
@@ -552,6 +554,12 @@ pub fn register_all(
     // ── Updater ──────────────────────────────────────────────────────────────
     register!("__velox_updater_check",  updater_check_callback);
     register!("__velox_updater_update", updater_update_callback);
+    // ── Crash reporter ───────────────────────────────────────────────────────
+    register!("__velox_crash_report_js",    crash_report_js_callback);
+    register!("__velox_crash_get_reports",  crash_get_reports_callback);
+    register!("__velox_crash_clear_reports", crash_clear_reports_callback);
+    // ── Splash screen ────────────────────────────────────────────────────────
+    register!("__velox_splash_hide", splash_hide_callback);
 }
 
 struct AsyncState {
@@ -4442,6 +4450,125 @@ fn video_poll_callback(
     };
     let s = v8::String::new(scope, &json).unwrap();
     rv.set(s.into());
+}
+
+/// Return the platform-specific directory for Velox crash dumps.
+/// `~/.velox/crashes/` on all platforms (USERPROFILE on Windows, HOME on Unix).
+pub fn crash_reports_dir() -> std::path::PathBuf {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    home.join(".velox").join("crashes")
+}
+
+// ── Crash reporter bindings ───────────────────────────────────────────────────
+
+/// `__velox_crash_report_js(json)` — sync void.
+///
+/// Writes a JS-side crash report (from `onerror` / `unhandledrejection`) to disk.
+/// Capability-gated: requires `crash: true` in velox.config.json.
+fn crash_report_js_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    if !velox_security::get().crash {
+        throw_cap_error(scope, "crash"); return;
+    }
+    let json = args.get(0).to_rust_string_lossy(scope);
+    let dir  = crash_reports_dir();
+    let _    = std::fs::create_dir_all(&dir);
+    let ts   = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let path = dir.join(format!("js_{}.json", ts));
+    let _    = std::fs::write(path, json.as_bytes());
+}
+
+/// `__velox_crash_get_reports() → Promise<JSON>`
+///
+/// Returns an array of crash reports: `[{ file, content }]`.
+/// Reads all `*.json` files from the crash directory.
+fn crash_get_reports_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().crash {
+        rv.set(reject_cap_promise(scope, "crash").into()); return;
+    }
+
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let dir = crash_reports_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            let mut reports = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                        let file = path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let content = std::fs::read_to_string(&path).unwrap_or_default();
+                        reports.push(serde_json::json!({ "file": file, "content": content }));
+                    }
+                }
+            }
+            serde_json::to_string(&reports).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_crash_clear_reports()` — sync void.
+///
+/// Deletes all crash dump files from the crash directory.
+fn crash_clear_reports_callback(
+    scope: &mut v8::HandleScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    if !velox_security::get().crash {
+        throw_cap_error(scope, "crash"); return;
+    }
+    let dir = crash_reports_dir();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
+// ── Splash screen binding ─────────────────────────────────────────────────────
+
+/// `__velox_splash_hide()` — sync void.
+///
+/// Signals velox-core to hide the splash screen overlay (if one is configured).
+/// The splash is hidden immediately unless `minimumMs` has not yet elapsed,
+/// in which case it is hidden as soon as the minimum display time expires.
+fn splash_hide_callback(
+    _scope: &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    state.scene.lock().unwrap().push_back(SceneCommand::HideSplash);
 }
 
 /// Throw a generic JS Error with the given message.

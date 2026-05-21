@@ -137,6 +137,12 @@ pub struct Capabilities {
     /// Gracefully degrades to "not available" if the DLL has not been downloaded.
     #[serde(default)]
     pub video: bool,
+    /// Crash reporter — capture and persist JS/Rust crash reports to disk.
+    /// Enables `crash.getReports()`, `crash.clearReports()`, and automatic
+    /// `unhandledrejection`/`onerror` capture from JS.
+    /// Rust panics are always written to `~/.velox/crashes/` regardless of this flag.
+    #[serde(default)]
+    pub crash: bool,
     /// Deep-link URL scheme registration.  `None` = no deep-link support.
     pub deeplink: Option<DeeplinkCapability>,
 }

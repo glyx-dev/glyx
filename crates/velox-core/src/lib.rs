@@ -79,6 +79,19 @@ include!(concat!(env!("OUT_DIR"), "/embedded_snapshot.rs"));
 
 // ── Config file parsing ───────────────────────────────────────────────────────
 
+/// Splash screen configuration from `velox.config.json`.
+#[derive(serde::Deserialize, Default)]
+struct SplashCfgJson {
+    /// Path to a PNG image displayed centered on the splash background. Optional.
+    image:       Option<String>,
+    /// Background color as `"#rrggbb"` or `"#rrggbbaa"`. Default: opaque black.
+    background:  Option<String>,
+    /// Minimum display time in milliseconds. The splash is not hidden before this
+    /// elapses even if JS calls `veloxWindow.hideSplash()`. Default: 0 (immediate).
+    #[serde(rename = "minimumMs", default)]
+    minimum_ms:  u64,
+}
+
 #[derive(serde::Deserialize, Default)]
 struct VeloxConfigFile {
     window:       Option<WindowCfgJson>,
@@ -87,6 +100,8 @@ struct VeloxConfigFile {
     /// Used for the window icon (all platforms), taskbar (Windows/Linux),
     /// Dock (macOS), and installer icon (velox package --installer).
     icon:         Option<String>,
+    /// Splash screen configuration. Optional — omit for no splash.
+    splash:       Option<SplashCfgJson>,
 }
 
 /// Window settings from `velox.config.json`.
@@ -183,6 +198,91 @@ fn load_icon_png(path: &str) -> Option<(Vec<u8>, u32, u32)> {
             None
         }
     }
+}
+
+/// Return the platform-specific directory for Velox crash dumps.
+/// Mirrors `velox_runtime::bindings::crash_reports_dir()`.
+fn crash_reports_dir() -> std::path::PathBuf {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    home.join(".velox").join("crashes")
+}
+
+/// Install a Rust panic hook that writes a JSON crash dump to `~/.velox/crashes/`.
+///
+/// This always runs (no capability check needed) since panics are exceptional.
+/// In release builds with `panic = "abort"`, the hook may not execute; JS-side
+/// crash reporting via `__velox_crash_report_js` covers those scenarios.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let dir = crash_reports_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let message: &str = info.payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let file = info.location().map(|l| l.file()).unwrap_or("unknown");
+        let line = info.location().map(|l| l.line()).unwrap_or(0);
+        let json = format!(
+            "{{\"type\":\"rust_panic\",\"timestamp\":{},\"message\":{},\"file\":{},\"line\":{}}}",
+            ts,
+            serde_json::to_string(message).unwrap_or_else(|_| "\"\"".to_string()),
+            serde_json::to_string(file).unwrap_or_else(|_| "\"\"".to_string()),
+            line,
+        );
+        let path = dir.join(format!("rust_{}.json", ts));
+        let _ = std::fs::write(&path, json.as_bytes());
+        log::error!("[crash] Rust panic: {message} at {file}:{line}");
+    }));
+}
+
+/// Parse a `"#rrggbb"` or `"#rrggbbaa"` hex color string to RGBA bytes.
+/// Returns `None` if the format is invalid.
+fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
+    let s = s.trim_start_matches('#');
+    let parse = |h: &str| u8::from_str_radix(h, 16).ok();
+    match s.len() {
+        6 => Some([parse(&s[0..2])?, parse(&s[2..4])?, parse(&s[4..6])?, 255]),
+        8 => Some([parse(&s[0..2])?, parse(&s[2..4])?, parse(&s[4..6])?, parse(&s[6..8])?]),
+        _ => None,
+    }
+}
+
+/// Build a `SplashState` from the `"splash"` section of `velox.config.json`.
+/// Returns `None` if no splash section is present.
+fn load_splash_state() -> Option<SplashState> {
+    let json = read_config_json()?;
+    let file: VeloxConfigFile = serde_json::from_str(&json).ok()?;
+    let cfg = file.splash?;
+    let now = Instant::now();
+    let min_ms = cfg.minimum_ms;
+    let min_until    = now + Duration::from_millis(min_ms);
+    // Safety auto-hide: at least minimumMs, at most 30 seconds.
+    let auto_hide_at = now + Duration::from_millis(min_ms.max(30_000));
+
+    let background = cfg.background.as_deref()
+        .and_then(parse_hex_color)
+        .unwrap_or([0, 0, 0, 255]);
+
+    let img = cfg.image.as_ref().and_then(|path| {
+        match image::open(path) {
+            Ok(img) => {
+                let rgba = img.into_rgba8();
+                let (w, h) = rgba.dimensions();
+                Some(peniko::Image::new(rgba.into_raw().into(), peniko::Format::Rgba8, w, h))
+            }
+            Err(e) => { log::warn!("[splash] failed to load '{path}': {e}"); None }
+        }
+    });
+
+    Some(SplashState { image: img, background, min_until, auto_hide_at, hidden: false })
 }
 
 /// Load the Velox config from the current working directory.
@@ -460,6 +560,32 @@ impl CachedLabel {
 
 // ── Application state ─────────────────────────────────────────────────────────
 
+/// Splash screen overlay state. Active from window open until dismissed.
+struct SplashState {
+    /// Optional decoded splash image (centered on background).
+    image:      Option<peniko::Image>,
+    /// RGBA background fill color shown behind the image and during image load.
+    background: [u8; 4],
+    /// Splash is shown until this instant regardless of `hidden` (minimum display time).
+    min_until:  Instant,
+    /// Safety auto-hide: splash is removed no later than this instant.
+    auto_hide_at: Instant,
+    /// `true` after JS calls `veloxWindow.hideSplash()`.
+    hidden:     bool,
+}
+
+impl SplashState {
+    fn is_visible(&self) -> bool {
+        let now = Instant::now();
+        // Still within minimum display time → always show.
+        if now < self.min_until { return true; }
+        // Safety timeout → always hide.
+        if now >= self.auto_hide_at { return false; }
+        // After minimum but before safety timeout → show only if not explicitly hidden.
+        !self.hidden
+    }
+}
+
 /// Live camera capture stream. Owned by `PerWindowState`.
 /// The capture thread writes RGBA frames into `frame_buf`;
 /// the main render loop reads them and creates a `peniko::Image`.
@@ -556,6 +682,8 @@ struct PerWindowState {
     camera_streams: std::collections::HashMap<u32, CameraStream>,
     /// Video playback streams keyed by velox handle ID.
     video_streams: std::collections::HashMap<u32, VideoStream>,
+    /// Splash screen overlay. `None` if no splash was configured.
+    splash_state: Option<SplashState>,
     /// Whether the window is frameless (decorations=false). When true, velox
     /// handles window drag via `veloxDraggable` nodes.
     decorations: bool,
@@ -1057,6 +1185,9 @@ fn build_window_controller(
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn run(mut config: AppConfig) -> bool {
+    // Install Rust panic hook early so panics during init are also captured.
+    install_panic_hook();
+
     // Set module-specific log levels first so they take precedence over any
     // global level set by RUST_LOG (e.g. RUST_LOG=info would otherwise
     // re-enable the very noisy wgpu_core submission-index spam).
@@ -1183,6 +1314,10 @@ pub fn run(mut config: AppConfig) -> bool {
     let AppConfig { window, js_src, snapshot_blob, dev_mode: _dev_mode, extensions } = config;
     // Capture before `window` is moved into velox_shell::run().
     let window_decorations = window.decorations;
+
+    // Load splash state from config (None = no splash configured).
+    // Wrapped in Option so it can be moved into the main window's PerWindowState exactly once.
+    let mut main_splash_state: Option<SplashState> = load_splash_state();
 
     // Shared across all windows.
     let ipc_bus        = new_ipc_bus();
@@ -1420,6 +1555,8 @@ pub fn run(mut config: AppConfig) -> bool {
                     renderer_3d:     None,
                     camera_streams:  std::collections::HashMap::new(),
                     video_streams:   std::collections::HashMap::new(),
+                    // Splash only applies to the main window; secondary windows get None.
+                    splash_state: if window_handle == 0 { main_splash_state.take() } else { None },
                     decorations:     window_decorations,
                     drag_window_fn,
                     #[cfg(feature = "dev")]
@@ -1687,6 +1824,28 @@ pub fn run(mut config: AppConfig) -> bool {
                         any_cursor_active: &mut any_cursor_active,
                     };
                     render_subtree(root_id, 0.0, &mut render_ctx);
+                }
+
+                // Splash screen overlay — drawn on top of JS scene.
+                if let Some(sp) = &s.splash_state {
+                    if sp.is_visible() {
+                        let sw = s.gpu.width()  as f64;
+                        let sh = s.gpu.height() as f64;
+                        let bg = rgba_to_vello(sp.background);
+                        frame.fill_rect(0.0, 0.0, sw, sh, bg);
+                        if let Some(img) = &sp.image {
+                            let iw = img.width  as f64;
+                            let ih = img.height as f64;
+                            let scale  = (sw / iw).min(sh / ih).min(1.0);
+                            let dw = iw * scale;
+                            let dh = ih * scale;
+                            let dx = (sw - dw) * 0.5;
+                            let dy = (sh - dh) * 0.5;
+                            frame.draw_image(img, dx, dy, dw, dh);
+                        }
+                        // Request another frame so the splash keeps redrawing until hidden.
+                        (s.request_redraw)();
+                    }
                 }
 
                 #[cfg(feature = "dev")]

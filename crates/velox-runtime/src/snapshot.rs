@@ -197,6 +197,9 @@ globalThis.__velox_crash_clear_reports = function() {};
 
 // Splash screen binding
 globalThis.__velox_splash_hide = function() {};
+
+// Backend command dispatch
+globalThis.__velox_backend_call = function() { return stubPromise('null'); };
 "#
     .to_string()
 }

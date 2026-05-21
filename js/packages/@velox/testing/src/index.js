@@ -209,6 +209,9 @@ export function installStubs() {
   globalThis.__velox_vectorDb_search = () => spArr();
   globalThis.__velox_vectorDb_close  = () => sp(undefined);
 
+  // Backend command dispatch
+  globalThis.__velox_backend_call = () => sp('null');
+
   // console passthrough
   if (typeof globalThis.console === 'undefined') {
     globalThis.console = {

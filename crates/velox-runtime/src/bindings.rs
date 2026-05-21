@@ -334,6 +334,7 @@ pub fn register_all(
     db_pools:     DbPools,
     video_events: VideoEvents,
     cdp_log_tx:   Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
+    backend_commands: crate::BackendRegistry,
 ) {
     set_func(scope, global, "__velox_getTime", get_time);
 
@@ -385,6 +386,7 @@ pub fn register_all(
         ai_generate_model: Arc::new(Mutex::new(None)),
         ai_whisper_model:  Arc::new(Mutex::new(None)),
         cdp_log_tx,
+        backend_commands,
     });
     let ptr   = Box::into_raw(state) as *mut std::ffi::c_void;
     // Safety: ptr is valid for the lifetime of the isolate.
@@ -560,6 +562,8 @@ pub fn register_all(
     register!("__velox_crash_clear_reports", crash_clear_reports_callback);
     // ── Splash screen ────────────────────────────────────────────────────────
     register!("__velox_splash_hide", splash_hide_callback);
+    // ── Backend command dispatch ──────────────────────────────────────────────
+    register!("__velox_backend_call", backend_call_callback);
 }
 
 struct AsyncState {
@@ -638,6 +642,10 @@ struct AsyncState {
     /// When the CDP inspector is active, this holds the outbox sender so
     /// __velox_log can forward console messages as Runtime.consoleAPICalled events.
     cdp_log_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
+    // ── Backend command registry ──────────────────────────────────────────────
+    /// Named async commands registered by `VeloxExtension::register_commands`.
+    /// Dispatched by `__velox_backend_call(name, argsJson) → Promise<resultJson>`.
+    backend_commands: crate::BackendRegistry,
 }
 
 struct WsHandle {
@@ -4569,6 +4577,48 @@ fn splash_hide_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     state.scene.lock().unwrap().push_back(SceneCommand::HideSplash);
+}
+
+// ── Backend command dispatch ──────────────────────────────────────────────────
+//
+// JS: `await __velox_backend_call(name, argsJson)` → Promise<resultJson>
+//
+// Looks up `name` in the BackendRegistry and dispatches to the registered async
+// handler.  Returns a rejected Promise (not a thrown error) for unknown commands
+// so the JS caller can handle the rejection with a normal `.catch()`.
+
+fn backend_call_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let name      = v8_arg_to_string(scope, &args, 0);
+    let args_json = v8_arg_to_string(scope, &args, 1);
+
+    let handler = state.backend_commands.get(&name).cloned();
+
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    if let Some(handler) = handler {
+        state.tokio.spawn(async move {
+            let result = handler(args_json).await;
+            queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+            if let Some(r) = redraw { r(); }
+        });
+    } else {
+        // Unknown command — reject immediately.
+        let msg = format!("backend.{name}: no such command registered");
+        queue_clone.lock().unwrap().push_back(Completion {
+            resolver_ptr: resolver,
+            result: Err(msg),
+        });
+        if let Some(r) = redraw { r(); }
+    }
 }
 
 /// Throw a generic JS Error with the given message.

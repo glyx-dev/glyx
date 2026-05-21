@@ -11,7 +11,7 @@ use crate::{
         SceneQueue, VideoEvents, WindowController,
     },
     runtime_trait::JsRuntime,
-    RuntimeError, VeloxExtension,
+    BackendRegistry, RuntimeError, VeloxExtension,
 };
 
 #[cfg(feature = "dev")]
@@ -76,13 +76,16 @@ impl V8Runtime {
         let ipc_bus        = new_ipc_bus();
         let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
         let perf_state     = Arc::new(std::sync::Mutex::new(velox_perf::PerfState::new()));
-        Self::new_with_ipc(tokio_handle, window, ipc_bus, 0, next_window_id, perf_state)
+        Self::new_with_ipc(tokio_handle, window, ipc_bus, 0, next_window_id, perf_state,
+            std::sync::Arc::new(std::collections::HashMap::new()))
     }
 
     /// Create a new VeloxRuntime and join it to the shared IPC bus.
     ///
     /// `my_handle` is this window's identifier in the bus.
     /// `next_window_id` is a shared counter for assigning secondary-window IDs.
+    /// `backend_commands` is the registry of named async Rust commands callable
+    ///   from JS via `backend.<name>(args)`.
     pub fn new_with_ipc(
         tokio_handle:   Handle,
         window:         Option<WindowController>,
@@ -90,6 +93,7 @@ impl V8Runtime {
         my_handle:      u32,
         next_window_id: Arc<std::sync::atomic::AtomicU32>,
         perf_state:     Arc<std::sync::Mutex<velox_perf::PerfState>>,
+        backend_commands: BackendRegistry,
     ) -> Self {
         // Register this window's inbox in the shared bus.
         ipc_bus.lock().unwrap()
@@ -133,6 +137,7 @@ impl V8Runtime {
                 Arc::clone(&db_pools),
                 Arc::clone(&video_events),
                 Arc::clone(&cdp_log_tx),
+                backend_commands,
             );
 
             (v8::Global::new(scope, ctx), queue, scene)
@@ -165,7 +170,8 @@ impl V8Runtime {
         let ipc_bus        = new_ipc_bus();
         let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
         let perf_state     = Arc::new(std::sync::Mutex::new(velox_perf::PerfState::new()));
-        Self::new_from_snapshot_with_ipc(snapshot_blob, tokio_handle, window, ipc_bus, 0, next_window_id, perf_state)
+        Self::new_from_snapshot_with_ipc(snapshot_blob, tokio_handle, window, ipc_bus, 0, next_window_id, perf_state,
+            std::sync::Arc::new(std::collections::HashMap::new()))
     }
 
     /// Restore from snapshot and join the shared IPC bus.
@@ -177,6 +183,7 @@ impl V8Runtime {
         my_handle:      u32,
         next_window_id: Arc<std::sync::atomic::AtomicU32>,
         perf_state:     Arc<std::sync::Mutex<velox_perf::PerfState>>,
+        backend_commands: BackendRegistry,
     ) -> Result<Self, RuntimeError> {
         // Register this window's inbox in the bus.
         ipc_bus.lock().unwrap()
@@ -223,6 +230,7 @@ impl V8Runtime {
                 Arc::clone(&db_pools),
                 Arc::clone(&video_events),
                 Arc::clone(&cdp_log_tx),
+                backend_commands,
             );
 
             (v8::Global::new(scope, ctx), queue, scene)

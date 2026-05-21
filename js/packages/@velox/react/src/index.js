@@ -1415,6 +1415,33 @@ export const crash = {
   };
 })();
 
+// ── Backend command dispatch ──────────────────────────────────────────────────
+//
+// Calls native Rust commands registered via VeloxExtension::register_commands().
+//
+// Usage (JS):
+//   const result = await backend.greet({ name: 'Alice' });
+//
+// The Rust side:
+//   cmds.add("greet", |args_json| async move {
+//     let v: serde_json::Value = serde_json::from_str(&args_json)?;
+//     Ok(format!("\"Hello, {}!\"", v["name"].as_str().unwrap_or("world")))
+//   });
+//
+// `backend` is a Proxy so any property access returns an async function.
+// The resolved value is JSON-parsed — return a JSON string from Rust.
+
+export const backend = new Proxy(Object.create(null), {
+  get(_, name) {
+    return function(args) {
+      const json = typeof args === 'undefined' ? '{}' : JSON.stringify(args);
+      return __velox_backend_call(String(name), json).then(function(raw) {
+        try { return JSON.parse(raw); } catch (_) { return raw; }
+      });
+    };
+  },
+});
+
 // ── Performance monitoring ────────────────────────────────────────────────────
 
 /**

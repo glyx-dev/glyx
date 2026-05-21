@@ -47,35 +47,102 @@ pub use bindings::{
 };
 pub use snapshot::{SnapshotBlob, create_stub_bindings_script};
 
+// ── Backend command registry ──────────────────────────────────────────────────
+
+/// A single async Rust command callable from JS via `backend.<name>(args)`.
+///
+/// Receives the raw JSON string of the args object and must return a JSON string
+/// (or an error message). Keep IO-bound work on Tokio; avoid blocking.
+pub type BackendCommandFn = std::sync::Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Immutable registry of named backend commands. Built once at startup from the
+/// list of extensions and then shared read-only across all async invocations.
+pub type BackendRegistry = std::sync::Arc<std::collections::HashMap<String, BackendCommandFn>>;
+
+/// Builder used by `VeloxExtension::register_commands` to accumulate commands.
+pub struct BackendRegistryBuilder {
+    commands: std::collections::HashMap<String, BackendCommandFn>,
+}
+
+impl BackendRegistryBuilder {
+    pub fn new() -> Self { Self { commands: std::collections::HashMap::new() } }
+
+    /// Register an async command handler.
+    pub fn add<F, Fut>(&mut self, name: impl Into<String>, f: F)
+    where
+        F:   Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
+    {
+        self.commands.insert(name.into(), std::sync::Arc::new(move |args| Box::pin(f(args))));
+    }
+
+    pub fn build(self) -> BackendRegistry {
+        std::sync::Arc::new(self.commands)
+    }
+}
+
+/// Collect commands from all extensions and build a single shared registry.
+pub fn build_backend_registry(extensions: &[Box<dyn VeloxExtension>]) -> BackendRegistry {
+    let mut builder = BackendRegistryBuilder::new();
+    for ext in extensions {
+        ext.register_commands(&mut builder);
+    }
+    builder.build()
+}
+
+// ── Extension trait ───────────────────────────────────────────────────────────
+
 /// Trait for registering custom native (Rust) bindings from app code.
 ///
 /// Implement this trait to expose your own `__myapp_*` functions to JavaScript
 /// without modifying the framework. Extensions are called once at startup,
 /// after all built-in bindings are registered.
 ///
+/// ## Two integration points
+///
+/// 1. **`register()`** — low-level: directly install V8 callback functions under
+///    any global name you choose.  Use this for synchronous bindings or when you
+///    need full control of the V8 API.
+///
+/// 2. **`register_commands()`** — high-level: declare named async commands that
+///    are callable from JS as `await backend.myCommand({ ...args })`.  The
+///    framework handles the Promise plumbing; you only write the Rust async fn.
+///
+/// You can implement either, both, or neither (for config-only extensions).
+///
 /// # Example
 /// ```no_run
-/// use velox_runtime::VeloxExtension;
+/// use velox_runtime::{VeloxExtension, BackendRegistryBuilder};
 ///
-/// struct MyBinding;
-/// impl VeloxExtension for MyBinding {
-///     fn name(&self) -> &str { "my_binding" }
-///     fn register(&self, scope: &mut v8::HandleScope, global: v8::Local<v8::Object>) {
-///         let key = v8::String::new(scope, "__myapp_hello").unwrap();
-///         let func = v8::Function::new(scope, |_scope: &mut v8::HandleScope,
-///             _args: v8::FunctionCallbackArguments,
-///             mut rv: v8::ReturnValue| {
-///             rv.set_undefined();
-///         }).unwrap();
-///         global.set(scope, key.into(), func.into());
+/// struct MyExtension;
+/// impl VeloxExtension for MyExtension {
+///     fn name(&self) -> &str { "my_extension" }
+///
+///     fn register_commands(&self, cmds: &mut BackendRegistryBuilder) {
+///         cmds.add("greet", |args_json| async move {
+///             let args: serde_json::Value = serde_json::from_str(&args_json)
+///                 .unwrap_or_default();
+///             let name = args["name"].as_str().unwrap_or("world");
+///             Ok(format!("\"Hello, {name}!\""))
+///         });
 ///     }
 /// }
 /// ```
 pub trait VeloxExtension: Send + Sync {
     /// Unique name for logging/debugging.
     fn name(&self) -> &str;
-    /// Register native V8 bindings. Called once after the isolate is created.
-    fn register(&self, scope: &mut v8::HandleScope, global: v8::Local<v8::Object>);
+
+    /// Register native V8 bindings directly. Called once after the isolate is created.
+    /// Default: no-op.
+    fn register(&self, _scope: &mut v8::HandleScope, _global: v8::Local<v8::Object>) {}
+
+    /// Register named async backend commands callable from JS as `backend.<name>(args)`.
+    /// Default: no commands.
+    fn register_commands(&self, _cmds: &mut BackendRegistryBuilder) {}
 }
 
 // ── V8 platform init ──────────────────────────────────────────────────────────

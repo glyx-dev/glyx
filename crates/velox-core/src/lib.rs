@@ -63,7 +63,7 @@ use velox_gpu::GpuContext;
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
 use velox_renderer::{colors, peniko, VeloxRenderer, FrameBuilder};
 use velox_runtime::{
-    init_v8, new_ipc_bus,
+    init_v8, new_ipc_bus, build_backend_registry,
     CanvasCmd, InputEvent, NodeProps, NodeType, SceneCommand,
     VeloxRuntime, WindowController,
 };
@@ -1327,6 +1327,8 @@ pub fn run(mut config: AppConfig) -> bool {
     let js_src_arc        = Arc::new(js_src);
     let snapshot_blob_arc = Arc::new(snapshot_blob);
     let extensions_arc    = Arc::new(extensions);
+    // Build the backend command registry once; share it across all windows.
+    let backend_registry  = Arc::new(velox_runtime::build_backend_registry(&*extensions_arc));
 
     // Per-window state: handle → PerWindowState.
     let mut windows: std::collections::HashMap<u32, PerWindowState> =
@@ -1397,6 +1399,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         blob, tokio_handle.clone(), Some(window_ctrl),
                         Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
                         Arc::clone(&shared_perf),
+                        Arc::clone(&backend_registry),
                     ) {
                         Ok(rt) => {
                             log::info!("Window {}: restored from snapshot", window_handle);
@@ -1425,6 +1428,7 @@ pub fn run(mut config: AppConfig) -> bool {
                                 tokio_handle.clone(), Some(wc),
                                 Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
                                 Arc::clone(&shared_perf),
+                                Arc::clone(&backend_registry),
                             )
                         }
                     }
@@ -1433,6 +1437,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         tokio_handle.clone(), Some(window_ctrl),
                         Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
                         Arc::clone(&shared_perf),
+                        Arc::clone(&backend_registry),
                     )
                 };
 

@@ -82,6 +82,24 @@ enum Commands {
         #[command(subcommand)]
         cmd: RuntimeCommands,
     },
+    /// Generate boilerplate for Velox features.
+    Generate {
+        #[command(subcommand)]
+        cmd: GenerateCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum GenerateCommands {
+    /// Scaffold a new native backend command (requires --native project).
+    ///
+    /// Creates `src-velox/commands/<name>.rs` with a typed async handler and
+    /// prints the JS usage so you can call `await backend.<name>(args)` from
+    /// any React component.
+    Command {
+        /// Command name in camelCase (e.g. `fetchUser`). Snake-case is also accepted.
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -115,6 +133,7 @@ fn run() -> Result<()> {
             cmd_build(target.as_deref(), &mode, check_performance, perf_budget, perf_duration),
         Commands::Package { target, installer } => cmd_package(target.as_deref(), installer),
         Commands::Runtime { cmd }         => cmd_runtime(cmd),
+        Commands::Generate { cmd }        => cmd_generate(cmd),
     }
 }
 
@@ -1337,6 +1356,111 @@ fn build_app_bundle(project_name: &str, entry: &str) -> Result<PathBuf> {
         .context("Failed to run `bun build`")?;
     if !status.success() { bail!("bun build failed"); }
     Ok(PathBuf::from(bundle_out))
+}
+
+// ── velox generate ────────────────────────────────────────────────────────────
+
+fn cmd_generate(cmd: GenerateCommands) -> Result<()> {
+    match cmd {
+        GenerateCommands::Command { name } => cmd_generate_command(&name),
+    }
+}
+
+fn cmd_generate_command(name: &str) -> Result<()> {
+    // Accept both camelCase and snake_case inputs.
+    let snake = camel_to_snake(name);
+    let camel = snake_to_camel(&snake);
+
+    if !is_native_project() {
+        bail!(
+            "velox generate command requires a native project (Cargo.toml not found).\n\
+             Run `velox create --native <name>` to create one, or run this command from \
+             the project root."
+        );
+    }
+
+    let dir = PathBuf::from("src-velox").join("commands");
+    std::fs::create_dir_all(&dir)?;
+
+    let file_path = dir.join(format!("{snake}.rs"));
+    if file_path.exists() {
+        bail!("'{}' already exists", file_path.display());
+    }
+
+    let content = format!(
+        r#"//! Backend command: `{camel}`
+//!
+//! Called from JS as:
+//!   const result = await backend.{camel}({{ /* args */ }});
+//!
+//! Register this command in your VeloxExtension:
+//!   fn register_commands(&self, cmds: &mut velox_runtime::BackendRegistryBuilder) {{
+//!       cmds.add("{camel}", {snake});
+//!   }}
+
+use velox_runtime::BackendRegistryBuilder;
+
+/// Register this command with the backend registry.
+pub fn register(cmds: &mut BackendRegistryBuilder) {{
+    cmds.add("{camel}", handler);
+}}
+
+/// Handler for the `{camel}` command.
+///
+/// `args_json` is the JSON-serialised object passed from JS.
+/// Return a JSON string to resolve the Promise, or an Err string to reject it.
+async fn handler(args_json: String) -> Result<String, String> {{
+    let _args: serde_json::Value = serde_json::from_str(&args_json)
+        .map_err(|e| e.to_string())?;
+
+    // TODO: implement {camel}
+    Ok("null".to_string())
+}}
+"#
+    );
+
+    std::fs::write(&file_path, content)?;
+
+    println!("Created {}", file_path.display());
+    println!();
+    println!("Next steps:");
+    println!("  1. Implement the handler in {}", file_path.display());
+    println!("  2. In your VeloxExtension impl, add:");
+    println!("       fn register_commands(&self, cmds: &mut BackendRegistryBuilder) {{");
+    println!("           crate::commands::{snake}::register(cmds);");
+    println!("       }}");
+    println!("  3. Call from JS:");
+    println!("       import {{ backend }} from '@velox/react';");
+    println!("       const result = await backend.{camel}({{ /* args */ }});");
+
+    Ok(())
+}
+
+/// Convert camelCase / PascalCase → snake_case.
+fn camel_to_snake(s: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in s.char_indices() {
+        if ch.is_uppercase() && i > 0 { out.push('_'); }
+        out.push(ch.to_ascii_lowercase());
+    }
+    out
+}
+
+/// Convert snake_case → camelCase.
+fn snake_to_camel(s: &str) -> String {
+    let mut out = String::new();
+    let mut cap_next = false;
+    for ch in s.chars() {
+        if ch == '_' {
+            cap_next = true;
+        } else if cap_next {
+            out.push(ch.to_ascii_uppercase());
+            cap_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 // ── Project detection ─────────────────────────────────────────────────────────

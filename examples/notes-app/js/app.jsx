@@ -28,6 +28,9 @@ import {
   Video,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
+import { createKeychain, createTypedKeychain } from '@velox/keychain';
+import { initStore, createStore } from '@velox/store';
+import { Scene, PerspectiveCamera, AmbientLight, DirectionalLight, Mesh } from '@velox/three';
 import { createDrizzle } from '@velox/drizzle';
 import { sqliteTable, integer, text, real } from 'drizzle-orm/sqlite-core';
 import { desc, eq, gt } from 'drizzle-orm';
@@ -481,6 +484,12 @@ function NoteListScreen() {
             onPress={() => navigate('drizzle')}
             width={68}
             color={C.green}
+          />
+          <Btn
+            label="Packages"
+            onPress={() => navigate('packages')}
+            width={84}
+            color={C.mauve}
           />
         </View>
         <Text fontSize={11} width={isWide ? inner - 308 : inner} height={16} style={{ color: C.dim }}>
@@ -1953,60 +1962,13 @@ function CanvasDemoScreen() {
     return () => clearTimeout(raf);
   }, []);
 
-  // 3D canvas ref — simple rotating box via Scene3D
-  const c3dRef  = React.useRef(null);
-  const tRef3d  = React.useRef(0);
+  // 3D canvas — declarative via @velox/three
+  const c3dRef = React.useRef(null);
+  const [angle3d, setAngle3d] = useState(0);
 
   useEffect(() => {
-    let raf3d;
-    function loop3d() {
-      const c = c3dRef.current;
-      if (c) {
-        const t = tRef3d.current;
-        tRef3d.current += 0.02;
-
-        const cos = Math.cos(t), sin = Math.sin(t);
-        // Y-rotation matrix (column-major → row-major for our WGSL which uses row vectors)
-        const transform = [
-           cos, 0, sin, 0,
-             0, 1,   0, 0,
-          -sin, 0, cos, 0,
-             0, 0,   0, 1,
-        ];
-
-        c.updateScene({
-          background: [0.06, 0.067, 0.125, 1.0],
-          camera: {
-            position:  [0, 1.2, 3.5],
-            target:    [0, 0, 0],
-            up:        [0, 1, 0],
-            fovDeg:    55,
-            near:      0.1,
-            far:       100,
-          },
-          lights: [
-            { type: 'ambient',     color: [1.0, 1.0, 1.0],        intensity: 0.25 },
-            { type: 'directional', color: [1.0, 0.94, 0.82],      intensity: 1.0,
-              direction: [-0.5, -1, -0.8] },
-          ],
-          meshes: [
-            {
-              geometry:  { type: 'box', width: 1, height: 1, depth: 1 },
-              transform,
-              color:     [0.39, 0.55, 1.0, 1.0],
-            },
-            {
-              geometry:  { type: 'plane', width: 4, depth: 4 },
-              transform: [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,-0.5,0,1],
-              color:     [0.157, 0.176, 0.275, 1.0],
-            },
-          ],
-        });
-      }
-      raf3d = setTimeout(loop3d, 33);
-    }
-    loop3d();
-    return () => clearTimeout(raf3d);
+    const id = setInterval(() => setAngle3d((a) => a + 0.02), 33);
+    return () => clearInterval(id);
   }, []);
 
   return (
@@ -2027,16 +1989,24 @@ function CanvasDemoScreen() {
         style={{ borderRadius: 8, borderWidth: 1, borderColor: C.border }}
       />
 
-      {/* 3D Canvas */}
+      {/* 3D Canvas — declarative @velox/three */}
       <Text fontSize={13} width={inner} height={18} style={{ color: C.dim }}>
-        3D Canvas — wgpu Phong shading, rotating box
+        3D Canvas — declarative @velox/three (R3F-style)
       </Text>
       <Canvas3D
         ref={c3dRef}
         width={300}
         height={220}
         style={{ borderRadius: 8, borderWidth: 1, borderColor: C.border, backgroundColor: '#0f1120' }}
-      />
+      >
+        <Scene canvasRef={c3dRef} background={[0.06, 0.067, 0.125, 1.0]}>
+          <PerspectiveCamera position={[0, 1.2, 3.5]} target={[0, 0, 0]} fov={55} near={0.1} far={100} />
+          <AmbientLight color={[1.0, 1.0, 1.0]} intensity={0.25} />
+          <DirectionalLight direction={[-0.5, -1, -0.8]} color={[1.0, 0.94, 0.82]} intensity={1.0} />
+          <Mesh geometry="box"   rotation={[0, angle3d, 0]}       color={[0.39, 0.55, 1.0, 1.0]} />
+          <Mesh geometry="plane" position={[0, -0.5, 0]} scale={[4, 1, 4]} color={[0.157, 0.176, 0.275, 1.0]} />
+        </Scene>
+      </Canvas3D>
     </ScrollView>
   );
 }
@@ -2570,6 +2540,123 @@ function MediaDemoScreen() {
   );
 }
 
+// ── Screen: Packages Demo (@velox/keychain + @velox/store) ────────────────────
+
+// Module-level singletons — created once, shared across all renders.
+const appChain   = createTypedKeychain('demo', { apiKey: null, sessionToken: null });
+const useCounter = createStore('counter', { count: 0, lastReset: '' });
+
+function PackagesDemoScreen() {
+  const { width: winW } = useWindowSize();
+  const inner = winW - PAD * 2;
+  const C = useThemeColors();
+
+  // ── @velox/keychain demo ───────────────────────────────────────────────────
+  const [kcInput,  setKcInput]  = useState('');
+  const [kcStored, setKcStored] = useState(null);
+  const [kcStatus, setKcStatus] = useState('');
+
+  async function kcSave() {
+    await appChain.set('apiKey', kcInput.trim());
+    setKcStatus('Saved to OS keychain ✓');
+    setKcInput('');
+  }
+
+  async function kcLoad() {
+    const val = await appChain.get('apiKey');
+    setKcStored(val);
+    setKcStatus(val === null ? 'No value stored yet.' : 'Loaded from OS keychain ✓');
+  }
+
+  async function kcClear() {
+    await appChain.clear();
+    setKcStored(null);
+    setKcStatus('Cleared ✓');
+  }
+
+  // ── @velox/store demo ──────────────────────────────────────────────────────
+  const { state: ctr, set: setCtr, reset: resetCtr, hydrated } = useCounter();
+
+  return (
+    <ScrollView width={inner} height={600} style={{ gap: 24 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }} width={inner} height={28}>
+        <BackBtn />
+        <Text fontSize={18} height={24} style={{ color: C.text }}>Packages</Text>
+      </View>
+
+      {/* @velox/keychain ────────────────────────────────────────────────── */}
+      <Text fontSize={15} width={inner} height={20} style={{ color: C.accent }}>@velox/keychain</Text>
+      <Text fontSize={12} width={inner} height={16} style={{ color: C.dim }}>
+        Typed namespace-scoped wrapper over the OS credential store (DPAPI / Keychain / Secret Service).
+      </Text>
+
+      <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }} width={inner} height={34}>
+        <TextInput
+          value={kcInput}
+          onChangeText={setKcInput}
+          placeholder="Enter a value to store as apiKey…"
+          width={inner - 100} height={32}
+          style={{ backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.border, paddingHorizontal: 8 }}
+        />
+        <Pressable onPress={kcSave} width={84} height={32}
+          style={{ backgroundColor: C.accent, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+          <Text fontSize={13} width={72} height={18} style={{ color: C.bg }}>Save</Text>
+        </Pressable>
+      </View>
+
+      <View style={{ flexDirection: 'row', gap: 8 }} width={inner} height={32}>
+        <Pressable onPress={kcLoad} width={100} height={32}
+          style={{ backgroundColor: C.sapphire, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+          <Text fontSize={13} width={88} height={18} style={{ color: C.bg }}>Load apiKey</Text>
+        </Pressable>
+        <Pressable onPress={kcClear} width={80} height={32}
+          style={{ backgroundColor: C.red, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+          <Text fontSize={13} width={68} height={18} style={{ color: C.bg }}>Clear all</Text>
+        </Pressable>
+      </View>
+
+      {kcStatus ? (
+        <Text fontSize={12} width={inner} height={16} style={{ color: C.teal }}>{kcStatus}</Text>
+      ) : null}
+      {kcStored !== null ? (
+        <Text fontSize={12} width={inner} height={16} style={{ color: C.text }}>
+          {`apiKey = "${kcStored}"`}
+        </Text>
+      ) : null}
+
+      {/* @velox/store ───────────────────────────────────────────────────── */}
+      <Text fontSize={15} width={inner} height={20} style={{ color: C.accent }}>@velox/store</Text>
+      <Text fontSize={12} width={inner} height={16} style={{ color: C.dim }}>
+        Persistent reactive store backed by SQLite. State survives app restarts.
+        {hydrated ? '' : '  (hydrating…)'}
+      </Text>
+
+      <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }} width={inner} height={40}>
+        <Pressable onPress={() => setCtr('count', ctr.count - 1)} width={40} height={40}
+          style={{ backgroundColor: C.surface, borderRadius: 8, borderWidth: 1, borderColor: C.border, justifyContent: 'center', alignItems: 'center' }}>
+          <Text fontSize={20} width={28} height={28} style={{ color: C.text }}>−</Text>
+        </Pressable>
+        <Text fontSize={24} width={60} height={32} style={{ color: C.text, textAlign: 'center' }}>
+          {ctr.count}
+        </Text>
+        <Pressable onPress={() => setCtr('count', ctr.count + 1)} width={40} height={40}
+          style={{ backgroundColor: C.surface, borderRadius: 8, borderWidth: 1, borderColor: C.border, justifyContent: 'center', alignItems: 'center' }}>
+          <Text fontSize={20} width={28} height={28} style={{ color: C.text }}>+</Text>
+        </Pressable>
+        <Pressable
+          onPress={() => resetCtr()}
+          width={70} height={32}
+          style={{ backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.border, justifyContent: 'center', alignItems: 'center' }}>
+          <Text fontSize={12} width={58} height={16} style={{ color: C.dim }}>Reset</Text>
+        </Pressable>
+      </View>
+      <Text fontSize={11} width={inner} height={14} style={{ color: C.dim }}>
+        Increment, close the app, reopen — counter persists.
+      </Text>
+    </ScrollView>
+  );
+}
+
 // ── Screen: Drizzle ORM ────────────────────────────────────────────────────────
 
 const SEED_PRODUCTS = [
@@ -2779,15 +2866,18 @@ function App() {
     db.open('notes.db')
       .then(() => {
         setInitStatus('Creating schema…');
-        return db.run(
-          'CREATE TABLE IF NOT EXISTS notes (' +
-          '  id         INTEGER PRIMARY KEY AUTOINCREMENT,' +
-          '  title      TEXT    NOT NULL DEFAULT "",' +
-          '  body       TEXT    NOT NULL DEFAULT "",' +
-          '  created_at INTEGER NOT NULL,' +
-          '  updated_at INTEGER NOT NULL' +
-          ')'
-        );
+        return Promise.all([
+          db.run(
+            'CREATE TABLE IF NOT EXISTS notes (' +
+            '  id         INTEGER PRIMARY KEY AUTOINCREMENT,' +
+            '  title      TEXT    NOT NULL DEFAULT "",' +
+            '  body       TEXT    NOT NULL DEFAULT "",' +
+            '  created_at INTEGER NOT NULL,' +
+            '  updated_at INTEGER NOT NULL' +
+            ')'
+          ),
+          initStore(),  // creates velox_store table in the same notes.db
+        ]);
       })
       .then(() => db.query('SELECT count(*) AS cnt FROM notes'))
       .then(([{ cnt }]) => {
@@ -2930,7 +3020,8 @@ function App() {
               <Route name="canvas"  component={CanvasDemoScreen}  />
               <Route name="ai"      component={AiDemoScreen}      />
               <Route name="media"   component={MediaDemoScreen}   />
-              <Route name="drizzle" component={DrizzleScreen}      />
+              <Route name="drizzle"   component={DrizzleScreen}      />
+              <Route name="packages"  component={PackagesDemoScreen} />
             </Router>
           </View>
 

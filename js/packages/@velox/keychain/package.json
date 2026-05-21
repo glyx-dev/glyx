@@ -1,0 +1,10 @@
+{
+  "name": "@velox/keychain",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "description": "Typed namespace-scoped OS keychain for Velox apps — wraps the credentials API.",
+  "peerDependencies": {
+    "@velox/react": "0.1.0"
+  }
+}

@@ -2081,6 +2081,16 @@ export const video = {
 export const Camera = React.forwardRef(function Camera({ mirror, style, ...rest }, ref) {
   const [cameraHandle, setCameraHandle] = React.useState(null);
 
+  // Auto-close the camera when this component unmounts (e.g. tab switch, navigation).
+  // Without this the native capture session keeps running in the background.
+  React.useEffect(() => {
+    return () => {
+      if (cameraHandle !== null) {
+        __velox_camera_close(String(cameraHandle));
+      }
+    };
+  }, [cameraHandle]);
+
   React.useImperativeHandle(ref, () => ({
     /** @returns {number|null} current handle, or null if not open */
     get handle() { return cameraHandle; },

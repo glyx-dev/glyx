@@ -25,7 +25,7 @@ import {
   Slider, Select, DatePicker,
   Canvas, Canvas3D,
   ai, camera, microphone, Camera,
-  Video,
+  Video, Image,
 } from '@velox/react';
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
 import { createKeychain, createTypedKeychain } from '@velox/keychain';
@@ -344,14 +344,14 @@ function NoteListScreen() {
     [notes]
   );
   const latestDate = notes.length > 0 ? formatShortDate(notes[0].updated_at) : 'N/A';
-  const panelGap = isWide ? 12 : 10;
+
 
   const contentW = winW - 2 * PAD;
   const contentH = winH - HEADER_H - 2 * PAD;
   const inner    = contentW - 32;
   const svContentH = displayed.length * 110 + 20;
   const heroH = isWide ? 124 : 188;
-  const actionsH = isWide ? 34 : 78;
+  const actionsH = 76;
   const svH = Math.max(110, contentH - 40 - heroH - 40 - actionsH - 18 - 16);
 
   return (
@@ -413,8 +413,11 @@ function NoteListScreen() {
         height={36}
       />
 
-      <View style={{ flexDirection: isWide ? 'row' : 'column', gap: panelGap }} width={inner} height={actionsH}>
-        <View style={{ flexDirection: 'row', gap: 8 }} width={isWide ? 300 : inner} height={34}>
+      <View style={{ gap: 8 }} width={inner} height={actionsH}>
+        <Text fontSize={11} width={inner} height={16} style={{ color: C.dim }}>
+          {'Tap a card to edit. Search narrows results instantly using SQL LIKE.'}
+        </Text>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }} width={inner} height={52}>
           <Btn
             label="+ New"
             onPress={() => navigate('edit', { noteId: null })}
@@ -492,9 +495,6 @@ function NoteListScreen() {
             color={C.mauve}
           />
         </View>
-        <Text fontSize={11} width={isWide ? inner - 308 : inner} height={16} style={{ color: C.dim }}>
-          {'Tap a card to edit. Search narrows results instantly using SQL LIKE.'}
-        </Text>
       </View>
 
       {displayed.length === 0 ? (
@@ -2313,8 +2313,10 @@ function MediaDemoScreen() {
       const path = await camRef.current.stopRecord();
       setVideoPath(path);
       setRecording(false);
-      // Play back the recorded video as audio (it has audio track if mic was used;
-      // for now just open the file path — user can navigate to it).
+      // Auto-switch to Video tab so the user can preview the recording.
+      setVidSrc(path);
+      setVidInput(path);
+      setTab(2);
     } catch (e) { setCamError(String(e)); setRecording(false); }
   }
 
@@ -2346,7 +2348,13 @@ function MediaDemoScreen() {
   }
 
   return (
-    <ScrollView width={inner} height={600}>
+    <ScrollView width={inner} height={650}>
+      {/* Header */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }} width={inner} height={28}>
+        <BackBtn />
+        <Text fontSize={18} height={24} style={{ color: C.text }}>Media</Text>
+      </View>
+
       {/* Tab row */}
       <View style={{ flexDirection: 'row', gap: 8, marginBottom: 16 }} width={inner} height={36}>
         {MEDIA_TABS.map((t, i) => (
@@ -2405,15 +2413,19 @@ function MediaDemoScreen() {
             )}
           </View>
 
-          {/* Results */}
+          {/* Photo preview */}
           {photoPath ? (
-            <Text fontSize={11} width={inner} height={16} style={{ color: C.teal }}>
-              Photo: {photoPath}
-            </Text>
+            <View style={{ gap: 6 }} width={inner} height={246}>
+              <Text fontSize={11} width={inner} height={14} style={{ color: C.teal }}>
+                Captured: {photoPath}
+              </Text>
+              <Image src={photoPath} width={inner} height={228} resizeMode="contain" />
+            </View>
           ) : null}
+          {/* Video recorded — tap Stop Record to auto-switch to Video tab */}
           {videoPath ? (
-            <Text fontSize={11} width={inner} height={16} style={{ color: C.teal }}>
-              Video: {videoPath}
+            <Text fontSize={11} width={inner} height={14} style={{ color: C.teal }}>
+              Recorded: {videoPath} (switched to Video tab)
             </Text>
           ) : null}
           {camError ? (
@@ -2557,21 +2569,29 @@ function PackagesDemoScreen() {
   const [kcStatus, setKcStatus] = useState('');
 
   async function kcSave() {
-    await appChain.set('apiKey', kcInput.trim());
-    setKcStatus('Saved to OS keychain ✓');
-    setKcInput('');
+    setKcStatus('');
+    try {
+      await appChain.set('apiKey', kcInput.trim());
+      setKcStatus('Saved to OS keychain ✓');
+      setKcInput('');
+    } catch (e) { setKcStatus('Save error: ' + String(e)); }
   }
 
   async function kcLoad() {
-    const val = await appChain.get('apiKey');
-    setKcStored(val);
-    setKcStatus(val === null ? 'No value stored yet.' : 'Loaded from OS keychain ✓');
+    setKcStatus('');
+    try {
+      const val = await appChain.get('apiKey');
+      setKcStored(val);
+      setKcStatus(val === null ? 'No value stored yet.' : 'Loaded from OS keychain ✓');
+    } catch (e) { setKcStatus('Load error: ' + String(e)); }
   }
 
   async function kcClear() {
-    await appChain.clear();
-    setKcStored(null);
-    setKcStatus('Cleared ✓');
+    try {
+      await appChain.clear();
+      setKcStored(null);
+      setKcStatus('Cleared ✓');
+    } catch (e) { setKcStatus('Clear error: ' + String(e)); }
   }
 
   // ── @velox/store demo ──────────────────────────────────────────────────────

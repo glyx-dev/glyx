@@ -215,10 +215,12 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 let frame_buf       = Arc::new(Mutex::new(None::<(u32, u32, Vec<u8>)>));
                 let last_raw_frame  = Arc::new(Mutex::new(None::<(u32, u32, Vec<u8>)>));
                 let stop_flag       = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let capture_fps     = Arc::new(std::sync::atomic::AtomicU32::new(30));
                 let record_frame_tx = Arc::new(Mutex::new(None::<std::sync::mpsc::SyncSender<(u32, u32, Vec<u8>)>>));
                 let buf_clone      = Arc::clone(&frame_buf);
                 let raw_clone      = Arc::clone(&last_raw_frame);
                 let stop_clone     = Arc::clone(&stop_flag);
+                let fps_clone      = Arc::clone(&capture_fps);
                 let rec_tx_clone   = Arc::clone(&record_frame_tx);
                 let redraw         = Arc::clone(&state.request_redraw);
 
@@ -234,25 +236,35 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     if let Err(e) = cam.open_stream() {
                         log::warn!("[camera] stream open failed: {e}"); return;
                     }
+
+                    let actual_fps = cam.camera_format().frame_rate().clamp(1, 240);
+                    fps_clone.store(actual_fps, std::sync::atomic::Ordering::Relaxed);
+                    log::info!("[camera] stream open (nokhwa reports {}fps)", actual_fps);
+
+                    // No pre-throttling — forward every frame as it arrives.
+                    // The recording thread measures actual inter-frame intervals and uses
+                    // that rate as the encoder FPS, so playback speed is always correct.
                     while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                        if let Ok(frame) = cam.frame() {
-                            if let Ok(rgba) = frame.decode_image::<RgbAFormat>() {
-                                let (w, h) = (rgba.width(), rgba.height());
-                                let data = rgba.into_raw();
-                                // Keep a permanent copy for CaptureCamera (never taken, only overwritten).
-                                *raw_clone.lock().unwrap() = Some((w, h, data.clone()));
-                                // Forward to recording thread if active.
-                                if let Some(tx) = rec_tx_clone.lock().unwrap().as_ref() {
-                                    let _ = tx.try_send((w, h, data.clone()));
+                        match cam.frame() {
+                            Ok(frame) => {
+                                if let Ok(rgba) = frame.decode_image::<RgbAFormat>() {
+                                    let (w, h) = (rgba.width(), rgba.height());
+                                    let data = rgba.into_raw();
+                                    // Keep a permanent copy for CaptureCamera (still photo).
+                                    *raw_clone.lock().unwrap() = Some((w, h, data.clone()));
+                                    // Forward to recording thread if active (try_send = non-blocking).
+                                    if let Some(tx) = rec_tx_clone.lock().unwrap().as_ref() {
+                                        let _ = tx.try_send((w, h, data.clone()));
+                                    }
+                                    // Render loop uses take() to detect new frames.
+                                    *buf_clone.lock().unwrap() = Some((w, h, data));
+                                    // Wake the winit event loop to paint the new frame.
+                                    redraw();
                                 }
-                                // Render loop uses take() to detect new frames.
-                                *buf_clone.lock().unwrap() = Some((w, h, data));
-                                // Wake the winit event loop so the new frame is painted
-                                // even when the user is not moving the mouse.
-                                redraw();
                             }
+                            // No frame ready yet — brief backoff to avoid busy-looping.
+                            Err(_) => std::thread::sleep(std::time::Duration::from_millis(1)),
                         }
-                        std::thread::sleep(std::time::Duration::from_millis(33)); // ~30fps
                     }
                     let _ = cam.stop_stream();
                 });
@@ -262,6 +274,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     last_raw_frame,
                     stop_flag,
                     latest_image: None,
+                    capture_fps,
                     record_frame_tx,
                     record_done_rx: None,
                 });
@@ -292,34 +305,71 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
             }
             SceneCommand::StartCameraRecord { handle_id, output_path } => {
                 if let Some(stream) = state.camera_streams.get_mut(&handle_id) {
-                    // Bounded channel: at most 4 buffered frames so we don't OOM on slow encoder.
-                    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(u32, u32, Vec<u8>)>(4);
+                    // Buffer enough frames for FPS calibration before the encoder opens.
+                    // 8 slots: capture thread can pipeline frames while calibration runs.
+                    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(u32, u32, Vec<u8>)>(8);
                     let (done_tx, done_rx)   = std::sync::mpsc::channel::<Result<String, String>>();
                     *stream.record_frame_tx.lock().unwrap() = Some(frame_tx);
                     stream.record_done_rx = Some(done_rx);
 
                     std::thread::spawn(move || {
-                        // Wait for the first frame to learn dimensions.
-                        let (w, h, first_data) = match frame_rx.recv() {
-                            Ok(f)  => f,
-                            Err(_) => { let _ = done_tx.send(Err("no frames received".to_string())); return; }
-                        };
+                        // ── Phase 1: Calibrate actual frame delivery rate ──────────────────
+                        // Collect up to CAL_FRAMES to measure inter-frame intervals.
+                        // Using (N-1) intervals / elapsed avoids including thread-spawn lag.
+                        const CAL_FRAMES: usize = 8;
+                        let frame_timeout = std::time::Duration::from_secs(2);
+                        let mut buffered: Vec<(u32, u32, Vec<u8>)> = Vec::with_capacity(CAL_FRAMES);
+                        let mut t_first: Option<std::time::Instant> = None;
+                        let mut t_last  = std::time::Instant::now();
 
-                        // ── Try velox-media DLL encoder first ────────────────────────────────
+                        loop {
+                            if buffered.len() >= CAL_FRAMES { break; }
+                            match frame_rx.recv_timeout(frame_timeout) {
+                                Ok(f) => {
+                                    let now = std::time::Instant::now();
+                                    if t_first.is_none() { t_first = Some(now); }
+                                    t_last = now;
+                                    buffered.push(f);
+                                }
+                                Err(_) => break, // channel closed or timeout
+                            }
+                        }
+
+                        if buffered.is_empty() {
+                            let _ = done_tx.send(Err("no frames received".to_string()));
+                            return;
+                        }
+
+                        let fps: u32 = if buffered.len() >= 2 {
+                            let span = (t_last - t_first.unwrap()).as_secs_f64().max(0.001);
+                            let intervals = (buffered.len() - 1) as f64;
+                            ((intervals / span).round() as u32).clamp(5, 60)
+                        } else {
+                            24 // single-frame recording — conservative default
+                        };
+                        log::info!("[camera] encoder fps={fps} (measured over {} calibration frames)", buffered.len());
+
+                        let (w, h) = (buffered[0].0, buffered[0].1);
+
+                        // ── Phase 2: Open encoder and write all frames ────────────────────
                         if let Some(media) = velox_media::get_media() {
-                            match media.encoder_open(&output_path, w, h, 30) {
+                            match media.encoder_open(&output_path, w, h, fps) {
                                 Ok(enc) => {
-                                    let ok = media.encoder_write_rgba(&enc, &first_data).is_ok()
-                                        && frame_rx.iter().all(|(_, _, data)| {
-                                            media.encoder_write_rgba(&enc, &data).is_ok()
-                                        });
+                                    let mut ok = true;
+                                    for (_, _, ref data) in &buffered {
+                                        if media.encoder_write_rgba(&enc, data).is_err() { ok = false; break; }
+                                    }
+                                    if ok {
+                                        for (_, _, data) in frame_rx.iter() {
+                                            if media.encoder_write_rgba(&enc, &data).is_err() { ok = false; break; }
+                                        }
+                                    }
                                     media.encoder_close(enc);
-                                    let result = if ok {
+                                    let _ = done_tx.send(if ok {
                                         Ok(output_path)
                                     } else {
                                         Err("velox-media encoder write failed".to_string())
-                                    };
-                                    let _ = done_tx.send(result);
+                                    });
                                     return;
                                 }
                                 Err(e) => {
@@ -328,18 +378,19 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                             }
                         }
 
-                        // ── Fallback: subprocess ffmpeg ───────────────────────────────────────
+                        // ── Fallback: subprocess ffmpeg ───────────────────────────────────
                         use std::process::{Command, Stdio};
                         use std::io::Write;
 
                         let ffmpeg_bin = find_ffmpeg();
+                        let fps_str = fps.to_string();
                         let child = Command::new(&ffmpeg_bin)
                             .args([
                                 "-y",
                                 "-f", "rawvideo",
                                 "-pixel_format", "rgba",
                                 "-video_size", &format!("{}x{}", w, h),
-                                "-framerate", "30",
+                                "-framerate", &fps_str,
                                 "-i", "pipe:0",
                                 "-vf", "format=yuv420p",
                                 "-c:v", "libx264",
@@ -365,7 +416,9 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         };
 
                         let mut stdin = child.stdin.take().unwrap();
-                        let _ = stdin.write_all(&first_data);
+                        for (_, _, ref data) in &buffered {
+                            if stdin.write_all(data).is_err() { break; }
+                        }
                         while let Ok((_, _, data)) = frame_rx.recv() {
                             if stdin.write_all(&data).is_err() { break; }
                         }

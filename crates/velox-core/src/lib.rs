@@ -63,7 +63,7 @@ use velox_gpu::GpuContext;
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
 use velox_renderer::{colors, peniko, VeloxRenderer, FrameBuilder};
 use velox_runtime::{
-    init_v8, new_ipc_bus, build_backend_registry,
+    init_v8, new_ipc_bus,
     CanvasCmd, InputEvent, NodeProps, NodeType, SceneCommand,
     VeloxRuntime, WindowController,
 };
@@ -178,6 +178,10 @@ fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> Capabilities {
     // Load icon PNG → RGBA bytes for winit window icon.
     if let Some(icon_path) = file.as_ref().and_then(|f| f.icon.as_ref()) {
         cfg.icon_rgba = load_icon_png(icon_path);
+    } else {
+        // Fall back to the embedded Velox logo so the taskbar always shows
+        // an icon even when the user hasn't configured one yet.
+        cfg.icon_rgba = load_icon_from_bytes(DEFAULT_ICON_BYTES);
     }
 
     file.and_then(|f| f.capabilities).unwrap_or_default()
@@ -199,6 +203,27 @@ fn load_icon_png(path: &str) -> Option<(Vec<u8>, u32, u32)> {
         }
     }
 }
+
+/// Decode PNG bytes (e.g. from `include_bytes!`) to RGBA for a winit window icon.
+fn load_icon_from_bytes(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    use image::ImageReader;
+    use std::io::Cursor;
+    match ImageReader::new(Cursor::new(bytes)).with_guessed_format() {
+        Ok(reader) => match reader.decode() {
+            Ok(img) => {
+                let rgba = img.into_rgba8();
+                let (w, h) = rgba.dimensions();
+                Some((rgba.into_raw(), w, h))
+            }
+            Err(_) => None,
+        },
+        Err(_) => None,
+    }
+}
+
+/// Default Velox icon embedded in all builds.
+/// Used as the window icon when the user hasn't configured one in velox.config.json.
+static DEFAULT_ICON_BYTES: &[u8] = include_bytes!("../../../velox.png");
 
 /// Return the platform-specific directory for Velox crash dumps.
 /// Mirrors `velox_runtime::bindings::crash_reports_dir()`.
@@ -599,6 +624,9 @@ struct CameraStream {
     stop_flag:    Arc<std::sync::atomic::AtomicBool>,
     /// Latest peniko::Image built from the most recent frame.
     latest_image: Option<peniko::Image>,
+    /// Actual FPS negotiated with the camera hardware (written by capture thread
+    /// shortly after open_stream; read by StartCameraRecord for the encoder).
+    capture_fps:  Arc<std::sync::atomic::AtomicU32>,
     // ── Recording ─────────────────────────────────────────────────────────────
     /// When recording is active, the capture thread clones each RGBA frame and
     /// sends it here. Dropping the sender signals the recording thread to stop.
@@ -1185,6 +1213,24 @@ fn build_window_controller(
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn run(mut config: AppConfig) -> bool {
+    // On Windows, Ctrl+C causes STATUS_CONTROL_C_EXIT (0xc000013a) by default,
+    // which cargo treats as a failure even though the user intentionally quit.
+    // Install a console ctrl handler that exits cleanly with code 0.
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetConsoleCtrlHandler(
+                handler: Option<unsafe extern "system" fn(u32) -> i32>,
+                add: i32,
+            ) -> i32;
+        }
+        unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
+            std::process::exit(0);
+        }
+        unsafe { SetConsoleCtrlHandler(Some(ctrl_handler), 1); }
+    }
+
     // Install Rust panic hook early so panics during init are also captured.
     install_panic_hook();
 
@@ -1255,7 +1301,11 @@ pub fn run(mut config: AppConfig) -> bool {
                         .and_then(|s| s.trim().parse::<u16>().ok())
                         .and_then(|port| {
                             use std::io::Write;
-                            std::net::TcpStream::connect(("127.0.0.1", port))
+                            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                            std::net::TcpStream::connect_timeout(
+                                &addr,
+                                std::time::Duration::from_millis(150),
+                            )
                                 .ok()
                                 .and_then(|mut s| {
                                     let payload = launch_url.as_deref().unwrap_or("").to_string() + "\n";

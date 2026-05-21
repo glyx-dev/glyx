@@ -28,6 +28,12 @@ extern "C" {
 /** Return the DLL version string, e.g. "1.0.0". Never NULL. */
 VELOX_EXPORT const char* velox_media_version(void);
 
+/**
+ * Set the FFmpeg internal log level.  Call once after loading the DLL.
+ * AV_LOG_QUIET=-8, AV_LOG_ERROR=16, AV_LOG_WARNING=24, AV_LOG_INFO=32 (default).
+ */
+VELOX_EXPORT void velox_media_set_log_level(int level);
+
 /* ── Decoder (video playback) ───────────────────────────────────────────── */
 
 typedef struct VmDecoder VmDecoder;

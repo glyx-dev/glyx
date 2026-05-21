@@ -38,6 +38,10 @@ const char* velox_media_version(void) {
     return "1.0.0";
 }
 
+void velox_media_set_log_level(int level) {
+    av_log_set_level(level);
+}
+
 /* ── Decoder ─────────────────────────────────────────────────────────────── */
 
 struct VmDecoder {

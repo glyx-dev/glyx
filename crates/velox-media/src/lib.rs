@@ -112,6 +112,17 @@ impl VeloxMedia {
             }};
         }
 
+        // Optional: suppress verbose FFmpeg stats (encoder summary, libx264 info, etc.).
+        // AV_LOG_WARNING = 24 keeps real errors/warnings visible, silences stats.
+        type FnSetLogLevel = unsafe extern "C" fn(i32);
+        match unsafe { lib.get::<FnSetLogLevel>(b"velox_media_set_log_level\0") } {
+            Ok(sym) => unsafe { (*sym)(24) }, // AV_LOG_WARNING
+            Err(_)  => log::warn!(
+                "[velox-media] velox_media_set_log_level not in DLL — \
+                 rebuild velox-media-c to suppress FFmpeg logs"
+            ),
+        }
+
         Ok(Self {
             version:                 sym!(lib, b"velox_media_version\0",             FnVersion),
             decoder_open:            sym!(lib, b"vm_decoder_open\0",                 FnDecoderOpen),

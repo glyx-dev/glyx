@@ -8,7 +8,8 @@
     "js/packages/@velox/keychain",
     "js/packages/@velox/store",
     "js/packages/@velox/three",
-    "js/packages/@velox/testing"
+    "js/packages/@velox/testing",
+    "js/packages/@velox/design"
   ],
   "dependencies": {
     "@velox/react":    "workspace:*",
@@ -18,6 +19,7 @@
     "@velox/store":    "workspace:*",
     "@velox/three":    "workspace:*",
     "@velox/testing":  "workspace:*",
+    "@velox/design":   "workspace:*",
     "drizzle-orm": "^0.36.4",
     "react": "^18.2.0",
     "react-reconciler": "^0.29.0"

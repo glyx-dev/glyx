@@ -35,6 +35,14 @@ enum Commands {
         /// Required if you want to add custom VeloxExtension implementations.
         #[arg(long)]
         native: bool,
+        /// Starter template: blank (default), notes, dashboard, settings.
+        ///
+        /// blank     — minimal counter app (default)
+        /// notes     — sidebar + content layout with navigation
+        /// dashboard — stat cards, sidebar nav, data display
+        /// settings  — preferences panel with sections and toggles
+        #[arg(long, default_value = "blank")]
+        template: String,
     },
     /// Start dev server with hot reload and optional CDP inspector.
     Dev {
@@ -127,7 +135,7 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Create { name, native } => cmd_create(&name, native),
+        Commands::Create { name, native, template } => cmd_create(&name, native, &template),
         Commands::Dev { inspect }         => cmd_dev(inspect),
         Commands::Build { target, mode, check_performance, perf_budget, perf_duration } =>
             cmd_build(target.as_deref(), &mode, check_performance, perf_budget, perf_duration),
@@ -139,23 +147,33 @@ fn run() -> Result<()> {
 
 // ── velox create ─────────────────────────────────────────────────────────────
 
-fn cmd_create(name: &str, native: bool) -> Result<()> {
+fn cmd_create(name: &str, native: bool, template: &str) -> Result<()> {
     let dest = PathBuf::from(name);
     if dest.exists() { bail!("directory '{}' already exists", name); }
+
+    let valid_templates = ["blank", "notes", "dashboard", "settings"];
+    if !valid_templates.contains(&template) {
+        bail!(
+            "Unknown template '{}'. Valid options: {}",
+            template,
+            valid_templates.join(", ")
+        );
+    }
+
     let velox_home = velox_home()?;
 
     if native {
         println!("Creating Velox project (native): {name}/");
-        println!("  Includes Cargo.toml + src/main.rs for custom VeloxExtension support.");
-        cmd_create_native(name, &dest, &velox_home)?;
+        println!("  Template: {template}  |  Includes Cargo.toml + src/main.rs");
+        cmd_create_native(name, &dest, &velox_home, template)?;
     } else {
         println!("Creating Velox project: {name}/");
-        println!("  JS-only mode — no Rust toolchain required.");
-        cmd_create_js(name, &dest, &velox_home)?;
+        println!("  Template: {template}  |  JS-only mode — no Rust toolchain required.");
+        cmd_create_js(name, &dest, &velox_home, template)?;
     }
 
     println!();
-    println!("✓ Created project: {name}/");
+    println!("Created {name}/  [template: {template}]");
     println!();
     println!("Next steps:");
     println!("  cd {name}");
@@ -168,15 +186,16 @@ fn cmd_create(name: &str, native: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_create_js(name: &str, dest: &Path, velox_home: &Path) -> Result<()> {
+fn cmd_create_js(name: &str, dest: &Path, velox_home: &Path, template: &str) -> Result<()> {
     std::fs::create_dir_all(dest.join("js"))?;
 
-    let react_path  = relpath(dest, &velox_home.join("js/packages/@velox/react"));
-    let router_path = relpath(dest, &velox_home.join("js/packages/@velox/router"));
-    let config_path = relpath(dest, &velox_home.join("js/packages/@velox/config"));
+    let react_path   = relpath(dest, &velox_home.join("js/packages/@velox/react"));
+    let router_path  = relpath(dest, &velox_home.join("js/packages/@velox/router"));
+    let design_path  = relpath(dest, &velox_home.join("js/packages/@velox/design"));
+    let config_path  = relpath(dest, &velox_home.join("js/packages/@velox/config"));
 
     write_file(dest.join("js/polyfills.js"), POLYFILLS_JS)?;
-    write_file(dest.join("js/app.jsx"), &app_jsx_template(name))?;
+    write_file(dest.join("js/app.jsx"), &app_jsx_for_template(name, template))?;
     write_file(dest.join("velox.config.ts"), &velox_config_ts_template(name))?;
     write_file(dest.join("package.json"), &format!(
         r#"{{
@@ -184,9 +203,10 @@ fn cmd_create_js(name: &str, dest: &Path, velox_home: &Path) -> Result<()> {
   "version": "0.1.0",
   "private": true,
   "dependencies": {{
-    "react":         "^18",
-    "@velox/react":  "file:{react_path}",
-    "@velox/router": "file:{router_path}"
+    "react":          "^18",
+    "@velox/react":   "file:{react_path}",
+    "@velox/router":  "file:{router_path}",
+    "@velox/design":  "file:{design_path}"
   }},
   "devDependencies": {{
     "@velox/config": "file:{config_path}"
@@ -197,14 +217,15 @@ fn cmd_create_js(name: &str, dest: &Path, velox_home: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_create_native(name: &str, dest: &Path, velox_home: &Path) -> Result<()> {
+fn cmd_create_native(name: &str, dest: &Path, velox_home: &Path, template: &str) -> Result<()> {
     std::fs::create_dir_all(dest.join("src"))?;
     std::fs::create_dir_all(dest.join("js"))?;
 
-    let core_path  = relpath(dest, &velox_home.join("crates/velox-core"));
-    let shell_path = relpath(dest, &velox_home.join("crates/velox-shell"));
+    let core_path   = relpath(dest, &velox_home.join("crates/velox-core"));
+    let shell_path  = relpath(dest, &velox_home.join("crates/velox-shell"));
     let react_path  = relpath(dest, &velox_home.join("js/packages/@velox/react"));
     let router_path = relpath(dest, &velox_home.join("js/packages/@velox/router"));
+    let design_path = relpath(dest, &velox_home.join("js/packages/@velox/design"));
     let config_path = relpath(dest, &velox_home.join("js/packages/@velox/config"));
 
     write_file(dest.join("Cargo.toml"), &format!(
@@ -226,7 +247,7 @@ env_logger  = "0.11"
 "#))?;
     write_file(dest.join("src/main.rs"), "#![cfg_attr(all(target_os = \"windows\", not(debug_assertions)), windows_subsystem = \"windows\")]\n\nfn main() {\n    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(\"info\"))\n        .format_timestamp(None)\n        .format_module_path(false)\n        .init();\n    velox_core::run(velox_core::AppConfig::from_config());\n}\n")?;
     write_file(dest.join("js/polyfills.js"), POLYFILLS_JS)?;
-    write_file(dest.join("js/app.jsx"), &app_jsx_template(name))?;
+    write_file(dest.join("js/app.jsx"), &app_jsx_for_template(name, template))?;
     write_file(dest.join("velox.config.ts"), &velox_config_ts_template(name))?;
     write_file(dest.join("package.json"), &format!(
         r#"{{
@@ -234,9 +255,10 @@ env_logger  = "0.11"
   "version": "0.1.0",
   "private": true,
   "dependencies": {{
-    "react":         "^18",
-    "@velox/react":  "file:{react_path}",
-    "@velox/router": "file:{router_path}"
+    "react":          "^18",
+    "@velox/react":   "file:{react_path}",
+    "@velox/router":  "file:{router_path}",
+    "@velox/design":  "file:{design_path}"
   }},
   "devDependencies": {{
     "@velox/config": "file:{config_path}"
@@ -247,7 +269,16 @@ env_logger  = "0.11"
     Ok(())
 }
 
-fn app_jsx_template(name: &str) -> String {
+fn app_jsx_for_template(name: &str, template: &str) -> String {
+    match template {
+        "notes"     => app_jsx_notes(name),
+        "dashboard" => app_jsx_dashboard(name),
+        "settings"  => app_jsx_settings(name),
+        _           => app_jsx_blank(name),
+    }
+}
+
+fn app_jsx_blank(name: &str) -> String {
     format!(r#"import './polyfills.js';
 import React, {{ useState }} from 'react';
 import {{ View, Text, Pressable, render, useWindowSize }} from '@velox/react';
@@ -279,6 +310,265 @@ function App() {{
 }}
 
 render(<App />);
+"#)
+}
+
+fn app_jsx_notes(name: &str) -> String {
+    format!(r#"import './polyfills.js';
+import React, {{ useState }} from 'react';
+import {{ View, Text, Pressable, ScrollView, render, useWindowSize }} from '@velox/react';
+import {{ ThemeProvider, useTheme, Button, Card, Label, Heading }} from '@velox/design';
+
+const NOTES = [
+  {{ id: 1, title: 'Welcome', body: 'This is your first note in {name}. Click any note to read it, or press New Note to create one.' }},
+  {{ id: 2, title: 'Getting started', body: 'Edit js/app.jsx to customise this template. Import more components from @velox/react and @velox/design.' }},
+];
+
+function Sidebar({{ notes, selectedId, onSelect, onNew }}) {{
+  const {{ colors, space }} = useTheme();
+  return (
+    <View style={{{{ width: 240, backgroundColor: colors.surface, borderRightWidth: 1, borderRightColor: colors.border }}}}>
+      <View style={{{{ padding: space[4], borderBottomWidth: 1, borderBottomColor: colors.border }}}}>
+        <Heading level={{2}}>Notes</Heading>
+      </View>
+      <ScrollView style={{{{ flex: 1 }}}}>
+        {{notes.map(n => (
+          <Pressable
+            key={{n.id}}
+            onPress={{() => onSelect(n.id)}}
+            style={{{{
+              padding: space[3],
+              backgroundColor: n.id === selectedId ? colors.primary + '22' : 'transparent',
+              borderLeftWidth: 3,
+              borderLeftColor: n.id === selectedId ? colors.primary : 'transparent',
+            }}}}
+          >
+            <Label bold={{n.id === selectedId}}>{{n.title}}</Label>
+          </Pressable>
+        ))}}
+      </ScrollView>
+      <View style={{{{ padding: space[3] }}}}>
+        <Button label="+ New Note" onPress={{onNew}} />
+      </View>
+    </View>
+  );
+}}
+
+function NoteView({{ note }}) {{
+  const {{ colors, space }} = useTheme();
+  if (!note) return (
+    <View style={{{{ flex: 1, justifyContent: 'center', alignItems: 'center' }}}}>
+      <Label muted>Select a note</Label>
+    </View>
+  );
+  return (
+    <ScrollView style={{{{ flex: 1, padding: space[6] }}}}>
+      <Heading level={{1}}>{{note.title}}</Heading>
+      <View style={{{{ height: space[4] }} }} />
+      <Label size="md">{{note.body}}</Label>
+    </ScrollView>
+  );
+}}
+
+function App() {{
+  const {{ width, height }} = useWindowSize();
+  const [selectedId, setSelectedId] = useState(1);
+  const [notes, setNotes] = useState(NOTES);
+  const {{ colors }} = useTheme();
+
+  const selected = notes.find(n => n.id === selectedId) ?? null;
+
+  function handleNew() {{
+    const id = Math.max(0, ...notes.map(n => n.id)) + 1;
+    const note = {{ id, title: 'Untitled', body: '' }};
+    setNotes(prev => [...prev, note]);
+    setSelectedId(id);
+  }}
+
+  return (
+    <View width={{width}} height={{height}} style={{{{ backgroundColor: colors.bg, flexDirection: 'row' }}}}>
+      <Sidebar notes={{notes}} selectedId={{selectedId}} onSelect={{setSelectedId}} onNew={{handleNew}} />
+      <NoteView note={{selected}} />
+    </View>
+  );
+}}
+
+render(
+  <ThemeProvider colorScheme="system">
+    <App />
+  </ThemeProvider>
+);
+"#)
+}
+
+fn app_jsx_dashboard(name: &str) -> String {
+    format!(r#"import './polyfills.js';
+import React, {{ useState }} from 'react';
+import {{ View, Text, Pressable, render, useWindowSize }} from '@velox/react';
+import {{ ThemeProvider, useTheme, Card, Label, Heading, Divider, Badge }} from '@velox/design';
+
+const NAV_ITEMS = ['Overview', 'Analytics', 'Users', 'Settings'];
+
+const STATS = [
+  {{ label: 'Total Users',    value: '12,480', delta: '+8.2%',  variant: 'success' }},
+  {{ label: 'Active Sessions', value: '1,024',  delta: '+3.1%',  variant: 'success' }},
+  {{ label: 'Requests / min', value: '4,302',  delta: '-0.4%',  variant: 'warning' }},
+  {{ label: 'Error Rate',     value: '0.12%',  delta: '+0.01%', variant: 'error'   }},
+];
+
+function Sidebar({{ active, onSelect }}) {{
+  const {{ colors, space }} = useTheme();
+  return (
+    <View style={{{{ width: 200, backgroundColor: colors.surface, borderRightWidth: 1, borderRightColor: colors.border, paddingTop: space[6] }}}}>
+      <View style={{{{ paddingHorizontal: space[4], paddingBottom: space[4] }}}}>
+        <Heading level={{3}}>{name}</Heading>
+      </View>
+      <Divider />
+      {{NAV_ITEMS.map(item => (
+        <Pressable
+          key={{item}}
+          onPress={{() => onSelect(item)}}
+          style={{{{
+            paddingHorizontal: space[4],
+            paddingVertical:   space[3],
+            backgroundColor:   item === active ? colors.primary + '18' : 'transparent',
+          }}}}
+        >
+          <Label bold={{item === active}} style={{{{ color: item === active ? colors.primary : colors.text }}}}>
+            {{item}}
+          </Label>
+        </Pressable>
+      ))}}
+    </View>
+  );
+}}
+
+function StatCard({{ label, value, delta, variant }}) {{
+  const {{ space }} = useTheme();
+  return (
+    <Card style={{{{ flex: 1, minWidth: 140, gap: space[2] }}}}>
+      <Label muted size="sm">{{label}}</Label>
+      <Heading level={{2}}>{{value}}</Heading>
+      <Badge label={{delta}} variant={{variant}} />
+    </Card>
+  );
+}}
+
+function Overview() {{
+  const {{ colors, space }} = useTheme();
+  return (
+    <View style={{{{ flex: 1, padding: space[6], gap: space[6] }}}}>
+      <Heading level={{1}}>Overview</Heading>
+      <View style={{{{ flexDirection: 'row', gap: space[4] }}}}>
+        {{STATS.map(s => <StatCard key={{s.label}} {{...s}} />)}}
+      </View>
+      <Card style={{{{ flex: 1 }}}}>
+        <Label muted>Chart placeholder — connect your data source to render a chart here.</Label>
+      </Card>
+    </View>
+  );
+}}
+
+function App() {{
+  const {{ width, height }} = useWindowSize();
+  const [active, setActive] = useState('Overview');
+  const {{ colors }} = useTheme();
+  return (
+    <View width={{width}} height={{height}} style={{{{ backgroundColor: colors.bg, flexDirection: 'row' }}}}>
+      <Sidebar active={{active}} onSelect={{setActive}} />
+      <Overview />
+    </View>
+  );
+}}
+
+render(
+  <ThemeProvider colorScheme="system">
+    <App />
+  </ThemeProvider>
+);
+"#)
+}
+
+fn app_jsx_settings(name: &str) -> String {
+    format!(r#"import './polyfills.js';
+import React, {{ useState }} from 'react';
+import {{ View, Text, Pressable, Switch, render, useWindowSize }} from '@velox/react';
+import {{ ThemeProvider, useTheme, Card, Label, Heading, Divider, Button }} from '@velox/design';
+
+function SettingRow({{ label, description, children }}) {{
+  const {{ colors, space }} = useTheme();
+  return (
+    <View style={{{{ flexDirection: 'row', alignItems: 'center', paddingVertical: space[3], gap: space[4] }}}}>
+      <View style={{{{ flex: 1 }}}}>
+        <Label>{{label}}</Label>
+        {{description && <Label muted size="sm">{{description}}</Label>}}
+      </View>
+      {{children}}
+    </View>
+  );
+}}
+
+function Section({{ title, children }}) {{
+  const {{ space }} = useTheme();
+  return (
+    <Card style={{{{ gap: space[2] }}}}>
+      <Heading level={{3}}>{{title}}</Heading>
+      <Divider />
+      {{children}}
+    </Card>
+  );
+}}
+
+function App() {{
+  const {{ width, height }} = useWindowSize();
+  const {{ colors, space }} = useTheme();
+
+  const [darkMode,      setDarkMode]      = useState(false);
+  const [notifications, setNotifications] = useState(true);
+  const [telemetry,     setTelemetry]     = useState(false);
+  const [autoUpdate,    setAutoUpdate]    = useState(true);
+
+  return (
+    <View width={{width}} height={{height}} style={{{{ backgroundColor: colors.bg }}}}>
+      <View style={{{{ maxWidth: 640, alignSelf: 'center', flex: 1, padding: space[6], gap: space[6] }}}}>
+        <Heading level={{1}}>Settings</Heading>
+
+        <Section title="Appearance">
+          <SettingRow label="Dark mode" description="Switch between light and dark theme">
+            <Switch value={{darkMode}} onValueChange={{setDarkMode}} />
+          </SettingRow>
+        </Section>
+
+        <Section title="Notifications">
+          <SettingRow label="Enable notifications" description="Show system notifications for important events">
+            <Switch value={{notifications}} onValueChange={{setNotifications}} />
+          </SettingRow>
+        </Section>
+
+        <Section title="Privacy">
+          <SettingRow label="Usage telemetry" description="Help improve {name} by sending anonymous usage data">
+            <Switch value={{telemetry}} onValueChange={{setTelemetry}} />
+          </SettingRow>
+        </Section>
+
+        <Section title="Updates">
+          <SettingRow label="Auto-update" description="Automatically install updates when available">
+            <Switch value={{autoUpdate}} onValueChange={{setAutoUpdate}} />
+          </SettingRow>
+          <View style={{{{ alignItems: 'flex-start' }}}}>
+            <Button label="Check for updates" variant="secondary" onPress={{() => {{}}}} />
+          </View>
+        </Section>
+      </View>
+    </View>
+  );
+}}
+
+render(
+  <ThemeProvider colorScheme="system">
+    <App />
+  </ThemeProvider>
+);
 "#)
 }
 

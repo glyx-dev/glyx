@@ -6071,7 +6071,14 @@ No matching component was found for:
           let handled = false;
           for (const [nodeId, handlers] of pressableRegistry) {
             if (hitTest(nodeId, ev.x, ev.y)) {
-              handlers.onPress?.();
+              const layout = __velox_getLayout(nodeId);
+              const pressEv = {
+                x: ev.x,
+                y: ev.y,
+                locationX: layout ? ev.x - layout.x : 0,
+                locationY: layout ? ev.y - layout.y : 0
+              };
+              handlers.onPress?.(pressEv);
               handled = true;
               break;
             }
@@ -6459,7 +6466,7 @@ No matching component was found for:
     const [pressed, setPressed] = import_react.useState(false);
     const [hovered, setHovered] = import_react.useState(false);
     handlersRef.current = {
-      onPress: () => onPress?.(),
+      onPress: (e) => onPress?.(e),
       onPressIn: () => {
         setPressed(true);
         onPressIn?.();
@@ -6480,7 +6487,7 @@ No matching component was found for:
     const onMount = import_react.useCallback((id) => {
       nodeIdRef.current = id;
       registerPressable(id, {
-        onPress: () => handlersRef.current.onPress(),
+        onPress: (e) => handlersRef.current.onPress(e),
         onPressIn: () => handlersRef.current.onPressIn(),
         onPressOut: () => handlersRef.current.onPressOut(),
         onHoverIn: () => handlersRef.current.onHoverIn(),
@@ -7238,6 +7245,10 @@ No matching component was found for:
           if (typeof __velox_audio_resume !== "undefined")
             __velox_audio_resume(id);
         },
+        play() {
+          if (typeof __velox_audio_resume !== "undefined")
+            __velox_audio_resume(id);
+        },
         stop() {
           if (typeof __velox_audio_stop !== "undefined")
             __velox_audio_stop(id);
@@ -7249,6 +7260,16 @@ No matching component was found for:
         },
         getVolume() {
           return typeof __velox_audio_getVolume !== "undefined" ? __velox_audio_getVolume(id) : 1;
+        },
+        getTime() {
+          return typeof __velox_audio_get_time !== "undefined" ? __velox_audio_get_time(id) : 0;
+        },
+        async getDuration() {
+          return typeof __velox_audio_duration !== "undefined" ? parseFloat(await __velox_audio_duration(id)) : -1;
+        },
+        async seek(secs) {
+          if (typeof __velox_audio_seek !== "undefined")
+            await __velox_audio_seek(id, secs);
         },
         onEnded(cb) {
           if (!_audioCallbacks.has(id))
@@ -7430,18 +7451,29 @@ No matching component was found for:
         cbs.onEnded();
       else if (ev.type === "metadata" && cbs.onMetadata)
         cbs.onMetadata(ev);
+      else if (ev.type === "timeupdate" && cbs.onTimeUpdate)
+        cbs.onTimeUpdate(ev.currentTime);
       else if (ev.type === "error" && cbs.onError)
         cbs.onError(ev.message);
     }
   }
   var video = {
-    async open(url, { onEnded, onMetadata, onError } = {}) {
+    async open(url, { onEnded, onMetadata, onTimeUpdate, onError } = {}) {
       const handleId = parseInt(await __velox_video_open(url));
-      _videoCallbacks.set(handleId, { onEnded, onMetadata, onError });
+      _videoCallbacks.set(handleId, { onEnded, onMetadata, onTimeUpdate, onError });
       return handleId;
     },
     seek(handleId, seconds) {
-      __velox_video_seek(String(handleId), seconds);
+      __velox_video_seek(String(handleId), Math.max(0, seconds));
+    },
+    setVolume(handleId, volume) {
+      __velox_video_set_volume(String(handleId), volume);
+    },
+    pause(handleId) {
+      __velox_video_pause(String(handleId));
+    },
+    play(handleId) {
+      __velox_video_play(String(handleId));
     },
     close(handleId) {
       __velox_video_close(String(handleId));
@@ -7495,19 +7527,32 @@ No matching component was found for:
       ...rest
     });
   });
-  var Video = import_react.default.forwardRef(function Video2({ src, autoPlay = true, loop = false, onEnded, onMetadata, onError, style, ...rest }, ref) {
+  var Video = import_react.default.forwardRef(function Video2({ src, autoPlay = true, loop = false, onEnded, onMetadata, onTimeUpdate, onError, style, ...rest }, ref) {
     const [videoHandle, setVideoHandle] = import_react.default.useState(null);
+    const currentTimeRef = import_react.default.useRef(0);
+    const durationRef = import_react.default.useRef(-1);
     import_react.default.useEffect(() => {
       if (!src)
         return;
       let handle = null;
       let cancelled = false;
+      currentTimeRef.current = 0;
+      durationRef.current = -1;
       video.open(src, {
         onEnded: loop ? () => {
           if (handle !== null)
             video.seek(handle, 0);
         } : onEnded,
-        onMetadata,
+        onMetadata: (m) => {
+          durationRef.current = m.durationSecs ?? -1;
+          if (onMetadata)
+            onMetadata(m);
+        },
+        onTimeUpdate: (t) => {
+          currentTimeRef.current = t;
+          if (onTimeUpdate)
+            onTimeUpdate(t);
+        },
         onError
       }).then((h) => {
         if (cancelled) {
@@ -7533,9 +7578,27 @@ No matching component was found for:
       get handle() {
         return videoHandle;
       },
+      get currentTime() {
+        return currentTimeRef.current;
+      },
+      get duration() {
+        return durationRef.current;
+      },
       seek(seconds) {
         if (videoHandle !== null)
           video.seek(videoHandle, seconds);
+      },
+      setVolume(vol) {
+        if (videoHandle !== null)
+          video.setVolume(videoHandle, vol);
+      },
+      pause() {
+        if (videoHandle !== null)
+          video.pause(videoHandle);
+      },
+      play() {
+        if (videoHandle !== null)
+          video.play(videoHandle);
       },
       close() {
         if (videoHandle !== null) {
@@ -7544,11 +7607,7 @@ No matching component was found for:
         }
       }
     }), [videoHandle]);
-    return import_react.default.createElement("video", {
-      videoHandle,
-      style,
-      ...rest
-    });
+    return import_react.default.createElement("video", { videoHandle, style, ...rest });
   });
   var input = {
     gamepads: {
@@ -7627,14 +7686,22 @@ No matching component was found for:
   function Slider({
     value = 0,
     onValueChange,
+    onChange,
     min = 0,
     max = 1,
     step = 0,
     disabled = false,
     style,
+    width: widthProp = 200,
     ...rest
   }) {
+    const _cb = onValueChange ?? onChange;
+    const THUMB = 20;
+    const TRACK = 4;
+    const accent = disabled ? "#555" : "#7aa2f7";
     const pct = max === min ? 0 : Math.max(0, Math.min(1, (Math.min(max, Math.max(min, value)) - min) / (max - min)));
+    const fillW = Math.max(0, Math.round(pct * (widthProp - THUMB)));
+    const rightW = Math.max(0, widthProp - THUMB - fillW);
     const trackNodeId = import_react.useRef(null);
     const minRef = import_react.useRef(min);
     minRef.current = min;
@@ -7644,8 +7711,8 @@ No matching component was found for:
     stepRef.current = step;
     const disabledRef = import_react.useRef(disabled);
     disabledRef.current = disabled;
-    const onChangeRef = import_react.useRef(onValueChange);
-    onChangeRef.current = onValueChange;
+    const onChangeRef = import_react.useRef(_cb);
+    onChangeRef.current = _cb;
     const updateFromX = import_react.useCallback((x) => {
       if (disabledRef.current || !onChangeRef.current)
         return;
@@ -7677,16 +7744,12 @@ No matching component was found for:
           unregisterDraggable(trackNodeId.current);
       };
     }, []);
-    const THUMB = 20;
-    const TRACK = 4;
-    const accent = disabled ? "#555" : "#7aa2f7";
     return import_react.default.createElement(View, {
       _veloxOnMount: onTrackMount,
-      style: { flexDirection: "row", alignItems: "center", height: THUMB, ...style },
+      width: widthProp,
+      style: { flexDirection: "row", alignItems: "center", ...style },
       ...rest
-    }, import_react.default.createElement(View, { style: { flex: pct, height: TRACK, backgroundColor: accent } }), import_react.default.createElement(View, {
-      style: { width: THUMB, height: THUMB, borderRadius: THUMB / 2, backgroundColor: accent }
-    }), import_react.default.createElement(View, { style: { flex: 1 - pct, height: TRACK, backgroundColor: "#3c4464" } }));
+    }, import_react.default.createElement(View, { width: fillW, height: TRACK, style: { backgroundColor: accent } }), import_react.default.createElement(View, { width: THUMB, height: THUMB, style: { borderRadius: THUMB / 2, backgroundColor: accent } }), import_react.default.createElement(View, { width: rightW, height: TRACK, style: { backgroundColor: "#3c4464" } }));
   }
   function Select({
     value,
@@ -15036,16 +15099,50 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
     const [micLoading, setMicLoading] = import_react7.useState(false);
     const [micPath, setMicPath] = import_react7.useState("");
     const [micError, setMicError] = import_react7.useState("");
+    const micPlayerRef = import_react7.default.useRef(null);
+    const micSeekingRef = import_react7.default.useRef(false);
+    const [micPaused, setMicPaused] = import_react7.useState(true);
+    const [micTime, setMicTime] = import_react7.useState(0);
+    const [micDur, setMicDur] = import_react7.useState(-1);
+    const [micVolume, setMicVolume] = import_react7.useState(1);
+    import_react7.default.useEffect(() => {
+      if (!micPaused && micPlayerRef.current) {
+        let active = true;
+        const poll = () => {
+          if (!active || !micPlayerRef.current)
+            return;
+          if (!micSeekingRef.current)
+            setMicTime(micPlayerRef.current.getTime());
+          setTimeout(poll, 250);
+        };
+        const id = setTimeout(poll, 250);
+        return () => {
+          active = false;
+          clearTimeout(id);
+        };
+      }
+    }, [micPaused]);
     const vidRef = import_react7.default.useRef(null);
+    const vidSeekingRef = import_react7.default.useRef(false);
     const [vidSrc, setVidSrc] = import_react7.useState("");
     const [vidInput, setVidInput] = import_react7.useState("");
     const [vidStatus, setVidStatus] = import_react7.useState("");
     const [vidError, setVidError] = import_react7.useState("");
     const [vidMeta, setVidMeta] = import_react7.useState(null);
+    const [vidCurrentTime, setVidCurrentTime] = import_react7.useState(0);
+    const [vidVolume, setVidVolume] = import_react7.useState(1);
+    const [vidPaused, setVidPaused] = import_react7.useState(false);
     async function recordMic() {
       setMicLoading(true);
       setMicError("");
       setMicPath("");
+      if (micPlayerRef.current) {
+        micPlayerRef.current.stop();
+        micPlayerRef.current = null;
+      }
+      setMicPaused(true);
+      setMicTime(0);
+      setMicDur(-1);
       try {
         const path = await microphone.record(5000);
         setMicPath(path);
@@ -15059,10 +15156,52 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
       if (!micPath)
         return;
       try {
-        await audio.play(micPath);
+        if (micPlayerRef.current) {
+          micPlayerRef.current.stop();
+          micPlayerRef.current = null;
+        }
+        setMicTime(0);
+        setMicDur(-1);
+        setMicPaused(true);
+        const player = await audio.play(micPath, {
+          onEnded: () => {
+            setMicPaused(true);
+            micPlayerRef.current = null;
+            setMicTime(0);
+          }
+        });
+        micPlayerRef.current = player;
+        let dur = -1;
+        try {
+          dur = await player.getDuration();
+        } catch (_) {}
+        if (!(dur > 0))
+          dur = 5;
+        setMicDur(dur);
+        setMicPaused(false);
       } catch (e) {
         setMicError(String(e));
+        setMicPaused(true);
       }
+    }
+    function pauseResumeMic() {
+      if (!micPlayerRef.current)
+        return;
+      if (micPaused) {
+        micPlayerRef.current.play();
+        setMicPaused(false);
+      } else {
+        micPlayerRef.current.pause();
+        setMicPaused(true);
+      }
+    }
+    function stopMic() {
+      if (micPlayerRef.current) {
+        micPlayerRef.current.stop();
+        micPlayerRef.current = null;
+      }
+      setMicPaused(true);
+      setMicTime(0);
     }
     return /* @__PURE__ */ jsx_runtime.jsxs(ScrollView, {
       width: inner,
@@ -15263,46 +15402,186 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
               style: { color: C2.text },
               children: "Record 5 seconds from the default microphone, then play it back."
             }),
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: { flexDirection: "row", gap: 10 },
-              width: inner,
-              height: 36,
-              children: [
-                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-                  onPress: recordMic,
-                  width: 110,
-                  height: 32,
-                  style: { backgroundColor: micLoading ? C2.border : C2.teal, borderRadius: 6, justifyContent: "center", alignItems: "center" },
-                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                    fontSize: 13,
-                    width: 96,
-                    height: 18,
-                    style: { color: C2.bg },
-                    children: micLoading ? "Recording…" : "Record 5s"
-                  })
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-                  onPress: playMic,
-                  width: 70,
-                  height: 32,
-                  style: { backgroundColor: micPath ? C2.green : C2.border, borderRadius: 6, justifyContent: "center", alignItems: "center" },
-                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                    fontSize: 13,
-                    width: 58,
-                    height: 18,
-                    style: { color: C2.bg },
-                    children: "Play"
-                  })
-                })
-              ]
+            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+              onPress: recordMic,
+              width: 110,
+              height: 32,
+              style: { backgroundColor: micLoading ? C2.border : C2.teal, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 13,
+                width: 96,
+                height: 18,
+                style: { color: C2.bg },
+                children: micLoading ? "Recording…" : "Record 5s"
+              })
             }),
-            micPath ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 11,
-              width: inner,
-              height: 16,
-              style: { color: C2.dim },
-              children: micPath
-            }) : null,
+            micPath ? (() => {
+              const hasDur = micDur > 0;
+              const fmtT = (s) => {
+                const m = Math.floor(s / 60);
+                return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+              };
+              const isActive = !!micPlayerRef.current;
+              return /* @__PURE__ */ jsx_runtime.jsxs(View, {
+                style: { gap: 8 },
+                width: inner,
+                height: 164,
+                children: [
+                  /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 11,
+                    width: inner,
+                    height: 14,
+                    style: { color: C2.dim },
+                    children: micPath
+                  }),
+                  /* @__PURE__ */ jsx_runtime.jsx(Slider, {
+                    value: micTime,
+                    min: 0,
+                    max: micDur > 0 ? micDur : 5,
+                    step: 0,
+                    disabled: !micPlayerRef.current,
+                    onChange: (v) => {
+                      micSeekingRef.current = true;
+                      clearTimeout(micSeekingRef._t);
+                      micSeekingRef._t = setTimeout(() => {
+                        micSeekingRef.current = false;
+                      }, 500);
+                      micPlayerRef.current?.seek(v);
+                      setMicTime(v);
+                    },
+                    width: inner,
+                    height: 24
+                  }),
+                  /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 11,
+                    width: inner,
+                    height: 14,
+                    style: { color: C2.dim },
+                    children: hasDur ? `${fmtT(micTime)} / ${fmtT(micDur)}` : micTime > 0 ? fmtT(micTime) : "0:00"
+                  }),
+                  /* @__PURE__ */ jsx_runtime.jsxs(View, {
+                    style: { flexDirection: "row", gap: 8, alignItems: "center" },
+                    width: inner,
+                    height: 32,
+                    children: [
+                      /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                        onPress: playMic,
+                        width: 56,
+                        height: 30,
+                        style: { backgroundColor: C2.green, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+                        children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                          fontSize: 12,
+                          width: 44,
+                          height: 16,
+                          style: { color: C2.bg },
+                          children: "Play"
+                        })
+                      }),
+                      /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                        onPress: pauseResumeMic,
+                        width: 70,
+                        height: 30,
+                        style: { backgroundColor: isActive ? C2.accent : C2.border, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+                        children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                          fontSize: 12,
+                          width: 58,
+                          height: 16,
+                          style: { color: C2.bg },
+                          children: micPaused ? "Resume" : "Pause"
+                        })
+                      }),
+                      /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                        onPress: stopMic,
+                        width: 52,
+                        height: 30,
+                        style: { backgroundColor: isActive ? C2.red : C2.border, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+                        children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                          fontSize: 12,
+                          width: 40,
+                          height: 16,
+                          style: { color: C2.bg },
+                          children: "Stop"
+                        })
+                      }),
+                      /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                        onPress: async () => {
+                          if (micPlayerRef.current) {
+                            const t = Math.max(0, micTime - 10);
+                            await micPlayerRef.current.seek(t);
+                            setMicTime(t);
+                          }
+                        },
+                        width: 44,
+                        height: 30,
+                        style: { backgroundColor: C2.surface, borderRadius: 6, borderWidth: 1, borderColor: C2.border, justifyContent: "center", alignItems: "center" },
+                        children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                          fontSize: 12,
+                          width: 36,
+                          height: 16,
+                          style: { color: C2.text },
+                          children: "-10s"
+                        })
+                      }),
+                      /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                        onPress: async () => {
+                          if (micPlayerRef.current) {
+                            const t = micTime + 10;
+                            await micPlayerRef.current.seek(t);
+                            setMicTime(t);
+                          }
+                        },
+                        width: 44,
+                        height: 30,
+                        style: { backgroundColor: C2.surface, borderRadius: 6, borderWidth: 1, borderColor: C2.border, justifyContent: "center", alignItems: "center" },
+                        children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                          fontSize: 12,
+                          width: 36,
+                          height: 16,
+                          style: { color: C2.text },
+                          children: "+10s"
+                        })
+                      })
+                    ]
+                  }),
+                  /* @__PURE__ */ jsx_runtime.jsxs(View, {
+                    style: { flexDirection: "row", gap: 10, alignItems: "center" },
+                    width: inner,
+                    height: 28,
+                    children: [
+                      /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                        fontSize: 12,
+                        width: 52,
+                        height: 16,
+                        style: { color: C2.dim },
+                        children: "Vol"
+                      }),
+                      /* @__PURE__ */ jsx_runtime.jsx(Slider, {
+                        value: micVolume,
+                        min: 0,
+                        max: 1,
+                        step: 0.05,
+                        onChange: (v) => {
+                          setMicVolume(v);
+                          micPlayerRef.current?.setVolume(v);
+                        },
+                        width: inner - 62,
+                        height: 28
+                      }),
+                      /* @__PURE__ */ jsx_runtime.jsxs(Text, {
+                        fontSize: 11,
+                        width: 32,
+                        height: 16,
+                        style: { color: C2.dim },
+                        children: [
+                          Math.round(micVolume * 100),
+                          "%"
+                        ]
+                      })
+                    ]
+                  })
+                ]
+              });
+            })() : null,
             micError ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
               fontSize: 12,
               width: inner,
@@ -15315,7 +15594,7 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
         tab === 2 && /* @__PURE__ */ jsx_runtime.jsxs(View, {
           style: { gap: 10, alignItems: "flex-start" },
           width: inner,
-          height: 620,
+          height: 660,
           children: [
             /* @__PURE__ */ jsx_runtime.jsx(Text, {
               fontSize: 13,
@@ -15395,52 +15674,157 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
               src: vidSrc || undefined,
               autoPlay: true,
               loop: false,
-              onMetadata: (m) => setVidMeta(m),
-              onEnded: () => setVidStatus("Playback ended"),
+              onMetadata: (m) => {
+                setVidMeta(m);
+                setVidCurrentTime(0);
+                setVidPaused(false);
+              },
+              onTimeUpdate: (t) => {
+                if (!vidSeekingRef.current)
+                  setVidCurrentTime(t);
+              },
+              onEnded: () => {
+                setVidStatus("Playback ended");
+                setVidPaused(true);
+              },
               onError: (e) => setVidError(String(e)),
-              style: { width: inner, height: 400, borderRadius: 8, backgroundColor: "#000" }
+              style: { width: inner, height: 360, borderRadius: 8, backgroundColor: "#000" }
             }),
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: { flexDirection: "row", gap: 8, alignItems: "center" },
-              width: inner,
-              height: 34,
-              children: [
-                /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                  fontSize: 12,
-                  width: 36,
-                  height: 16,
-                  style: { color: C2.dim },
-                  children: "Seek:"
-                }),
-                [0, 10, 30, 60].map((s) => /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-                  onPress: () => vidRef.current && vidRef.current.seek(s),
-                  width: 52,
-                  height: 30,
-                  style: { backgroundColor: C2.surface, borderRadius: 6, borderWidth: 1, borderColor: C2.border, justifyContent: "center", alignItems: "center" },
-                  children: /* @__PURE__ */ jsx_runtime.jsxs(Text, {
-                    fontSize: 12,
-                    width: 40,
-                    height: 16,
-                    style: { color: C2.text },
-                    children: [
-                      s,
-                      "s"
-                    ]
+            (() => {
+              const dur = vidMeta?.durationSecs ?? -1;
+              const hasDur = dur > 0;
+              const fmtT = (s) => {
+                const m = Math.floor(s / 60);
+                return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+              };
+              return /* @__PURE__ */ jsx_runtime.jsxs(View, {
+                style: { gap: 6 },
+                width: inner,
+                height: 38,
+                children: [
+                  /* @__PURE__ */ jsx_runtime.jsx(Slider, {
+                    value: vidCurrentTime,
+                    min: 0,
+                    max: Math.max(dur > 0 ? dur : 7200, vidCurrentTime + 1),
+                    step: 0,
+                    disabled: !vidRef.current?.handle,
+                    onChange: (v) => {
+                      vidSeekingRef.current = true;
+                      clearTimeout(vidSeekingRef._t);
+                      vidSeekingRef._t = setTimeout(() => {
+                        vidSeekingRef.current = false;
+                      }, 500);
+                      vidRef.current?.seek(v);
+                      setVidCurrentTime(v);
+                    },
+                    width: inner,
+                    height: 24
+                  }),
+                  /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 11,
+                    width: inner,
+                    height: 14,
+                    style: { color: C2.dim },
+                    children: hasDur ? `${fmtT(vidCurrentTime)} / ${fmtT(dur)}` : vidCurrentTime > 0 ? fmtT(vidCurrentTime) : ""
                   })
-                }, s)),
+                ]
+              });
+            })(),
+            /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap" },
+              width: inner,
+              height: 36,
+              children: [
                 /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
                   onPress: () => {
-                    vidRef.current && vidRef.current.close();
+                    if (vidPaused) {
+                      vidRef.current?.play();
+                      setVidPaused(false);
+                    } else {
+                      vidRef.current?.pause();
+                      setVidPaused(true);
+                    }
+                  },
+                  width: 62,
+                  height: 30,
+                  style: { backgroundColor: C2.accent, borderRadius: 6, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 12,
+                    width: 50,
+                    height: 16,
+                    style: { color: C2.bg },
+                    children: vidPaused ? "Play" : "Pause"
+                  })
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: () => vidRef.current?.seek(Math.max(0, vidCurrentTime - 15)),
+                  width: 44,
+                  height: 30,
+                  style: { backgroundColor: C2.surface, borderRadius: 6, borderWidth: 1, borderColor: C2.border, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 12,
+                    width: 36,
+                    height: 16,
+                    style: { color: C2.text },
+                    children: "-15s"
+                  })
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: () => vidRef.current?.seek(vidCurrentTime + 15),
+                  width: 44,
+                  height: 30,
+                  style: { backgroundColor: C2.surface, borderRadius: 6, borderWidth: 1, borderColor: C2.border, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 12,
+                    width: 36,
+                    height: 16,
+                    style: { color: C2.text },
+                    children: "+15s"
+                  })
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                  fontSize: 11,
+                  width: 28,
+                  height: 16,
+                  style: { color: C2.dim },
+                  children: "Vol"
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Slider, {
+                  min: 0,
+                  max: 1,
+                  step: 0.05,
+                  value: vidVolume,
+                  onChange: (v) => {
+                    setVidVolume(v);
+                    vidRef.current?.setVolume(v);
+                  },
+                  style: { width: 100, height: 30 }
+                }),
+                /* @__PURE__ */ jsx_runtime.jsxs(Text, {
+                  fontSize: 11,
+                  width: 28,
+                  height: 16,
+                  style: { color: C2.dim },
+                  children: [
+                    Math.round(vidVolume * 100),
+                    "%"
+                  ]
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: () => {
+                    vidRef.current?.close();
                     setVidSrc("");
                     setVidStatus("");
                     setVidMeta(null);
+                    setVidCurrentTime(0);
+                    setVidPaused(false);
                   },
-                  width: 60,
+                  width: 52,
                   height: 30,
                   style: { backgroundColor: C2.red, borderRadius: 6, justifyContent: "center", alignItems: "center" },
                   children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
                     fontSize: 12,
-                    width: 48,
+                    width: 40,
                     height: 16,
                     style: { color: C2.bg },
                     children: "Close"
@@ -15451,9 +15835,9 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
             vidMeta ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
               fontSize: 11,
               width: inner,
-              height: 16,
+              height: 14,
               style: { color: C2.dim },
-              children: `${vidMeta.width ?? "?"}×${vidMeta.height ?? "?"}  ${vidMeta.fps ?? "?"} fps  ${vidMeta.duration_secs != null ? vidMeta.duration_secs.toFixed(1) + "s" : "?"}`
+              children: `${vidMeta.width ?? "?"}×${vidMeta.height ?? "?"}  ${(vidMeta.fps ?? 0).toFixed(1)}fps`
             }) : null,
             vidStatus ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
               fontSize: 12,

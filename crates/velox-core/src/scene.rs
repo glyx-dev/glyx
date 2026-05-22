@@ -454,17 +454,21 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
 
             // ── Video player ──────────────────────────────────────────────────
             SceneCommand::OpenVideo { handle_id, url } => {
-                let frame_buf = Arc::new(Mutex::new(None::<(u32, u32, Vec<u8>)>));
-                let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let frame_buf      = Arc::new(Mutex::new(None::<(u32, u32, Vec<u8>)>));
+                let stop_flag      = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let pause_flag     = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let audio_stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let video_volume   = Arc::new(Mutex::new(1.0_f32));
                 let (seek_tx, seek_rx) = std::sync::mpsc::sync_channel::<f64>(4);
-                let events    = Arc::new(Mutex::new(std::collections::VecDeque::<String>::new()));
+                let events = Arc::new(Mutex::new(std::collections::VecDeque::<String>::new()));
 
-                // Spawn a self-contained audio thread (non-blocking). The thread owns its
-                // OutputStream + Sink so !Send is not an issue. It exits when stop_flag is set.
-                spawn_video_audio(&url, Arc::clone(&stop_flag));
+                // Audio thread owns its OutputStream + Sink (!Send) — reads volume + pause_flag each poll.
+                spawn_video_audio(&url, Arc::clone(&stop_flag), Arc::clone(&audio_stop_flag), Arc::clone(&pause_flag), Arc::clone(&video_volume), 0.0);
 
+                let url_stored  = url.clone(); // keep a copy for SeekVideo audio restart
                 let buf_clone   = Arc::clone(&frame_buf);
                 let stop_clone  = Arc::clone(&stop_flag);
+                let pause_clone = Arc::clone(&pause_flag);
                 let ev_clone    = Arc::clone(&events);
 
                 std::thread::spawn(move || {
@@ -493,51 +497,62 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
 
                     let (w, h, fps) = (dec.width, dec.height, dec.fps);
                     let rgba_size   = (w * h * 4) as usize;
+                    let duration_secs = media.decoder_duration(&dec);
                     let meta_msg = format!(
-                        r#"{{"type":"metadata","id":{handle_id},"width":{w},"height":{h},"fps":{fps:.3}}}"#
+                        r#"{{"type":"metadata","id":{handle_id},"width":{w},"height":{h},"fps":{fps:.3},"durationSecs":{duration_secs:.3}}}"#
                     );
                     ev_clone.lock().unwrap().push_back(meta_msg);
 
                     let mut rgba_buf = vec![0u8; rgba_size];
 
-                    // PTS-based A/V sync: we record the wall-clock time and the
-                    // PTS of the first decoded frame, then for every subsequent
-                    // frame we sleep until (wall_start + (pts - pts_start)).
-                    // This accounts for variable decode time and keeps video in
-                    // lock-step with the audio thread (which plays at real time).
                     let mut wall_start: Option<std::time::Instant> = None;
                     let mut pts_start  = 0f64;
+
+                    // Push timeupdate events at most 4× per second (250ms throttle).
+                    let timeupdate_interval = std::time::Duration::from_millis(250);
+                    let mut last_timeupdate = std::time::Instant::now();
 
                     loop {
                         if stop_clone.load(std::sync::atomic::Ordering::Relaxed) { break; }
 
-                        // Handle seek requests (non-blocking drain).
+                        // Pause: spin-wait and reset A/V sync anchor so resume stays in sync.
+                        if pause_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                            wall_start = None; // reset so A/V sync restarts fresh on resume
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                            continue;
+                        }
+
                         while let Ok(secs) = seek_rx.try_recv() {
                             media.decoder_seek(&dec, secs);
-                            wall_start = None; // reset clock so timing resumes from new position
+                            wall_start = None;
                         }
 
                         match media.decoder_next_frame(&dec, &mut rgba_buf) {
                             Ok(Some(pts)) => {
                                 *buf_clone.lock().unwrap() = Some((w, h, rgba_buf.clone()));
 
-                                // Initialise the sync clock on the first frame.
                                 let ws = wall_start.get_or_insert_with(|| {
                                     pts_start = pts;
                                     std::time::Instant::now()
                                 });
 
-                                // Sleep until this frame's display time.
-                                // If we're already late (decode took too long) skip the sleep.
                                 let video_pos = pts - pts_start;
                                 let to_sleep  = video_pos - ws.elapsed().as_secs_f64();
                                 if to_sleep > 0.001 {
                                     std::thread::sleep(
                                         std::time::Duration::from_secs_f64(to_sleep));
                                 }
+
+                                // Throttled timeupdate event.
+                                if last_timeupdate.elapsed() >= timeupdate_interval {
+                                    let msg = format!(
+                                        r#"{{"type":"timeupdate","id":{handle_id},"currentTime":{pts:.3}}}"#
+                                    );
+                                    ev_clone.lock().unwrap().push_back(msg);
+                                    last_timeupdate = std::time::Instant::now();
+                                }
                             }
                             Ok(None) => {
-                                // End of stream.
                                 let msg = format!(r#"{{"type":"ended","id":{handle_id}}}"#);
                                 ev_clone.lock().unwrap().push_back(msg);
                                 break;
@@ -552,17 +567,51 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 state.video_streams.insert(handle_id, VideoStream {
                     frame_buf,
                     stop_flag,
+                    pause_flag,
+                    audio_stop_flag,
                     seek_tx,
                     events,
                     latest_image: None,
+                    video_volume,
+                    url: url_stored,
                 });
             }
 
             SceneCommand::SeekVideo { handle_id, seconds } => {
-                if let Some(stream) = state.video_streams.get(&handle_id) {
+                if let Some(stream) = state.video_streams.get_mut(&handle_id) {
+                    // Seek the video decode thread.
                     let _ = stream.seek_tx.try_send(seconds);
-                    // Audio seek requires rodio 0.18+; not available in 0.17.3.
-                    // Audio will continue from its current position after a seek.
+                    // Restart audio from the new position:
+                    // signal old audio thread to stop, spawn a new one from `seconds`.
+                    stream.audio_stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let new_audio_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    stream.audio_stop_flag = Arc::clone(&new_audio_stop);
+                    spawn_video_audio(
+                        &stream.url,
+                        Arc::clone(&stream.stop_flag),
+                        new_audio_stop,
+                        Arc::clone(&stream.pause_flag),
+                        Arc::clone(&stream.video_volume),
+                        seconds,
+                    );
+                }
+            }
+
+            SceneCommand::SetVideoVolume { handle_id, volume } => {
+                if let Some(stream) = state.video_streams.get(&handle_id) {
+                    *stream.video_volume.lock().unwrap() = volume.clamp(0.0, 2.0);
+                }
+            }
+
+            SceneCommand::PauseVideo { handle_id } => {
+                if let Some(stream) = state.video_streams.get(&handle_id) {
+                    stream.pause_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+
+            SceneCommand::ResumeVideo { handle_id } => {
+                if let Some(stream) = state.video_streams.get(&handle_id) {
+                    stream.pause_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                 }
             }
 
@@ -591,7 +640,17 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
 /// MKV+AC3, etc.) without rodio/symphonia trying to probe the container.
 ///
 /// Non-blocking: returns immediately.
-fn spawn_video_audio(url: &str, stop_flag: Arc<std::sync::atomic::AtomicBool>) {
+/// `stop_flag`       — global stop (close video); `audio_stop_flag` — audio-only stop (seek).
+/// `start_secs`      — seek offset: source is wrapped with `skip_duration` when > 0.
+fn spawn_video_audio(
+    url:             &str,
+    stop_flag:       Arc<std::sync::atomic::AtomicBool>,
+    audio_stop_flag: Arc<std::sync::atomic::AtomicBool>,
+    pause_flag:      Arc<std::sync::atomic::AtomicBool>,
+    volume:          Arc<Mutex<f32>>,
+    start_secs:      f64,
+) {
+    use rodio::Source;
     // Only local files — skip network streams.
     if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("rtsp://") {
         return;
@@ -635,12 +694,36 @@ fn spawn_video_audio(url: &str, stop_flag: Arc<std::sync::atomic::AtomicBool>) {
             done:        false,
         };
 
-        sink.append(source);
+        if start_secs > 0.001 {
+            // Prefer a real FFmpeg seek (instant) over rodio's skip_duration()
+            // which decodes and discards every sample up to start_secs.
+            let sought = source.dec.as_ref()
+                .map(|dec| media.audio_decoder_seek(dec, start_secs))
+                .unwrap_or(false);
+            if sought {
+                sink.append(source);
+            } else {
+                // Older DLL without vm_audio_decoder_seek — fall back to software skip.
+                sink.append(source.skip_duration(std::time::Duration::from_secs_f64(start_secs)));
+            }
+        } else {
+            sink.append(source);
+        }
         sink.play();
-        log::debug!("[video-audio] audio playing via ffmpeg ({sample_rate}Hz/{channels}ch)");
+        log::debug!("[video-audio] audio playing via ffmpeg ({sample_rate}Hz/{channels}ch), start={start_secs:.2}s");
 
-        // Keep the thread (and thus the OutputStream) alive until video closes or audio ends.
-        while !stop_flag.load(std::sync::atomic::Ordering::Relaxed) && !sink.empty() {
+        // Keep alive; apply pause + volume changes each poll tick.
+        // Exit when global stop, audio-only stop (seek restart), or source exhausted.
+        let mut audio_paused = false;
+        while !stop_flag.load(std::sync::atomic::Ordering::Relaxed)
+            && !audio_stop_flag.load(std::sync::atomic::Ordering::Relaxed)
+            && !sink.empty()
+        {
+            let should_pause = pause_flag.load(std::sync::atomic::Ordering::Relaxed);
+            if should_pause && !audio_paused { sink.pause(); audio_paused = true; }
+            if !should_pause && audio_paused  { sink.play();  audio_paused = false; }
+            let vol = *volume.lock().unwrap();
+            if (sink.volume() - vol).abs() > 0.01 { sink.set_volume(vol); }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         sink.stop();

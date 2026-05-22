@@ -2324,17 +2324,45 @@ function MediaDemoScreen() {
   const [micLoading, setMicLoading] = useState(false);
   const [micPath,    setMicPath]    = useState('');
   const [micError,   setMicError]   = useState('');
+  // Mic audio player state
+  const micPlayerRef              = React.useRef(null);
+  const micSeekingRef             = React.useRef(false); // suppress poll snapback during seek
+  const [micPaused,  setMicPaused]   = useState(true);
+  const [micTime,    setMicTime]     = useState(0);
+  const [micDur,     setMicDur]      = useState(-1);
+  const [micVolume,  setMicVolume]   = useState(1.0);
+
+  // Poll audio position while playing (250ms recursive setTimeout)
+  React.useEffect(() => {
+    if (!micPaused && micPlayerRef.current) {
+      let active = true;
+      const poll = () => {
+        if (!active || !micPlayerRef.current) return;
+        if (!micSeekingRef.current) setMicTime(micPlayerRef.current.getTime());
+        setTimeout(poll, 250);
+      };
+      const id = setTimeout(poll, 250);
+      return () => { active = false; clearTimeout(id); };
+    }
+  }, [micPaused]);
 
   // ── Video tab ─────────────────────────────────────────────────────────────────
-  const vidRef       = React.useRef(null);
-  const [vidSrc,     setVidSrc]     = useState('');
-  const [vidInput,   setVidInput]   = useState('');
-  const [vidStatus,  setVidStatus]  = useState('');
-  const [vidError,   setVidError]   = useState('');
-  const [vidMeta,    setVidMeta]    = useState(null);
+  const vidRef            = React.useRef(null);
+  const vidSeekingRef     = React.useRef(false); // suppress timeupdate snapback during seek
+  const [vidSrc,          setVidSrc]          = useState('');
+  const [vidInput,        setVidInput]        = useState('');
+  const [vidStatus,       setVidStatus]       = useState('');
+  const [vidError,        setVidError]        = useState('');
+  const [vidMeta,         setVidMeta]         = useState(null);
+  const [vidCurrentTime,  setVidCurrentTime]  = useState(0);
+  const [vidVolume,       setVidVolume]       = useState(1.0);
+  const [vidPaused,       setVidPaused]       = useState(false);
 
   async function recordMic() {
     setMicLoading(true); setMicError(''); setMicPath('');
+    // Stop any existing player first
+    if (micPlayerRef.current) { micPlayerRef.current.stop(); micPlayerRef.current = null; }
+    setMicPaused(true); setMicTime(0); setMicDur(-1);
     try {
       const path = await microphone.record(5000);
       setMicPath(path);
@@ -2344,7 +2372,31 @@ function MediaDemoScreen() {
 
   async function playMic() {
     if (!micPath) return;
-    try { await audio.play(micPath); } catch (e) { setMicError(String(e)); }
+    try {
+      if (micPlayerRef.current) { micPlayerRef.current.stop(); micPlayerRef.current = null; }
+      setMicTime(0); setMicDur(-1); setMicPaused(true); // ensure true before transition
+      const player = await audio.play(micPath, {
+        onEnded: () => { setMicPaused(true); micPlayerRef.current = null; setMicTime(0); },
+      });
+      micPlayerRef.current = player;
+      let dur = -1;
+      try { dur = await player.getDuration(); } catch (_) {}
+      // Fallback: microphone records exactly 5 seconds; use that if getDuration() fails.
+      if (!(dur > 0)) dur = 5.0;
+      setMicDur(dur);
+      setMicPaused(false); // now the effect fires with micPlayerRef.current already set
+    } catch (e) { setMicError(String(e)); setMicPaused(true); }
+  }
+
+  function pauseResumeMic() {
+    if (!micPlayerRef.current) return;
+    if (micPaused) { micPlayerRef.current.play(); setMicPaused(false); }
+    else           { micPlayerRef.current.pause(); setMicPaused(true); }
+  }
+
+  function stopMic() {
+    if (micPlayerRef.current) { micPlayerRef.current.stop(); micPlayerRef.current = null; }
+    setMicPaused(true); setMicTime(0);
   }
 
   return (
@@ -2440,21 +2492,98 @@ function MediaDemoScreen() {
           <Text fontSize={14} width={inner} height={20} style={{ color: C.text }}>
             Record 5 seconds from the default microphone, then play it back.
           </Text>
-          <View style={{ flexDirection: 'row', gap: 10 }} width={inner} height={36}>
-            <Pressable onPress={recordMic} width={110} height={32}
-              style={{ backgroundColor: micLoading ? C.border : C.teal, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
-              <Text fontSize={13} width={96} height={18} style={{ color: C.bg }}>
-                {micLoading ? 'Recording…' : 'Record 5s'}
-              </Text>
-            </Pressable>
-            <Pressable onPress={playMic} width={70} height={32}
-              style={{ backgroundColor: micPath ? C.green : C.border, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
-              <Text fontSize={13} width={58} height={18} style={{ color: C.bg }}>Play</Text>
-            </Pressable>
-          </View>
-          {micPath ? (
-            <Text fontSize={11} width={inner} height={16} style={{ color: C.dim }}>{micPath}</Text>
-          ) : null}
+
+          {/* Record button */}
+          <Pressable onPress={recordMic} width={110} height={32}
+            style={{ backgroundColor: micLoading ? C.border : C.teal, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+            <Text fontSize={13} width={96} height={18} style={{ color: C.bg }}>
+              {micLoading ? 'Recording…' : 'Record 5s'}
+            </Text>
+          </Pressable>
+
+          {/* Player (shown once a recording exists) */}
+          {micPath ? (() => {
+            const hasDur = micDur > 0;
+            const fmtT   = s => { const m = Math.floor(s / 60); return `${m}:${String(Math.floor(s % 60)).padStart(2, '0')}`; };
+            const isActive = !!micPlayerRef.current;
+            return (
+              <View style={{ gap: 8 }} width={inner} height={164}>
+                {/* File path */}
+                <Text fontSize={11} width={inner} height={14} style={{ color: C.dim }}>{micPath}</Text>
+
+                {/* Progress slider — draggable pin, click to seek */}
+                <Slider
+                  value={micTime}
+                  min={0} max={micDur > 0 ? micDur : 5} step={0}
+                  disabled={!micPlayerRef.current}
+                  onChange={v => {
+                    micSeekingRef.current = true;
+                    clearTimeout(micSeekingRef._t);
+                    micSeekingRef._t = setTimeout(() => { micSeekingRef.current = false; }, 500);
+                    micPlayerRef.current?.seek(v);
+                    setMicTime(v);
+                  }}
+                  width={inner} height={24}
+                />
+
+                {/* Time label */}
+                <Text fontSize={11} width={inner} height={14} style={{ color: C.dim }}>
+                  {hasDur ? `${fmtT(micTime)} / ${fmtT(micDur)}` : micTime > 0 ? fmtT(micTime) : '0:00'}
+                </Text>
+
+                {/* Transport row: Play, Pause/Resume, Stop, -10s, +10s */}
+                <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }} width={inner} height={32}>
+                  {/* Play (fresh start) */}
+                  <Pressable onPress={playMic} width={56} height={30}
+                    style={{ backgroundColor: C.green, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+                    <Text fontSize={12} width={44} height={16} style={{ color: C.bg }}>Play</Text>
+                  </Pressable>
+                  {/* Pause / Resume */}
+                  <Pressable onPress={pauseResumeMic} width={70} height={30}
+                    style={{ backgroundColor: isActive ? C.accent : C.border, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+                    <Text fontSize={12} width={58} height={16} style={{ color: C.bg }}>
+                      {micPaused ? 'Resume' : 'Pause'}
+                    </Text>
+                  </Pressable>
+                  {/* Stop */}
+                  <Pressable onPress={stopMic} width={52} height={30}
+                    style={{ backgroundColor: isActive ? C.red : C.border, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+                    <Text fontSize={12} width={40} height={16} style={{ color: C.bg }}>Stop</Text>
+                  </Pressable>
+                  {/* -10s */}
+                  <Pressable onPress={async () => { if (micPlayerRef.current) { const t = Math.max(0, micTime - 10); await micPlayerRef.current.seek(t); setMicTime(t); } }}
+                    width={44} height={30}
+                    style={{ backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.border, justifyContent: 'center', alignItems: 'center' }}>
+                    <Text fontSize={12} width={36} height={16} style={{ color: C.text }}>-10s</Text>
+                  </Pressable>
+                  {/* +10s */}
+                  <Pressable onPress={async () => { if (micPlayerRef.current) { const t = micTime + 10; await micPlayerRef.current.seek(t); setMicTime(t); } }}
+                    width={44} height={30}
+                    style={{ backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.border, justifyContent: 'center', alignItems: 'center' }}>
+                    <Text fontSize={12} width={36} height={16} style={{ color: C.text }}>+10s</Text>
+                  </Pressable>
+                </View>
+
+                {/* Volume row */}
+                <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }} width={inner} height={28}>
+                  <Text fontSize={12} width={52} height={16} style={{ color: C.dim }}>Vol</Text>
+                  <Slider
+                    value={micVolume}
+                    min={0} max={1} step={0.05}
+                    onChange={v => {
+                      setMicVolume(v);
+                      micPlayerRef.current?.setVolume(v);
+                    }}
+                    width={inner - 62} height={28}
+                  />
+                  <Text fontSize={11} width={32} height={16} style={{ color: C.dim }}>
+                    {Math.round(micVolume * 100)}%
+                  </Text>
+                </View>
+              </View>
+            );
+          })() : null}
+
           {micError ? (
             <Text fontSize={12} width={inner} height={20} style={{ color: C.red }}>{micError}</Text>
           ) : null}
@@ -2463,7 +2592,7 @@ function MediaDemoScreen() {
 
       {/* ── Video tab ── */}
       {tab === 2 && (
-        <View style={{ gap: 10, alignItems: 'flex-start' }} width={inner} height={620}>
+        <View style={{ gap: 10, alignItems: 'flex-start' }} width={inner} height={660}>
           <Text fontSize={13} width={inner} height={18} style={{ color: C.dim }}>
             Pick a video file or type a URL. Requires velox-media DLL.
           </Text>
@@ -2511,33 +2640,97 @@ function MediaDemoScreen() {
             src={vidSrc || undefined}
             autoPlay
             loop={false}
-            onMetadata={m => setVidMeta(m)}
-            onEnded={() => setVidStatus('Playback ended')}
+            onMetadata={m => { setVidMeta(m); setVidCurrentTime(0); setVidPaused(false); }}
+            onTimeUpdate={t => { if (!vidSeekingRef.current) setVidCurrentTime(t); }}
+            onEnded={() => { setVidStatus('Playback ended'); setVidPaused(true); }}
             onError={e => setVidError(String(e))}
-            style={{ width: inner, height: 400, borderRadius: 8, backgroundColor: '#000' }}
+            style={{ width: inner, height: 360, borderRadius: 8, backgroundColor: '#000' }}
           />
 
-          {/* Seek row */}
-          <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }} width={inner} height={34}>
-            <Text fontSize={12} width={36} height={16} style={{ color: C.dim }}>Seek:</Text>
-            {[0, 10, 30, 60].map(s => (
-              <Pressable key={s} onPress={() => vidRef.current && vidRef.current.seek(s)}
-                width={52} height={30}
-                style={{ backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.border, justifyContent: 'center', alignItems: 'center' }}>
-                <Text fontSize={12} width={40} height={16} style={{ color: C.text }}>{s}s</Text>
-              </Pressable>
-            ))}
-            <Pressable onPress={() => { vidRef.current && vidRef.current.close(); setVidSrc(''); setVidStatus(''); setVidMeta(null); }}
-              width={60} height={30}
+          {/* Progress slider + time */}
+          {(() => {
+            const dur    = vidMeta?.durationSecs ?? -1;
+            const hasDur = dur > 0;
+            const fmtT   = s => { const m = Math.floor(s / 60); return `${m}:${String(Math.floor(s % 60)).padStart(2,'0')}`; };
+            return (
+              <View style={{ gap: 6 }} width={inner} height={38}>
+                {/* Draggable seek slider */}
+                <Slider
+                  value={vidCurrentTime}
+                  min={0} max={Math.max(dur > 0 ? dur : 7200, vidCurrentTime + 1)} step={0}
+                  disabled={!vidRef.current?.handle}
+                  onChange={v => {
+                    vidSeekingRef.current = true;
+                    clearTimeout(vidSeekingRef._t);
+                    vidSeekingRef._t = setTimeout(() => { vidSeekingRef.current = false; }, 500);
+                    vidRef.current?.seek(v);
+                    setVidCurrentTime(v);
+                  }}
+                  width={inner} height={24}
+                />
+                {/* Time label */}
+                <Text fontSize={11} width={inner} height={14} style={{ color: C.dim }}>
+                  {hasDur
+                    ? `${fmtT(vidCurrentTime)} / ${fmtT(dur)}`
+                    : vidCurrentTime > 0 ? fmtT(vidCurrentTime) : ''}
+                </Text>
+              </View>
+            );
+          })()}
+
+          {/* Transport + volume row */}
+          <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', flexWrap: 'wrap' }} width={inner} height={36}>
+            {/* Pause / Play */}
+            <Pressable
+              onPress={() => {
+                if (vidPaused) { vidRef.current?.play();  setVidPaused(false); }
+                else           { vidRef.current?.pause(); setVidPaused(true);  }
+              }}
+              width={62} height={30}
+              style={{ backgroundColor: C.accent, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
+              <Text fontSize={12} width={50} height={16} style={{ color: C.bg }}>
+                {vidPaused ? 'Play' : 'Pause'}
+              </Text>
+            </Pressable>
+            {/* −15s */}
+            <Pressable onPress={() => vidRef.current?.seek(Math.max(0, vidCurrentTime - 15))}
+              width={44} height={30}
+              style={{ backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.border, justifyContent: 'center', alignItems: 'center' }}>
+              <Text fontSize={12} width={36} height={16} style={{ color: C.text }}>-15s</Text>
+            </Pressable>
+            {/* +15s */}
+            <Pressable onPress={() => vidRef.current?.seek(vidCurrentTime + 15)}
+              width={44} height={30}
+              style={{ backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.border, justifyContent: 'center', alignItems: 'center' }}>
+              <Text fontSize={12} width={36} height={16} style={{ color: C.text }}>+15s</Text>
+            </Pressable>
+            {/* Volume label + slider */}
+            <Text fontSize={11} width={28} height={16} style={{ color: C.dim }}>Vol</Text>
+            <Slider
+              min={0} max={1} step={0.05}
+              value={vidVolume}
+              onChange={v => {
+                setVidVolume(v);
+                vidRef.current?.setVolume(v);
+              }}
+              style={{ width: 100, height: 30 }}
+            />
+            <Text fontSize={11} width={28} height={16} style={{ color: C.dim }}>
+              {Math.round(vidVolume * 100)}%
+            </Text>
+            {/* Close */}
+            <Pressable
+              onPress={() => { vidRef.current?.close(); setVidSrc(''); setVidStatus(''); setVidMeta(null); setVidCurrentTime(0); setVidPaused(false); }}
+              width={52} height={30}
               style={{ backgroundColor: C.red, borderRadius: 6, justifyContent: 'center', alignItems: 'center' }}>
-              <Text fontSize={12} width={48} height={16} style={{ color: C.bg }}>Close</Text>
+              <Text fontSize={12} width={40} height={16} style={{ color: C.bg }}>Close</Text>
             </Pressable>
           </View>
 
           {/* Metadata / status */}
           {vidMeta ? (
-            <Text fontSize={11} width={inner} height={16} style={{ color: C.dim }}>
-              {`${vidMeta.width ?? '?'}×${vidMeta.height ?? '?'}  ${vidMeta.fps ?? '?'} fps  ${vidMeta.duration_secs != null ? vidMeta.duration_secs.toFixed(1) + 's' : '?'}`}
+            <Text fontSize={11} width={inner} height={14} style={{ color: C.dim }}>
+              {`${vidMeta.width ?? '?'}×${vidMeta.height ?? '?'}  ${(vidMeta.fps ?? 0).toFixed(1)}fps`}
             </Text>
           ) : null}
           {vidStatus ? (

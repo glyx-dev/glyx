@@ -243,7 +243,13 @@ export function dispatchEvents() {
         let handled = false;
         for (const [nodeId, handlers] of pressableRegistry) {
           if (hitTest(nodeId, ev.x, ev.y)) {
-            handlers.onPress?.();
+            const layout = __velox_getLayout(nodeId);
+            const pressEv = {
+              x: ev.x, y: ev.y,
+              locationX: layout ? ev.x - layout.x : 0,
+              locationY: layout ? ev.y - layout.y : 0,
+            };
+            handlers.onPress?.(pressEv);
             handled = true;
             break;
           }

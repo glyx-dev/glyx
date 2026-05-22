@@ -15,7 +15,7 @@ pub mod verify;
 
 use libloading::{Library, Symbol};
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_double, c_int, c_void};
 use std::sync::{Arc, OnceLock};
 
 // ── Global lazy-loaded singleton ──────────────────────────────────────────────
@@ -49,13 +49,15 @@ type FnVersion               = unsafe extern "C" fn() -> *const c_char;
 type FnDecoderOpen           = unsafe extern "C" fn(*const c_char, *mut c_int, *mut c_int, *mut f64) -> *mut c_void;
 type FnDecoderNextFrame      = unsafe extern "C" fn(*mut c_void, *mut u8, *mut f64) -> c_int;
 type FnDecoderSeek           = unsafe extern "C" fn(*mut c_void, f64);
+type FnDecoderDuration       = unsafe extern "C" fn(*mut c_void) -> f64;
 type FnDecoderClose          = unsafe extern "C" fn(*mut c_void);
 type FnEncoderOpen           = unsafe extern "C" fn(*const c_char, c_int, c_int, c_int) -> *mut c_void;
 type FnEncoderWriteRgba      = unsafe extern "C" fn(*mut c_void, *const u8, c_int) -> c_int;
 type FnEncoderClose          = unsafe extern "C" fn(*mut c_void);
-type FnAudioDecoderOpen      = unsafe extern "C" fn(*const c_char, *mut c_int, *mut c_int) -> *mut c_void;
+type FnAudioDecoderOpen        = unsafe extern "C" fn(*const c_char, *mut c_int, *mut c_int) -> *mut c_void;
 type FnAudioDecoderNextSamples = unsafe extern "C" fn(*mut c_void, *mut i16, c_int) -> c_int;
-type FnAudioDecoderClose     = unsafe extern "C" fn(*mut c_void);
+type FnAudioDecoderSeek        = unsafe extern "C" fn(*mut c_void, c_double);
+type FnAudioDecoderClose       = unsafe extern "C" fn(*mut c_void);
 
 /// Safe wrapper around the velox-media dynamic library.
 ///
@@ -66,12 +68,14 @@ pub struct VeloxMedia {
     decoder_open:             FnDecoderOpen,
     decoder_next_frame:       FnDecoderNextFrame,
     decoder_seek:             FnDecoderSeek,
+    fn_decoder_duration:      Option<FnDecoderDuration>,  // optional — older DLLs won't have it
     decoder_close:            FnDecoderClose,
     encoder_open:             FnEncoderOpen,
     encoder_write_rgba:       FnEncoderWriteRgba,
     encoder_close:            FnEncoderClose,
     audio_decoder_open:       FnAudioDecoderOpen,
     audio_decoder_next_samp:  FnAudioDecoderNextSamples,
+    fn_audio_decoder_seek:    Option<FnAudioDecoderSeek>,
     audio_decoder_close:      FnAudioDecoderClose,
     _lib: Library,  // ← LAST — must be dropped after function pointers
 }
@@ -123,17 +127,26 @@ impl VeloxMedia {
             ),
         }
 
+        let fn_decoder_duration = unsafe {
+            lib.get::<FnDecoderDuration>(b"vm_decoder_duration\0").ok().map(|s| *s)
+        };
+        let fn_audio_decoder_seek = unsafe {
+            lib.get::<FnAudioDecoderSeek>(b"vm_audio_decoder_seek\0").ok().map(|s| *s)
+        };
+
         Ok(Self {
             version:                 sym!(lib, b"velox_media_version\0",             FnVersion),
             decoder_open:            sym!(lib, b"vm_decoder_open\0",                 FnDecoderOpen),
             decoder_next_frame:      sym!(lib, b"vm_decoder_next_frame\0",           FnDecoderNextFrame),
             decoder_seek:            sym!(lib, b"vm_decoder_seek\0",                 FnDecoderSeek),
+            fn_decoder_duration,
             decoder_close:           sym!(lib, b"vm_decoder_close\0",                FnDecoderClose),
             encoder_open:            sym!(lib, b"vm_encoder_open\0",                 FnEncoderOpen),
             encoder_write_rgba:      sym!(lib, b"vm_encoder_write_rgba\0",           FnEncoderWriteRgba),
             encoder_close:           sym!(lib, b"vm_encoder_close\0",                FnEncoderClose),
             audio_decoder_open:      sym!(lib, b"vm_audio_decoder_open\0",           FnAudioDecoderOpen),
             audio_decoder_next_samp: sym!(lib, b"vm_audio_decoder_next_samples\0",   FnAudioDecoderNextSamples),
+            fn_audio_decoder_seek,
             audio_decoder_close:     sym!(lib, b"vm_audio_decoder_close\0",          FnAudioDecoderClose),
             _lib: lib,
         })
@@ -182,6 +195,15 @@ impl VeloxMedia {
     /// Seek decoder to `seconds`.
     pub fn decoder_seek(&self, dec: &VmDecoder, seconds: f64) {
         unsafe { (self.decoder_seek)(dec.ptr, seconds) }
+    }
+
+    /// Return total stream duration in seconds, or `-1.0` if unknown.
+    /// Returns `-1.0` on older DLLs that don't export `vm_decoder_duration`.
+    pub fn decoder_duration(&self, dec: &VmDecoder) -> f64 {
+        match self.fn_decoder_duration {
+            Some(f) => unsafe { f(dec.ptr) },
+            None    => -1.0,
+        }
     }
 
     /// Close a decoder and free its resources.
@@ -238,6 +260,17 @@ impl VeloxMedia {
     pub fn audio_decoder_next_samples(&self, dec: &VmAudioDecoder, buf: &mut [i16]) -> i32 {
         unsafe {
             (self.audio_decoder_next_samp)(dec.ptr, buf.as_mut_ptr(), buf.len() as c_int) as i32
+        }
+    }
+
+    /// Seek the audio decoder to `seconds`. Returns `true` if the native seek
+    /// function is available in the loaded DLL, `false` if the DLL is older.
+    pub fn audio_decoder_seek(&self, dec: &VmAudioDecoder, seconds: f64) -> bool {
+        if let Some(f) = self.fn_audio_decoder_seek {
+            unsafe { f(dec.ptr, seconds as c_double) };
+            true
+        } else {
+            false
         }
     }
 

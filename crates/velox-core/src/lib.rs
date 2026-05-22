@@ -644,14 +644,20 @@ struct VideoStream {
     frame_buf:    Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>,
     /// Signal the decode thread to stop (also stops the audio thread).
     stop_flag:    Arc<std::sync::atomic::AtomicBool>,
+    /// Signal the decode + audio threads to pause (spin-wait). Cleared by ResumeVideo.
+    pause_flag:   Arc<std::sync::atomic::AtomicBool>,
+    /// Stops the audio thread only — replaced each seek so a new thread can start fresh.
+    audio_stop_flag: Arc<std::sync::atomic::AtomicBool>,
     /// Send seek-to-seconds requests to the decode thread.
     seek_tx:      std::sync::mpsc::SyncSender<f64>,
-    /// Pending events (ended, metadata). Drained into velox-runtime's video_events each frame.
+    /// Pending events (ended, metadata, timeupdate). Drained into velox-runtime each frame.
     events:       Arc<Mutex<std::collections::VecDeque<String>>>,
     /// Most recent peniko::Image built from the decoded frame. Used by render.rs.
     latest_image: Option<peniko::Image>,
-    // Audio is played by a self-contained background thread that owns the
-    // OutputStream + Sink — no audio fields needed here.
+    /// Shared volume (0.0–2.0). Written by SetVideoVolume, read by the audio thread.
+    video_volume: Arc<Mutex<f32>>,
+    /// Original URL — needed to restart the audio thread after seeking.
+    url:          String,
 }
 
 /// Per-window rendering + runtime state.

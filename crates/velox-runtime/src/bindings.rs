@@ -308,7 +308,13 @@ pub enum SceneCommand {
     /// Open a video file/URL for playback. velox-core spawns a decode thread.
     OpenVideo  { handle_id: u32, url: String },
     /// Seek the video to `seconds`. The decode thread resyncs from the new position.
-    SeekVideo  { handle_id: u32, seconds: f64 },
+    SeekVideo      { handle_id: u32, seconds: f64 },
+    /// Set playback volume (0.0–2.0). Applied to the audio sink within 50ms.
+    SetVideoVolume { handle_id: u32, volume: f32 },
+    /// Pause decode + audio threads.
+    PauseVideo  { handle_id: u32 },
+    /// Resume decode + audio threads.
+    ResumeVideo { handle_id: u32 },
     /// Stop playback and release all resources for this video handle.
     CloseVideo { handle_id: u32 },
     /// Signal velox-core to hide the splash screen overlay.
@@ -371,11 +377,12 @@ pub fn register_all(
         hotkey_state:   std::cell::RefCell::new(None),
         next_hotkey_id: std::sync::atomic::AtomicU32::new(1),
         deeplink_url_queue,
-        audio_stream:  std::cell::RefCell::new(None),
-        audio_handle:  std::cell::RefCell::new(None),
-        audio_sinks:   Arc::new(Mutex::new(HashMap::new())),
-        audio_events:  Arc::new(Mutex::new(VecDeque::new())),
+        audio_stream:   std::cell::RefCell::new(None),
+        audio_handle:   std::cell::RefCell::new(None),
+        audio_sinks:    Arc::new(Mutex::new(HashMap::new())),
+        audio_events:   Arc::new(Mutex::new(VecDeque::new())),
         next_audio_id:  std::sync::atomic::AtomicU32::new(1),
+        audio_trackers: Arc::new(Mutex::new(HashMap::new())),
         next_camera_id: std::sync::atomic::AtomicU32::new(1),
         next_video_id:  std::sync::atomic::AtomicU32::new(1),
         video_events,
@@ -510,6 +517,9 @@ pub fn register_all(
     register!("__velox_audio_setVolume", audio_set_volume_callback);
     register!("__velox_audio_getVolume", audio_get_volume_callback);
     register!("__velox_audio_poll",      audio_poll_callback);
+    register!("__velox_audio_get_time",  audio_get_time_callback);
+    register!("__velox_audio_duration",  audio_duration_callback);
+    register!("__velox_audio_seek",      audio_seek_callback);
 
     // ── App lifecycle ────────────────────────────────────────────────────────
     register!("__velox_quit",         quit_callback);
@@ -542,10 +552,13 @@ pub fn register_all(
     register!("__velox_microphone_record",   microphone_record_callback);
 
     // ── Video player ─────────────────────────────────────────────────────────
-    register!("__velox_video_open",  video_open_callback);
-    register!("__velox_video_seek",  video_seek_callback);
-    register!("__velox_video_close", video_close_callback);
-    register!("__velox_video_poll",  video_poll_callback);
+    register!("__velox_video_open",       video_open_callback);
+    register!("__velox_video_seek",       video_seek_callback);
+    register!("__velox_video_set_volume", video_set_volume_callback);
+    register!("__velox_video_pause",      video_pause_callback);
+    register!("__velox_video_play",       video_play_callback);
+    register!("__velox_video_close",      video_close_callback);
+    register!("__velox_video_poll",       video_poll_callback);
 
     // ── HID devices ──────────────────────────────────────────────────────────
     register!("__velox_hid_enumerate", hid_enumerate_callback);
@@ -617,6 +630,8 @@ struct AsyncState {
     /// Events (e.g. "ended") produced by the audio subsystem, drained each frame.
     audio_events:  Arc<Mutex<VecDeque<String>>>,
     next_audio_id: std::sync::atomic::AtomicU32,
+    /// Wall-clock position tracker for each audio handle (no get_pos in rodio 0.17).
+    audio_trackers: Arc<Mutex<HashMap<u32, AudioTracker>>>,
     // ── Camera ────────────────────────────────────────────────────────────────
     /// Handle ID counter. CameraStream lives in velox-core; we only track IDs here.
     next_camera_id: std::sync::atomic::AtomicU32,
@@ -646,6 +661,20 @@ struct AsyncState {
     /// Named async commands registered by `VeloxExtension::register_commands`.
     /// Dispatched by `__velox_backend_call(name, argsJson) → Promise<resultJson>`.
     backend_commands: crate::BackendRegistry,
+}
+
+/// Tracks playback position for a rodio audio handle.
+/// rodio 0.17 has no `get_pos()` — we maintain wall-clock state manually.
+struct AudioTracker {
+    path:        String,
+    offset_secs: f64,                        // saved offset when paused / seeked
+    started_at:  Option<std::time::Instant>, // None = paused
+}
+impl AudioTracker {
+    fn current_time(&self) -> f64 {
+        self.offset_secs
+            + self.started_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0)
+    }
 }
 
 struct WsHandle {
@@ -1947,7 +1976,7 @@ fn dialog_open_folder_callback(
 /// `__velox_clipboard_readText() -> Promise<string>` — clipboard text content.
 fn clipboard_read_text_callback(
     scope:  &mut v8::HandleScope,
-    args:   v8::FunctionCallbackArguments,
+    _args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
     if !velox_security::get().clipboard {
@@ -3233,8 +3262,10 @@ fn audio_play_callback(
         return;
     };
 
-    let sinks = Arc::clone(&state.audio_sinks);
+    let sinks    = Arc::clone(&state.audio_sinks);
+    let trackers = Arc::clone(&state.audio_trackers);
     let id = state.next_audio_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let src_path = src.clone();
     let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
 
     state.tokio.spawn(async move {
@@ -3249,6 +3280,11 @@ fn audio_play_callback(
             sink.append(decoder);
             sink.play();
             sinks.lock().unwrap().insert(id, sink);
+            trackers.lock().unwrap().insert(id, AudioTracker {
+                path:        src_path,
+                offset_secs: 0.0,
+                started_at:  Some(std::time::Instant::now()),
+            });
             Ok(id.to_string())
         }).await.map_err(|e| e.to_string()).and_then(|r| r);
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result });
@@ -3270,6 +3306,10 @@ fn audio_pause_callback(
             if let Some(sink) = state.audio_sinks.lock().unwrap().get(&id) {
                 sink.pause();
             }
+            if let Some(tracker) = state.audio_trackers.lock().unwrap().get_mut(&id) {
+                tracker.offset_secs = tracker.current_time();
+                tracker.started_at  = None;
+            }
         }
     }
 }
@@ -3287,6 +3327,9 @@ fn audio_resume_callback(
         if let Ok(id) = id_str.parse::<u32>() {
             if let Some(sink) = state.audio_sinks.lock().unwrap().get(&id) {
                 sink.play();
+            }
+            if let Some(tracker) = state.audio_trackers.lock().unwrap().get_mut(&id) {
+                tracker.started_at = Some(std::time::Instant::now());
             }
         }
     }
@@ -3308,6 +3351,7 @@ fn audio_stop_callback(
             if let Some(sink) = state.audio_sinks.lock().unwrap().remove(&id) {
                 sink.stop();
             }
+            state.audio_trackers.lock().unwrap().remove(&id);
         }
     }
 }
@@ -3375,6 +3419,10 @@ fn audio_poll_callback(
         sinks_guard.remove(id);
     }
     drop(sinks_guard);
+    // Remove trackers for ended sinks.
+    let mut tr = state.audio_trackers.lock().unwrap();
+    for id in &ended_ids { tr.remove(id); }
+    drop(tr);
 
     // Merge newly-ended events with the shared events queue, then drain all.
     let json = {
@@ -3392,6 +3440,129 @@ fn audio_poll_callback(
 
     let s = v8::String::new(scope, &json).unwrap();
     rv.set(s.into());
+}
+
+/// `__velox_audio_get_time(handle)` → f64 seconds (sync).
+///
+/// Returns the current playback position. Based on wall-clock tracking since
+/// rodio 0.17 has no built-in get_pos(). Returns 0.0 for unknown handles.
+fn audio_get_time_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let t = if let Some(id_str) = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)) {
+        if let Ok(id) = id_str.parse::<u32>() {
+            state.audio_trackers.lock().unwrap().get(&id).map(|t| t.current_time()).unwrap_or(0.0)
+        } else { 0.0 }
+    } else { 0.0 };
+    rv.set(v8::Number::new(scope, t).into());
+}
+
+/// `__velox_audio_duration(handle)` → Promise<f64> seconds.
+///
+/// Opens the file with rodio::Decoder and calls `total_duration()`.
+/// May return -1.0 for formats that don't expose a duration header.
+fn audio_duration_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let id_str = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let path = if let Ok(id) = id_str.parse::<u32>() {
+        state.audio_trackers.lock().unwrap().get(&id).map(|t| t.path.clone())
+    } else { None };
+    let Some(path) = path else {
+        rv.set(reject_promise_with_error(scope, "unknown audio handle").into());
+        return;
+    };
+    let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            use rodio::Source;
+            let file = std::fs::File::open(&path).map_err(|e| format!("{e}"))?;
+            let dec  = rodio::Decoder::new(std::io::BufReader::new(file)).map_err(|e| format!("{e}"))?;
+            let dur  = dec.total_duration().map(|d| d.as_secs_f64()).unwrap_or(-1.0);
+            Ok(dur.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result });
+    });
+    rv.set(promise.into());
+}
+
+/// `__velox_audio_seek(handle, seconds)` → Promise<void>.
+///
+/// Stops the current sink, re-opens the file, skips `seconds` via
+/// `skip_duration`, and inserts a fresh sink. Updates the tracker.
+fn audio_seek_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let id_str = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let secs   = args.get(1).number_value(scope).unwrap_or(0.0).max(0.0);
+    let Ok(id) = id_str.parse::<u32>() else {
+        rv.set(reject_promise_with_error(scope, "invalid audio handle").into());
+        return;
+    };
+    let path = state.audio_trackers.lock().unwrap().get(&id).map(|t| t.path.clone());
+    let Some(path) = path else {
+        rv.set(reject_promise_with_error(scope, "unknown audio handle").into());
+        return;
+    };
+    // Was the sink paused before seek?  Keep paused state after seek.
+    let was_paused = state.audio_trackers.lock().unwrap()
+        .get(&id).map(|t| t.started_at.is_none()).unwrap_or(false);
+
+    // NOTE: do NOT remove the old sink here — that would let audio_poll_callback
+    // see a "gap" and fire a spurious "ended" event before the new sink is ready.
+    // Instead, we atomically swap old→new inside spawn_blocking while holding the Mutex.
+
+    let Some(handle) = state.audio_handle.borrow().as_ref().map(Clone::clone) else {
+        rv.set(reject_promise_with_error(scope, "audio device unavailable").into());
+        return;
+    };
+    let sinks    = Arc::clone(&state.audio_sinks);
+    let trackers = Arc::clone(&state.audio_trackers);
+    let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            use rodio::Source;
+            // Build the new source first (before touching the sinks map).
+            let file = std::fs::File::open(&path).map_err(|e| format!("audio open: {e}"))?;
+            let decoder = rodio::Decoder::new(std::io::BufReader::new(file))
+                .map_err(|e| format!("audio decode: {e}"))?;
+            let skipped = decoder.skip_duration(std::time::Duration::from_secs_f64(secs));
+            let sink = rodio::Sink::try_new(&handle).map_err(|e| format!("audio sink: {e}"))?;
+            sink.append(skipped);
+            if was_paused { sink.pause(); } else { sink.play(); }
+            // Atomic swap: remove old + insert new while holding the Mutex so
+            // audio_poll_callback never sees the handle missing (no spurious "ended").
+            {
+                let mut sg = sinks.lock().unwrap();
+                if let Some(old) = sg.remove(&id) { old.stop(); }
+                sg.insert(id, sink);
+            }
+            // Update tracker position.
+            let mut tr = trackers.lock().unwrap();
+            if let Some(t) = tr.get_mut(&id) {
+                t.offset_secs = secs;
+                t.started_at  = if was_paused { None } else { Some(std::time::Instant::now()) };
+            }
+            Ok("null".to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result });
+    });
+    rv.set(promise.into());
 }
 
 /// Parse `"ctrl+shift+v"` into a `global_hotkey::hotkey::HotKey`.
@@ -4415,6 +4586,26 @@ fn video_seek_callback(
         .push_back(SceneCommand::SeekVideo { handle_id, seconds });
 }
 
+/// `__velox_video_set_volume(handleId: string, volume: number)` — sync
+///
+/// Sets playback volume (0.0 = mute, 1.0 = normal, up to 2.0).
+/// Applied to the audio sink within ~50ms.
+fn video_set_volume_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle_id = v8_arg_to_string(scope, &args, 0).parse::<u32>().unwrap_or(0);
+    let volume    = args.get(1).number_value(scope).unwrap_or(1.0) as f32;
+
+    state.scene.lock().unwrap()
+        .push_back(SceneCommand::SetVideoVolume { handle_id, volume });
+}
+
 /// `__velox_video_close(handleId: string)` — sync
 ///
 /// Stops playback and releases all resources for this video handle.
@@ -4432,6 +4623,36 @@ fn video_close_callback(
 
     state.scene.lock().unwrap()
         .push_back(SceneCommand::CloseVideo { handle_id });
+}
+
+/// `__velox_video_pause(handleId: string)` — sync
+///
+/// Pauses the decode thread (spin-wait) and the audio sink.
+fn video_pause_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let handle_id = v8_arg_to_string(scope, &args, 0).parse::<u32>().unwrap_or(0);
+    state.scene.lock().unwrap().push_back(SceneCommand::PauseVideo { handle_id });
+}
+
+/// `__velox_video_play(handleId: string)` — sync
+///
+/// Resumes the decode thread and audio sink after a pause.
+fn video_play_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let handle_id = v8_arg_to_string(scope, &args, 0).parse::<u32>().unwrap_or(0);
+    state.scene.lock().unwrap().push_back(SceneCommand::ResumeVideo { handle_id });
 }
 
 /// `__velox_video_poll() → JSON`

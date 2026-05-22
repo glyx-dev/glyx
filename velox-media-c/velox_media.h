@@ -77,6 +77,13 @@ VELOX_EXPORT int vm_decoder_next_frame(
  */
 VELOX_EXPORT void vm_decoder_seek(VmDecoder* dec, double seconds);
 
+/**
+ * Return the total duration of the open stream in seconds.
+ * Returns -1.0 if unknown (e.g. live / network stream).
+ * May be called at any point after vm_decoder_open succeeds.
+ */
+VELOX_EXPORT double vm_decoder_duration(VmDecoder* dec);
+
 /** Close the decoder and free all resources. */
 VELOX_EXPORT void vm_decoder_close(VmDecoder* dec);
 
@@ -113,6 +120,9 @@ VELOX_EXPORT int vm_audio_decoder_next_samples(
     int16_t*        buf,
     int             max_samples
 );
+
+/** Seek the audio decoder to the given position in seconds. */
+VELOX_EXPORT void vm_audio_decoder_seek(VmAudioDecoder* dec, double seconds);
 
 /** Close the audio decoder and free all resources. */
 VELOX_EXPORT void vm_audio_decoder_close(VmAudioDecoder* dec);

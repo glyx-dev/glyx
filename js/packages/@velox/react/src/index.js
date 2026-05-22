@@ -269,7 +269,7 @@ export function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn,
 
   // Always keep handlersRef up to date with the latest prop values.
   handlersRef.current = {
-    onPress:    () => onPress?.(),
+    onPress:    (e) => onPress?.(e),
     onPressIn:  () => { setPressed(true);  onPressIn?.(); },
     onPressOut: () => { setPressed(false); onPressOut?.(); },
     onHoverIn:  () => { setHovered(true);  onHoverIn?.(); },
@@ -281,7 +281,7 @@ export function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn,
     nodeIdRef.current = id;
     // Register stable proxy functions that delegate to handlersRef.
     registerPressable(id, {
-      onPress:    () => handlersRef.current.onPress(),
+      onPress:    (e) => handlersRef.current.onPress(e),
       onPressIn:  () => handlersRef.current.onPressIn(),
       onPressOut: () => handlersRef.current.onPressOut(),
       onHoverIn:  () => handlersRef.current.onHoverIn(),
@@ -1626,9 +1626,13 @@ export const audio = {
       id,
       pause()           { if (typeof __velox_audio_pause     !== 'undefined') __velox_audio_pause(id); },
       resume()          { if (typeof __velox_audio_resume    !== 'undefined') __velox_audio_resume(id); },
+      play()            { if (typeof __velox_audio_resume    !== 'undefined') __velox_audio_resume(id); },
       stop()            { if (typeof __velox_audio_stop      !== 'undefined') __velox_audio_stop(id); _audioCallbacks.delete(id); },
       setVolume(v)      { if (typeof __velox_audio_setVolume !== 'undefined') __velox_audio_setVolume(id, v); },
       getVolume()       { return typeof __velox_audio_getVolume !== 'undefined' ? __velox_audio_getVolume(id) : 1.0; },
+      getTime()         { return typeof __velox_audio_get_time !== 'undefined' ? __velox_audio_get_time(id) : 0.0; },
+      async getDuration() { return typeof __velox_audio_duration !== 'undefined' ? parseFloat(await __velox_audio_duration(id)) : -1; },
+      async seek(secs)  { if (typeof __velox_audio_seek !== 'undefined') await __velox_audio_seek(id, secs); },
       onEnded(cb)       {
         if (!_audioCallbacks.has(id)) _audioCallbacks.set(id, []);
         _audioCallbacks.get(id).push({ onEnded: cb });
@@ -2029,33 +2033,47 @@ export const updater = {
 //   video.close(handleId);
 
 // Internal: video event listeners
-const _videoCallbacks = new Map(); // handleId → { onEnded, onMetadata, onError }
+// handleId → { onEnded, onMetadata, onTimeUpdate, onError }
+const _videoCallbacks = new Map();
 function _pollVideo() {
   const events = JSON.parse(__velox_video_poll());
   for (const ev of events) {
     const cbs = _videoCallbacks.get(ev.id);
     if (!cbs) continue;
-    if (ev.type === 'ended' && cbs.onEnded) cbs.onEnded();
-    else if (ev.type === 'metadata' && cbs.onMetadata) cbs.onMetadata(ev);
-    else if (ev.type === 'error' && cbs.onError) cbs.onError(ev.message);
+    if      (ev.type === 'ended'      && cbs.onEnded)      cbs.onEnded();
+    else if (ev.type === 'metadata'   && cbs.onMetadata)   cbs.onMetadata(ev);
+    else if (ev.type === 'timeupdate' && cbs.onTimeUpdate) cbs.onTimeUpdate(ev.currentTime);
+    else if (ev.type === 'error'      && cbs.onError)      cbs.onError(ev.message);
   }
 }
 
 export const video = {
   /**
    * Open a video file or URL for playback.
-   * @param {string} url  Local path or network URL supported by ffmpeg.
-   * @param {{ onEnded?: ()=>void, onMetadata?: (m:object)=>void, onError?: (msg:string)=>void }} opts
+   * @param {string} url
+   * @param {{ onEnded?, onMetadata?, onTimeUpdate?, onError? }} opts
    * @returns {Promise<number>} Resolves with the video handle ID.
    */
-  async open(url, { onEnded, onMetadata, onError } = {}) {
+  async open(url, { onEnded, onMetadata, onTimeUpdate, onError } = {}) {
     const handleId = parseInt(await __velox_video_open(url));
-    _videoCallbacks.set(handleId, { onEnded, onMetadata, onError });
+    _videoCallbacks.set(handleId, { onEnded, onMetadata, onTimeUpdate, onError });
     return handleId;
   },
-  /** Seek to `seconds` in the currently playing video. */
+  /** Seek to `seconds`. */
   seek(handleId, seconds) {
-    __velox_video_seek(String(handleId), seconds);
+    __velox_video_seek(String(handleId), Math.max(0, seconds));
+  },
+  /** Set playback volume (0.0 = mute, 1.0 = normal, up to 2.0). */
+  setVolume(handleId, volume) {
+    __velox_video_set_volume(String(handleId), volume);
+  },
+  /** Pause decode and audio threads. */
+  pause(handleId) {
+    __velox_video_pause(String(handleId));
+  },
+  /** Resume after pause. */
+  play(handleId) {
+    __velox_video_play(String(handleId));
   },
   /** Close and release the video handle. */
   close(handleId) {
@@ -2146,19 +2164,30 @@ export const Camera = React.forwardRef(function Camera({ mirror, style, ...rest 
 //   vidRef.current.close();          // release handle early
 
 export const Video = React.forwardRef(function Video(
-  { src, autoPlay = true, loop = false, onEnded, onMetadata, onError, style, ...rest },
+  { src, autoPlay = true, loop = false, onEnded, onMetadata, onTimeUpdate, onError, style, ...rest },
   ref
 ) {
   const [videoHandle, setVideoHandle] = React.useState(null);
+  // Mutable refs — updated from event callbacks without causing re-renders.
+  const currentTimeRef = React.useRef(0);
+  const durationRef    = React.useRef(-1);
 
-  // Open / close whenever src changes
   React.useEffect(() => {
     if (!src) return;
     let handle = null;
     let cancelled = false;
+    currentTimeRef.current = 0;
+    durationRef.current    = -1;
     video.open(src, {
-      onEnded:    loop ? () => { if (handle !== null) video.seek(handle, 0); } : onEnded,
-      onMetadata,
+      onEnded: loop ? () => { if (handle !== null) video.seek(handle, 0); } : onEnded,
+      onMetadata: (m) => {
+        durationRef.current = m.durationSecs ?? -1;
+        if (onMetadata) onMetadata(m);
+      },
+      onTimeUpdate: (t) => {
+        currentTimeRef.current = t;
+        if (onTimeUpdate) onTimeUpdate(t);
+      },
       onError,
     }).then(h => {
       if (cancelled) { video.close(h); return; }
@@ -2178,13 +2207,21 @@ export const Video = React.forwardRef(function Video(
   }, [src]); // eslint-disable-line react-hooks/exhaustive-deps
 
   React.useImperativeHandle(ref, () => ({
-    /** Current video handle (null when not open). */
-    get handle() { return videoHandle; },
-    /** Seek to the given time in seconds. */
+    get handle()      { return videoHandle; },
+    get currentTime() { return currentTimeRef.current; },
+    get duration()    { return durationRef.current; },
     seek(seconds) {
       if (videoHandle !== null) video.seek(videoHandle, seconds);
     },
-    /** Close the video early (src change also closes automatically). */
+    setVolume(vol) {
+      if (videoHandle !== null) video.setVolume(videoHandle, vol);
+    },
+    pause() {
+      if (videoHandle !== null) video.pause(videoHandle);
+    },
+    play() {
+      if (videoHandle !== null) video.play(videoHandle);
+    },
     close() {
       if (videoHandle !== null) {
         video.close(videoHandle);
@@ -2193,11 +2230,7 @@ export const Video = React.forwardRef(function Video(
     },
   }), [videoHandle]);
 
-  return React.createElement('video', {
-    videoHandle: videoHandle,
-    style,
-    ...rest,
-  });
+  return React.createElement('video', { videoHandle, style, ...rest });
 });
 
 export const input = {
@@ -2318,12 +2351,22 @@ export const deeplink = {
  *           disabled?: boolean, style?: object }} props
  */
 export function Slider({
-  value = 0, onValueChange,
+  value = 0, onValueChange, onChange,
   min = 0, max = 1, step = 0,
   disabled = false, style,
+  width: widthProp = 200,
   ...rest
 }) {
-  const pct = max === min ? 0 : Math.max(0, Math.min(1, (Math.min(max, Math.max(min, value)) - min) / (max - min)));
+  const _cb = onValueChange ?? onChange;
+  const THUMB = 20;
+  const TRACK = 4;
+  const accent = disabled ? '#555' : '#7aa2f7';
+
+  // Compute explicit pixel widths — avoids flex_grow which doesn't update
+  // visually in Velox's incremental layout path.
+  const pct    = max === min ? 0 : Math.max(0, Math.min(1, (Math.min(max, Math.max(min, value)) - min) / (max - min)));
+  const fillW  = Math.max(0, Math.round(pct * (widthProp - THUMB)));
+  const rightW = Math.max(0, widthProp - THUMB - fillW);
 
   // Native node ID for the track container — draggable is registered on it.
   const trackNodeId = useRef(null);
@@ -2333,7 +2376,7 @@ export function Slider({
   const maxRef      = useRef(max);   maxRef.current      = max;
   const stepRef     = useRef(step);  stepRef.current     = step;
   const disabledRef = useRef(disabled); disabledRef.current = disabled;
-  const onChangeRef = useRef(onValueChange); onChangeRef.current = onValueChange;
+  const onChangeRef = useRef(_cb); onChangeRef.current = _cb;
 
   // Shared update logic: compute value from absolute cursor x position.
   // Using absolute x (not delta) means each dragMove is independent — no
@@ -2366,20 +2409,18 @@ export function Slider({
     };
   }, []);
 
-  const THUMB = 20;
-  const TRACK = 4;
-  const accent = disabled ? '#555' : '#7aa2f7';
-
+  // Explicit pixel widths for all three pieces so Taffy updates correctly.
+  // The container is registered as draggable — clicking anywhere on the rail
+  // (including the thumb area) fires updateFromX.
   return React.createElement(View, {
     _veloxOnMount: onTrackMount,
-    style: { flexDirection: 'row', alignItems: 'center', height: THUMB, ...style },
+    width: widthProp,
+    style: { flexDirection: 'row', alignItems: 'center', ...style },
     ...rest,
   },
-    React.createElement(View, { style: { flex: pct, height: TRACK, backgroundColor: accent } }),
-    React.createElement(View, {
-      style: { width: THUMB, height: THUMB, borderRadius: THUMB / 2, backgroundColor: accent },
-    }),
-    React.createElement(View, { style: { flex: 1 - pct, height: TRACK, backgroundColor: '#3c4464' } }),
+    React.createElement(View, { width: fillW,  height: TRACK, style: { backgroundColor: accent } }),
+    React.createElement(View, { width: THUMB,  height: THUMB, style: { borderRadius: THUMB / 2, backgroundColor: accent } }),
+    React.createElement(View, { width: rightW, height: TRACK, style: { backgroundColor: '#3c4464' } }),
   );
 }
 

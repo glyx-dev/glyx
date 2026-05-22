@@ -172,6 +172,12 @@ void vm_decoder_seek(VmDecoder* dec, double seconds) {
     avcodec_flush_buffers(dec->codec_ctx);
 }
 
+double vm_decoder_duration(VmDecoder* dec) {
+    if (!dec || !dec->fmt_ctx) return -1.0;
+    if (dec->fmt_ctx->duration == AV_NOPTS_VALUE) return -1.0;
+    return (double)dec->fmt_ctx->duration / (double)AV_TIME_BASE;
+}
+
 void vm_decoder_close(VmDecoder* dec) {
     if (!dec) return;
     if (dec->sws_ctx)    sws_freeContext(dec->sws_ctx);
@@ -460,6 +466,17 @@ int vm_audio_decoder_next_samples(VmAudioDecoder* dec, int16_t* buf, int max_sam
         av_packet_unref(dec->packet);
     }
     return written;
+}
+
+void vm_audio_decoder_seek(VmAudioDecoder* dec, double seconds)
+{
+    if (!dec) return;
+    int64_t ts = (int64_t)(seconds * AV_TIME_BASE);
+    avformat_seek_file(dec->fmt_ctx, -1, INT64_MIN, ts, INT64_MAX, 0);
+    avcodec_flush_buffers(dec->codec_ctx);
+    /* Reset overflow buffer so no stale pre-seek samples are replayed */
+    dec->overflow_pos   = 0;
+    dec->overflow_count = 0;
 }
 
 void vm_audio_decoder_close(VmAudioDecoder* dec)

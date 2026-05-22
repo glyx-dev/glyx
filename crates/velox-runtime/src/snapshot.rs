@@ -158,6 +158,9 @@ globalThis.__velox_audio_stop      = function() {};
 globalThis.__velox_audio_setVolume = function() {};
 globalThis.__velox_audio_getVolume = function() { return 1.0; };
 globalThis.__velox_audio_poll      = function() { return '[]'; };
+globalThis.__velox_audio_get_time  = function() { return 0.0; };
+globalThis.__velox_audio_duration  = function() { return stubPromise('-1'); };
+globalThis.__velox_audio_seek      = function() { return stubPromise('null'); };
 
 // Canvas 2D / 3D bindings
 globalThis.__velox_canvas_update      = function() {};
@@ -187,6 +190,9 @@ globalThis.__velox_updater_check       = function() { return stubPromise('{"hasU
 globalThis.__velox_updater_update      = function() { return stubPromise('{"updated":false,"latestVersion":""}'); };
 globalThis.__velox_video_open          = function() { return stubPromise('0'); };
 globalThis.__velox_video_seek          = function() {};
+globalThis.__velox_video_set_volume    = function() {};
+globalThis.__velox_video_pause         = function() {};
+globalThis.__velox_video_play          = function() {};
 globalThis.__velox_video_close         = function() {};
 globalThis.__velox_video_poll          = function() { return '[]'; };
 

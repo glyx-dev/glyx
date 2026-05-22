@@ -59,13 +59,15 @@ enum Commands {
     Build {
         /// Target OS (windows, macos, linux)
         target: Option<String>,
-        /// Build mode: snapshot (default), bundle, portable
-        ///
-        /// snapshot  — embeds V8 snapshot in binary; self-contained exe, fastest startup (~50ms)
-        /// bundle    — minified JS bundle shipped alongside binary; smaller binary, easy JS updates
-        /// portable  — development-style JS alongside binary; readable, largest, easiest to patch
-        #[arg(long, default_value = "snapshot")]
-        mode: String,
+        /// Embed V8 snapshot in binary — self-contained exe, fastest startup (default)
+        #[arg(long)]
+        snapshot: bool,
+        /// Ship minified JS bundle alongside binary — smaller binary, easy JS updates
+        #[arg(long)]
+        bundle: bool,
+        /// Ship JS files alongside binary — readable, easiest to patch
+        #[arg(long)]
+        portable: bool,
         /// After building, launch the app and check that it meets the frame-time budget.
         #[arg(long)]
         check_performance: bool,
@@ -141,8 +143,10 @@ fn run() -> Result<()> {
     match cli.command {
         Commands::Create { name, native, template } => cmd_create(&name, native, &template),
         Commands::Dev { inspect }         => cmd_dev(inspect),
-        Commands::Build { target, mode, check_performance, perf_budget, perf_duration } =>
-            cmd_build(target.as_deref(), &mode, check_performance, perf_budget, perf_duration),
+        Commands::Build { target, snapshot: _, bundle, portable, check_performance, perf_budget, perf_duration } => {
+            let mode = if bundle { "bundle" } else if portable { "portable" } else { "snapshot" };
+            cmd_build(target.as_deref(), mode, check_performance, perf_budget, perf_duration)
+        }
         Commands::Package { target, installer } => cmd_package(target.as_deref(), installer),
         Commands::Runtime { cmd }         => cmd_runtime(cmd),
         Commands::Generate { cmd }        => cmd_generate(cmd),

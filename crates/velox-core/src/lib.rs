@@ -1397,6 +1397,9 @@ pub fn run(mut config: AppConfig) -> bool {
     let mut windows: std::collections::HashMap<u32, PerWindowState> =
         std::collections::HashMap::new();
 
+    // Save background color before `window` (ShellConfig) is moved into run().
+    let window_bg = window.background_color;
+
     let restart = velox_shell::run(window, move |event| {
         match event {
             // ── Window ready — initialise per-window subsystems ──────────
@@ -1407,8 +1410,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     .expect("Failed to initialise Vello renderer");
                 // Apply window background color so the GPU clear matches the
                 // app theme from frame zero — no blank white flash on startup.
-                let [r, g, b, a] = config.window.background_color;
-                renderer.background_color = vello::peniko::Color::rgba8(r, g, b, a);
+                renderer.background_color = rgba_to_vello(window_bg);
 
                 // Build callbacks that send events to the shell event loop.
                 let proxy_for_fn = ev_proxy.clone();

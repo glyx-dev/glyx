@@ -119,6 +119,10 @@ struct WindowCfgJson {
     startup_mode: Option<String>,
     /// `true` (default) = OS title bar. `false` = frameless custom title bar.
     decorations:  Option<bool>,
+    /// GPU clear color shown before the first JS frame renders.
+    /// Format: `"#rrggbb"` or `"#rrggbbaa"`. Defaults to Velox dark background.
+    /// Set this to your app's root background color to eliminate the white flash.
+    background:   Option<String>,
 }
 
 /// Read the project config as a JSON string.
@@ -162,6 +166,9 @@ fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> Capabilities {
     if let Some(w) = file.as_ref().and_then(|f| f.window.as_ref()) {
         if let Some(t) = &w.title { cfg.title = t.clone(); }
         if let Some(d) = w.decorations { cfg.decorations = d; }
+        if let Some(bg) = w.background.as_deref().and_then(parse_hex_color) {
+            cfg.background_color = bg;
+        }
 
         cfg.startup_mode = match w.startup_mode.as_deref() {
             Some("fullscreen") => StartupMode::Fullscreen,
@@ -1396,8 +1403,12 @@ pub fn run(mut config: AppConfig) -> bool {
             ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy } => {
                 let gpu_ctx = pollster::block_on(GpuContext::new(window.clone()))
                     .expect("Failed to initialise GPU");
-                let renderer = VeloxRenderer::new(&gpu_ctx)
+                let mut renderer = VeloxRenderer::new(&gpu_ctx)
                     .expect("Failed to initialise Vello renderer");
+                // Apply window background color so the GPU clear matches the
+                // app theme from frame zero — no blank white flash on startup.
+                let [r, g, b, a] = config.window.background_color;
+                renderer.background_color = vello::peniko::Color::rgba8(r, g, b, a);
 
                 // Build callbacks that send events to the shell event loop.
                 let proxy_for_fn = ev_proxy.clone();

@@ -117,6 +117,10 @@ pub struct ShellConfig {
     /// Used to set the window icon (taskbar on Windows/Linux, Dock on macOS).
     /// `None` = no icon set (system default).
     pub icon_rgba:    Option<(Vec<u8>, u32, u32)>,
+    /// RGBA background color set as the GPU clear color before the first JS frame.
+    /// Eliminates the blank-white-window flash during JS startup.
+    /// Defaults to the Velox dark background `[0x14, 0x14, 0x1A, 0xFF]`.
+    pub background_color: [u8; 4],
 }
 
 impl Default for ShellConfig {
@@ -129,6 +133,7 @@ impl Default for ShellConfig {
             startup_mode: StartupMode::Windowed,
             decorations:  true,
             icon_rgba:    None,
+            background_color: [0x14, 0x14, 0x1A, 0xFF],
         }
     }
 }

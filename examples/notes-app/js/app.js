@@ -5792,6 +5792,34 @@ No matching component was found for:
         fn();
     };
   }
+  if (typeof setInterval === "undefined") {
+    let _nextIntervalId = 1;
+    const _pendingIntervals = new Map;
+    globalThis.setInterval = (fn, ms) => {
+      const id = _nextIntervalId++;
+      const delay = ms > 0 ? ms : 0;
+      _pendingIntervals.set(id, { fn, ms: delay, nextDue: performance.now() + delay });
+      if (typeof __velox_request_frame !== "undefined")
+        __velox_request_frame(delay);
+      return id;
+    };
+    globalThis.clearInterval = (id) => {
+      _pendingIntervals.delete(id);
+    };
+    const _prevDrain = globalThis._veloxDrainTimers;
+    globalThis._veloxDrainTimers = () => {
+      _prevDrain?.();
+      if (_pendingIntervals.size === 0)
+        return;
+      const now = performance.now();
+      for (const [, t] of _pendingIntervals) {
+        if (now >= t.nextDue) {
+          t.nextDue = now + t.ms;
+          t.fn();
+        }
+      }
+    };
+  }
   if (typeof queueMicrotask === "undefined") {
     globalThis.queueMicrotask = (fn) => Promise.resolve().then(fn);
   }
@@ -7090,6 +7118,20 @@ No matching component was found for:
   veloxWindow.hideSplash = function hideSplash() {
     if (typeof __velox_splash_hide !== "undefined")
       __velox_splash_hide();
+  };
+  var crash = {
+    _endpoint: null,
+    async getReports() {
+      return JSON.parse(await __velox_crash_get_reports());
+    },
+    clearReports() {
+      if (typeof __velox_crash_clear_reports !== "undefined") {
+        __velox_crash_clear_reports();
+      }
+    },
+    setEndpoint(url) {
+      crash._endpoint = url;
+    }
   };
   (function _installCrashHandlers() {
     function _report(data) {
@@ -16351,8 +16393,18 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
     const [fullscreen, setFullscreen] = import_react7.useState(false);
     const [maximized, setMaximized] = import_react7.useState(false);
     const C2 = useThemeColors();
+    import_react7.useEffect(() => {
+      veloxWindow.hideSplash();
+    }, []);
     const [pendingDeeplink, setPendingDeeplink] = import_react7.useState(null);
     import_react7.useEffect(() => deeplink.onOpen((url) => setPendingDeeplink(url)), []);
+    const [crashReports, setCrashReports] = import_react7.useState([]);
+    import_react7.useEffect(() => {
+      crash.getReports().then((reports) => {
+        if (reports && reports.length > 0)
+          setCrashReports(reports);
+      }).catch(() => {});
+    }, []);
     const [vdb, setVdb] = import_react7.useState(null);
     const [dbReady, setDbReady] = import_react7.useState(false);
     const [notes, setNotes] = import_react7.useState([]);
@@ -16412,6 +16464,36 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
         width: winW,
         height: winH,
         children: [
+          crashReports.length > 0 && /* @__PURE__ */ jsx_runtime.jsxs(View, {
+            style: {
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              backgroundColor: "#4d1a1a",
+              borderWidth: 1,
+              borderColor: "#e06c75",
+              padding: 8,
+              gap: 8
+            },
+            width: winW,
+            children: [
+              /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                style: { color: "#e06c75", fontSize: 12, flex: 1 },
+                children: "⚠ Crash detected in previous session: " + (crashReports[0]?.message || crashReports[0]?.error || "Unknown error") + (crashReports.length > 1 ? ` (+${crashReports.length - 1} more)` : "")
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                onPress: () => {
+                  crash.clearReports().catch(() => {});
+                  setCrashReports([]);
+                },
+                style: { padding: 4 },
+                children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                  style: { color: "#e06c75", fontSize: 14 },
+                  children: "✕"
+                })
+              })
+            ]
+          }),
           /* @__PURE__ */ jsx_runtime.jsxs(View, {
             style: {
               flexDirection: "row",

@@ -190,6 +190,10 @@ pub struct VeloxRenderer {
     scene:           Scene,
     /// Cached blit bind group — rebuilt only on window resize.
     blit_bind_group: Option<wgpu::BindGroup>,
+    /// Window background color — clears the surface each frame.
+    /// Set from `window.background` in velox.config.json; defaults to
+    /// the Velox dark background so the window is never a blank white flash.
+    pub background_color: vello::peniko::Color,
 }
 
 impl VeloxRenderer {
@@ -211,7 +215,7 @@ impl VeloxRenderer {
         let blit   = BlitPipeline::new(&gpu.device, gpu.surface_format());
         let target = RenderTarget::new(&gpu.device, gpu.width().max(1), gpu.height().max(1));
 
-        Ok(Self { renderer, blit, target, scene: Scene::new(), blit_bind_group: None })
+        Ok(Self { renderer, blit, target, scene: Scene::new(), blit_bind_group: None, background_color: colors::BACKGROUND })
     }
 
     /// Start a new frame.
@@ -249,7 +253,7 @@ impl VeloxRenderer {
         self.renderer.render_to_texture(
             &gpu.device, &gpu.queue, &self.scene, &self.target.view,
             &vello::RenderParams {
-                base_color:          colors::BACKGROUND,
+                base_color:          self.background_color,
                 width:               w,
                 height:              h,
                 antialiasing_method: AaConfig::Area,

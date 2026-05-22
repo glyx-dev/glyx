@@ -9,7 +9,8 @@
     "title":       "Notes",
     "width":       1100,
     "height":      780,
-    "startupMode": "windowed"
+    "startupMode": "windowed",
+    "background":  "#171923"
   },
   "capabilities": {
     "fs":             { "read": ["**"], "write": ["**"] },

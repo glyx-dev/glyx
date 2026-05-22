@@ -48,6 +48,36 @@ if (typeof setTimeout === 'undefined') {
   };
 }
 
+if (typeof setInterval === 'undefined') {
+  // Repeating timer queue — drained alongside setTimeout each frame.
+  let _nextIntervalId = 1;
+  const _pendingIntervals = new Map(); // id → { fn, ms, nextDue }
+
+  globalThis.setInterval = (fn, ms) => {
+    const id   = _nextIntervalId++;
+    const delay = ms > 0 ? ms : 0;
+    _pendingIntervals.set(id, { fn, ms: delay, nextDue: performance.now() + delay });
+    if (typeof __velox_request_frame !== 'undefined') __velox_request_frame(delay);
+    return id;
+  };
+
+  globalThis.clearInterval = (id) => { _pendingIntervals.delete(id); };
+
+  // Extend the drain function so intervals are also processed each frame.
+  const _prevDrain = globalThis._veloxDrainTimers;
+  globalThis._veloxDrainTimers = () => {
+    _prevDrain?.();
+    if (_pendingIntervals.size === 0) return;
+    const now = performance.now();
+    for (const [, t] of _pendingIntervals) {
+      if (now >= t.nextDue) {
+        t.nextDue = now + t.ms;
+        t.fn();
+      }
+    }
+  };
+}
+
 if (typeof queueMicrotask === 'undefined') {
   globalThis.queueMicrotask = (fn) => Promise.resolve().then(fn);
 }

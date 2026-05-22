@@ -93,6 +93,9 @@ ffmpeg-sidecar      = "2"
 hidapi              = "2"
 self_update         = { version = "0.41", default-features = false, features = ["archive-zip", "archive-tar", "compression-flate2", "compression-zip-deflate"] }
 ico                 = "0.3"
+zip                 = { version = "2", default-features = false, features = ["deflate"] }
+flate2              = "1"
+tar                 = "0.4"
 libloading          = "0.8"
 sha2                = "0.10"
 ed25519-dalek       = { version = "2", default-features = false, features = ["std"] }

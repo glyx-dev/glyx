@@ -20,7 +20,7 @@ import React, { useState, useEffect, useContext, createContext, useCallback, use
 import {
   View, Text, Pressable, TextInput, ScrollView, render, useWindowSize, useMediaQuery,
   db, vectorDb, fs, dialog, clipboard, notification, veloxWindow, fetch, ws, mdns, ipc,
-  battery, system, power, storage, input, perf, deeplink, credentials,
+  battery, system, power, storage, input, perf, deeplink, credentials, crash,
   Checkbox, Switch, RadioGroup, Radio, FileInput, audio,
   Slider, Select, DatePicker,
   Canvas, Canvas3D,
@@ -3060,6 +3060,14 @@ function App() {
   const [pendingDeeplink, setPendingDeeplink] = useState(null);
   useEffect(() => deeplink.onOpen((url) => setPendingDeeplink(url)), []);
 
+  // Crash report banner — shown once on startup if a previous session crashed.
+  const [crashReports, setCrashReports] = useState([]);
+  useEffect(() => {
+    crash.getReports().then((reports) => {
+      if (reports && reports.length > 0) setCrashReports(reports);
+    }).catch(() => {});
+  }, []);
+
   // ── Notes context state ────────────────────────────────────────────────────
   const [vdb,        setVdb]        = useState(null);
   const [dbReady,    setDbReady]    = useState(false);
@@ -3147,6 +3155,35 @@ function App() {
   return (
     <NotesCtx.Provider value={ctx}>
       <View style={{ backgroundColor: C.bg }} width={winW} height={winH}>
+
+          {/* Crash report banner */}
+          {crashReports.length > 0 && (
+            <View
+              style={{
+                flexDirection:   'row',
+                alignItems:      'center',
+                justifyContent:  'space-between',
+                backgroundColor: '#4d1a1a',
+                borderWidth:     1,
+                borderColor:     '#e06c75',
+                padding:         8,
+                gap:             8,
+              }}
+              width={winW}
+            >
+              <Text style={{ color: '#e06c75', fontSize: 12, flex: 1 }}>
+                {'⚠ Crash detected in previous session: ' +
+                  (crashReports[0]?.message || crashReports[0]?.error || 'Unknown error') +
+                  (crashReports.length > 1 ? ` (+${crashReports.length - 1} more)` : '')}
+              </Text>
+              <Pressable
+                onPress={() => { crash.clearReports().catch(() => {}); setCrashReports([]); }}
+                style={{ padding: 4 }}
+              >
+                <Text style={{ color: '#e06c75', fontSize: 14 }}>✕</Text>
+              </Pressable>
+            </View>
+          )}
 
           {/* Persistent header bar */}
           <View

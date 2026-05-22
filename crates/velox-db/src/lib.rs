@@ -34,9 +34,15 @@ pub async fn open(path: &str) -> Result<SqlitePool> {
 
     let pool = SqlitePoolOptions::new()
         .max_connections(2)
+        // Give up acquiring a connection after 5 s instead of blocking forever.
+        // This surfaces lock errors quickly (e.g. WAL left by a previous crash).
+        .acquire_timeout(std::time::Duration::from_secs(5))
         .connect(&url)
         .await?;
 
+    // Set busy_timeout FIRST — every subsequent PRAGMA must also be able to wait
+    // for any WAL lock left by a previous crash before acquiring the DB.
+    sqlx::query("PRAGMA busy_timeout=5000").execute(&pool).await?;
     // WAL: allows concurrent reads while writing
     sqlx::query("PRAGMA journal_mode=WAL").execute(&pool).await?;
     // NORMAL: flush at the most critical moments; fast and safe enough for apps

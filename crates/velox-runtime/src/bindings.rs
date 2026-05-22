@@ -1581,10 +1581,43 @@ fn resolve_db_path(path: String) -> String {
     if path == ":memory:" || std::path::Path::new(&path).is_absolute() {
         return path;
     }
-    let data_dir = std::path::Path::new("data");
-    if !data_dir.exists() {
-        let _ = std::fs::create_dir_all(data_dir);
-    }
+
+    // Use a stable, user-writable app-data directory so the DB ends up in the
+    // same place regardless of how or from where the app is launched.
+    //
+    // The subdirectory name comes from the running executable's file stem
+    // (e.g. "notes-app"), which is the same as the app's binary name.
+    //
+    //   Windows:  %APPDATA%\{exe}\data\
+    //   macOS:    ~/Library/Application Support/{exe}/data/
+    //   Linux:    ~/.local/share/{exe}/data/  (or $XDG_DATA_HOME/{exe}/data/)
+    let exe_stem = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "velox".to_string());
+
+    #[cfg(target_os = "windows")]
+    let base = std::env::var("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::var("USERPROFILE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(".")));
+
+    #[cfg(target_os = "macos")]
+    let base = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("Library").join("Application Support");
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::var("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".local").join("share"))
+            .unwrap_or_else(|_| std::path::PathBuf::from(".")));
+
+    let data_dir = base.join(&exe_stem).join("data");
+    let _ = std::fs::create_dir_all(&data_dir);
     data_dir.join(&path).to_string_lossy().into_owned()
 }
 

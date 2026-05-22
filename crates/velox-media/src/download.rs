@@ -57,18 +57,33 @@ fn dirs_or_fallback() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Return the cached DLL path if it exists and passes integrity verification.
-/// Returns `None` if not cached or if integrity fails (will re-download).
+/// Return the DLL path to use, searching in order:
+/// 1. Next to the running executable (installed apps — DLL copied by `velox package`)
+/// 2. The user cache at `~/.velox/cache/media/` (dev / auto-downloaded)
+///
+/// Integrity verification is skipped for the exe-relative path because the
+/// manifest files are not distributed with the installer; we trust installed files.
 pub fn find_cached_media() -> Option<PathBuf> {
     let stem = dll_stem();
     let ext  = dll_ext();
-    let dir  = cache_dir().ok()?;
-    let dll  = dir.join(format!("{stem}.{ext}"));
 
+    // 1. Beside the running exe (production install)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let dll = exe_dir.join(format!("{stem}.{ext}"));
+            if dll.exists() {
+                log::debug!("[velox-media] using DLL next to exe: {}", dll.display());
+                return Some(dll);
+            }
+        }
+    }
+
+    // 2. User cache (~/.velox/cache/media/)
+    let dir = cache_dir().ok()?;
+    let dll = dir.join(format!("{stem}.{ext}"));
     if !dll.exists() {
         return None;
     }
-
     match crate::verify::verify_cached_dll(&dll) {
         Ok(()) => {
             log::debug!("[velox-media] using cached DLL: {}", dll.display());

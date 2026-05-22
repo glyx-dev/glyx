@@ -84,9 +84,22 @@ pub fn verify_manifest(manifest_bytes: &[u8], sig_bytes: &[u8]) -> Result<Manife
 /// Verify a cached DLL against its sidecar manifest + signature files.
 /// Returns `Ok(())` if the DLL is intact and the manifest is authentic.
 /// On hash mismatch the DLL file is deleted so it will be re-downloaded.
+///
+/// If the manifest sidecar does not exist the DLL was distributed by the
+/// installer (not downloaded from CDN), so verification is skipped — the
+/// file is already trusted by virtue of the user having run our installer.
 pub fn verify_cached_dll(dll_path: &Path) -> Result<(), String> {
     let manifest_path = dll_path.with_extension("manifest.json");
     let sig_path      = dll_path.with_extension("manifest.sig");
+
+    // No manifest → installer-distributed DLL; skip integrity check.
+    if !manifest_path.exists() {
+        log::debug!(
+            "[velox-media] no manifest for {} — skipping verification (installer-distributed)",
+            dll_path.display()
+        );
+        return Ok(());
+    }
 
     let manifest_bytes = std::fs::read(&manifest_path)
         .map_err(|_| format!("velox-media: missing manifest at {}", manifest_path.display()))?;

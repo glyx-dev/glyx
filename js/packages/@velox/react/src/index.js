@@ -8,6 +8,7 @@ import {
   registerInput, unregisterInput,
   registerScrollView, unregisterScrollView,
   registerDraggable, unregisterDraggable,
+  registerDisabledNode, unregisterDisabledNode,
   dispatchEvents,
   addWindowSizeListener, removeWindowSizeListener,
   addKeyListener,
@@ -261,7 +262,7 @@ export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', 
 // always delegate to the latest closure values without needing re-registration
 // on every render.
 
-export function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn, onHoverOut, style, ...props }) {
+export function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn, onHoverOut, disabled, style, ...props }) {
   const nodeIdRef    = useRef(null);
   const handlersRef  = useRef(null);
   const [pressed, setPressed] = useState(false);
@@ -287,13 +288,22 @@ export function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn,
       onHoverIn:  () => handlersRef.current.onHoverIn(),
       onHoverOut: () => handlersRef.current.onHoverOut(),
     });
-  }, []); // empty deps — fires exactly once per mount
+    registerDisabledNode(id, !!disabled);
+  }, [disabled]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep disabled state in sync when the prop changes.
+  useEffect(() => {
+    if (nodeIdRef.current !== null) {
+      registerDisabledNode(nodeIdRef.current, !!disabled);
+    }
+  }, [disabled]);
 
   // Unregister on unmount. useEffect for cleanup only — no timing dependency.
   useEffect(() => {
     return () => {
       if (nodeIdRef.current !== null) {
         unregisterPressable(nodeIdRef.current);
+        unregisterDisabledNode(nodeIdRef.current);
       }
     };
   }, []);

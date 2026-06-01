@@ -167,15 +167,27 @@ pub enum NodeType {
     Video,
 }
 
+/// A length value that can be either absolute (px) or relative (%).
+/// Parsed from JS numbers (pixels) or strings like `"50%"`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LengthValue {
+    Px(f32),
+    Percent(f32),
+}
+
+impl Default for LengthValue {
+    fn default() -> Self { Self::Px(0.0) }
+}
+
 /// All layout + visual props that JS can set on a node.
 ///
 /// All fields are `Option` — `None` means "not set / inherit / use default".
 /// `parse_props` only sets fields that are present in the JS object.
 #[derive(Debug, Clone, Default)]
 pub struct NodeProps {
-    // ── Dimensions ──────────────────────────────────────────────────────────
-    pub width:  Option<f32>,
-    pub height: Option<f32>,
+    // ── Dimensions (px or %) ────────────────────────────────────────────────
+    pub width:  Option<LengthValue>,
+    pub height: Option<LengthValue>,
 
     // ── Text ────────────────────────────────────────────────────────────────
     pub text:      Option<String>,
@@ -197,10 +209,10 @@ pub struct NodeProps {
     pub justify_content: Option<String>,
     /// `"flex-start"` | `"center"` | `"flex-end"` | `"stretch"`.
     pub align_items:     Option<String>,
-    /// Uniform padding in logical pixels.
-    pub padding:         Option<f32>,
-    /// Gap between children in logical pixels.
-    pub gap:             Option<f32>,
+    /// Uniform padding (px or %).
+    pub padding:         Option<LengthValue>,
+    /// Gap between children (px or %).
+    pub gap:             Option<LengthValue>,
 
     // ── Cursor UI / selection ────────────────────────────────────────────────
     /// When true, draw a text cursor rect after the text.
@@ -223,10 +235,13 @@ pub struct NodeProps {
     /// Border stroke colour as RGBA [r, g, b, a] 0–255.
     pub border_color: Option<[u8; 4]>,
 
-    // ── Scroll / clip ────────────────────────────────────────────────────────
+    // ── Scroll / clip / overflow ──────────────────────────────────────────────
     /// When true, clip children rendering to this node's layout bounds.
     /// Used by ScrollView to prevent children from overflowing visually.
     pub clip: Option<bool>,
+    /// Overflow behaviour: `"visible"` (default), `"hidden"`, or `"scroll"`.
+    /// Maps to Taffy's `Overflow` and controls whether children are clipped.
+    pub overflow: Option<String>,
     /// Vertical scroll offset in pixels (positive = scrolled toward bottom).
     /// Children are rendered offset upward by this amount, producing the
     /// visual effect of scrolling down through content taller than the node.
@@ -259,6 +274,88 @@ pub struct NodeProps {
     /// Handle ID returned by `__velox_video_open`. The render loop maps this
     /// to a `VideoStream` in `PerWindowState` and renders the current decoded frame.
     pub video_handle: Option<u32>,
+
+    // ── Margin (uniform + per-side, px or %) ────────────────────────────────
+    /// Uniform margin (applied to all four sides).
+    pub margin: Option<LengthValue>,
+    /// Per-side margins override the uniform `margin` value.
+    pub margin_left:   Option<LengthValue>,
+    pub margin_right:  Option<LengthValue>,
+    pub margin_top:    Option<LengthValue>,
+    pub margin_bottom: Option<LengthValue>,
+
+    // ── Per-side padding (px or %, overrides uniform `padding`) ─────────────
+    pub padding_left:   Option<LengthValue>,
+    pub padding_right:  Option<LengthValue>,
+    pub padding_top:    Option<LengthValue>,
+    pub padding_bottom: Option<LengthValue>,
+
+    // ── Min / max dimensions (px or %) ───────────────────────────────────────
+    pub min_width:  Option<LengthValue>,
+    pub min_height: Option<LengthValue>,
+    pub max_width:  Option<LengthValue>,
+    pub max_height: Option<LengthValue>,
+
+    // ── Visibility ────────────────────────────────────────────────────────────
+    /// When true, the node and its children are not rendered and do not
+    /// participate in hit-testing.  They still occupy layout space.
+    pub hidden: Option<bool>,
+
+    // ── Interaction ───────────────────────────────────────────────────────────
+    /// When true, the node does not respond to pointer / keyboard events.
+    /// Children inherit this behaviour.  The JS event dispatcher in events.js
+    /// checks a parallel `disabledRegistry` before firing callbacks.
+    pub disabled: Option<bool>,
+    /// `"auto"` (default) or `"none"`.  When `"none"`, the element is invisible
+    /// to hit-testing; events pass through to nodes underneath.
+    pub pointer_events: Option<String>,
+
+    // ── Flex item properties (override container flex distribution) ─────────────
+    /// `flex_grow` — rate at which this item grows to fill space (CSS `flex-grow`).
+    pub flex_grow: Option<f32>,
+    /// `flex_shrink` — rate at which this item shrinks when space is tight (CSS `flex-shrink`).
+    pub flex_shrink: Option<f32>,
+    /// `flex_basis` — initial main-axis size before growing/shrinking (px or %).
+    pub flex_basis: Option<LengthValue>,
+    /// `flex_wrap` — `"nowrap"`, `"wrap"`, or `"wrap-reverse"` (CSS `flex-wrap`).
+    pub flex_wrap: Option<String>,
+
+    // ── CSS Grid ────────────────────────────────────────────────────────────────
+    /// `display` — `"flex"` (default for View), `"grid"`, or `"none"`.
+    pub display: Option<String>,
+    /// `gridTemplateColumns` — space-separated track sizes (e.g. `"1fr 1fr 1fr 1fr"`).
+    /// Supports `repeat(N, ...)` for repeated tracks.
+    pub grid_template_columns: Option<String>,
+    /// `gridTemplateRows` — same format as `gridTemplateColumns`.
+    pub grid_template_rows: Option<String>,
+    /// `gridColumn` — CSS grid column placement (e.g. `"1 / -1"`, `"span 2"`).
+    pub grid_column: Option<String>,
+    /// `gridRow` — CSS grid row placement (e.g. `"1 / 3"`, `"auto"`).
+    pub grid_row: Option<String>,
+
+    // ── Item-level alignment overrides (override what the parent specifies) ─────
+    /// `align_self` — overrides this item's cross-axis alignment.  Values: `"auto"`,
+    /// `"flex-start"`, `"flex-end"`, `"center"`, `"baseline"`, `"stretch"`.
+    pub align_self: Option<String>,
+    /// `align_content` — cross-axis alignment of multi-line content.  Values:
+    /// `"flex-start"`, `"flex-end"`, `"center"`, `"space-between"`, `"space-around"`,
+    /// `"space-evenly"`, `"stretch"`.
+    pub align_content: Option<String>,
+    /// `justify_self` — inline-axis alignment override for grid items.
+    /// Values: `"auto"`, `"flex-start"`, `"flex-end"`, `"center"`, `"baseline"`, `"stretch"`.
+    pub justify_self: Option<String>,
+    /// `justify_items` — inline-axis alignment for children (grid).
+    /// Values: same as `align_items`.
+    pub justify_items: Option<String>,
+
+    // ── Visual effects ──────────────────────────────────────────────────────────
+    /// Opacity multiplier (0.0 – 1.0).  Applied via Vello compositing layer.
+    pub opacity: Option<f32>,
+    /// Box shadow string: `"dx dy blur color"` (e.g. `"2 2 4 #00000044"`).
+    pub box_shadow: Option<String>,
+    /// Linear background gradient: `"startColor endColor"` (e.g. `"#ff0000 #0000ff"`).
+    /// The gradient always goes from top to bottom.
+    pub background_gradient: Option<String>,
 }
 
 // ── Canvas 2D draw commands ───────────────────────────────────────────────────
@@ -776,6 +873,33 @@ fn get_num_prop(
     }
 }
 
+/// Read a length value from a JS object: either a plain number (px) or a
+/// `"50%"` string (percent). Returns `None` if the property is absent.
+fn get_length_prop(
+    scope: &mut v8::HandleScope,
+    obj:   v8::Local<v8::Object>,
+    key:   &str,
+) -> Option<LengthValue> {
+    let k = v8::String::new(scope, key).unwrap();
+    let v = obj.get(scope, k.into())?;
+
+    // String: "50%" → Percent(0.5), "123" → Px(123.0)
+    if v.is_string() {
+        let s = v.to_string(scope)?.to_rust_string_lossy(scope);
+        if let Some(pct) = s.strip_suffix('%') {
+            return pct.parse::<f32>().ok().map(|n| LengthValue::Percent(n / 100.0));
+        }
+        return s.parse::<f32>().ok().map(LengthValue::Px);
+    }
+
+    // Number: 123 → Px(123.0)
+    if v.is_number() {
+        return Some(LengthValue::Px(v.number_value(scope)? as f32));
+    }
+
+    None
+}
+
 /// Read a boolean property from a JS object, if present.
 fn get_bool_prop(
     scope: &mut v8::HandleScope,
@@ -808,18 +932,33 @@ fn parse_props(
     let mut props = NodeProps::default();
     let Some(obj) = value.to_object(scope) else { return props };
 
-    props.width       = get_num_prop(scope, obj, "width");
-    props.height      = get_num_prop(scope, obj, "height");
+    props.width       = get_length_prop(scope, obj, "width");
+    props.height      = get_length_prop(scope, obj, "height");
     props.font_size   = get_num_prop(scope, obj, "fontSize");
     props.border_radius = get_num_prop(scope, obj, "borderRadius");
-    props.padding     = get_num_prop(scope, obj, "padding");
-    props.gap         = get_num_prop(scope, obj, "gap");
+    props.padding     = get_length_prop(scope, obj, "padding");
+    props.gap         = get_length_prop(scope, obj, "gap");
     props.flex        = get_num_prop(scope, obj, "flex");
+    props.flex_grow   = get_num_prop(scope, obj, "flexGrow");
+    props.flex_shrink = get_num_prop(scope, obj, "flexShrink");
+    props.flex_basis  = get_length_prop(scope, obj, "flexBasis");
+    props.flex_wrap   = get_str_prop(scope, obj, "flexWrap");
 
     props.text           = get_str_prop(scope, obj, "text");
     props.flex_direction  = get_str_prop(scope, obj, "flexDirection");
     props.justify_content = get_str_prop(scope, obj, "justifyContent");
     props.align_items     = get_str_prop(scope, obj, "alignItems");
+    props.align_self      = get_str_prop(scope, obj, "alignSelf");
+    props.align_content   = get_str_prop(scope, obj, "alignContent");
+    props.justify_self    = get_str_prop(scope, obj, "justifySelf");
+    props.justify_items   = get_str_prop(scope, obj, "justifyItems");
+
+    // ── CSS Grid ─────────────────────────────────────────────────────────
+    props.display               = get_str_prop(scope, obj, "display");
+    props.grid_template_columns = get_str_prop(scope, obj, "gridTemplateColumns");
+    props.grid_template_rows    = get_str_prop(scope, obj, "gridTemplateRows");
+    props.grid_column           = get_str_prop(scope, obj, "gridColumn");
+    props.grid_row              = get_str_prop(scope, obj, "gridRow");
 
     props.background_color = get_color_prop(scope, obj, "backgroundColor");
     props.color            = get_color_prop(scope, obj, "color");
@@ -841,6 +980,36 @@ fn parse_props(
     props.camera_handle   = get_num_prop(scope, obj, "cameraHandle").map(|v| v as u32);
     props.mirror          = get_bool_prop(scope, obj, "mirror");
     props.video_handle    = get_num_prop(scope, obj, "videoHandle").map(|v| v as u32);
+
+    // ── Margin ─────────────────────────────────────────────────────────────
+    props.margin          = get_length_prop(scope, obj, "margin");
+    props.margin_left     = get_length_prop(scope, obj, "marginLeft");
+    props.margin_right    = get_length_prop(scope, obj, "marginRight");
+    props.margin_top      = get_length_prop(scope, obj, "marginTop");
+    props.margin_bottom   = get_length_prop(scope, obj, "marginBottom");
+
+    // ── Per-side padding ──────────────────────────────────────────────────
+    props.padding_left    = get_length_prop(scope, obj, "paddingLeft");
+    props.padding_right   = get_length_prop(scope, obj, "paddingRight");
+    props.padding_top     = get_length_prop(scope, obj, "paddingTop");
+    props.padding_bottom  = get_length_prop(scope, obj, "paddingBottom");
+
+    // ── Min / max ─────────────────────────────────────────────────────────
+    props.min_width  = get_length_prop(scope, obj, "minWidth");
+    props.min_height = get_length_prop(scope, obj, "minHeight");
+    props.max_width  = get_length_prop(scope, obj, "maxWidth");
+    props.max_height = get_length_prop(scope, obj, "maxHeight");
+
+    // ── Visibility / interaction ──────────────────────────────────────────
+    props.overflow        = get_str_prop(scope, obj, "overflow");
+    props.hidden          = get_bool_prop(scope, obj, "hidden");
+    props.disabled        = get_bool_prop(scope, obj, "disabled");
+    props.pointer_events  = get_str_prop(scope, obj, "pointerEvents");
+
+    // ── Visual effects ────────────────────────────────────────────────────
+    props.opacity             = get_num_prop(scope, obj, "opacity");
+    props.box_shadow          = get_str_prop(scope, obj, "boxShadow");
+    props.background_gradient = get_str_prop(scope, obj, "backgroundGradient");
 
     props
 }

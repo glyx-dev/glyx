@@ -35,6 +35,14 @@ const scrollRegistry = new Map();
 // Draggable nodes (e.g. Slider thumb) register here.
 const dragRegistry = new Map();
 
+// Map from nodeId -> true/false — prevents event dispatch to the node.
+// Children of a disabled node are also blocked (ancestor check during dispatch).
+const disabledRegistry = new Map();
+
+// Set of nodeIds with pointerEvents: 'none' — these nodes are invisible to
+// hit-testing; events pass through them to nodes underneath.
+const pointerEventsNoneRegistry = new Set();
+
 // Currently dragged node id (or null). Set on dragStart, cleared on dragEnd.
 let activeDragId = null;
 
@@ -137,6 +145,46 @@ export function unregisterDraggable(nodeId) {
 }
 
 /**
+ * Register or update the disabled state of a node.
+ * When `disabled` is true, the node (and any descendant) will not receive
+ * press, input, drag, hover, or scroll events.
+ * @param {number} nodeId
+ * @param {boolean} disabled
+ */
+export function registerDisabledNode(nodeId, disabled) {
+  if (disabled) {
+    disabledRegistry.set(nodeId, true);
+  } else {
+    disabledRegistry.delete(nodeId);
+  }
+}
+
+/**
+ * Unregister a disabled node (called when the component unmounts).
+ * @param {number} nodeId
+ */
+export function unregisterDisabledNode(nodeId) {
+  disabledRegistry.delete(nodeId);
+}
+
+/**
+ * Mark a node as having `pointerEvents: 'none'`, making it invisible to
+ * hit-testing. Events pass through to nodes layered underneath.
+ * @param {number} nodeId
+ */
+export function registerPointerEventsNone(nodeId) {
+  pointerEventsNoneRegistry.add(nodeId);
+}
+
+/**
+ * Unregister a pointerEvents: 'none' marker.
+ * @param {number} nodeId
+ */
+export function unregisterPointerEventsNone(nodeId) {
+  pointerEventsNoneRegistry.delete(nodeId);
+}
+
+/**
  * Subscribe to window resize events.
  * @param {(size: {width: number, height: number}) => void} fn
  */
@@ -207,12 +255,18 @@ export function setFocus(nodeId) {
 // ── Hit-test helpers ──────────────────────────────────────────────────────────
 
 function hitTest(nodeId, px, py) {
+  if (pointerEventsNoneRegistry.has(nodeId)) return false;
   const layout = __velox_getLayout(nodeId);
   if (!layout) return false;
   return (
     px >= layout.x && px < layout.x + layout.width &&
     py >= layout.y && py < layout.y + layout.height
   );
+}
+
+/** True when the node is in the disabled registry. */
+function isDisabled(nodeId) {
+  return disabledRegistry.has(nodeId);
 }
 
 // ── Main dispatch ─────────────────────────────────────────────────────────────
@@ -243,6 +297,7 @@ export function dispatchEvents() {
         let handled = false;
         for (const [nodeId, handlers] of pressableRegistry) {
           if (hitTest(nodeId, ev.x, ev.y)) {
+            if (isDisabled(nodeId)) break;
             const layout = __velox_getLayout(nodeId);
             const pressEv = {
               x: ev.x, y: ev.y,
@@ -258,6 +313,7 @@ export function dispatchEvents() {
         // Check inputs (clicking into a TextInput focuses it and positions cursor).
         for (const [nodeId, handlers] of inputRegistry) {
           if (hitTest(nodeId, ev.x, ev.y)) {
+            if (isDisabled(nodeId)) break;
             setFocus(nodeId);
             // Fire click-to-cursor: pass click position relative to the node.
             if (handlers.onClickAt) {
@@ -318,6 +374,7 @@ export function dispatchEvents() {
         // (front-to-back, stop at first hit).
         for (const [nodeId, handlers] of scrollRegistry) {
           if (hitTest(nodeId, cursorX, cursorY)) {
+            if (isDisabled(nodeId)) break;
             handlers.onScroll?.(ev.deltaY);
             break;
           }
@@ -334,6 +391,7 @@ export function dispatchEvents() {
       case 'dragStart': {
         for (const [nodeId, handlers] of dragRegistry) {
           if (hitTest(nodeId, ev.x, ev.y)) {
+            if (isDisabled(nodeId)) break;
             activeDragId = nodeId;
             handlers.onDragStart?.({ x: ev.x, y: ev.y });
             break;
@@ -370,6 +428,7 @@ export function dispatchEvents() {
   if (cursorMovedThisFrame) {
     let newHoveredId = null;
     for (const [nodeId] of pressableRegistry) {
+      if (isDisabled(nodeId)) continue;
       if (hitTest(nodeId, cursorX, cursorY)) {
         newHoveredId = nodeId;
         break;

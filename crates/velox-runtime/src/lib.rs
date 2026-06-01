@@ -42,7 +42,7 @@ pub use runtime_trait::JsRuntime;
 /// to compile unchanged. Switch to `Box<dyn JsRuntime>` when adding a second backend.
 pub type VeloxRuntime = V8Runtime;
 pub use bindings::{
-    NodeProps, NodeType, CanvasCmd, SceneCommand, InputEvent, WindowController,
+    LengthValue, NodeProps, NodeType, CanvasCmd, SceneCommand, InputEvent, WindowController,
     IpcBus, IpcInbox, new_ipc_bus,
 };
 pub use snapshot::{SnapshotBlob, create_stub_bindings_script};

@@ -302,6 +302,12 @@ impl FrameBuilder {
         self.scene.fill(Fill::NonZero, Affine::IDENTITY, &Brush::Solid(color), None, &rect);
     }
 
+    pub fn fill_rounded_rect_with_brush(&mut self, x: f64, y: f64, w: f64, h: f64,
+                                         radius: f64, brush: &Brush) {
+        let rect = RoundedRect::new(x, y, x + w, y + h, radius);
+        self.scene.fill(Fill::NonZero, Affine::IDENTITY, brush, None, &rect);
+    }
+
     pub fn fill_rect(&mut self, x: f64, y: f64, w: f64, h: f64, color: Color) {
         self.fill_rounded_rect(x, y, w, h, 0.0, color);
     }
@@ -405,6 +411,18 @@ impl FrameBuilder {
         self.scene.push_layer(
             vello::peniko::Mix::Normal,
             1.0,
+            Affine::IDENTITY,
+            &rect,
+        );
+    }
+
+    /// Push a rectangular clip layer with a per-layer alpha (opacity).
+    pub fn push_layer_with_alpha(&mut self, x: f64, y: f64, w: f64, h: f64, alpha: f32) {
+        use vello::kurbo::Rect;
+        let rect = Rect::new(x, y, x + w, y + h);
+        self.scene.push_layer(
+            vello::peniko::Mix::Normal,
+            alpha,
             Affine::IDENTITY,
             &rect,
         );

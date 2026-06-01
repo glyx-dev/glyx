@@ -16393,9 +16393,6 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
     const [fullscreen, setFullscreen] = import_react7.useState(false);
     const [maximized, setMaximized] = import_react7.useState(false);
     const C2 = useThemeColors();
-    import_react7.useEffect(() => {
-      veloxWindow.hideSplash();
-    }, []);
     const [pendingDeeplink, setPendingDeeplink] = import_react7.useState(null);
     import_react7.useEffect(() => deeplink.onOpen((url) => setPendingDeeplink(url)), []);
     const [crashReports, setCrashReports] = import_react7.useState([]);

@@ -1,0 +1,25 @@
+{
+  "app": {
+    "version":     "0.1.0",
+    "publisher":   "Velox Examples",
+    "description": "A calculator app for testing Velox improvements",
+    "website":     "https://velox.dev"
+  },
+  "window": {
+    "title":       "Calculator",
+    "width":       320,
+    "height":      480,
+    "startupMode": "windowed",
+    "background":  "#1e1e2e",
+    "decorations": false
+  },
+  "capabilities": {
+    "fs": { "read": ["**"], "write": ["**"] },
+    "dialog": true
+  },
+  "dev": {
+    "entry":  "js/app.jsx",
+    "output": "js/app.js",
+    "watch":  ["js"]
+  }
+}

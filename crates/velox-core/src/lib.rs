@@ -64,7 +64,7 @@ use velox_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
 use velox_renderer::{colors, peniko, VeloxRenderer, FrameBuilder};
 use velox_runtime::{
     init_v8, new_ipc_bus,
-    CanvasCmd, InputEvent, NodeProps, NodeType, SceneCommand,
+    CanvasCmd, InputEvent, LengthValue, NodeProps, NodeType, SceneCommand,
     VeloxRuntime, WindowController,
 };
 
@@ -1897,7 +1897,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         cursor_blink_on:   s.cursor_blink_on,
                         any_cursor_active: &mut any_cursor_active,
                     };
-                    render_subtree(root_id, 0.0, &mut render_ctx);
+                    render_subtree(root_id, 0.0, 1.0, &mut render_ctx);
                 }
 
                 // Splash screen overlay — drawn on top of JS scene.

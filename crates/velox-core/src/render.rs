@@ -18,8 +18,50 @@ pub(crate) struct RenderCtx<'a> {
     pub any_cursor_active: &'a mut bool,
 }
 
-pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
+fn apply_opacity(c: peniko::Color, opacity: f32) -> peniko::Color {
+    if opacity >= 1.0 { c } else { c.multiply_alpha(opacity) }
+}
+
+/// Parse a hex colour string (`#RGB`, `#RRGGBB`, `#RRGGBBAA`) into RGBA bytes.
+fn hex_color(s: &str) -> Option<[u8; 4]> {
+    let h = s.strip_prefix('#')?;
+    let (r, g, b, a) = match h.len() {
+        3 => (u8::from_str_radix(&h[0..1], 16).ok()? * 17,
+              u8::from_str_radix(&h[1..2], 16).ok()? * 17,
+              u8::from_str_radix(&h[2..3], 16).ok()? * 17, 255),
+        6 => (u8::from_str_radix(&h[0..2], 16).ok()?,
+              u8::from_str_radix(&h[2..4], 16).ok()?,
+              u8::from_str_radix(&h[4..6], 16).ok()?, 255),
+        8 => (u8::from_str_radix(&h[0..2], 16).ok()?,
+              u8::from_str_radix(&h[2..4], 16).ok()?,
+              u8::from_str_radix(&h[4..6], 16).ok()?,
+              u8::from_str_radix(&h[6..8], 16).ok()?),
+        _ => return None,
+    };
+    Some([r, g, b, a])
+}
+
+fn parse_box_shadow(s: &str) -> Option<(f64, f64, peniko::Color)> {
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.len() < 4 { return None; }
+    let dx    = parts[0].parse::<f64>().ok()?;
+    let dy    = parts[1].parse::<f64>().ok()?;
+    let color = hex_color(parts[3])?;
+    Some((dx, dy, rgba_to_vello(color)))
+}
+
+fn parse_gradient(s: &str) -> Option<(peniko::Color, peniko::Color)> {
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.len() < 2 { return None; }
+    let c1 = hex_color(parts[0])?;
+    let c2 = hex_color(parts[1])?;
+    Some((rgba_to_vello(c1), rgba_to_vello(c2)))
+}
+
+pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut RenderCtx<'_>) {
     let Some(node)      = ctx.nodes.get(&id)                                        else { return };
+    // Hidden nodes and their entire subtree are invisible — skip rendering.
+    if node.props.hidden.unwrap_or(false) { return; }
     let Some(layout_id) = node.layout_id                                             else { return };
     let Some((_, rl))   = ctx.resolved.iter().find(|(nid, _)| *nid == layout_id) else { return };
 
@@ -28,19 +70,48 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
     let rw = rl.width  as f64;
     let rh = rl.height as f64;
 
+    let child_opacity = opacity * node.props.opacity.unwrap_or(1.0);
+
     match node.node_type {
         NodeType::View => {
             let radius = node.props.border_radius.unwrap_or(0.0) as f64;
-            if let Some(bg) = node.props.background_color.map(rgba_to_vello) {
+
+            // ── Box shadow ────────────────────────────────────────────────
+            if let Some(ref ss) = node.props.box_shadow {
+                if let Some((sx, sy, sc)) = parse_box_shadow(ss) {
+                    ctx.frame.fill_rounded_rect(
+                        rx + sx, ry + sy, rw, rh, radius,
+                        apply_opacity(sc, child_opacity),
+                    );
+                }
+            }
+
+            // ── Background (gradient takes precedence over solid) ─────────
+            if let Some(ref gs) = node.props.background_gradient {
+                if let Some((c1, c2)) = parse_gradient(gs) {
+                    let gradient = peniko::Gradient::new_linear(
+                        velox_renderer::peniko::kurbo::Point::new(rx, ry),
+                        velox_renderer::peniko::kurbo::Point::new(rx, ry + rh),
+                    )
+                    .with_stops([
+                        peniko::ColorStop { offset: 0.0, color: apply_opacity(c1, child_opacity) },
+                        peniko::ColorStop { offset: 1.0, color: apply_opacity(c2, child_opacity) },
+                    ]);
+                    let brush = peniko::Brush::Gradient(gradient);
+                    ctx.frame.fill_rounded_rect_with_brush(rx, ry, rw, rh, radius, &brush);
+                }
+            } else if let Some(bg) = node.props.background_color.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
                 ctx.frame.fill_rounded_rect(rx, ry, rw, rh, radius, bg);
             }
 
+            // ── Border ────────────────────────────────────────────────────
             if let Some(bw) = node.props.border_width {
                 let bc = node.props.border_color.unwrap_or([80, 80, 120, 255]);
-                ctx.frame.stroke_rounded_rect(rx, ry, rw, rh, radius, bw as f64, rgba_to_vello(bc));
+                ctx.frame.stroke_rounded_rect(rx, ry, rw, rh, radius, bw as f64, apply_opacity(rgba_to_vello(bc), child_opacity));
             }
 
-            let is_clip = node.props.clip.unwrap_or(false);
+            let overflows = matches!(node.props.overflow.as_deref(), Some("hidden" | "scroll"));
+            let is_clip = node.props.clip.unwrap_or(false) || overflows;
 
             let child_scroll_y = {
                 let raw = scroll_y + node.props.scroll_offset_y.unwrap_or(0.0) as f64;
@@ -56,7 +127,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
                         .fold(f64::NEG_INFINITY, f64::max);
 
                     if max_child_bottom.is_finite() {
-                        let pad   = node.props.padding.unwrap_or(0.0) as f64;
+                        let pad   = match node.props.padding { Some(LengthValue::Px(px)) => px as f64, _ => 0.0 };
                         let max_s = (max_child_bottom + pad - (rl.y as f64 + rh)).max(0.0);
                         raw.min(max_s).max(0.0)
                     } else {
@@ -77,7 +148,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
                 ctx.nodes.get(&cid).and_then(|n| n.props.z_index).unwrap_or(0)
             });
             for child_id in children {
-                render_subtree(child_id, child_scroll_y, ctx);
+                render_subtree(child_id, child_scroll_y, child_opacity, ctx);
             }
 
             if is_clip {
@@ -129,13 +200,13 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
 
                     if let Some(bw) = node.props.border_width {
                         let bc = node.props.border_color.unwrap_or([80, 80, 120, 255]);
-                        ctx.frame.stroke_rounded_rect(rx, ry, rw, rh, radius, bw as f64, rgba_to_vello(bc));
+                        ctx.frame.stroke_rounded_rect(rx, ry, rw, rh, radius, bw as f64, apply_opacity(rgba_to_vello(bc), child_opacity));
                     }
                 } else {
-                    ctx.frame.fill_rounded_rect(rx, ry, rw, rh, 0.0, colors::TEXT_MUTED);
+                    ctx.frame.fill_rounded_rect(rx, ry, rw, rh, 0.0, apply_opacity(colors::TEXT_MUTED, child_opacity));
                 }
             } else {
-                ctx.frame.fill_rounded_rect(rx, ry, rw, rh, 0.0, colors::TEXT_MUTED);
+                ctx.frame.fill_rounded_rect(rx, ry, rw, rh, 0.0, apply_opacity(colors::TEXT_MUTED, child_opacity));
             }
         }
 
@@ -191,14 +262,14 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
                     if x1 > x0 {
                         ctx.frame.fill_rounded_rect(
                             tx + x0, cur_top, x1 - x0, cur_height, 0.0,
-                            peniko::Color::rgba8(100, 120, 255, 120),
+                            apply_opacity(peniko::Color::rgba8(100, 120, 255, 120), child_opacity),
                         );
                     }
                 }
             }
 
             // 2. Draw shaped text.
-            ctx.frame.draw_text(&label.layout, tx, ty, rgba_to_vello(color));
+            ctx.frame.draw_text(&label.layout, tx, ty, apply_opacity(rgba_to_vello(color), child_opacity));
 
             // 3. Blinking cursor line — uses same metrics as selection highlight.
             if show_cursor {
@@ -214,7 +285,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
                     };
                     ctx.frame.fill_rounded_rect(
                         tx + cx, cur_top, 2.0, cur_height, 0.0,
-                        rgba_to_vello(color),
+                        apply_opacity(rgba_to_vello(color), child_opacity),
                     );
                 }
             }
@@ -222,7 +293,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
 
         NodeType::Canvas => {
             // Draw optional background.
-            if let Some(bg) = node.props.background_color.map(rgba_to_vello) {
+            if let Some(bg) = node.props.background_color.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
                 let radius = node.props.border_radius.unwrap_or(0.0) as f64;
                 ctx.frame.fill_rounded_rect(rx, ry, rw, rh, radius, bg);
             }
@@ -239,7 +310,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
         NodeType::Canvas3D => {
             // Draw optional background fill in the 2D scene so the layout box is
             // visible even before the first 3D render completes.
-            if let Some(bg) = node.props.background_color.map(rgba_to_vello) {
+            if let Some(bg) = node.props.background_color.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
                 ctx.frame.fill_rect(rx, ry, rw, rh, bg);
             }
             // Register this canvas for post-Vello 3D rendering.
@@ -270,7 +341,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
                     } else {
                         // No frame yet — draw a placeholder background.
                         ctx.frame.fill_rect(rx, ry, rw, rh,
-                            peniko::Color::rgba8(0, 0, 0, 255));
+                            apply_opacity(peniko::Color::rgba8(0, 0, 0, 255), child_opacity));
                     }
                 }
             }
@@ -292,7 +363,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, ctx: &mut RenderCtx<'_>) {
                     } else {
                         // No frame yet — draw a black placeholder.
                         ctx.frame.fill_rect(rx, ry, rw, rh,
-                            peniko::Color::rgba8(0, 0, 0, 255));
+                            apply_opacity(peniko::Color::rgba8(0, 0, 0, 255), child_opacity));
                     }
                 }
             }

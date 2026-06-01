@@ -20,6 +20,7 @@ members = [
     "examples/hello-world-snapshot",
     "examples/cli-test",
     "examples/notes-app",
+    "examples/calculator",
     "crates/velox-snapshot",
     "crates/velox-media",
 ]

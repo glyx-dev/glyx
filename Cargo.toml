@@ -28,18 +28,18 @@ members = [
 [workspace.dependencies]
 # Windowing + GPU
 winit     = "0.30"
-wgpu      = "22"
+wgpu      = "29"
 
 # 2D Rendering
-vello     = "0.3"
-peniko    = "0.2"
+vello     = "0.9"
+peniko    = "0.6"
 kurbo     = "0.11"
 
 # Text
-parley    = "0.2"
+parley    = "0.10"
 
 # Layout
-taffy     = "0.5"
+taffy     = "0.10"
 
 # JS Runtime
 v8        = { package = "rusty_v8", version = "0.32" }

@@ -73,7 +73,7 @@ fn srgb_to_linear_u8(v: u8) -> u8 {
     (lin * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
-fn load_image_from_path(path: &str) -> Option<peniko::Image> {
+fn load_image_from_path(path: &str) -> Option<peniko::ImageData> {
     let decoded = image::open(path).ok()?;
     let rgba = decoded.into_rgba8();
     let (w, h) = rgba.dimensions();
@@ -87,7 +87,12 @@ fn load_image_from_path(path: &str) -> Option<peniko::Image> {
         px[1] = ((px[1] as u16 * a + 127) / 255) as u8;
         px[2] = ((px[2] as u16 * a + 127) / 255) as u8;
     }
-    Some(peniko::Image::new(bytes.into(), peniko::Format::Rgba8, w, h))
+    Some(peniko::ImageData {
+        data: peniko::Blob::from(bytes),
+        format: peniko::ImageFormat::Rgba8,
+        alpha_type: peniko::ImageAlphaType::AlphaPremultiplied,
+        width: w, height: h,
+    })
 }
 
 pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<SceneCommand>) -> bool {

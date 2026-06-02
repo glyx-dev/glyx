@@ -43,6 +43,16 @@ const disabledRegistry = new Map();
 // hit-testing; events pass through them to nodes underneath.
 const pointerEventsNoneRegistry = new Set();
 
+// Ordered array of all solid (click-opaque) node ids, in creation order.
+// Later entries were rendered later (on top in z-order).
+// Every 'view' native node is solid by default.  Nodes with pointerEvents:'none'
+// are still in this list but are excluded at lookup time via pointerEventsNoneRegistry.
+const solidRegistry = [];
+
+// Map from childId → parentId, populated by hostConfig on every tree mutation.
+// Used by findTopmostSolid to determine ancestor relationships.
+const parentMap = new Map();
+
 // Currently dragged node id (or null). Set on dragStart, cleared on dragEnd.
 let activeDragId = null;
 
@@ -112,7 +122,7 @@ export function unregisterInput(nodeId) {
 /**
  * Register a ScrollView node so scroll events are routed to it.
  * @param {number} nodeId
- * @param {{ onScroll: (deltaY: number) => void }} handlers
+ * @param {{ onScroll: (deltaY: number) => void, onAbsoluteScroll?: (y: number) => void }} handlers
  */
 export function registerScrollView(nodeId, handlers) {
   scrollRegistry.set(nodeId, handlers);
@@ -174,6 +184,44 @@ export function unregisterDisabledNode(nodeId) {
  */
 export function registerPointerEventsNone(nodeId) {
   pointerEventsNoneRegistry.add(nodeId);
+}
+
+/**
+ * Register a view node as solid (click-opaque).
+ * Called from hostConfig.createInstance for every 'view' native node.
+ * @param {number} nodeId
+ */
+export function registerSolid(nodeId) {
+  solidRegistry.push(nodeId);
+}
+
+/**
+ * Unregister a solid node on unmount.
+ * @param {number} nodeId
+ */
+export function unregisterSolid(nodeId) {
+  const i = solidRegistry.indexOf(nodeId);
+  if (i !== -1) solidRegistry.splice(i, 1);
+}
+
+/**
+ * Record that `childId` is a direct child of `parentId` in the native tree.
+ * Called by hostConfig whenever a child is attached to a parent.
+ * @param {number} childId
+ * @param {number} parentId
+ */
+export function setNodeParent(childId, parentId) {
+  parentMap.set(childId, parentId);
+}
+
+/**
+ * Remove a node from parentMap and solidRegistry on tree detach.
+ * Replaces separate unregisterSolid + parentMap.delete calls in hostConfig.
+ * @param {number} nodeId
+ */
+export function removeNodeFromTree(nodeId) {
+  parentMap.delete(nodeId);
+  unregisterSolid(nodeId);
 }
 
 /**
@@ -269,6 +317,51 @@ function isDisabled(nodeId) {
   return disabledRegistry.has(nodeId);
 }
 
+/** Returns true when `ancestorId` is a direct or indirect parent of `descendantId`. */
+function isAncestorOf(ancestorId, descendantId) {
+  let id = parentMap.get(descendantId);
+  while (id !== undefined) {
+    if (id === ancestorId) return true;
+    id = parentMap.get(id);
+  }
+  return false;
+}
+
+/**
+ * Return the topmost solid (click-opaque) node covering (x, y), or null.
+ *
+ * React creates host instances in post-order (children before parents), so
+ * solidRegistry is ordered: children have LOWER indices, parents HIGHER.
+ *
+ * Algorithm:
+ *   1. Collect every solid node whose layout rect covers (x, y).
+ *   2. Filter to "deepest" — remove any node that is an ancestor of another
+ *      covering node (an ancestor is painted beneath its descendants).
+ *   3. Among the remaining siblings/cousins, return the one with the highest
+ *      solidRegistry index (later-registered sibling = painted on top).
+ */
+function findTopmostSolid(x, y) {
+  const covering = [];
+  for (const id of solidRegistry) {
+    if (hitTest(id, x, y)) covering.push(id);
+  }
+  if (covering.length === 0) return null;
+  if (covering.length === 1) return covering[0];
+  // Keep only deepest nodes (remove ancestors of other covering nodes).
+  const deepest = covering.filter(
+    id => !covering.some(other => other !== id && isAncestorOf(id, other))
+  );
+  if (deepest.length === 1) return deepest[0];
+  // Among siblings, pick the one with the highest solidRegistry index.
+  let bestId = deepest[0];
+  let bestIdx = solidRegistry.lastIndexOf(deepest[0]);
+  for (let i = 1; i < deepest.length; i++) {
+    const idx = solidRegistry.lastIndexOf(deepest[i]);
+    if (idx > bestIdx) { bestIdx = idx; bestId = deepest[i]; }
+  }
+  return bestId;
+}
+
 // ── Main dispatch ─────────────────────────────────────────────────────────────
 
 /**
@@ -293,42 +386,35 @@ export function dispatchEvents() {
           for (const fn of globalClickListeners) try { fn(gev); } catch {}
         }
 
-        // Check pressables (front-to-back, stop at first hit).
-        let handled = false;
-        for (const [nodeId, handlers] of pressableRegistry) {
-          if (hitTest(nodeId, ev.x, ev.y)) {
-            if (isDisabled(nodeId)) break;
-            const layout = __velox_getLayout(nodeId);
-            const pressEv = {
+        // Find the topmost solid (click-opaque) node at this position.
+        // A plain View absorbs the click even without a handler, preventing
+        // fallthrough to pressables/inputs rendered beneath it in z-order.
+        const topmostId = findTopmostSolid(ev.x, ev.y);
+
+        if (topmostId !== null) {
+          // Route to Pressable handler if the topmost node is pressable.
+          const ph = pressableRegistry.get(topmostId);
+          if (ph && !isDisabled(topmostId)) {
+            const layout = __velox_getLayout(topmostId);
+            ph.onPress?.({
               x: ev.x, y: ev.y,
               locationX: layout ? ev.x - layout.x : 0,
               locationY: layout ? ev.y - layout.y : 0,
-            };
-            handlers.onPress?.(pressEv);
-            handled = true;
-            break;
+            });
+          }
+
+          // Route to TextInput handler if the topmost node is an input.
+          const ih = inputRegistry.get(topmostId);
+          if (ih && !isDisabled(topmostId)) {
+            setFocus(topmostId);
+            const layout = __velox_getLayout(topmostId);
+            if (layout) ih.onClickAt?.(ev.x - layout.x, ev.y - layout.y);
           }
         }
 
-        // Check inputs (clicking into a TextInput focuses it and positions cursor).
-        for (const [nodeId, handlers] of inputRegistry) {
-          if (hitTest(nodeId, ev.x, ev.y)) {
-            if (isDisabled(nodeId)) break;
-            setFocus(nodeId);
-            // Fire click-to-cursor: pass click position relative to the node.
-            if (handlers.onClickAt) {
-              const layout = __velox_getLayout(nodeId);
-              if (layout) handlers.onClickAt(ev.x - layout.x, ev.y - layout.y);
-            }
-            handled = true;
-            break;
-          }
-        }
-
-        // Click outside any input → blur.
-        if (!handled && focusedNodeId !== null) {
-          const prev = inputRegistry.get(focusedNodeId);
-          prev?.onBlur?.();
+        // Blur focused input if the click landed elsewhere.
+        if (focusedNodeId !== null && focusedNodeId !== topmostId) {
+          inputRegistry.get(focusedNodeId)?.onBlur?.();
           focusedNodeId = null;
         }
         break;
@@ -370,15 +456,23 @@ export function dispatchEvents() {
       }
 
       case 'scroll': {
-        // Route the scroll delta to whichever ScrollView the cursor is over
-        // (front-to-back, stop at first hit).
-        for (const [nodeId, handlers] of scrollRegistry) {
+        // Route the scroll delta to the topmost ScrollView the cursor is over
+        // (iterate reverse-registration-order so later-rendered = topmost).
+        for (const [nodeId, handlers] of [...scrollRegistry].reverse()) {
           if (hitTest(nodeId, cursorX, cursorY)) {
             if (isDisabled(nodeId)) break;
             handlers.onScroll?.(ev.deltaY);
             break;
           }
         }
+        break;
+      }
+
+      case 'scrollbarDrag': {
+        // Absolute scroll position set by scrollbar thumb drag — routed by
+        // node ID directly (no hit-test needed; the thumb is inside the clip).
+        const handlers = scrollRegistry.get(ev.nodeId);
+        handlers?.onAbsoluteScroll?.(ev.scrollY);
         break;
       }
 
@@ -425,15 +519,13 @@ export function dispatchEvents() {
   // ── Hover state update ────────────────────────────────────────────────────
   // Run once per frame using the final cursor position.
   // Only fires onHoverIn/Out callbacks on actual enter/leave transitions.
+  // Uses findTopmostSolid so that views beneath a covering solid node never
+  // receive hover effects, and plain Views (not in pressableRegistry) are
+  // treated as hover-opaque (no effect fires on them).
   if (cursorMovedThisFrame) {
-    let newHoveredId = null;
-    for (const [nodeId] of pressableRegistry) {
-      if (isDisabled(nodeId)) continue;
-      if (hitTest(nodeId, cursorX, cursorY)) {
-        newHoveredId = nodeId;
-        break;
-      }
-    }
+    const topSolid = findTopmostSolid(cursorX, cursorY);
+    const newHoveredId = (topSolid !== null && !isDisabled(topSolid) && pressableRegistry.has(topSolid))
+      ? topSolid : null;
 
     if (newHoveredId !== hoveredPressableId) {
       if (hoveredPressableId !== null) {

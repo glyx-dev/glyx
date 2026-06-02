@@ -33,15 +33,14 @@
 //! lands exactly at `ty + ascent`, which sits centred in the box.
 
 use parley::{
-    layout::Alignment,
-    style::{FontStack, FontWeight, StyleProperty},
+    layout::{Alignment, AlignmentOptions},
+    style::{FontFamily, FontWeight, StyleProperty},
     FontContext, LayoutContext,
 };
-use peniko::Color;
 
 pub struct TextSystem {
     font_cx:   FontContext,
-    layout_cx: LayoutContext<Color>,
+    layout_cx: LayoutContext<()>,
 }
 
 impl TextSystem {
@@ -127,18 +126,17 @@ impl TextSystem {
 
     /// Full-control shaping — returns a `TextLayout` whose metrics helpers
     /// give you everything you need for positioning.
+    /// Color is not stored in the layout — it is applied at render time by the caller.
     pub fn shape(
         &mut self,
         text:      &str,
         font_size: f32,
         max_width: f32,
-        color:     Color,
         weight:    FontWeight,
         alignment: Alignment,
     ) -> TextLayout {
-        let mut builder = self.layout_cx.ranged_builder(&mut self.font_cx, text, 1.0);
+        let mut builder = self.layout_cx.ranged_builder(&mut self.font_cx, text, 1.0, false);
 
-        builder.push_default(StyleProperty::Brush(color));
         builder.push_default(StyleProperty::FontSize(font_size));
         builder.push_default(StyleProperty::FontWeight(weight));
 
@@ -149,35 +147,35 @@ impl TextSystem {
         //   Linux    → DejaVu Sans (present in most distros)
         // The trailing "sans-serif" is a Parley generic that triggers its own
         // platform font-selection heuristic if none of the named fonts match.
-        builder.push_default(StyleProperty::FontStack(FontStack::Source(
+        builder.push_default(StyleProperty::FontFamily(FontFamily::Source(
             std::borrow::Cow::Borrowed("Segoe UI, Helvetica Neue, DejaVu Sans, sans-serif"),
         )));
 
         let mut layout = builder.build(text);
         layout.break_all_lines(Some(max_width));
-        layout.align(Some(max_width), alignment);
+        layout.align(alignment, AlignmentOptions::default());
 
         TextLayout { inner: layout }
     }
 
     /// Shape a single-line label at the given size.  No wrapping.
-    pub fn label(&mut self, text: &str, font_size: f32, color: Color) -> TextLayout {
-        self.shape(text, font_size, f32::MAX, color, FontWeight::NORMAL, Alignment::Start)
+    pub fn label(&mut self, text: &str, font_size: f32) -> TextLayout {
+        self.shape(text, font_size, f32::MAX, FontWeight::NORMAL, Alignment::Start)
     }
 
-    pub fn label_centered(&mut self, text: &str, font_size: f32, max_width: f32, color: Color) -> TextLayout {
-        self.shape(text, font_size, max_width, color, FontWeight::NORMAL, Alignment::Start)
+    pub fn label_centered(&mut self, text: &str, font_size: f32, max_width: f32) -> TextLayout {
+        self.shape(text, font_size, max_width, FontWeight::NORMAL, Alignment::Start)
     }
 
     /// Shape a bold single-line label.
-    pub fn bold_label(&mut self, text: &str, font_size: f32, color: Color) -> TextLayout {
-        self.shape(text, font_size, f32::MAX, color, FontWeight::BOLD, Alignment::Start)
+    pub fn bold_label(&mut self, text: &str, font_size: f32) -> TextLayout {
+        self.shape(text, font_size, f32::MAX, FontWeight::BOLD, Alignment::Start)
     }
 
     /// Deprecated alias kept for back-compat with early call sites.
     #[deprecated(note = "use bold_label()")]
-    pub fn bold(&mut self, text: &str, font_size: f32, color: Color) -> TextLayout {
-        self.bold_label(text, font_size, color)
+    pub fn bold(&mut self, text: &str, font_size: f32) -> TextLayout {
+        self.bold_label(text, font_size)
     }
 
     /// Measure the advance width of `text` up to (not including) `cursor_char` characters.
@@ -206,19 +204,12 @@ impl TextSystem {
     }
 
     /// Measure the natural (width, height) of `text` at `font_size` wrapped to
-    /// `max_width` pixels.  Color and weight do not affect metrics.
+    /// `max_width` pixels.
     ///
     /// Used by the Taffy measure function so Text nodes with no explicit
     /// `height` prop report their real wrapped height to the layout engine.
     pub fn measure(&mut self, text: &str, font_size: f32, max_width: f32) -> (f32, f32) {
-        let layout = self.shape(
-            text,
-            font_size,
-            max_width.max(1.0),
-            Color::rgba(1.0, 1.0, 1.0, 1.0),
-            FontWeight::NORMAL,
-            Alignment::Start,
-        );
+        let layout = self.shape(text, font_size, max_width.max(1.0), FontWeight::NORMAL, Alignment::Start);
         (layout.width(), layout.height())
     }
 }
@@ -230,7 +221,7 @@ impl Default for TextSystem {
 // ── TextLayout ────────────────────────────────────────────────────────────────
 
 pub struct TextLayout {
-    pub inner: parley::Layout<Color>,
+    pub inner: parley::Layout<()>,
 }
 
 impl TextLayout {
@@ -322,7 +313,7 @@ fn register_font_file(font_cx: &mut FontContext, path: &std::path::Path) -> bool
         .to_ascii_lowercase();
     if matches!(ext.as_str(), "ttf" | "otf" | "ttc") {
         if let Ok(data) = std::fs::read(path) {
-            font_cx.collection.register_fonts(data);
+            font_cx.collection.register_fonts(parley::fontique::Blob::from(data), None);
             return true;
         }
     }

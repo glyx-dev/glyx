@@ -6005,6 +6005,8 @@ No matching component was found for:
   var inputRegistry = new Map;
   var scrollRegistry = new Map;
   var dragRegistry = new Map;
+  var disabledRegistry = new Map;
+  var pointerEventsNoneRegistry = new Set;
   var activeDragId = null;
   var windowSizeListeners = [];
   var keyListeners = [];
@@ -6043,6 +6045,16 @@ No matching component was found for:
       activeDragId = null;
     dragRegistry.delete(nodeId);
   }
+  function registerDisabledNode(nodeId, disabled) {
+    if (disabled) {
+      disabledRegistry.set(nodeId, true);
+    } else {
+      disabledRegistry.delete(nodeId);
+    }
+  }
+  function unregisterDisabledNode(nodeId) {
+    disabledRegistry.delete(nodeId);
+  }
   function addWindowSizeListener(fn) {
     windowSizeListeners.push(fn);
   }
@@ -6074,10 +6086,15 @@ No matching component was found for:
     }
   }
   function hitTest(nodeId, px, py) {
+    if (pointerEventsNoneRegistry.has(nodeId))
+      return false;
     const layout = __velox_getLayout(nodeId);
     if (!layout)
       return false;
     return px >= layout.x && px < layout.x + layout.width && py >= layout.y && py < layout.y + layout.height;
+  }
+  function isDisabled(nodeId) {
+    return disabledRegistry.has(nodeId);
   }
   function dispatchEvents() {
     const events = __velox_pollEvents();
@@ -6097,8 +6114,10 @@ No matching component was found for:
               } catch {}
           }
           let handled = false;
-          for (const [nodeId, handlers] of pressableRegistry) {
+          for (const [nodeId, handlers] of [...pressableRegistry].reverse()) {
             if (hitTest(nodeId, ev.x, ev.y)) {
+              if (isDisabled(nodeId))
+                break;
               const layout = __velox_getLayout(nodeId);
               const pressEv = {
                 x: ev.x,
@@ -6111,8 +6130,10 @@ No matching component was found for:
               break;
             }
           }
-          for (const [nodeId, handlers] of inputRegistry) {
+          for (const [nodeId, handlers] of [...inputRegistry].reverse()) {
             if (hitTest(nodeId, ev.x, ev.y)) {
+              if (isDisabled(nodeId))
+                break;
               setFocus(nodeId);
               if (handlers.onClickAt) {
                 const layout = __velox_getLayout(nodeId);
@@ -6161,12 +6182,19 @@ No matching component was found for:
           break;
         }
         case "scroll": {
-          for (const [nodeId, handlers] of scrollRegistry) {
+          for (const [nodeId, handlers] of [...scrollRegistry].reverse()) {
             if (hitTest(nodeId, cursorX, cursorY)) {
+              if (isDisabled(nodeId))
+                break;
               handlers.onScroll?.(ev.deltaY);
               break;
             }
           }
+          break;
+        }
+        case "scrollbarDrag": {
+          const handlers = scrollRegistry.get(ev.nodeId);
+          handlers?.onAbsoluteScroll?.(ev.scrollY);
           break;
         }
         case "resize": {
@@ -6178,6 +6206,8 @@ No matching component was found for:
         case "dragStart": {
           for (const [nodeId, handlers] of dragRegistry) {
             if (hitTest(nodeId, ev.x, ev.y)) {
+              if (isDisabled(nodeId))
+                break;
               activeDragId = nodeId;
               handlers.onDragStart?.({ x: ev.x, y: ev.y });
               break;
@@ -6207,6 +6237,8 @@ No matching component was found for:
     if (cursorMovedThisFrame) {
       let newHoveredId = null;
       for (const [nodeId] of pressableRegistry) {
+        if (isDisabled(nodeId))
+          continue;
         if (hitTest(nodeId, cursorX, cursorY)) {
           newHoveredId = nodeId;
           break;
@@ -6488,7 +6520,7 @@ No matching component was found for:
       ...props
     });
   }
-  function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn, onHoverOut, style, ...props }) {
+  function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn, onHoverOut, disabled, style, ...props }) {
     const nodeIdRef = import_react.useRef(null);
     const handlersRef = import_react.useRef(null);
     const [pressed, setPressed] = import_react.useState(false);
@@ -6521,11 +6553,18 @@ No matching component was found for:
         onHoverIn: () => handlersRef.current.onHoverIn(),
         onHoverOut: () => handlersRef.current.onHoverOut()
       });
-    }, []);
+      registerDisabledNode(id, !!disabled);
+    }, [disabled]);
+    import_react.useEffect(() => {
+      if (nodeIdRef.current !== null) {
+        registerDisabledNode(nodeIdRef.current, !!disabled);
+      }
+    }, [disabled]);
     import_react.useEffect(() => {
       return () => {
         if (nodeIdRef.current !== null) {
           unregisterPressable(nodeIdRef.current);
+          unregisterDisabledNode(nodeIdRef.current);
         }
       };
     }, []);
@@ -6538,6 +6577,9 @@ No matching component was found for:
     width = 300,
     height = 200,
     contentHeight,
+    showScrollbar = true,
+    scrollbarWidth = 8,
+    scrollbarColor = "#8c8caa99",
     ...props
   }) {
     const nodeIdRef = import_react.useRef(null);
@@ -6555,10 +6597,13 @@ No matching component was found for:
         return Math.min(max, Math.max(0, prev + deltaY));
       });
     }, []);
+    const onAbsoluteScroll = import_react.useCallback((y) => {
+      setScrollY(Math.min(maxScrollRef.current, Math.max(0, y)));
+    }, []);
     const onMount = import_react.useCallback((id) => {
       nodeIdRef.current = id;
-      registerScrollView(id, { onScroll });
-    }, [onScroll]);
+      registerScrollView(id, { onScroll, onAbsoluteScroll });
+    }, [onScroll, onAbsoluteScroll]);
     import_react.useEffect(() => {
       return () => {
         if (nodeIdRef.current !== null) {
@@ -6571,6 +6616,9 @@ No matching component was found for:
       alignItems: "flex-start",
       clip: true,
       scrollOffsetY: scrollY,
+      showScrollbar,
+      scrollbarWidth,
+      scrollbarColor,
       ...style
     };
     return import_react.default.createElement("view", { _veloxOnMount: onMount, style: viewStyle, width, height, ...props }, children);

@@ -1,7 +1,7 @@
 import './polyfills.js';
 import React, { useState, useCallback } from 'react';
 import {
-  View, Text, Pressable, render, useWindowSize,
+  View, Text, Pressable, ScrollView, render, useWindowSize,
 } from '@velox/react';
 
 // ── Theme ─────────────────────────────────────────────────────────────────────
@@ -87,9 +87,18 @@ function App() {
   const { width: winW, height: winH } = useWindowSize();
   const [state, setState] = useState({ disp: '0', prev: null, op: null, wait: false, expr: '' });
   const [gridMode, setGridMode] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [history, setHistory] = useState([]);
 
   const press = useCallback((key) => {
-    setState(s => calc(s, key));
+    setState(s => {
+      const next = calc(s, key);
+      if (key === '=' && next.lastResult !== undefined) {
+        const entry = (s.expr || s.disp + ' =') + ' ' + next.disp;
+        setHistory(h => [...h, entry].slice(-50)); // keep last 50
+      }
+      return next;
+    });
   }, []);
 
   const titleH = 32;
@@ -131,6 +140,7 @@ function App() {
         gap: 4,
         justifyContent: 'flex-start',
         alignItems: 'center',
+        boxSizing: 'border-box',
       }}
       width={winW}
       height={winH}
@@ -151,6 +161,9 @@ function App() {
       >
         <Text fontSize={12} width={120} height={16} style={{ color: C.subtle }}>Calculator</Text>
         <View style={{ flexDirection: 'row', gap: 4, paddingRight: 4 }}>
+          <Pressable onPress={() => setShowHistory(s => !s)} width={24} height={24} style={{ backgroundColor: showHistory ? C.green : C.overlay, borderRadius: 6, alignItems: 'center', justifyContent: 'center' }}>
+            <Text fontSize={10} height={12} style={{ color: '#fff' }}>H</Text>
+          </Pressable>
           <Pressable onPress={() => setGridMode(m => !m)} width={36} height={24} style={{ backgroundColor: C.mauve, borderRadius: 6, alignItems: 'center', justifyContent: 'center' }}>
             <Text fontSize={10} height={12} style={{ color: '#fff' }}>{gridMode ? 'Std' : 'Sci'}</Text>
           </Pressable>
@@ -159,6 +172,44 @@ function App() {
           </Pressable>
         </View>
       </View>
+
+      {/* Scrollable history panel */}
+      {showHistory && history.length > 0 && (
+        <View
+          position="absolute"
+          top={titleH + 8} right={pad}
+          width={180}
+          height={260}
+          style={{
+            backgroundColor: C.surface,
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: C.overlay,
+            overflow: 'hidden',
+            zIndex: 10,
+          }}
+        >
+          <Text fontSize={10} height={20} style={{ color: C.subtle, padding: 4 }}>History</Text>
+          <ScrollView
+            width={178}
+            showScrollbar
+            scrollbarWidth={6}
+            scrollbarColor="#8c8caa99"
+            contentHeight={history.length * 26}
+            height={236}
+          >
+            {history.map((entry, i) => (
+              <Text key={i} fontSize={11} height={24} style={{
+                color: C.text,
+                paddingLeft: 4,
+                paddingRight: 16,
+              }}>
+                {entry}
+              </Text>
+            ))}
+          </ScrollView>
+        </View>
+      )}
 
       {/* Display */}
       <View
@@ -175,7 +226,12 @@ function App() {
         }}
         height={dispH}
       >
-        <Text fontSize={28} height={36} style={{ color: C.text }}>
+        <Text
+          fontSize={28} height={36}
+          width="100%"
+          style={{ color: C.text, textAlign: 'right' }}
+          numberOfLines={1}
+        >
           {state.disp}
         </Text>
       </View>
@@ -277,6 +333,67 @@ function App() {
           </View>
         </>
       )}
+
+      {/* ── Result overlay ── */}
+      {state.lastResult !== undefined && (
+        <Pressable
+          position="absolute"
+          top={0} left={0} right={0} bottom={0}
+          onPress={() => setState(s => ({ ...s, lastResult: undefined }))}
+          style={{
+            backgroundColor: '#00000088',
+            justifyContent: 'center',
+            alignItems: 'center',
+            zIndex: 10,
+          }}
+        >
+          <View
+            style={{
+              backgroundColor: C.surface,
+              borderRadius: 16,
+              padding: 24,
+              alignItems: 'center',
+              boxShadow: '0 4 12 #00000066',
+            }}
+          >
+            <View transform="scale(1.15)">
+              <Text fontSize={12} height={16} style={{ color: C.subtle }}>Result</Text>
+              <Text fontSize={40} height={48} style={{ color: C.text }}>
+                {state.lastResult}
+              </Text>
+            </View>
+            <Pressable
+              onPress={() => setState(s => ({ ...s, lastResult: undefined }))}
+              style={{
+                backgroundColor: C.accent,
+                borderRadius: 8,
+                padding: 8,
+                paddingLeft: 20,
+                paddingRight: 20,
+                marginTop: 12,
+              }}
+            >
+              <Text fontSize={14} height={18} style={{ color: '#fff' }}>OK</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      )}
+
+      {/* ── Test 2: Rotated "About" badge ── */}
+      <View
+        position="absolute"
+        bottom={8} right={8}
+        width={56} height={22}
+        transform="rotate(-6)"
+        style={{
+          backgroundColor: C.mauve,
+          borderTopLeftRadius: 8,
+          justifyContent: 'center',
+          alignItems: 'center',
+        }}
+      >
+        <Text fontSize={9} height={13} style={{ color: '#fff', textAlign: 'center' }}>About</Text>
+      </View>
     </View>
   );
 }

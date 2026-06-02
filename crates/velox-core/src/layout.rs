@@ -1,7 +1,7 @@
 use super::*;
 use smallvec::SmallVec;
 use taffy::prelude::*;
-use taffy::MinMax;
+use taffy::{GridTemplateRepetition, MinMax};
 
 pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::prelude::Style {
     use taffy::prelude::*;
@@ -9,20 +9,20 @@ pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::
     // Helpers to convert our LengthValue → Taffy types.
     let to_dim = |v: LengthValue| -> Dimension {
         match v {
-            LengthValue::Px(px)    => Dimension::Length(px),
-            LengthValue::Percent(p) => Dimension::Percent(p),
+            LengthValue::Px(px)    => Dimension::length(px),
+            LengthValue::Percent(p) => Dimension::percent(p),
         }
     };
     let to_lp = |v: LengthValue| -> LengthPercentage {
         match v {
-            LengthValue::Px(px)    => LengthPercentage::Length(px),
-            LengthValue::Percent(p) => LengthPercentage::Percent(p),
+            LengthValue::Px(px)    => LengthPercentage::length(px),
+            LengthValue::Percent(p) => LengthPercentage::percent(p),
         }
     };
     let to_lpa = |v: LengthValue| -> LengthPercentageAuto {
         match v {
-            LengthValue::Px(px)    => LengthPercentageAuto::Length(px),
-            LengthValue::Percent(p) => LengthPercentageAuto::Percent(p),
+            LengthValue::Px(px)    => LengthPercentageAuto::length(px),
+            LengthValue::Percent(p) => LengthPercentageAuto::percent(p),
         }
     };
 
@@ -59,6 +59,13 @@ pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::
                 ..Default::default()
             };
 
+            if let Some(bs) = props.box_sizing.as_deref() {
+                style.box_sizing = match bs {
+                    "border-box" => BoxSizing::BorderBox,
+                    _            => BoxSizing::ContentBox,
+                };
+            }
+
             if let Some(w) = props.width  { style.size.width  = to_dim(w); }
             if let Some(h) = props.height { style.size.height = to_dim(h); }
 
@@ -66,20 +73,20 @@ pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::
             // Uniform margin acts as the baseline; per-side values override.
             let m = props.margin;
             style.margin = Rect {
-                left:   props.margin_left.or(m).map_or(LengthPercentageAuto::Auto, to_lpa),
-                right:  props.margin_right.or(m).map_or(LengthPercentageAuto::Auto, to_lpa),
-                top:    props.margin_top.or(m).map_or(LengthPercentageAuto::Auto, to_lpa),
-                bottom: props.margin_bottom.or(m).map_or(LengthPercentageAuto::Auto, to_lpa),
+                left:   props.margin_left.or(m).map_or(LengthPercentageAuto::auto(), to_lpa),
+                right:  props.margin_right.or(m).map_or(LengthPercentageAuto::auto(), to_lpa),
+                top:    props.margin_top.or(m).map_or(LengthPercentageAuto::auto(), to_lpa),
+                bottom: props.margin_bottom.or(m).map_or(LengthPercentageAuto::auto(), to_lpa),
             };
 
             // ── Padding ───────────────────────────────────────────────────
             // Uniform `padding` acts as baseline; per-side values override.
             let p = props.padding;
             style.padding = Rect {
-                left:   props.padding_left.or(p).map_or(LengthPercentage::Length(0.0), to_lp),
-                right:  props.padding_right.or(p).map_or(LengthPercentage::Length(0.0), to_lp),
-                top:    props.padding_top.or(p).map_or(LengthPercentage::Length(0.0), to_lp),
-                bottom: props.padding_bottom.or(p).map_or(LengthPercentage::Length(0.0), to_lp),
+                left:   props.padding_left.or(p).map_or(LengthPercentage::length(0.0), to_lp),
+                right:  props.padding_right.or(p).map_or(LengthPercentage::length(0.0), to_lp),
+                top:    props.padding_top.or(p).map_or(LengthPercentage::length(0.0), to_lp),
+                bottom: props.padding_bottom.or(p).map_or(LengthPercentage::length(0.0), to_lp),
             };
 
             // ── Min / max dimensions ──────────────────────────────────────
@@ -163,6 +170,20 @@ pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::
                 style.justify_items = Some(v);
             }
 
+            // ── Position (absolute/relative) ──────────────────────────────
+            style.position = match props.position.as_deref() {
+                Some("absolute") => Position::Absolute,
+                _                => Position::Relative,
+            };
+
+            // ── Inset (top/left/right/bottom) ────────────────────────────
+            style.inset = Rect {
+                top:    props.top.map_or(LengthPercentageAuto::auto(), to_lpa),
+                left:   props.left.map_or(LengthPercentageAuto::auto(), to_lpa),
+                right:  props.right.map_or(LengthPercentageAuto::auto(), to_lpa),
+                bottom: props.bottom.map_or(LengthPercentageAuto::auto(), to_lpa),
+            };
+
             // ── CSS Grid ────────────────────────────────────────────
             if display == Display::Grid {
                 if let Some(s) = props.grid_template_columns.as_deref() {
@@ -190,6 +211,20 @@ pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::
             let mut style = taffy::prelude::Style::default();
             if let Some(w) = props.width  { style.size.width  = to_dim(w); }
             if let Some(h) = props.height { style.size.height = to_dim(h); }
+
+            // ── Position (absolute/relative) ──────────────────────────────
+            style.position = match props.position.as_deref() {
+                Some("absolute") => Position::Absolute,
+                _                => Position::Relative,
+            };
+            // ── Inset (top/left/right/bottom) ────────────────────────────
+            style.inset = Rect {
+                top:    props.top.map_or(LengthPercentageAuto::auto(), to_lpa),
+                left:   props.left.map_or(LengthPercentageAuto::auto(), to_lpa),
+                right:  props.right.map_or(LengthPercentageAuto::auto(), to_lpa),
+                bottom: props.bottom.map_or(LengthPercentageAuto::auto(), to_lpa),
+            };
+
             style
         }
     }
@@ -280,7 +315,11 @@ pub(crate) fn layout_props_changed(new: &NodeProps, old: &NodeProps) -> bool {
     new.grid_template_columns != old.grid_template_columns ||
     new.grid_template_rows != old.grid_template_rows ||
     new.grid_column != old.grid_column ||
-    new.grid_row != old.grid_row
+    new.grid_row != old.grid_row ||
+    new.position != old.position ||
+    new.top != old.top || new.left != old.left ||
+    new.right != old.right || new.bottom != old.bottom ||
+    new.box_sizing != old.box_sizing
 }
 
 pub(crate) fn recompute_layout(state: &mut PerWindowState) {
@@ -297,6 +336,23 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
 
     let w = state.gpu.width()  as f32;
     let h = state.gpu.height() as f32;
+
+    // Framework guarantee: the layout root is always exactly the GPU viewport size.
+    // This prevents child views from ever overflowing the window, even during the
+    // one frame between a window resize and React re-rendering with new winW/winH.
+    if let Some(root_lid) = state.layout.root() {
+        if let Ok(root_style) = state.layout.get_style(root_lid) {
+            let need_w = Dimension::length(w);
+            let need_h = Dimension::length(h);
+            if root_style.size.width != need_w || root_style.size.height != need_h {
+                let mut s = root_style;
+                s.size.width  = need_w;
+                s.size.height = need_h;
+                let _ = state.layout.set_style(root_lid, s);
+                let _ = state.layout.mark_dirty(root_lid);
+            }
+        }
+    }
 
     let layout   = &mut state.layout;
     let text_sys = &mut state.text_sys;
@@ -468,24 +524,22 @@ fn tokenize_template(s: &str) -> Vec<String> {
 }
 
 /// Parse a single non-repeated track value (`"1fr"`, `"100px"`, `"50%"`, etc.)
-fn parse_non_repeated_track(s: &str) -> Option<NonRepeatedTrackSizingFunction> {
+fn parse_non_repeated_track(s: &str) -> Option<TrackSizingFunction> {
     let s = s.trim();
     if let Some(n) = s.strip_suffix("fr") {
         let flex: f32 = n.trim().parse().ok()?;
         return Some(MinMax {
             min: MinTrackSizingFunction::AUTO,
-            max: MaxTrackSizingFunction::from_flex(flex),
+            max: MaxTrackSizingFunction::from_fr(flex),
         });
     }
     if let Some(n) = s.strip_suffix("px") {
         let v: f32 = n.trim().parse().ok()?;
-        let lp = LengthPercentage::Length(v);
-        return Some(MinMax { min: MinTrackSizingFunction::Fixed(lp), max: MaxTrackSizingFunction::Fixed(lp) });
+        return Some(MinMax { min: MinTrackSizingFunction::length(v), max: MaxTrackSizingFunction::length(v) });
     }
     if let Some(p) = s.strip_suffix('%') {
         let v: f32 = p.trim().parse().ok()?;
-        let lp = LengthPercentage::Percent(v / 100.0);
-        return Some(MinMax { min: MinTrackSizingFunction::Fixed(lp), max: MaxTrackSizingFunction::Fixed(lp) });
+        return Some(MinMax { min: MinTrackSizingFunction::percent(v / 100.0), max: MaxTrackSizingFunction::percent(v / 100.0) });
     }
     match s {
         "min-content" => Some(MinMax { min: MinTrackSizingFunction::MIN_CONTENT, max: MaxTrackSizingFunction::MIN_CONTENT }),
@@ -496,7 +550,7 @@ fn parse_non_repeated_track(s: &str) -> Option<NonRepeatedTrackSizingFunction> {
 }
 
 /// Parse a `minmax(a, b)` expression.
-fn parse_minmax(s: &str) -> Option<NonRepeatedTrackSizingFunction> {
+fn parse_minmax(s: &str) -> Option<TrackSizingFunction> {
     let inner = s.strip_prefix("minmax(")?.strip_suffix(')')?;
     let (a, b) = inner.split_once(',')?;
     let min = parse_min_track(a.trim());
@@ -511,11 +565,11 @@ fn parse_min_track(s: &str) -> Option<MinTrackSizingFunction> {
     let s = s.trim();
     if let Some(n) = s.strip_suffix("px") {
         let v: f32 = n.parse().ok()?;
-        return Some(MinTrackSizingFunction::Fixed(LengthPercentage::Length(v)));
+        return Some(MinTrackSizingFunction::length(v));
     }
     if let Some(p) = s.strip_suffix('%') {
         let v: f32 = p.parse().ok()?;
-        return Some(MinTrackSizingFunction::Fixed(LengthPercentage::Percent(v / 100.0)));
+        return Some(MinTrackSizingFunction::percent(v / 100.0));
     }
     match s {
         "min-content" => Some(MinTrackSizingFunction::MIN_CONTENT),
@@ -529,15 +583,15 @@ fn parse_max_track(s: &str) -> Option<MaxTrackSizingFunction> {
     let s = s.trim();
     if let Some(n) = s.strip_suffix("fr") {
         let flex: f32 = n.parse().ok()?;
-        return Some(MaxTrackSizingFunction::from_flex(flex));
+        return Some(MaxTrackSizingFunction::from_fr(flex));
     }
     if let Some(n) = s.strip_suffix("px") {
         let v: f32 = n.parse().ok()?;
-        return Some(MaxTrackSizingFunction::Fixed(LengthPercentage::Length(v)));
+        return Some(MaxTrackSizingFunction::length(v));
     }
     if let Some(p) = s.strip_suffix('%') {
         let v: f32 = p.parse().ok()?;
-        return Some(MaxTrackSizingFunction::Fixed(LengthPercentage::Percent(v / 100.0)));
+        return Some(MaxTrackSizingFunction::percent(v / 100.0));
     }
     match s {
         "min-content" => Some(MaxTrackSizingFunction::MIN_CONTENT),
@@ -548,14 +602,14 @@ fn parse_max_track(s: &str) -> Option<MaxTrackSizingFunction> {
 }
 
 /// Parse a `repeat(N, ...)` expression.
-fn parse_repeat(s: &str) -> Option<TrackSizingFunction> {
+fn parse_repeat(s: &str) -> Option<GridTemplateComponent<String>> {
     let inner = s.strip_prefix("repeat(")?.strip_suffix(')')?;
     let (count_str, rest) = inner.split_once(',')?;
     let count_str = count_str.trim();
-    let repetition = match count_str {
-        "auto-fill" => GridTrackRepetition::AutoFill,
-        "auto-fit"  => GridTrackRepetition::AutoFit,
-        _           => GridTrackRepetition::Count(count_str.parse().ok()?),
+    let count = match count_str {
+        "auto-fill" => RepetitionCount::AutoFill,
+        "auto-fit"  => RepetitionCount::AutoFit,
+        _           => RepetitionCount::Count(count_str.parse().ok()?),
     };
     let mut tracks = Vec::new();
     for tok in tokenize_template(rest) {
@@ -564,11 +618,11 @@ fn parse_repeat(s: &str) -> Option<TrackSizingFunction> {
         }
     }
     if tracks.is_empty() { return None; }
-    Some(TrackSizingFunction::Repeat(repetition, tracks))
+    Some(GridTemplateComponent::Repeat(GridTemplateRepetition { count, tracks, line_names: vec![] }))
 }
 
-/// Parse a `gridTemplateColumns` or `gridTemplateRows` string into `Vec<TrackSizingFunction>`.
-fn parse_grid_template_string(s: &str) -> Option<Vec<TrackSizingFunction>> {
+/// Parse a `gridTemplateColumns` or `gridTemplateRows` string into `Vec<GridTemplateComponent>`.
+fn parse_grid_template_string(s: &str) -> Option<Vec<GridTemplateComponent<String>>> {
     let mut result = Vec::new();
     for token in tokenize_template(s) {
         if token.starts_with("repeat(") {
@@ -577,12 +631,10 @@ fn parse_grid_template_string(s: &str) -> Option<Vec<TrackSizingFunction>> {
             }
         } else if token.starts_with("minmax(") {
             if let Some(t) = parse_minmax(&token) {
-                result.push(TrackSizingFunction::Single(t));
+                result.push(GridTemplateComponent::Single(t));
             }
-        } else {
-            if let Some(t) = parse_non_repeated_track(&token) {
-                result.push(TrackSizingFunction::Single(t));
-            }
+        } else if let Some(t) = parse_non_repeated_track(&token) {
+            result.push(GridTemplateComponent::Single(t));
         }
     }
     if result.is_empty() { None } else { Some(result) }

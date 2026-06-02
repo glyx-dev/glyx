@@ -8,6 +8,7 @@
 // Only `supportsMutation: true` is enabled — no persistence, no hydration.
 
 import { DefaultEventPriority } from 'react-reconciler/constants';
+import { registerSolid, setNodeParent, removeNodeFromTree } from './events.js';
 
 // ── Instance creation ─────────────────────────────────────────────────────────
 
@@ -21,6 +22,11 @@ function createInstance(type, props) {
   const nodeProps = { ...rest, ...style };
   if (veloxDraggable) nodeProps.draggable = true;
   const id = __velox_createNode(type, nodeProps);
+  // Every 'view' node is solid (click-opaque) by default.  Nodes with
+  // pointerEvents:'none' are still registered but excluded at lookup time.
+  if (type === 'view') {
+    registerSolid(id);
+  }
   // Fire the mount callback immediately so the component can register its ID
   // before any useEffect / useLayoutEffect runs.
   if (typeof _veloxOnMount === 'function') {
@@ -43,6 +49,7 @@ function createTextInstance(text) {
 function appendInitialChild(parentInstance, child) {
   if (child.id !== -1) {
     __velox_appendChild(parentInstance.id, child.id);
+    setNodeParent(child.id, parentInstance.id);
   }
 }
 
@@ -51,6 +58,7 @@ function appendInitialChild(parentInstance, child) {
 function appendChild(parentInstance, child) {
   if (child.id !== -1) {
     __velox_appendChild(parentInstance.id, child.id);
+    setNodeParent(child.id, parentInstance.id);
   }
 }
 
@@ -67,6 +75,7 @@ function insertBefore(parentInstance, child, _beforeChild) {
   // For now, treat as a regular append.
   if (child.id !== -1) {
     __velox_appendChild(parentInstance.id, child.id);
+    setNodeParent(child.id, parentInstance.id);
   }
 }
 
@@ -98,6 +107,7 @@ function clearContainer(_container) {
 function detachDeletedInstance(instance) {
   if (instance.id !== -1) {
     __velox_removeNode(instance.id);
+    removeNodeFromTree(instance.id);
   }
 }
 

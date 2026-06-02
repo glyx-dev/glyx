@@ -15,11 +15,12 @@ use thiserror::Error;
 use velox_gpu::GpuContext;
 use vello::{
     kurbo::{Affine, Circle, Line, Point, RoundedRect, Stroke},
-    peniko::{Brush, Color, Fill, Image},
-    AaConfig, Renderer, RendererOptions, Scene,
+    peniko::{Brush, Color, Fill, ImageData},
+    AaConfig, Renderer, RendererOptions,
 };
 pub use vello::kurbo;
 pub use vello::peniko;
+pub use vello::Scene;
 
 #[derive(Debug, Error)]
 pub enum RendererError {
@@ -31,119 +32,12 @@ pub enum RendererError {
 
 pub mod colors {
     use vello::peniko::Color;
-    pub const BRAND_GREEN:  Color = Color::rgba8(0x00, 0xA8, 0x78, 0xFF);
-    pub const BACKGROUND:   Color = Color::rgba8(0x14, 0x14, 0x1A, 0xFF);
-    pub const TEXT_PRIMARY: Color = Color::rgba8(0xF0, 0xF0, 0xF2, 0xFF);
-    pub const TEXT_MUTED:   Color = Color::rgba8(0x88, 0x88, 0x99, 0xFF);
+    pub const BRAND_GREEN:  Color = Color::from_rgba8(0x00, 0xA8, 0x78, 0xFF);
+    pub const BACKGROUND:   Color = Color::from_rgba8(0x14, 0x14, 0x1A, 0xFF);
+    pub const TEXT_PRIMARY: Color = Color::from_rgba8(0xF0, 0xF0, 0xF2, 0xFF);
+    pub const TEXT_MUTED:   Color = Color::from_rgba8(0x88, 0x88, 0x99, 0xFF);
 }
 
-// ── Blit pipeline ─────────────────────────────────────────────────────────────
-
-struct BlitPipeline {
-    pipeline:    wgpu::RenderPipeline,
-    bind_layout: wgpu::BindGroupLayout,
-    sampler:     wgpu::Sampler,
-}
-
-impl BlitPipeline {
-    fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label:  Some("blit"),
-            source: wgpu::ShaderSource::Wgsl(r#"
-@group(0) @binding(0) var t: texture_2d<f32>;
-@group(0) @binding(1) var s: sampler;
-struct Vert { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> Vert {
-    var pos = array<vec2<f32>,3>(vec2(-1.0,-1.0),vec2(3.0,-1.0),vec2(-1.0,3.0));
-    var uv  = array<vec2<f32>,3>(vec2(0.0,1.0),vec2(2.0,1.0),vec2(0.0,-1.0));
-    var o: Vert; o.pos = vec4(pos[vi],0.0,1.0); o.uv = uv[vi]; return o;
-}
-@fragment fn fs(v: Vert) -> @location(0) vec4<f32> { return textureSample(t,s,v.uv); }
-"#.into()),
-        });
-
-        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label:   Some("blit-bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type:    wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled:   false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("blit-layout"), bind_group_layouts: &[&bind_layout],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label:  Some("blit-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader, entry_point: "vs", buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader, entry_point: "fs",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format, blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive:     wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample:   wgpu::MultisampleState::default(),
-            multiview:     None,
-            cache:         None,
-        });
-
-        // Nearest preserves crispness during blit.
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("blit-sampler"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-
-        Self { pipeline, bind_layout, sampler }
-    }
-
-    fn blit(&self, device: &wgpu::Device, queue: &wgpu::Queue,
-            bind_group: &wgpu::BindGroup, dst: &wgpu::TextureView) {
-        let mut enc = device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("blit-enc") });
-        {
-            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("blit-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: dst, resolve_target: None,
-                    ops: wgpu::Operations {
-                        load:  wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                ..Default::default()
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        queue.submit([enc.finish()]);
-    }
-}
 
 // ── Render target ─────────────────────────────────────────────────────────────
 
@@ -182,14 +76,13 @@ impl RenderTarget {
 // ── VeloxRenderer ─────────────────────────────────────────────────────────────
 
 pub struct VeloxRenderer {
-    renderer:        Renderer,
-    blit:            BlitPipeline,
-    target:          RenderTarget,
+    renderer: Renderer,
+    /// wgpu 29 built-in blit helper — replaces the hand-rolled BlitPipeline.
+    blit:     wgpu::util::TextureBlitter,
+    target:   RenderTarget,
     /// Swapped into FrameBuilder each frame and back on render_frame.
     /// Kept here so its Vec allocations survive across frames.
-    scene:           Scene,
-    /// Cached blit bind group — rebuilt only on window resize.
-    blit_bind_group: Option<wgpu::BindGroup>,
+    scene:    Scene,
     /// Window background color — clears the surface each frame.
     /// Set from `window.background` in velox.config.json; defaults to
     /// the Velox dark background so the window is never a blank white flash.
@@ -206,16 +99,16 @@ impl VeloxRenderer {
         }
 
         let renderer = Renderer::new(&gpu.device, RendererOptions {
-            surface_format:       None,
             use_cpu,
             antialiasing_support: vello::AaSupport::area_only(),
             num_init_threads:     std::num::NonZeroUsize::new(1),
+            pipeline_cache:       None,
         }).map_err(|e| RendererError::Init(e.to_string()))?;
 
-        let blit   = BlitPipeline::new(&gpu.device, gpu.surface_format());
+        let blit   = wgpu::util::TextureBlitter::new(&gpu.device, gpu.surface_format());
         let target = RenderTarget::new(&gpu.device, gpu.width().max(1), gpu.height().max(1));
 
-        Ok(Self { renderer, blit, target, scene: Scene::new(), blit_bind_group: None, background_color: colors::BACKGROUND })
+        Ok(Self { renderer, blit, target, scene: Scene::new(), background_color: colors::BACKGROUND })
     }
 
     /// Start a new frame.
@@ -247,7 +140,6 @@ impl VeloxRenderer {
 
         if self.target.needs_resize(w, h) {
             self.target = RenderTarget::new(&gpu.device, w, h);
-            self.blit_bind_group = None;
         }
 
         self.renderer.render_to_texture(
@@ -260,25 +152,11 @@ impl VeloxRenderer {
             },
         ).map_err(|e| RendererError::Render(e.to_string()))?;
 
-        let bind_group = self.blit_bind_group.get_or_insert_with(|| {
-            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label:   Some("blit-bg"),
-                layout:  &self.blit.bind_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding:  0,
-                        resource: wgpu::BindingResource::TextureView(&self.target.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding:  1,
-                        resource: wgpu::BindingResource::Sampler(&self.blit.sampler),
-                    },
-                ],
-            })
-        });
-
         let surface_view = texture.texture.create_view(&Default::default());
-        self.blit.blit(&gpu.device, &gpu.queue, bind_group, &surface_view);
+        let mut enc = gpu.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("blit") });
+        self.blit.copy(&gpu.device, &mut enc, &self.target.view, &surface_view);
+        gpu.queue.submit([enc.finish()]);
 
         Ok(())
     }
@@ -336,9 +214,11 @@ impl FrameBuilder {
                 let parley::layout::PositionedLayoutItem::GlyphRun(gr) = item else {
                     continue;
                 };
-                let run      = gr.run();
-                let font     = run.font().clone();
-                let size     = run.font_size();
+                let run  = gr.run();
+                // vello 0.9 and parley 0.10 both use FontData from
+                // linebender_resource_handle — pass directly, no bridge needed.
+                let font = run.font();
+                let size = run.font_size();
                 let baseline = gr.baseline() as f64;
                 let run_off  = gr.offset()   as f64;
 
@@ -346,8 +226,9 @@ impl FrameBuilder {
                     vello::kurbo::Vec2::new(x + run_off, y + baseline)
                 );
 
+                // parley 0.8+ uses Y-down convention (same as vello) — no negation needed.
                 let mut glyphs: Vec<(vello::Glyph, f32)> = gr.glyphs()
-                    .map(|g| (vello::Glyph { id: g.id as u32, x: g.x, y: -g.y }, g.advance))
+                    .map(|g| (vello::Glyph { id: g.id as u32, x: g.x, y: g.y }, g.advance))
                     .collect();
 
                 if glyphs.is_empty() { continue; }
@@ -379,7 +260,7 @@ impl FrameBuilder {
         }
     }
 
-    pub fn draw_image(&mut self, image: &Image, x: f64, y: f64, w: f64, h: f64) {
+    pub fn draw_image(&mut self, image: &ImageData, x: f64, y: f64, w: f64, h: f64) {
         if image.width == 0 || image.height == 0 {
             return;
         }
@@ -389,8 +270,19 @@ impl FrameBuilder {
         self.draw_image_with_transform(image, transform);
     }
 
-    pub fn draw_image_with_transform(&mut self, image: &Image, transform: Affine) {
+    pub fn draw_image_with_transform(&mut self, image: &ImageData, transform: Affine) {
         self.scene.draw_image(image, transform);
+    }
+
+    /// Borrow the inner scene mutably — used for advanced operations like
+    /// sub-scene rendering with a transform.
+    pub fn scene_mut(&mut self) -> &mut Scene {
+        &mut self.scene
+    }
+
+    /// Swap out the inner scene for a new one and return the old one.
+    pub fn replace_scene(&mut self, new: Scene) -> Scene {
+        std::mem::replace(&mut self.scene, new)
     }
 
     /// Push a rectangular clip layer.  All drawing until the matching
@@ -399,6 +291,7 @@ impl FrameBuilder {
         use vello::kurbo::Rect;
         let rect = Rect::new(x, y, x + w, y + h);
         self.scene.push_layer(
+            Fill::NonZero,
             vello::peniko::Mix::Normal,
             1.0,
             Affine::IDENTITY,
@@ -409,6 +302,7 @@ impl FrameBuilder {
     pub fn push_rounded_layer(&mut self, x: f64, y: f64, w: f64, h: f64, radius: f64) {
         let rect = RoundedRect::new(x, y, x + w, y + h, radius);
         self.scene.push_layer(
+            Fill::NonZero,
             vello::peniko::Mix::Normal,
             1.0,
             Affine::IDENTITY,
@@ -421,6 +315,7 @@ impl FrameBuilder {
         use vello::kurbo::Rect;
         let rect = Rect::new(x, y, x + w, y + h);
         self.scene.push_layer(
+            Fill::NonZero,
             vello::peniko::Mix::Normal,
             alpha,
             Affine::IDENTITY,

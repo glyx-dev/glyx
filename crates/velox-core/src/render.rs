@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) struct RenderCtx<'a> {
     pub nodes: &'a std::collections::HashMap<u32, JsNode>,
-    pub images: &'a std::collections::HashMap<u32, peniko::Image>,
+    pub images: &'a std::collections::HashMap<u32, peniko::ImageData>,
     pub resolved: &'a [(NodeId, ResolvedLayout)],
     pub frame: &'a mut FrameBuilder,
     pub text_sys: &'a mut TextSystem,
@@ -58,6 +58,39 @@ fn parse_gradient(s: &str) -> Option<(peniko::Color, peniko::Color)> {
     Some((rgba_to_vello(c1), rgba_to_vello(c2)))
 }
 
+/// Parse a transform string into a kurbo Affine.
+/// Supports `"translate(x, y)"`, `"rotate(deg)"`, `"scale(sx, sy)"` / `"scale(s)"`,
+/// and chaining: `"translate(10,20) rotate(45)"`.
+fn parse_transform(s: &str) -> Option<peniko::kurbo::Affine> {
+    use peniko::kurbo::Affine;
+    let mut result = Affine::IDENTITY;
+    let mut remaining = s.trim();
+    while !remaining.is_empty() {
+        let open = remaining.find('(')?;
+        let close = remaining[open..].find(')')?;
+        let func = &remaining[..open].trim().to_lowercase();
+        let args_str = &remaining[open + 1..open + close];
+        let args: Vec<f64> = args_str.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        let t = match func.as_str() {
+            "translate" if args.len() >= 1 => {
+                Some(Affine::translate((args[0], args.get(1).copied().unwrap_or(0.0))))
+            }
+            "rotate" if args.len() >= 1 => {
+                Some(Affine::rotate(args[0].to_radians()))
+            }
+            "scale" if args.len() >= 1 => {
+                let sx = args[0];
+                let sy = args.get(1).copied().unwrap_or(sx);
+                Some(Affine::scale_non_uniform(sx, sy))
+            }
+            _ => None,
+        }?;
+        result = t * result;
+        remaining = remaining[open + close + 1..].trim();
+    }
+    Some(result)
+}
+
 pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut RenderCtx<'_>) {
     let Some(node)      = ctx.nodes.get(&id)                                        else { return };
     // Hidden nodes and their entire subtree are invisible — skip rendering.
@@ -71,6 +104,23 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     let rh = rl.height as f64;
 
     let child_opacity = opacity * node.props.opacity.unwrap_or(1.0);
+
+    // ── Transform handling ───────────────────────────────────────────────
+    // If the node has a transform, render node + children into a temporary
+    // scene, then append it to the main scene with the computed Affine.
+    let node_transform = node.props.transform.as_deref().and_then(parse_transform);
+    let mut _transform_sub: Option<(Scene, peniko::kurbo::Affine)> = None;
+    if let Some(affine) = node_transform {
+        // Center the transform on the element's bounding box
+        // (equivalent to CSS transform-origin: center center)
+        let cx = rx + rw / 2.0;
+        let cy = ry + rh / 2.0;
+        let centered = peniko::kurbo::Affine::translate((cx, cy))
+            * affine
+            * peniko::kurbo::Affine::translate((-cx, -cy));
+        let parent = ctx.frame.replace_scene(Scene::new());
+        _transform_sub = Some((parent, centered));
+    }
 
     match node.node_type {
         NodeType::View => {
@@ -94,8 +144,8 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                         velox_renderer::peniko::kurbo::Point::new(rx, ry + rh),
                     )
                     .with_stops([
-                        peniko::ColorStop { offset: 0.0, color: apply_opacity(c1, child_opacity) },
-                        peniko::ColorStop { offset: 1.0, color: apply_opacity(c2, child_opacity) },
+                        (0.0_f32, apply_opacity(c1, child_opacity)),
+                        (1.0_f32, apply_opacity(c2, child_opacity)),
                     ]);
                     let brush = peniko::Brush::Gradient(gradient);
                     ctx.frame.fill_rounded_rect_with_brush(rx, ry, rw, rh, radius, &brush);
@@ -113,26 +163,29 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             let overflows = matches!(node.props.overflow.as_deref(), Some("hidden" | "scroll"));
             let is_clip = node.props.clip.unwrap_or(false) || overflows;
 
+            // Compute max child bottom once — needed for both scroll clamping and scrollbar drawing.
+            let max_child_bottom: f64 = if is_clip {
+                node.children.iter()
+                    .filter_map(|&cid| {
+                        let cn   = ctx.nodes.get(&cid)?;
+                        let clid = cn.layout_id?;
+                        ctx.resolved.iter()
+                            .find(|(nid, _)| *nid == clid)
+                            .map(|(_, crl)| (crl.y + crl.height) as f64)
+                    })
+                    .fold(f64::NEG_INFINITY, f64::max)
+            } else {
+                f64::NEG_INFINITY
+            };
+
             let child_scroll_y = {
                 let raw = scroll_y + node.props.scroll_offset_y.unwrap_or(0.0) as f64;
-                if is_clip {
-                    let max_child_bottom = node.children.iter()
-                        .filter_map(|&cid| {
-                            let cn   = ctx.nodes.get(&cid)?;
-                            let clid = cn.layout_id?;
-                            ctx.resolved.iter()
-                                .find(|(nid, _)| *nid == clid)
-                                .map(|(_, crl)| (crl.y + crl.height) as f64)
-                        })
-                        .fold(f64::NEG_INFINITY, f64::max);
-
-                    if max_child_bottom.is_finite() {
-                        let pad   = match node.props.padding { Some(LengthValue::Px(px)) => px as f64, _ => 0.0 };
-                        let max_s = (max_child_bottom + pad - (rl.y as f64 + rh)).max(0.0);
-                        raw.min(max_s).max(0.0)
-                    } else {
-                        raw.max(0.0)
-                    }
+                if is_clip && max_child_bottom.is_finite() {
+                    let pad   = match node.props.padding { Some(LengthValue::Px(px)) => px as f64, _ => 0.0 };
+                    let max_s = (max_child_bottom + pad - (rl.y as f64 + rh)).max(0.0);
+                    raw.min(max_s).max(0.0)
+                } else if is_clip {
+                    raw.max(0.0)
                 } else {
                     raw
                 }
@@ -149,6 +202,18 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             });
             for child_id in children {
                 render_subtree(child_id, child_scroll_y, child_opacity, ctx);
+            }
+
+            // ── Scrollbar (drawn on top of children, inside clip) ────────
+            if is_clip && node.props.show_scrollbar.unwrap_or(true) && max_child_bottom.is_finite() {
+                let bar_w = node.props.scrollbar_width.unwrap_or(8.0) as f64;
+                let bar_color = node.props.scrollbar_color.as_deref()
+                    .map(parse_scrollbar_color)
+                    .unwrap_or_else(|| peniko::Color::from_rgba8(140, 140, 170, 153));
+                // Both rl.y and max_child_bottom are window-absolute. Content height is
+                // the distance from this node's top to the furthest child bottom.
+                let content_height = max_child_bottom - rl.y as f64;
+                draw_scrollbar(rx, ry, rw, rh, child_scroll_y, content_height, bar_w, bar_color, ctx.frame);
             }
 
             if is_clip {
@@ -262,7 +327,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                     if x1 > x0 {
                         ctx.frame.fill_rounded_rect(
                             tx + x0, cur_top, x1 - x0, cur_height, 0.0,
-                            apply_opacity(peniko::Color::rgba8(100, 120, 255, 120), child_opacity),
+                            apply_opacity(peniko::Color::from_rgba8(100, 120, 255, 120), child_opacity),
                         );
                     }
                 }
@@ -341,7 +406,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                     } else {
                         // No frame yet — draw a placeholder background.
                         ctx.frame.fill_rect(rx, ry, rw, rh,
-                            apply_opacity(peniko::Color::rgba8(0, 0, 0, 255), child_opacity));
+                            apply_opacity(peniko::Color::from_rgba8(0, 0, 0, 255), child_opacity));
                     }
                 }
             }
@@ -363,11 +428,17 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                     } else {
                         // No frame yet — draw a black placeholder.
                         ctx.frame.fill_rect(rx, ry, rw, rh,
-                            apply_opacity(peniko::Color::rgba8(0, 0, 0, 255), child_opacity));
+                            apply_opacity(peniko::Color::from_rgba8(0, 0, 0, 255), child_opacity));
                     }
                 }
             }
         }
+    }
+
+    // ── Restore transform (append sub-scene with Affine) ────────────────
+    if let Some((parent, affine)) = _transform_sub.take() {
+        let sub = ctx.frame.replace_scene(parent);
+        ctx.frame.append_scene(&sub, Some(affine));
     }
 }
 
@@ -397,5 +468,64 @@ fn draw_canvas_cmd(frame: &mut FrameBuilder, cmd: &CanvasCmd, ox: f64, oy: f64) 
             // Full Parley shaping requires a mutable TextSystem not available here.
             frame.fill_rect(ox + *x as f64, oy + *y as f64, *font_size as f64 * text.len() as f64 * 0.6, *font_size as f64 * 1.2, rgba_to_vello(*color));
         }
+    }
+}
+
+/// Compute the scrollbar thumb rectangle for a node.
+/// Returns `Some((thumb_x, thumb_y, thumb_width, thumb_height))` when content
+/// overflows the viewport; returns `None` when no scrollbar is needed.
+pub(crate) fn compute_scrollbar_thumb(
+    // Node's visual rect (x, y, w, h) in window coordinates.
+    rx: f64, ry: f64, rw: f64, rh: f64,
+    // Current scroll offset in logical pixels.
+    scroll_y: f64,
+    // Total content height (max_child_bottom - node's unshifted y).
+    content_height: f64,
+    // Width of the scrollbar in logical pixels.
+    bar_width: f64,
+) -> Option<(f64, f64, f64, f64)> {
+    let viewport_height = rh;
+    if content_height <= viewport_height {
+        return None;
+    }
+    let track_x = rx + rw - bar_width;
+    let track_y = ry;
+    let track_h = rh;
+    let thumb_ratio = viewport_height / content_height;
+    let thumb_h = (track_h * thumb_ratio).clamp(bar_width * 0.6, track_h);
+    let scroll_range = content_height - viewport_height;
+    let pos_ratio = (scroll_y / scroll_range).clamp(0.0, 1.0);
+    let thumb_y = track_y + (track_h - thumb_h) * pos_ratio;
+    Some((track_x, thumb_y, bar_width, thumb_h))
+}
+
+/// Draw a vertical scrollbar for a clipped node.
+fn draw_scrollbar(
+    rx: f64, ry: f64, rw: f64, rh: f64,
+    scroll_y: f64,
+    content_height: f64,
+    bar_width: f64,
+    bar_color: peniko::Color,
+    frame: &mut FrameBuilder,
+) {
+    let Some((tx, ty, tw, th)) = compute_scrollbar_thumb(rx, ry, rw, rh, scroll_y, content_height, bar_width)
+    else { return };
+
+    // Track background
+    let track_color = bar_color.multiply_alpha(0.3);
+    frame.fill_rounded_rect(tx, ty, tw, rh, bar_width * 0.5, track_color);
+
+    // Thumb
+    frame.fill_rounded_rect(tx, ty, tw, th, bar_width * 0.5, bar_color);
+}
+
+/// Parse an RGBA/hex colour string from JS into a peniko::Color.
+/// Supports `"#RGB"`, `"#RRGGBB"`, `"#RRGGBBAA"`.
+/// Falls back to a semi-transparent grey on parse failure.
+fn parse_scrollbar_color(s: &str) -> peniko::Color {
+    if let Some(rgba) = hex_color(s) {
+        rgba_to_vello(rgba)
+    } else {
+        peniko::Color::from_rgba8(140, 140, 170, 153) // default: semi-transparent grey-blue
     }
 }

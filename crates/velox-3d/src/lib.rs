@@ -403,17 +403,18 @@ impl Renderer3D {
 
         let pipeline_3d = {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("3d-pl"), push_constant_ranges: &[],
-                bind_group_layouts: &[&camera_bgl, &per_obj_bgl, &lighting_bgl],
+                label: Some("3d-pl"),
+                bind_group_layouts: &[Some(&camera_bgl), Some(&per_obj_bgl), Some(&lighting_bgl)],
+                ..Default::default()
             });
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("3d-pipe"), layout: Some(&layout),
                 vertex: wgpu::VertexState {
-                    module: &sm3d, entry_point: "vs", buffers: &[vbl],
+                    module: &sm3d, entry_point: Some("vs"), buffers: &[vbl],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &sm3d, entry_point: "fs",
+                    module: &sm3d, entry_point: Some("fs"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8Unorm,
                         blend: None, write_mask: wgpu::ColorWrites::ALL,
@@ -428,28 +429,29 @@ impl Renderer3D {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format:              wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    depth_compare:       wgpu::CompareFunction::Less,
+                    depth_write_enabled: Some(true),
+                    depth_compare:       Some(wgpu::CompareFunction::Less),
                     stencil: Default::default(), bias: Default::default(),
                 }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview:   None, cache: None,
+                multisample:   wgpu::MultisampleState::default(),
+                multiview_mask: None, cache: None,
             })
         };
 
         let overlay_pipeline = {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("ov-pl"), push_constant_ranges: &[],
-                bind_group_layouts: &[&overlay_bgl],
+                label: Some("ov-pl"),
+                bind_group_layouts: &[Some(&overlay_bgl)],
+                ..Default::default()
             });
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("ov-pipe"), layout: Some(&layout),
                 vertex: wgpu::VertexState {
-                    module: &smov, entry_point: "vs", buffers: &[],
+                    module: &smov, entry_point: Some("vs"), buffers: &[],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &smov, entry_point: "fs",
+                    module: &smov, entry_point: Some("fs"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: surface_format,
                         blend:  Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -457,13 +459,13 @@ impl Renderer3D {
                     })],
                     compilation_options: Default::default(),
                 }),
-                primitive:     wgpu::PrimitiveState {
+                primitive:    wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleStrip,
                     ..Default::default()
                 },
                 depth_stencil: None,
                 multisample:   wgpu::MultisampleState::default(),
-                multiview:     None, cache: None,
+                multiview_mask: None, cache: None,
             })
         };
 
@@ -624,7 +626,7 @@ impl Renderer3D {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("3d-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.color_view, resolve_target: None,
+                    view: &target.color_view, resolve_target: None, depth_slice: None,
                     ops: wgpu::Operations {
                         load:  wgpu::LoadOp::Clear(wgpu::Color { r: bg[0] as f64, g: bg[1] as f64, b: bg[2] as f64, a: bg[3] as f64 }),
                         store: wgpu::StoreOp::Store,
@@ -654,7 +656,7 @@ impl Renderer3D {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ov-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: surface_view, resolve_target: None,
+                    view: surface_view, resolve_target: None, depth_slice: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: None, ..Default::default()

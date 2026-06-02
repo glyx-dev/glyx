@@ -5852,12 +5852,280 @@ No matching component was found for:
 
   // ../../js/packages/@velox/react/src/hostConfig.js
   var import_constants = __toESM(require_constants(), 1);
+
+  // ../../js/packages/@velox/react/src/events.js
+  var pressableRegistry = new Map;
+  var inputRegistry = new Map;
+  var scrollRegistry = new Map;
+  var dragRegistry = new Map;
+  var disabledRegistry = new Map;
+  var pointerEventsNoneRegistry = new Set;
+  var solidRegistry = [];
+  var parentMap = new Map;
+  var activeDragId = null;
+  var windowSizeListeners = [];
+  var keyListeners = [];
+  var globalClickListeners = [];
+  var focusedNodeId = null;
+  var hoveredPressableId = null;
+  var ctrlHeld = false;
+  var shiftHeld = false;
+  var cursorX = 0;
+  var cursorY = 0;
+  function registerPressable(nodeId, handlers) {
+    pressableRegistry.set(nodeId, handlers);
+  }
+  function unregisterPressable(nodeId) {
+    pressableRegistry.delete(nodeId);
+  }
+  function registerScrollView(nodeId, handlers) {
+    scrollRegistry.set(nodeId, handlers);
+  }
+  function unregisterScrollView(nodeId) {
+    scrollRegistry.delete(nodeId);
+  }
+  function registerDisabledNode(nodeId, disabled) {
+    if (disabled) {
+      disabledRegistry.set(nodeId, true);
+    } else {
+      disabledRegistry.delete(nodeId);
+    }
+  }
+  function unregisterDisabledNode(nodeId) {
+    disabledRegistry.delete(nodeId);
+  }
+  function registerSolid(nodeId) {
+    solidRegistry.push(nodeId);
+  }
+  function unregisterSolid(nodeId) {
+    const i = solidRegistry.indexOf(nodeId);
+    if (i !== -1)
+      solidRegistry.splice(i, 1);
+  }
+  function setNodeParent(childId, parentId) {
+    parentMap.set(childId, parentId);
+  }
+  function removeNodeFromTree(nodeId) {
+    parentMap.delete(nodeId);
+    unregisterSolid(nodeId);
+  }
+  function addWindowSizeListener(fn) {
+    windowSizeListeners.push(fn);
+  }
+  function removeWindowSizeListener(fn) {
+    const idx = windowSizeListeners.indexOf(fn);
+    if (idx >= 0)
+      windowSizeListeners.splice(idx, 1);
+  }
+  function addKeyListener(fn) {
+    keyListeners.push(fn);
+  }
+  function setFocus(nodeId) {
+    if (focusedNodeId !== nodeId) {
+      if (focusedNodeId !== null) {
+        const prev = inputRegistry.get(focusedNodeId);
+        prev?.onBlur?.();
+      }
+      focusedNodeId = nodeId;
+      const handlers = inputRegistry.get(nodeId);
+      handlers?.onFocus?.();
+    }
+  }
+  function hitTest(nodeId, px, py) {
+    if (pointerEventsNoneRegistry.has(nodeId))
+      return false;
+    const layout = __velox_getLayout(nodeId);
+    if (!layout)
+      return false;
+    return px >= layout.x && px < layout.x + layout.width && py >= layout.y && py < layout.y + layout.height;
+  }
+  function isDisabled(nodeId) {
+    return disabledRegistry.has(nodeId);
+  }
+  function isAncestorOf(ancestorId, descendantId) {
+    let id = parentMap.get(descendantId);
+    while (id !== undefined) {
+      if (id === ancestorId)
+        return true;
+      id = parentMap.get(id);
+    }
+    return false;
+  }
+  function findTopmostSolid(x, y) {
+    const covering = [];
+    for (const id of solidRegistry) {
+      if (hitTest(id, x, y))
+        covering.push(id);
+    }
+    if (covering.length === 0)
+      return null;
+    if (covering.length === 1)
+      return covering[0];
+    const deepest = covering.filter((id) => !covering.some((other) => other !== id && isAncestorOf(id, other)));
+    if (deepest.length === 1)
+      return deepest[0];
+    let bestId = deepest[0];
+    let bestIdx = solidRegistry.lastIndexOf(deepest[0]);
+    for (let i = 1;i < deepest.length; i++) {
+      const idx = solidRegistry.lastIndexOf(deepest[i]);
+      if (idx > bestIdx) {
+        bestIdx = idx;
+        bestId = deepest[i];
+      }
+    }
+    return bestId;
+  }
+  function dispatchEvents() {
+    const events = __velox_pollEvents();
+    if (!events || events.length === 0)
+      return;
+    let cursorMovedThisFrame = false;
+    for (const ev of events) {
+      switch (ev.type) {
+        case "mouseButton": {
+          if (!ev.pressed)
+            break;
+          if (globalClickListeners.length > 0) {
+            const gev = { x: ev.x, y: ev.y };
+            for (const fn of globalClickListeners)
+              try {
+                fn(gev);
+              } catch {}
+          }
+          const topmostId = findTopmostSolid(ev.x, ev.y);
+          if (topmostId !== null) {
+            const ph = pressableRegistry.get(topmostId);
+            if (ph && !isDisabled(topmostId)) {
+              const layout = __velox_getLayout(topmostId);
+              ph.onPress?.({
+                x: ev.x,
+                y: ev.y,
+                locationX: layout ? ev.x - layout.x : 0,
+                locationY: layout ? ev.y - layout.y : 0
+              });
+            }
+            const ih = inputRegistry.get(topmostId);
+            if (ih && !isDisabled(topmostId)) {
+              setFocus(topmostId);
+              const layout = __velox_getLayout(topmostId);
+              if (layout)
+                ih.onClickAt?.(ev.x - layout.x, ev.y - layout.y);
+            }
+          }
+          if (focusedNodeId !== null && focusedNodeId !== topmostId) {
+            inputRegistry.get(focusedNodeId)?.onBlur?.();
+            focusedNodeId = null;
+          }
+          break;
+        }
+        case "keyInput": {
+          if (ev.key === "ControlLeft" || ev.key === "ControlRight") {
+            ctrlHeld = ev.pressed;
+            break;
+          }
+          if (ev.key === "ShiftLeft" || ev.key === "ShiftRight") {
+            shiftHeld = ev.pressed;
+            break;
+          }
+          if (keyListeners.length > 0) {
+            const kev = { key: ev.key, ctrl: ctrlHeld, shift: shiftHeld, pressed: ev.pressed };
+            for (const fn of keyListeners)
+              try {
+                fn(kev);
+              } catch {}
+          }
+          if (!ev.pressed || focusedNodeId === null)
+            break;
+          const handlers = inputRegistry.get(focusedNodeId);
+          if (!handlers)
+            break;
+          handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld });
+          break;
+        }
+        case "cursorMoved": {
+          cursorX = ev.x;
+          cursorY = ev.y;
+          cursorMovedThisFrame = true;
+          break;
+        }
+        case "scroll": {
+          for (const [nodeId, handlers] of [...scrollRegistry].reverse()) {
+            if (hitTest(nodeId, cursorX, cursorY)) {
+              if (isDisabled(nodeId))
+                break;
+              handlers.onScroll?.(ev.deltaY);
+              break;
+            }
+          }
+          break;
+        }
+        case "scrollbarDrag": {
+          const handlers = scrollRegistry.get(ev.nodeId);
+          handlers?.onAbsoluteScroll?.(ev.scrollY);
+          break;
+        }
+        case "resize": {
+          const size = { width: ev.width, height: ev.height };
+          for (const fn of windowSizeListeners)
+            fn(size);
+          break;
+        }
+        case "dragStart": {
+          for (const [nodeId, handlers] of dragRegistry) {
+            if (hitTest(nodeId, ev.x, ev.y)) {
+              if (isDisabled(nodeId))
+                break;
+              activeDragId = nodeId;
+              handlers.onDragStart?.({ x: ev.x, y: ev.y });
+              break;
+            }
+          }
+          break;
+        }
+        case "dragMove": {
+          if (activeDragId !== null) {
+            const handlers = dragRegistry.get(activeDragId);
+            handlers?.onDragMove?.({ x: ev.x, y: ev.y, dx: ev.dx, dy: ev.dy });
+          }
+          break;
+        }
+        case "dragEnd": {
+          if (activeDragId !== null) {
+            const handlers = dragRegistry.get(activeDragId);
+            handlers?.onDragEnd?.({ x: ev.x, y: ev.y });
+            activeDragId = null;
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
+    if (cursorMovedThisFrame) {
+      const topSolid = findTopmostSolid(cursorX, cursorY);
+      const newHoveredId = topSolid !== null && !isDisabled(topSolid) && pressableRegistry.has(topSolid) ? topSolid : null;
+      if (newHoveredId !== hoveredPressableId) {
+        if (hoveredPressableId !== null) {
+          pressableRegistry.get(hoveredPressableId)?.onHoverOut?.();
+        }
+        if (newHoveredId !== null) {
+          pressableRegistry.get(newHoveredId)?.onHoverIn?.();
+        }
+        hoveredPressableId = newHoveredId;
+      }
+    }
+  }
+
+  // ../../js/packages/@velox/react/src/hostConfig.js
   function createInstance(type, props) {
     const { children, style, ref: _ref, _veloxOnMount, veloxDraggable, ...rest } = props;
     const nodeProps = { ...rest, ...style };
     if (veloxDraggable)
       nodeProps.draggable = true;
     const id = __velox_createNode(type, nodeProps);
+    if (type === "view") {
+      registerSolid(id);
+    }
     if (typeof _veloxOnMount === "function") {
       _veloxOnMount(id);
     }
@@ -5870,11 +6138,13 @@ No matching component was found for:
   function appendInitialChild(parentInstance, child) {
     if (child.id !== -1) {
       __velox_appendChild(parentInstance.id, child.id);
+      setNodeParent(child.id, parentInstance.id);
     }
   }
   function appendChild(parentInstance, child) {
     if (child.id !== -1) {
       __velox_appendChild(parentInstance.id, child.id);
+      setNodeParent(child.id, parentInstance.id);
     }
   }
   function appendChildToContainer(_container, child) {
@@ -5885,6 +6155,7 @@ No matching component was found for:
   function insertBefore(parentInstance, child, _beforeChild) {
     if (child.id !== -1) {
       __velox_appendChild(parentInstance.id, child.id);
+      setNodeParent(child.id, parentInstance.id);
     }
   }
   function insertInContainerBefore(_container, child, _beforeChild) {
@@ -5906,6 +6177,7 @@ No matching component was found for:
   function detachDeletedInstance(instance) {
     if (instance.id !== -1) {
       __velox_removeNode(instance.id);
+      removeNodeFromTree(instance.id);
     }
   }
   function prepareUpdate(_instance, _type, _oldProps, newProps) {
@@ -5999,227 +6271,6 @@ No matching component was found for:
     getInstanceFromScope
   };
   var hostConfig_default = HostConfig;
-
-  // ../../js/packages/@velox/react/src/events.js
-  var pressableRegistry = new Map;
-  var inputRegistry = new Map;
-  var scrollRegistry = new Map;
-  var dragRegistry = new Map;
-  var disabledRegistry = new Map;
-  var pointerEventsNoneRegistry = new Set;
-  var activeDragId = null;
-  var windowSizeListeners = [];
-  var keyListeners = [];
-  var globalClickListeners = [];
-  var focusedNodeId = null;
-  var hoveredPressableId = null;
-  var ctrlHeld = false;
-  var shiftHeld = false;
-  var cursorX = 0;
-  var cursorY = 0;
-  function registerPressable(nodeId, handlers) {
-    pressableRegistry.set(nodeId, handlers);
-  }
-  function unregisterPressable(nodeId) {
-    pressableRegistry.delete(nodeId);
-  }
-  function registerDisabledNode(nodeId, disabled) {
-    if (disabled) {
-      disabledRegistry.set(nodeId, true);
-    } else {
-      disabledRegistry.delete(nodeId);
-    }
-  }
-  function unregisterDisabledNode(nodeId) {
-    disabledRegistry.delete(nodeId);
-  }
-  function addWindowSizeListener(fn) {
-    windowSizeListeners.push(fn);
-  }
-  function removeWindowSizeListener(fn) {
-    const idx = windowSizeListeners.indexOf(fn);
-    if (idx >= 0)
-      windowSizeListeners.splice(idx, 1);
-  }
-  function addKeyListener(fn) {
-    keyListeners.push(fn);
-  }
-  function setFocus(nodeId) {
-    if (focusedNodeId !== nodeId) {
-      if (focusedNodeId !== null) {
-        const prev = inputRegistry.get(focusedNodeId);
-        prev?.onBlur?.();
-      }
-      focusedNodeId = nodeId;
-      const handlers = inputRegistry.get(nodeId);
-      handlers?.onFocus?.();
-    }
-  }
-  function hitTest(nodeId, px, py) {
-    if (pointerEventsNoneRegistry.has(nodeId))
-      return false;
-    const layout = __velox_getLayout(nodeId);
-    if (!layout)
-      return false;
-    return px >= layout.x && px < layout.x + layout.width && py >= layout.y && py < layout.y + layout.height;
-  }
-  function isDisabled(nodeId) {
-    return disabledRegistry.has(nodeId);
-  }
-  function dispatchEvents() {
-    const events = __velox_pollEvents();
-    if (!events || events.length === 0)
-      return;
-    let cursorMovedThisFrame = false;
-    for (const ev of events) {
-      switch (ev.type) {
-        case "mouseButton": {
-          if (!ev.pressed)
-            break;
-          if (globalClickListeners.length > 0) {
-            const gev = { x: ev.x, y: ev.y };
-            for (const fn of globalClickListeners)
-              try {
-                fn(gev);
-              } catch {}
-          }
-          let handled = false;
-          for (const [nodeId, handlers] of pressableRegistry) {
-            if (hitTest(nodeId, ev.x, ev.y)) {
-              if (isDisabled(nodeId))
-                break;
-              const layout = __velox_getLayout(nodeId);
-              const pressEv = {
-                x: ev.x,
-                y: ev.y,
-                locationX: layout ? ev.x - layout.x : 0,
-                locationY: layout ? ev.y - layout.y : 0
-              };
-              handlers.onPress?.(pressEv);
-              handled = true;
-              break;
-            }
-          }
-          for (const [nodeId, handlers] of inputRegistry) {
-            if (hitTest(nodeId, ev.x, ev.y)) {
-              if (isDisabled(nodeId))
-                break;
-              setFocus(nodeId);
-              if (handlers.onClickAt) {
-                const layout = __velox_getLayout(nodeId);
-                if (layout)
-                  handlers.onClickAt(ev.x - layout.x, ev.y - layout.y);
-              }
-              handled = true;
-              break;
-            }
-          }
-          if (!handled && focusedNodeId !== null) {
-            const prev = inputRegistry.get(focusedNodeId);
-            prev?.onBlur?.();
-            focusedNodeId = null;
-          }
-          break;
-        }
-        case "keyInput": {
-          if (ev.key === "ControlLeft" || ev.key === "ControlRight") {
-            ctrlHeld = ev.pressed;
-            break;
-          }
-          if (ev.key === "ShiftLeft" || ev.key === "ShiftRight") {
-            shiftHeld = ev.pressed;
-            break;
-          }
-          if (keyListeners.length > 0) {
-            const kev = { key: ev.key, ctrl: ctrlHeld, shift: shiftHeld, pressed: ev.pressed };
-            for (const fn of keyListeners)
-              try {
-                fn(kev);
-              } catch {}
-          }
-          if (!ev.pressed || focusedNodeId === null)
-            break;
-          const handlers = inputRegistry.get(focusedNodeId);
-          if (!handlers)
-            break;
-          handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld });
-          break;
-        }
-        case "cursorMoved": {
-          cursorX = ev.x;
-          cursorY = ev.y;
-          cursorMovedThisFrame = true;
-          break;
-        }
-        case "scroll": {
-          for (const [nodeId, handlers] of scrollRegistry) {
-            if (hitTest(nodeId, cursorX, cursorY)) {
-              if (isDisabled(nodeId))
-                break;
-              handlers.onScroll?.(ev.deltaY);
-              break;
-            }
-          }
-          break;
-        }
-        case "resize": {
-          const size = { width: ev.width, height: ev.height };
-          for (const fn of windowSizeListeners)
-            fn(size);
-          break;
-        }
-        case "dragStart": {
-          for (const [nodeId, handlers] of dragRegistry) {
-            if (hitTest(nodeId, ev.x, ev.y)) {
-              if (isDisabled(nodeId))
-                break;
-              activeDragId = nodeId;
-              handlers.onDragStart?.({ x: ev.x, y: ev.y });
-              break;
-            }
-          }
-          break;
-        }
-        case "dragMove": {
-          if (activeDragId !== null) {
-            const handlers = dragRegistry.get(activeDragId);
-            handlers?.onDragMove?.({ x: ev.x, y: ev.y, dx: ev.dx, dy: ev.dy });
-          }
-          break;
-        }
-        case "dragEnd": {
-          if (activeDragId !== null) {
-            const handlers = dragRegistry.get(activeDragId);
-            handlers?.onDragEnd?.({ x: ev.x, y: ev.y });
-            activeDragId = null;
-          }
-          break;
-        }
-        default:
-          break;
-      }
-    }
-    if (cursorMovedThisFrame) {
-      let newHoveredId = null;
-      for (const [nodeId] of pressableRegistry) {
-        if (isDisabled(nodeId))
-          continue;
-        if (hitTest(nodeId, cursorX, cursorY)) {
-          newHoveredId = nodeId;
-          break;
-        }
-      }
-      if (newHoveredId !== hoveredPressableId) {
-        if (hoveredPressableId !== null) {
-          pressableRegistry.get(hoveredPressableId)?.onHoverOut?.();
-        }
-        if (newHoveredId !== null) {
-          pressableRegistry.get(newHoveredId)?.onHoverIn?.();
-        }
-        hoveredPressableId = newHoveredId;
-      }
-    }
-  }
 
   // ../../js/packages/@velox/react/src/index.js
   var VeloxReconciler = import_react_reconciler.default(hostConfig_default);
@@ -6519,6 +6570,58 @@ No matching component was found for:
     }, []);
     const mergedStyle = pressed ? { ...style, borderWidth: 2, borderColor: "#ffffffaa" } : hovered ? { ...style, borderWidth: 1, borderColor: "#ffffff55" } : style;
     return import_react.default.createElement("view", { _veloxOnMount: onMount, style: mergedStyle, ...props }, children);
+  }
+  function ScrollView({
+    children,
+    style,
+    width = 300,
+    height = 200,
+    contentHeight,
+    showScrollbar = true,
+    scrollbarWidth = 8,
+    scrollbarColor = "#8c8caa99",
+    ...props
+  }) {
+    const nodeIdRef = import_react.useRef(null);
+    const maxScrollRef = import_react.useRef(0);
+    const [scrollY, setScrollY] = import_react.useState(0);
+    const childArray = import_react.default.Children.toArray(children);
+    const gap = style && style.gap || 0;
+    const padding = style && style.padding || 0;
+    const autoContentH = childArray.reduce((sum, c) => sum + (c.props?.height || 0), 0) + Math.max(0, childArray.length - 1) * gap + 2 * padding;
+    const resolvedContentH = contentHeight ?? autoContentH;
+    maxScrollRef.current = Math.max(0, resolvedContentH - height);
+    const onScroll = import_react.useCallback((deltaY) => {
+      setScrollY((prev) => {
+        const max = maxScrollRef.current;
+        return Math.min(max, Math.max(0, prev + deltaY));
+      });
+    }, []);
+    const onAbsoluteScroll = import_react.useCallback((y) => {
+      setScrollY(Math.min(maxScrollRef.current, Math.max(0, y)));
+    }, []);
+    const onMount = import_react.useCallback((id) => {
+      nodeIdRef.current = id;
+      registerScrollView(id, { onScroll, onAbsoluteScroll });
+    }, [onScroll, onAbsoluteScroll]);
+    import_react.useEffect(() => {
+      return () => {
+        if (nodeIdRef.current !== null) {
+          unregisterScrollView(nodeIdRef.current);
+        }
+      };
+    }, []);
+    const viewStyle = {
+      justifyContent: "flex-start",
+      alignItems: "flex-start",
+      clip: true,
+      scrollOffsetY: scrollY,
+      showScrollbar,
+      scrollbarWidth,
+      scrollbarColor,
+      ...style
+    };
+    return import_react.default.createElement("view", { _veloxOnMount: onMount, style: viewStyle, width, height, ...props }, children);
   }
   function useWindowSize() {
     const [size, setSize] = import_react.useState(() => {
@@ -7076,8 +7179,17 @@ No matching component was found for:
     const { width: winW, height: winH } = useWindowSize();
     const [state, setState] = import_react2.useState({ disp: "0", prev: null, op: null, wait: false, expr: "" });
     const [gridMode, setGridMode] = import_react2.useState(false);
+    const [showHistory, setShowHistory] = import_react2.useState(false);
+    const [history, setHistory] = import_react2.useState([]);
     const press = import_react2.useCallback((key) => {
-      setState((s) => calc(s, key));
+      setState((s) => {
+        const next = calc(s, key);
+        if (key === "=" && next.lastResult !== undefined) {
+          const entry = (s.expr || s.disp + " =") + " " + next.disp;
+          setHistory((h) => [...h, entry].slice(-50));
+        }
+        return next;
+      });
     }, []);
     const titleH = 32;
     const btnH = gridMode ? (winH - 200) / 7 : (winH - 156) / 5;
@@ -7112,7 +7224,8 @@ No matching component was found for:
         padding: pad,
         gap: 4,
         justifyContent: "flex-start",
-        alignItems: "center"
+        alignItems: "center",
+        boxSizing: "border-box"
       },
       width: winW,
       height: winH,
@@ -7141,6 +7254,18 @@ No matching component was found for:
               style: { flexDirection: "row", gap: 4, paddingRight: 4 },
               children: [
                 /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                  onPress: () => setShowHistory((s) => !s),
+                  width: 24,
+                  height: 24,
+                  style: { backgroundColor: showHistory ? C.green : C.overlay, borderRadius: 6, alignItems: "center", justifyContent: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 10,
+                    height: 12,
+                    style: { color: "#fff" },
+                    children: "H"
+                  })
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
                   onPress: () => setGridMode((m) => !m),
                   width: 36,
                   height: 24,
@@ -7168,6 +7293,47 @@ No matching component was found for:
             })
           ]
         }),
+        showHistory && history.length > 0 && /* @__PURE__ */ jsx_runtime.jsxs(View, {
+          position: "absolute",
+          top: titleH + 8,
+          right: pad,
+          width: 180,
+          height: 260,
+          style: {
+            backgroundColor: C.surface,
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: C.overlay,
+            overflow: "hidden",
+            zIndex: 10
+          },
+          children: [
+            /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              fontSize: 10,
+              height: 20,
+              style: { color: C.subtle, padding: 4 },
+              children: "History"
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
+              width: 178,
+              showScrollbar: true,
+              scrollbarWidth: 6,
+              scrollbarColor: "#8c8caa99",
+              contentHeight: history.length * 26,
+              height: 236,
+              children: history.map((entry, i) => /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 11,
+                height: 24,
+                style: {
+                  color: C.text,
+                  paddingLeft: 4,
+                  paddingRight: 16
+                },
+                children: entry
+              }, i))
+            })
+          ]
+        }),
         /* @__PURE__ */ jsx_runtime.jsx(View, {
           backgroundGradient: "#1e1e2e #313244",
           alignSelf: "stretch",
@@ -7184,7 +7350,9 @@ No matching component was found for:
           children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
             fontSize: 28,
             height: 36,
-            style: { color: C.text },
+            width: "100%",
+            style: { color: C.text, textAlign: "right" },
+            numberOfLines: 1,
             children: state.disp
           })
         }),
@@ -7465,6 +7633,85 @@ No matching component was found for:
               ]
             })
           ]
+        }),
+        state.lastResult !== undefined && /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          onPress: () => setState((s) => ({ ...s, lastResult: undefined })),
+          style: {
+            backgroundColor: "#00000088",
+            justifyContent: "center",
+            alignItems: "center",
+            zIndex: 10
+          },
+          children: /* @__PURE__ */ jsx_runtime.jsxs(View, {
+            style: {
+              backgroundColor: C.surface,
+              borderRadius: 16,
+              padding: 24,
+              alignItems: "center",
+              boxShadow: "0 4 12 #00000066"
+            },
+            children: [
+              /* @__PURE__ */ jsx_runtime.jsxs(View, {
+                transform: "scale(1.15)",
+                children: [
+                  /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 12,
+                    height: 16,
+                    style: { color: C.subtle },
+                    children: "Result"
+                  }),
+                  /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 40,
+                    height: 48,
+                    style: { color: C.text },
+                    children: state.lastResult
+                  })
+                ]
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                onPress: () => setState((s) => ({ ...s, lastResult: undefined })),
+                style: {
+                  backgroundColor: C.accent,
+                  borderRadius: 8,
+                  padding: 8,
+                  paddingLeft: 20,
+                  paddingRight: 20,
+                  marginTop: 12
+                },
+                children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                  fontSize: 14,
+                  height: 18,
+                  style: { color: "#fff" },
+                  children: "OK"
+                })
+              })
+            ]
+          })
+        }),
+        /* @__PURE__ */ jsx_runtime.jsx(View, {
+          position: "absolute",
+          bottom: 8,
+          right: 8,
+          width: 56,
+          height: 22,
+          transform: "rotate(-6)",
+          style: {
+            backgroundColor: C.mauve,
+            borderTopLeftRadius: 8,
+            justifyContent: "center",
+            alignItems: "center"
+          },
+          children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+            fontSize: 9,
+            height: 13,
+            style: { color: "#fff", textAlign: "center" },
+            children: "About"
+          })
         })
       ]
     });

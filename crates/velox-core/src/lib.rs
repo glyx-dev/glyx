@@ -61,7 +61,7 @@ use std::time::{Duration, Instant};
 use smallvec::SmallVec;
 use velox_gpu::GpuContext;
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
-use velox_renderer::{colors, peniko, VeloxRenderer, FrameBuilder};
+use velox_renderer::{colors, peniko, VeloxRenderer, FrameBuilder, Scene};
 use velox_runtime::{
     init_v8, new_ipc_bus,
     CanvasCmd, InputEvent, LengthValue, NodeProps, NodeType, SceneCommand,
@@ -308,7 +308,12 @@ fn load_splash_state() -> Option<SplashState> {
             Ok(img) => {
                 let rgba = img.into_rgba8();
                 let (w, h) = rgba.dimensions();
-                Some(peniko::Image::new(rgba.into_raw().into(), peniko::Format::Rgba8, w, h))
+                Some(peniko::ImageData {
+                    data: peniko::Blob::from(rgba.into_raw()),
+                    format: peniko::ImageFormat::Rgba8,
+                    alpha_type: peniko::ImageAlphaType::Alpha,
+                    width: w, height: h,
+                })
             }
             Err(e) => { log::warn!("[splash] failed to load '{path}': {e}"); None }
         }
@@ -410,7 +415,7 @@ mod render;
 
 use scene::apply_scene_commands;
 use layout::{recompute_layout, update_scroll_positions};
-use render::{render_subtree, RenderCtx};
+use render::{render_subtree, RenderCtx, compute_scrollbar_thumb};
 
 /// Zero-allocation cache key for shaped text.
 ///
@@ -565,8 +570,7 @@ struct CachedLabel {
 
 impl CachedLabel {
     fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4]) -> Self {
-        let vello_color = peniko::Color::rgba8(color[0], color[1], color[2], color[3]);
-        let layout      = ts.label_centered(text, font_size, max_width, vello_color);
+        let layout      = ts.label_centered(text, font_size, max_width);
         let width       = layout.width() as f64;
         let text_height = layout.height() as f64;
         // For an empty string Parley produces no glyph runs, so ascent() = 0.
@@ -574,8 +578,9 @@ impl CachedLabel {
         let ref_layout = if layout.ascent() > 0.1 {
             None
         } else {
-            Some(ts.label_centered("M", font_size, max_width, vello_color))
+            Some(ts.label_centered("M", font_size, max_width))
         };
+        let _ = color; // used at draw time via frame.draw_text
         let src    = ref_layout.as_ref().unwrap_or(&layout);
         let ascent = src.ascent() as f64;
         let (cursor_top_raw, cursor_height_raw) = src.cursor_metrics();
@@ -595,7 +600,7 @@ impl CachedLabel {
 /// Splash screen overlay state. Active from window open until dismissed.
 struct SplashState {
     /// Optional decoded splash image (centered on background).
-    image:      Option<peniko::Image>,
+    image:      Option<peniko::ImageData>,
     /// RGBA background fill color shown behind the image and during image load.
     background: [u8; 4],
     /// Splash is shown until this instant regardless of `hidden` (minimum display time).
@@ -630,7 +635,7 @@ struct CameraStream {
     /// Set to `true` to signal the capture thread to exit.
     stop_flag:    Arc<std::sync::atomic::AtomicBool>,
     /// Latest peniko::Image built from the most recent frame.
-    latest_image: Option<peniko::Image>,
+    latest_image: Option<peniko::ImageData>,
     /// Actual FPS negotiated with the camera hardware (written by capture thread
     /// shortly after open_stream; read by StartCameraRecord for the encoder).
     capture_fps:  Arc<std::sync::atomic::AtomicU32>,
@@ -660,7 +665,7 @@ struct VideoStream {
     /// Pending events (ended, metadata, timeupdate). Drained into velox-runtime each frame.
     events:       Arc<Mutex<std::collections::VecDeque<String>>>,
     /// Most recent peniko::Image built from the decoded frame. Used by render.rs.
-    latest_image: Option<peniko::Image>,
+    latest_image: Option<peniko::ImageData>,
     /// Shared volume (0.0–2.0). Written by SetVideoVolume, read by the audio thread.
     video_volume: Arc<Mutex<f32>>,
     /// Original URL — needed to restart the audio thread after seeking.
@@ -684,10 +689,10 @@ struct PerWindowState {
     resolved:     Vec<(NodeId, ResolvedLayout)>,
     js_nodes:     std::collections::HashMap<u32, JsNode>,
     js_root:      Option<u32>,
-    images:       std::collections::HashMap<u32, peniko::Image>,
+    images:       std::collections::HashMap<u32, peniko::ImageData>,
     /// Path-keyed image cache — decoded images reused across remounts without re-decoding.
     /// Capped at 64 entries (LRU eviction) so long sessions don't accumulate stale decoded bitmaps.
-    images_by_path: lru::LruCache<String, peniko::Image>,
+    images_by_path: lru::LruCache<String, peniko::ImageData>,
     image_cache_hits: u64,
     image_cache_misses: u64,
     /// Shaped text cache — keyed by (text, font_size_bits, max_width_bits, color).
@@ -732,6 +737,8 @@ struct PerWindowState {
     /// `decorations=false`; calling it is equivalent to the user grabbing the
     /// title bar.
     drag_window_fn: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Active scrollbar thumb drag, if any.
+    scrollbar_drag: Option<ScrollbarDragState>,
     #[cfg(feature = "dev")]
     dev_mode: Option<DevModeState>,
 }
@@ -744,6 +751,21 @@ struct JsNode {
     /// 5+ children (e.g. long lists rendered inside a loop).
     children:  SmallVec<[u32; 4]>,
     layout_id: Option<NodeId>,
+}
+
+/// State for an active scrollbar thumb drag.
+struct ScrollbarDragState {
+    node_id: u32,
+    /// Height of the scrollbar track.
+    track_h: f64,
+    /// Height of the thumb at the start of the drag.
+    thumb_h: f64,
+    /// Total scrollable range (content_height - viewport_height).
+    scroll_range: f64,
+    /// Scroll offset when drag started.
+    start_scroll_y: f64,
+    /// Mouse Y position when drag started.
+    start_mouse_y: f64,
 }
 
 #[cfg(feature = "dev")]
@@ -772,7 +794,61 @@ struct DevModeState {
 // ── Colour helpers ─────────────────────────────────────────────────────────────
 
 fn rgba_to_vello(c: [u8; 4]) -> peniko::Color {
-    peniko::Color::rgba8(c[0], c[1], c[2], c[3])
+    peniko::Color::from_rgba8(c[0], c[1], c[2], c[3])
+}
+
+/// Try to start a scrollbar thumb drag at the current cursor position.
+/// Returns `Some(ScrollbarDragState)` if the cursor is over a scrollbar thumb.
+fn try_start_scrollbar_drag(s: &mut PerWindowState) -> Option<ScrollbarDragState> {
+    let cx = s.cursor_x as f64;
+    let cy = s.cursor_y as f64;
+    for (&id, node) in &s.js_nodes {
+        let show = node.props.show_scrollbar.unwrap_or(true);
+        if !show { continue; }
+        let Some(lid) = node.layout_id else { continue };
+        let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == lid) else { continue };
+        let scroll_y = node.props.scroll_offset_y.unwrap_or(0.0);
+        let bar_w = node.props.scrollbar_width.unwrap_or(8.0);
+        let rx = rl.x as f64;
+        let ry = rl.y as f64;
+        let rw = rl.width as f64;
+        let rh = rl.height as f64;
+        // Skip if cursor is not even in the track X range
+        let track_x = rx + rw - bar_w as f64;
+        if cx < track_x || cx > rx + rw { continue; }
+        // Compute max_child_bottom from raw Taffy positions (not the scroll-adjusted cache)
+        let max_child_bottom: f64 = node.children.iter()
+            .filter_map(|&cid| {
+                let cn   = s.js_nodes.get(&cid)?;
+                let clid = cn.layout_id?;
+                s.resolved.iter()
+                    .find(|(nid, _)| *nid == clid)
+                    .map(|(_, crl)| (crl.y + crl.height) as f64)
+            })
+            .fold(f64::NEG_INFINITY, f64::max);
+        if !max_child_bottom.is_finite() { continue; }
+        // Both rl.y and max_child_bottom are window-absolute; content height is
+        // the distance from this node's top to the furthest child bottom.
+        let content_h = max_child_bottom - rl.y as f64;
+        if let Some((_tx, ty, _tw, th)) = compute_scrollbar_thumb(
+            rx, ry, rw, rh,
+            scroll_y as f64, content_h, bar_w as f64,
+        ) {
+            if cy >= ty && cy <= ty + th {
+                let vp_h = rh;
+                let scroll_range = (content_h - vp_h).max(0.0);
+                return Some(ScrollbarDragState {
+                    node_id: id,
+                    track_h: rh,
+                    thumb_h: th,
+                    scroll_range,
+                    start_scroll_y: scroll_y as f64,
+                    start_mouse_y: s.cursor_y as f64,
+                });
+            }
+        }
+    }
+    None
 }
 
 #[cfg(feature = "dev")]
@@ -1054,13 +1130,13 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
     // ── Overlay background ────────────────────────────────────────────────
     let overlay_w = 490.0_f64;
     let overlay_h = 130.0_f64;
-    frame.fill_rounded_rect(16.0, 16.0, overlay_w, overlay_h, 8.0, peniko::Color::rgba8(15, 15, 25, 225));
+    frame.fill_rounded_rect(16.0, 16.0, overlay_w, overlay_h, 8.0, peniko::Color::from_rgba8(15, 15, 25, 225));
 
     // ── Text rows ─────────────────────────────────────────────────────────
-    let txt_color = peniko::Color::rgba8(220, 220, 235, 255);
+    let txt_color = peniko::Color::from_rgba8(220, 220, 235, 255);
     let lines = &dev.overlay_lines;
     for (i, line) in lines.iter().enumerate() {
-        let text = state.text_sys.label(line, 12.0, txt_color);
+        let text = state.text_sys.label(line, 12.0);
         frame.draw_text(&text, 26.0, 34.0 + (i as f64 * 20.0), txt_color);
     }
 
@@ -1078,11 +1154,11 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
         let x   = spark_x + i as f64 * bar_w;
         let y   = spark_y + (spark_h - h);
         let col = if ms > budget * 2.0 {
-            peniko::Color::rgba8(255, 80, 80, 220)
+            peniko::Color::from_rgba8(255, 80, 80, 220)
         } else if ms > budget {
-            peniko::Color::rgba8(255, 180, 50, 220)
+            peniko::Color::from_rgba8(255, 180, 50, 220)
         } else {
-            peniko::Color::rgba8(80, 200, 120, 200)
+            peniko::Color::from_rgba8(80, 200, 120, 200)
         };
         frame.fill_rect(x, y, bar_w - 0.5, h, col);
     }
@@ -1103,18 +1179,18 @@ fn draw_error_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
     let panel_h = 140.0_f64;
     let panel_y = win_h - panel_h;
     frame.fill_rounded_rect(0.0, panel_y, win_w, panel_h, 0.0,
-        peniko::Color::rgba8(40, 5, 5, 245));
+        peniko::Color::from_rgba8(40, 5, 5, 245));
 
     // Red top border line.
     frame.fill_rect(0.0, panel_y, win_w, 2.0,
-        peniko::Color::rgba8(220, 50, 50, 255));
+        peniko::Color::from_rgba8(220, 50, 50, 255));
 
-    let title_color = peniko::Color::rgba8(255, 100, 100, 255);
-    let body_color  = peniko::Color::rgba8(240, 200, 200, 255);
-    let dim_color   = peniko::Color::rgba8(160, 120, 120, 200);
+    let title_color = peniko::Color::from_rgba8(255, 100, 100, 255);
+    let body_color  = peniko::Color::from_rgba8(240, 200, 200, 255);
+    let dim_color   = peniko::Color::from_rgba8(160, 120, 120, 200);
 
     // Title row.
-    let title = state.text_sys.label("⚠  JavaScript Error  (fix and save to dismiss)", 12.0, title_color);
+    let title = state.text_sys.label("⚠  JavaScript Error  (fix and save to dismiss)", 12.0);
     frame.draw_text(&title, 16.0, panel_y + 12.0, title_color);
 
     // Error lines — up to 4 lines, truncated at 120 chars each.
@@ -1126,16 +1202,16 @@ fn draw_error_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
         } else {
             line.to_string()
         };
-        let text = state.text_sys.label(&truncated, 11.0, body_color);
+        let text = state.text_sys.label(&truncated, 11.0);
         frame.draw_text(&text, 16.0, panel_y + 34.0 + (i as f64 * 18.0), body_color);
     }
     if err.lines().count() > 4 {
-        let more = state.text_sys.label("… (more lines in console)", 10.0, dim_color);
+        let more = state.text_sys.label("… (more lines in console)", 10.0);
         frame.draw_text(&more, 16.0, panel_y + 34.0 + (4.0 * 18.0), dim_color);
     }
 
     // Footer hint.
-    let hint = state.text_sys.label("Save any source file to rebuild and dismiss", 10.0, dim_color);
+    let hint = state.text_sys.label("Save any source file to rebuild and dismiss", 10.0);
     frame.draw_text(&hint, 16.0, panel_y + panel_h - 16.0, dim_color);
 }
 
@@ -1633,6 +1709,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     splash_state: if window_handle == 0 { main_splash_state.take() } else { None },
                     decorations:     window_decorations,
                     drag_window_fn,
+                    scrollbar_drag:  None,
                     #[cfg(feature = "dev")]
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
@@ -1691,6 +1768,23 @@ pub fn run(mut config: AppConfig) -> bool {
                         x: s.cursor_x,
                         y: s.cursor_y,
                     });
+
+                    // Scrollbar thumb drag
+                    if let Some(ref drag) = s.scrollbar_drag {
+                        let cursor_y = y as f64;
+                        let mouse_delta = cursor_y - drag.start_mouse_y;
+                        let drag_range = drag.track_h - drag.thumb_h;
+                        if drag_range > 0.0 && drag.scroll_range > 0.0 {
+                            let ratio = drag.scroll_range / drag_range;
+                            let new_scroll_y =
+                                (drag.start_scroll_y + mouse_delta * ratio).clamp(0.0, drag.scroll_range);
+                            s.runtime.push_event(InputEvent::ScrollbarDrag {
+                                node_id: drag.node_id,
+                                scroll_y: new_scroll_y as f32,
+                            });
+                        }
+                    }
+
                     if s.drag_active {
                         s.runtime.push_event(InputEvent::DragMove {
                             x: s.cursor_x,
@@ -1731,6 +1825,20 @@ pub fn run(mut config: AppConfig) -> bool {
                                 });
                                 return;
                             }
+                        }
+                    }
+
+                    // ── Scrollbar thumb drag ─────────────────────────────
+                    if button == 0 {
+                        if pressed {
+                            // Clear any stale drag (e.g. from focus loss).
+                            s.scrollbar_drag = None;
+                            if let Some(drag) = try_start_scrollbar_drag(s) {
+                                s.scrollbar_drag = Some(drag);
+                                return;
+                            }
+                        } else if s.scrollbar_drag.take().is_some() {
+                            return;
                         }
                     }
 
@@ -1824,22 +1932,28 @@ pub fn run(mut config: AppConfig) -> bool {
                 let post_commands = s.runtime.drain_scene_commands();
                 apply_scene_commands(s, post_commands);
 
-                // 5a. Pull latest camera frames and build peniko::Images.
+                // 5a. Pull latest camera frames and build peniko::ImageData.
                 for stream in s.camera_streams.values_mut() {
                     if let Some((w, h, data)) = stream.frame_buf.lock().unwrap().take() {
-                        stream.latest_image = Some(
-                            peniko::Image::new(data.into(), peniko::Format::Rgba8, w, h)
-                        );
+                        stream.latest_image = Some(peniko::ImageData {
+                            data: peniko::Blob::from(data),
+                            format: peniko::ImageFormat::Rgba8,
+                            alpha_type: peniko::ImageAlphaType::Alpha,
+                            width: w, height: h,
+                        });
                     }
                 }
 
-                // 5b. Pull latest video frames and build peniko::Images.
+                // 5b. Pull latest video frames and build peniko::ImageData.
                 // Also drain video events into the runtime's video_events queue.
                 for stream in s.video_streams.values_mut() {
                     if let Some((w, h, data)) = stream.frame_buf.lock().unwrap().take() {
-                        stream.latest_image = Some(
-                            peniko::Image::new(data.into(), peniko::Format::Rgba8, w, h)
-                        );
+                        stream.latest_image = Some(peniko::ImageData {
+                            data: peniko::Blob::from(data),
+                            format: peniko::ImageFormat::Rgba8,
+                            alpha_type: peniko::ImageAlphaType::Alpha,
+                            width: w, height: h,
+                        });
                     }
                     let pending: Vec<_> = stream.events.lock().unwrap().drain(..).collect();
                     if !pending.is_empty() {
@@ -1862,9 +1976,9 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 // 7. Acquire swapchain texture.
                 let texture = match s.gpu.current_texture() {
-                    Ok(t)  => t,
-                    Err(e) => {
-                        log::warn!("Surface error: {}; reconfiguring.", e);
+                    Some(t) => t,
+                    None => {
+                        log::warn!("Surface lost or outdated; reconfiguring.");
                         s.gpu.resize(s.gpu.width(), s.gpu.height());
                         return;
                     }

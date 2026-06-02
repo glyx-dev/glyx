@@ -81,6 +81,8 @@ pub enum InputEvent {
     KeyInput { key: String, text: Option<String>, pressed: bool },
     /// Vertical scroll delta (positive = down).
     Scroll { delta_y: f32 },
+    /// Absolute scroll position set by a scrollbar thumb drag.
+    ScrollbarDrag { node_id: u32, scroll_y: f32 },
     /// Window resized to new physical pixel dimensions.
     Resize { width: u32, height: u32 },
 }
@@ -356,6 +358,35 @@ pub struct NodeProps {
     /// Linear background gradient: `"startColor endColor"` (e.g. `"#ff0000 #0000ff"`).
     /// The gradient always goes from top to bottom.
     pub background_gradient: Option<String>,
+
+    // ── Position / transform ─────────────────────────────────────────────────────
+    /// `"relative"` (default) or `"absolute"`.
+    pub position: Option<String>,
+    /// Inset from the containing block's top edge (px or %).  Used with absolute
+    /// positioning.
+    pub top:    Option<LengthValue>,
+    /// Inset from the containing block's left edge (px or %).
+    pub left:   Option<LengthValue>,
+    /// Inset from the containing block's right edge (px or %).
+    pub right:  Option<LengthValue>,
+    /// Inset from the containing block's bottom edge (px or %).
+    pub bottom: Option<LengthValue>,
+    /// Transform string: `"translate(x, y)"`, `"rotate(deg)"`, `"scale(sx, sy)"`,
+    /// or chained: `"translate(10,20) rotate(45)"`.  Applied as an Affine transform
+    /// to the node and all its descendants.
+    pub transform: Option<String>,
+    /// Box-sizing model: `"border-box"` | `"content-box"` (default).
+    /// With `"border-box"`, `width`/`height` include padding so the element
+    /// never overflows its declared size (matches the CSS `box-sizing` property).
+    pub box_sizing: Option<String>,
+
+    // ── Scrollbar ────────────────────────────────────────────────────────────────
+    /// Width of the scrollbar in logical pixels (default 8).
+    pub scrollbar_width: Option<f32>,
+    /// Scrollbar thumb colour as RGBA string, e.g. `"rgba(100,100,120,0.6)"`.
+    pub scrollbar_color: Option<String>,
+    /// When false, the scrollbar is hidden entirely (default true).
+    pub show_scrollbar: Option<bool>,
 }
 
 // ── Canvas 2D draw commands ───────────────────────────────────────────────────
@@ -1011,6 +1042,20 @@ fn parse_props(
     props.box_shadow          = get_str_prop(scope, obj, "boxShadow");
     props.background_gradient = get_str_prop(scope, obj, "backgroundGradient");
 
+    // ── Position / transform ──────────────────────────────────────────────
+    props.position  = get_str_prop(scope, obj, "position");
+    props.top       = get_length_prop(scope, obj, "top");
+    props.left      = get_length_prop(scope, obj, "left");
+    props.right     = get_length_prop(scope, obj, "right");
+    props.bottom    = get_length_prop(scope, obj, "bottom");
+    props.transform = get_str_prop(scope, obj, "transform");
+    props.box_sizing = get_str_prop(scope, obj, "boxSizing");
+
+    // ── Scrollbar ─────────────────────────────────────────────────────────
+    props.scrollbar_width  = get_num_prop(scope, obj, "scrollbarWidth");
+    props.scrollbar_color  = get_str_prop(scope, obj, "scrollbarColor");
+    props.show_scrollbar   = get_bool_prop(scope, obj, "showScrollbar");
+
     props
 }
 
@@ -1155,6 +1200,11 @@ fn poll_events_callback(
             InputEvent::Scroll { delta_y } => {
                 set_str!("type", "scroll");
                 set_num!("deltaY", delta_y);
+            }
+            InputEvent::ScrollbarDrag { node_id, scroll_y } => {
+                set_str!("type", "scrollbarDrag");
+                set_num!("nodeId", node_id);
+                set_num!("scrollY", scroll_y);
             }
             InputEvent::Resize { width, height } => {
                 set_str!("type", "resize");

@@ -344,6 +344,9 @@ export function ScrollView({
   width        = 300,
   height       = 200,
   contentHeight,        // explicit content height override (more reliable than auto-detect)
+  showScrollbar   = true,
+  scrollbarWidth  = 8,
+  scrollbarColor  = '#8c8caa99',
   ...props
 }) {
   const nodeIdRef    = useRef(null);
@@ -376,10 +379,14 @@ export function ScrollView({
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const onAbsoluteScroll = useCallback((y) => {
+    setScrollY(Math.min(maxScrollRef.current, Math.max(0, y)));
+  }, []);
+
   const onMount = useCallback((id) => {
     nodeIdRef.current = id;
-    registerScrollView(id, { onScroll });
-  }, [onScroll]);
+    registerScrollView(id, { onScroll, onAbsoluteScroll });
+  }, [onScroll, onAbsoluteScroll]);
 
   useEffect(() => {
     return () => {
@@ -397,6 +404,10 @@ export function ScrollView({
     // Rust: push Vello clip layer + shift children by scrollOffsetY.
     clip:           true,
     scrollOffsetY:  scrollY,
+    // Scrollbar visual props
+    showScrollbar,
+    scrollbarWidth,
+    scrollbarColor,
     ...style,
   };
 

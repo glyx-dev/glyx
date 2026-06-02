@@ -213,6 +213,16 @@ impl LayoutTree {
         self.tree.mark_dirty(node).map_err(LayoutError::Taffy)
     }
 
+    /// Return the root node id (if set).
+    pub fn root(&self) -> Option<NodeId> {
+        self.root
+    }
+
+    /// Return a clone of the Taffy style for an existing node.
+    pub fn get_style(&self, node: NodeId) -> Result<Style, LayoutError> {
+        self.tree.style(node).cloned().map_err(LayoutError::Taffy)
+    }
+
     /// Look up metadata for a node.
     pub fn meta(&self, node: NodeId) -> Option<&NodeMeta> {
         self.meta.get(&node)
@@ -239,8 +249,8 @@ pub fn flex_column(gap: f32) -> Style {
             height: length(gap),
         },
         size: Size {
-            width:  Dimension::Percent(1.0),
-            height: Dimension::Percent(1.0),
+            width:  Dimension::percent(1.0),
+            height: Dimension::percent(1.0),
         },
         ..Default::default()
     }

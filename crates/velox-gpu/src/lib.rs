@@ -12,12 +12,12 @@ use winit::window::Window;
 pub enum GpuError {
     #[error("No suitable GPU adapter found")]
     NoAdapter,
+    #[error("Failed to request adapter: {0}")]
+    AdapterRequest(#[from] wgpu::RequestAdapterError),
     #[error("Failed to request device: {0}")]
     DeviceRequest(#[from] wgpu::RequestDeviceError),
     #[error("Failed to create surface: {0}")]
     SurfaceCreation(#[from] wgpu::CreateSurfaceError),
-    #[error("Surface error: {0}")]
-    Surface(#[from] wgpu::SurfaceError),
 }
 
 /// Everything wgpu-related, owned in one place.
@@ -49,22 +49,23 @@ impl GpuContext {
         for &backends in sets {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends,
-                ..Default::default()
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
             });
             // Surface borrows Arc<Window> — 'static is satisfied because Arc
             // keeps the window alive for the lifetime of GpuContext.
             let Ok(surface) = instance.create_surface(Arc::clone(&window)) else {
                 continue;
             };
-            let Some(adapter) = instance
+            let adapter = match instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference:       wgpu::PowerPreference::HighPerformance,
                     compatible_surface:     Some(&surface),
                     force_fallback_adapter: false,
                 })
                 .await
-            else {
-                continue;
+            {
+                Ok(a)  => a,
+                Err(_) => continue,
             };
             log::info!(
                 "GPU adapter: {} ({:?})",
@@ -95,8 +96,8 @@ impl GpuContext {
                     // pools. Costs a small amount of GPU throughput but
                     // meaningfully reduces process RSS for UI-heavy workloads.
                     memory_hints:      wgpu::MemoryHints::MemoryUsage,
+                    ..Default::default()
                 },
-                None,
             )
             .await?;
 
@@ -148,14 +149,17 @@ impl GpuContext {
     ///
     /// Returns `None` on `Outdated`/`Lost` — the caller should call
     /// `resize()` with the current window size and retry next frame.
-    pub fn current_texture(&self) -> Result<wgpu::SurfaceTexture, GpuError> {
-        Ok(self.surface.get_current_texture()?)
+    pub fn current_texture(&self) -> Option<wgpu::SurfaceTexture> {
+        match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t)    => Some(t),
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(t),
+            _ => None,
+        }
     }
 
     pub fn surface_format(&self) -> wgpu::TextureFormat {
         self.config.format
     }
-
 
     pub fn width(&self)  -> u32 { self.config.width  }
     pub fn height(&self) -> u32 { self.config.height }

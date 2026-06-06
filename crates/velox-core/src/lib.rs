@@ -179,7 +179,7 @@ fn read_config_json() -> Option<String> {
 
 // ── JS plugin bundling ────────────────────────────────────────────────────────
 
-pub use velox_runtime::{JsPlugin, JsPlugins};
+pub use velox_runtime::{JsPlugin, JsPlugins, CancellableTask};
 
 /// Bundle a single plugin entry using bun.
 /// Returns `None` on failure (error already logged).
@@ -2124,7 +2124,7 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 // 2. Pre-frame scene commands (initial mount, async completions).
                 let pre_commands = s.runtime.drain_scene_commands();
-                apply_scene_commands(s, pre_commands);
+                let pre_changed  = apply_scene_commands(s, pre_commands);
 
                 // 3. JS frame callback — dispatchEvents, React state updates.
                 let js_start = Instant::now();
@@ -2141,9 +2141,10 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 // 4. Post-frame commands (React re-renders from step 3 events).
                 let post_commands = s.runtime.drain_scene_commands();
-                apply_scene_commands(s, post_commands);
+                let post_changed  = apply_scene_commands(s, post_commands);
 
                 // 5a. Pull latest camera frames and build peniko::ImageData.
+                let mut media_changed = false;
                 for stream in s.camera_streams.values_mut() {
                     if let Some((w, h, data)) = stream.frame_buf.lock().unwrap().take() {
                         stream.latest_image = Some(peniko::ImageData {
@@ -2152,6 +2153,7 @@ pub fn run(mut config: AppConfig) -> bool {
                             alpha_type: peniko::ImageAlphaType::Alpha,
                             width: w, height: h,
                         });
+                        media_changed = true;
                     }
                 }
 
@@ -2165,6 +2167,7 @@ pub fn run(mut config: AppConfig) -> bool {
                             alpha_type: peniko::ImageAlphaType::Alpha,
                             width: w, height: h,
                         });
+                        media_changed = true;
                     }
                     let pending: Vec<_> = stream.events.lock().unwrap().drain(..).collect();
                     if !pending.is_empty() {
@@ -2185,6 +2188,35 @@ pub fn run(mut config: AppConfig) -> bool {
                 // 6. Scroll-adjusted positions for next frame's hit-testing.
                 update_scroll_positions(s);
 
+                // 6b. Cursor blink phase — evaluated before the gate so blink flips
+                //     are included in the dirty check.
+                let now = Instant::now();
+                let blink_changed = if now >= s.cursor_blink_deadline {
+                    s.cursor_blink_on       = !s.cursor_blink_on;
+                    s.cursor_blink_deadline = now + Duration::from_millis(500);
+                    true
+                } else {
+                    false
+                };
+
+                // ── Frame gate ────────────────────────────────────────────────
+                // Skip GPU work entirely when nothing changed visually. This covers
+                // async completions that don't produce React state updates (fire-
+                // and-forget DB writes, background network pings, etc.) — the most
+                // common source of unnecessary full-pipeline frames on idle apps.
+                //
+                // In dev mode we always render so the perf overlay and error banner
+                // stay live without needing a separate redraw request.
+                let needs_gpu = pre_changed || post_changed || media_changed || blink_changed;
+                #[cfg(feature = "dev")]
+                let needs_gpu = {
+                    let _ = needs_gpu; // suppress unused warning in dev path
+                    true
+                };
+                if !needs_gpu {
+                    return;
+                }
+
                 // 7. Acquire swapchain texture.
                 let texture = match s.gpu.current_texture() {
                     Some(t) => t,
@@ -2194,13 +2226,6 @@ pub fn run(mut config: AppConfig) -> bool {
                         return;
                     }
                 };
-
-                // 8. Cursor blink phase.
-                let now = Instant::now();
-                if now >= s.cursor_blink_deadline {
-                    s.cursor_blink_on       = !s.cursor_blink_on;
-                    s.cursor_blink_deadline = now + Duration::from_millis(500);
-                }
 
                 // 9. Render JS scene graph.
                 let mut frame = s.renderer.begin_frame();

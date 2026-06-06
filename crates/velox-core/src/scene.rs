@@ -194,6 +194,11 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     r3d.remove_canvas(id);
                 }
                 state.js_nodes.remove(&id);
+                // If a scrollbar drag was active on this node, cancel it so the
+                // stale node_id is never used for scroll updates after removal.
+                if state.scrollbar_drag.as_ref().is_some_and(|d| d.node_id == id) {
+                    state.scrollbar_drag = None;
+                }
                 // Unlink from any parent's children list so stale ghost IDs don't
                 // accumulate in the renderer's traversal.  O(n × avg_children) but
                 // n < 1000 in practice so this is negligible.

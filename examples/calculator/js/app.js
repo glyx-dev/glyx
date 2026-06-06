@@ -6789,18 +6789,35 @@ No matching component was found for:
         prevUnhandled(event);
     };
   })();
+  function _backendCall(cmd, args) {
+    var json = args === undefined ? "{}" : JSON.stringify(args);
+    return __velox_backend_call(cmd, json).then(function(raw) {
+      try {
+        return JSON.parse(raw);
+      } catch (_) {
+        return raw;
+      }
+    });
+  }
+  function _backendNs(prefix) {
+    return new Proxy(function() {}, {
+      get: function(_, fn) {
+        if (typeof fn !== "string")
+          return;
+        return function(args) {
+          return _backendCall(prefix + "." + fn, args);
+        };
+      },
+      apply: function(_, __, a) {
+        return _backendCall(prefix, a[0]);
+      }
+    });
+  }
   var backend = new Proxy(Object.create(null), {
-    get(_, name) {
-      return function(args) {
-        const json = typeof args === "undefined" ? "{}" : JSON.stringify(args);
-        return __velox_backend_call(String(name), json).then(function(raw) {
-          try {
-            return JSON.parse(raw);
-          } catch (_2) {
-            return raw;
-          }
-        });
-      };
+    get: function(_, name) {
+      if (typeof name !== "string")
+        return;
+      return _backendNs(name);
     }
   });
   var _RadioCtx = import_react.default.createContext(null);

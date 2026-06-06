@@ -164,6 +164,58 @@ pub trait VeloxExtension: Send + Sync {
     fn register_commands(&self, _cmds: &mut BackendRegistryBuilder) {}
 }
 
+// ── Cancellable async task ────────────────────────────────────────────────────
+
+/// A handle to a background Tokio task that is **automatically aborted when dropped**.
+///
+/// Store this in component state. When the component unmounts (React reconciler
+/// calls `detachDeletedInstance`), the handle is dropped and the in-flight work
+/// is cancelled immediately — no wasted DB queries, network fetches, or AI calls
+/// for screens the user already navigated away from.
+///
+/// Call [`CancellableTask::detach`] to let the task run to completion even if
+/// the handle is dropped (equivalent to `tokio::spawn` with no handle).
+///
+/// # Example
+/// ```no_run
+/// // In a JS plugin or Rust extension:
+/// fn start_work(tokio: &tokio::runtime::Handle) -> CancellableTask {
+///     CancellableTask::spawn(tokio, async {
+///         let result = do_heavy_work().await;
+///         // post result to completion queue...
+///     })
+/// }
+/// // Dropping the returned CancellableTask aborts `do_heavy_work` immediately.
+/// ```
+pub struct CancellableTask {
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl CancellableTask {
+    /// Spawn a task on `rt`. Dropping the returned handle aborts the task.
+    pub fn spawn<F>(rt: &tokio::runtime::Handle, fut: F) -> Self
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        Self { handle: Some(rt.spawn(fut)) }
+    }
+
+    /// Detach: the task continues running even after this handle is dropped.
+    /// Tokio's `JoinHandle` detaches (not aborts) on normal drop, so we just
+    /// take the inner handle out before our `Drop` impl can abort it.
+    pub fn detach(mut self) {
+        drop(self.handle.take()); // JoinHandle drop = detach, not abort
+    }
+}
+
+impl Drop for CancellableTask {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            h.abort();
+        }
+    }
+}
+
 // ── V8 platform init ──────────────────────────────────────────────────────────
 
 static V8_INIT: Once = Once::new();

@@ -198,10 +198,12 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     r3d.remove_canvas(id);
                 }
                 state.js_nodes.remove(&id);
-                // Clean up dirty tracking for the removed node.
+                // Clean up all per-node state for the removed node.
                 state.dirty_nodes.remove(&id);
                 state.dirty_subtrees.remove(&id);
                 state.prev_resolved.remove(&id);
+                state.scene_cache.remove(&id);
+                state.scene_cache_new.remove(&id);
                 // If a scrollbar drag was active on this node, cancel it so the
                 // stale node_id is never used for scroll updates after removal.
                 if state.scrollbar_drag.as_ref().is_some_and(|d| d.node_id == id) {
@@ -707,24 +709,56 @@ pub(crate) fn snapshot_resolved(state: &mut PerWindowState) {
     }
 }
 
-/// Build `dirty_subtrees` by cascading `dirty_nodes` to all ancestors (needed
-/// for the render traversal to reach dirty leaves) and all descendants (needed
-/// to repaint subtrees of dirty containers).
+/// Build `dirty_subtrees` from `dirty_nodes`:
 ///
-/// Current policy: when *any* node is dirty, include every node — this ensures
-/// correctness until O4b adds per-subtree scene caching.  The infrastructure
-/// (dirty_nodes, dirty_subtrees) is the O4b hook.
+/// - The dirty nodes themselves (need fresh render).
+/// - All **ancestors** of dirty nodes — so `render_subtree` can traverse the
+///   tree down to dirty leaves without being blocked by the early-return guard.
+/// - All **descendants** of dirty nodes — because changing a node's background,
+///   clip, or opacity affects everything painted on top of it.
+///
+/// An empty `dirty_subtrees` means "render everything" (blink / media frames).
 pub(crate) fn build_dirty_subtrees(state: &mut PerWindowState) {
     state.dirty_subtrees.clear();
     if state.dirty_nodes.is_empty() {
-        // Nothing changed → render_subtree will get an empty set, meaning
-        // "render everything" (the early-return guard checks `is_empty()` first).
-        return;
+        return; // empty → render_subtree early-return guard never fires → full render
     }
-    // O4b: replace with proper ancestor+descendant cascade.
-    // For now, include all known nodes so the early-return guard never fires
-    // and frames remain visually correct.
-    state.dirty_subtrees.extend(state.js_nodes.keys().copied());
+
+    // Seed with the dirty nodes themselves.
+    state.dirty_subtrees.extend(state.dirty_nodes.iter().copied());
+
+    // Build child→parent map for the ancestor walk.
+    let mut parent_of: std::collections::HashMap<u32, u32> =
+        std::collections::HashMap::with_capacity(state.js_nodes.len());
+    for (&pid, node) in &state.js_nodes {
+        for &cid in &node.children {
+            parent_of.insert(cid, pid);
+        }
+    }
+
+    // Walk ancestors so render_subtree traversal can reach each dirty leaf.
+    let dirty_snap: SmallVec<[u32; 16]> = state.dirty_nodes.iter().copied().collect();
+    for &start in &dirty_snap {
+        let mut cur = start;
+        while let Some(&pid) = parent_of.get(&cur) {
+            if !state.dirty_subtrees.insert(pid) {
+                break; // ancestor chain already visited
+            }
+            cur = pid;
+        }
+    }
+
+    // Walk descendants — a dirty container means all its children must repaint.
+    let mut stack: SmallVec<[u32; 32]> = dirty_snap.iter().copied().collect();
+    while let Some(cur) = stack.pop() {
+        if let Some(node) = state.js_nodes.get(&cur) {
+            for &cid in &node.children {
+                if state.dirty_subtrees.insert(cid) {
+                    stack.push(cid);
+                }
+            }
+        }
+    }
 }
 
 /// Spawn a self-contained audio thread for a video file.

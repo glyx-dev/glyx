@@ -864,6 +864,13 @@ struct PerWindowState {
     /// Compared post-layout in `update_dirty_from_layout` to detect
     /// position/size changes caused by incremental layout cascades.
     prev_resolved: std::collections::HashMap<u32, ResolvedLayout>,
+    /// Per-node Vello scene fragment from the most recent rendered frame.
+    /// `render_subtree` replays this for nodes absent from `dirty_subtrees`,
+    /// skipping CPU traversal and Vello draw-call construction.
+    scene_cache:     std::collections::HashMap<u32, Scene>,
+    /// Accumulates newly captured scene fragments during the current frame.
+    /// Swapped with `scene_cache` after `texture.present()` and then cleared.
+    scene_cache_new: std::collections::HashMap<u32, Scene>,
     #[cfg(feature = "dev")]
     dev_mode: Option<DevModeState>,
 }
@@ -1934,9 +1941,11 @@ pub fn run(mut config: AppConfig) -> bool {
                     decorations:     window_decorations,
                     drag_window_fn,
                     scrollbar_drag:  None,
-                    dirty_nodes:    std::collections::HashSet::new(),
-                    dirty_subtrees: std::collections::HashSet::new(),
-                    prev_resolved:  std::collections::HashMap::new(),
+                    dirty_nodes:     std::collections::HashSet::new(),
+                    dirty_subtrees:  std::collections::HashSet::new(),
+                    prev_resolved:   std::collections::HashMap::new(),
+                    scene_cache:     std::collections::HashMap::new(),
+                    scene_cache_new: std::collections::HashMap::new(),
                     #[cfg(feature = "dev")]
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
@@ -2267,6 +2276,8 @@ pub fn run(mut config: AppConfig) -> bool {
                         cursor_blink_on:   s.cursor_blink_on,
                         any_cursor_active: &mut any_cursor_active,
                         dirty_subtrees:    &s.dirty_subtrees,
+                        scene_cache:       &mut s.scene_cache,
+                        scene_cache_new:   &mut s.scene_cache_new,
                     };
                     render_subtree(root_id, 0.0, 1.0, &mut render_ctx);
                 }
@@ -2347,6 +2358,12 @@ pub fn run(mut config: AppConfig) -> bool {
                 snapshot_resolved(s);
                 s.dirty_nodes.clear();
                 s.dirty_subtrees.clear();
+
+                // Rotate scene cache: scene_cache_new becomes the cache for the
+                // next frame; the old scene_cache (stale entries for hidden /
+                // removed nodes) is cleared and reused as the write buffer.
+                std::mem::swap(&mut s.scene_cache, &mut s.scene_cache_new);
+                s.scene_cache_new.clear();
 
                 let gpu_time_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
 

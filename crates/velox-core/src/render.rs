@@ -18,8 +18,14 @@ pub(crate) struct RenderCtx<'a> {
     pub any_cursor_active: &'a mut bool,
     /// Set of node IDs that must be redrawn this frame (dirty_nodes + ancestors + descendants).
     /// An **empty** set means "render everything" (first frame / full invalidation).
-    /// A **non-empty** set enables early-return skipping of clean subtrees (O4b hooks into this).
+    /// A **non-empty** set activates clean-subtree skipping via the scene cache.
     pub dirty_subtrees: &'a std::collections::HashSet<u32>,
+    /// Previous frame's per-node Vello scene fragments (read path).
+    /// Entries are `remove()`d as they are replayed; leftovers are dropped on swap.
+    pub scene_cache: &'a mut std::collections::HashMap<u32, Scene>,
+    /// Current frame's captured scene fragments (write path).
+    /// Populated during render; swapped into `scene_cache` after present.
+    pub scene_cache_new: &'a mut std::collections::HashMap<u32, Scene>,
 }
 
 fn apply_opacity(c: peniko::Color, opacity: f32) -> peniko::Color {
@@ -96,13 +102,30 @@ fn parse_transform(s: &str) -> Option<peniko::kurbo::Affine> {
 }
 
 pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut RenderCtx<'_>) {
-    // Skip subtrees that didn't change this frame.
-    // An empty dirty_subtrees means "render everything" (first frame, full invalidation,
-    // or O4b not yet providing selective caching).  Once O4b adds per-subtree scene
-    // caching the early-return here will avoid re-traversing and re-drawing clean nodes.
+    // ── O4b: clean-node fast path ────────────────────────────────────────
+    // If dirty_subtrees is non-empty AND this node is absent from it, the node
+    // didn't change this frame.  Replay its cached Vello scene fragment — no
+    // tree traversal, no draw-call construction.
+    //
+    // Canvas3D nodes are deliberately excluded from the cache: they push entries
+    // onto `canvas3d_overlays` as a side-effect, and their Vello scene fragment
+    // is empty (3D rendering happens in a separate post-Vello GPU pass).
     if !ctx.dirty_subtrees.is_empty() && !ctx.dirty_subtrees.contains(&id) {
-        return;
+        // Skip the cache check for Canvas3D — fall through so overlays are recorded.
+        let is_canvas3d = ctx.nodes.get(&id)
+            .map(|n| matches!(n.node_type, NodeType::Canvas3D))
+            .unwrap_or(false);
+        if !is_canvas3d {
+            if let Some(cached) = ctx.scene_cache.remove(&id) {
+                ctx.frame.append_scene(&cached, None);
+                ctx.scene_cache_new.insert(id, cached);
+                return;
+            }
+            // Cache miss (first time seeing this node as clean) — fall through
+            // to full render so the cache is populated for subsequent frames.
+        }
     }
+
     let Some(node)      = ctx.nodes.get(&id)                                        else { return };
     // Hidden nodes and their entire subtree are invisible — skip rendering.
     if node.props.hidden.unwrap_or(false) { return; }
@@ -115,6 +138,18 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     let rh = rl.height as f64;
 
     let child_opacity = opacity * node.props.opacity.unwrap_or(1.0);
+
+    // ── O4b: scene capture ───────────────────────────────────────────────
+    // Swap in a fresh Scene so all draw calls for this node + its children go
+    // into an isolated fragment.  On completion we store the fragment in
+    // scene_cache_new for next-frame replay, then append it to the parent scene.
+    // Canvas3D is excluded (its Vello fragment is empty; 3D renders post-Vello).
+    let is_cacheable = !matches!(node.node_type, NodeType::Canvas3D);
+    let capture_parent: Option<Scene> = if is_cacheable {
+        Some(ctx.frame.replace_scene(Scene::new()))
+    } else {
+        None
+    };
 
     // ── Transform handling ───────────────────────────────────────────────
     // If the node has a transform, render node + children into a temporary
@@ -450,6 +485,15 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     if let Some((parent, affine)) = _transform_sub.take() {
         let sub = ctx.frame.replace_scene(parent);
         ctx.frame.append_scene(&sub, Some(affine));
+    }
+
+    // ── O4b: end capture — store fragment for next-frame replay ─────────
+    // Restore the outer scene; the captured fragment is appended to it and
+    // saved for clean-path replay in future frames.
+    if let Some(outer_parent) = capture_parent {
+        let captured = ctx.frame.replace_scene(outer_parent);
+        ctx.frame.append_scene(&captured, None);
+        ctx.scene_cache_new.insert(id, captured);
     }
 }
 

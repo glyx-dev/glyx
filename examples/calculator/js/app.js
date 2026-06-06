@@ -7185,8 +7185,8 @@ No matching component was found for:
       setState((s) => {
         const next = calc(s, key);
         if (key === "=" && next.lastResult !== undefined) {
-          const entry = (s.expr || s.disp + " =") + " " + next.disp;
-          setHistory((h) => [...h, entry].slice(-50));
+          const fullExpr = ((s.expr || "") + s.disp).trim() + " = " + next.disp;
+          setHistory((h) => [...h, fullExpr].slice(-50));
         }
         return next;
       });
@@ -7220,432 +7220,443 @@ No matching component was found for:
     const pad = 8;
     return /* @__PURE__ */ jsx_runtime.jsxs(View, {
       style: {
+        position: "relative",
         backgroundColor: C.bg,
-        padding: pad,
-        gap: 4,
-        justifyContent: "flex-start",
-        alignItems: "center",
         boxSizing: "border-box"
       },
       width: winW,
       height: winH,
       children: [
         /* @__PURE__ */ jsx_runtime.jsxs(View, {
-          veloxDraggable: true,
           style: {
-            backgroundColor: C.surfaceAlt,
-            borderRadius: 8,
-            flexDirection: "row",
+            padding: pad,
+            gap: 4,
+            justifyContent: "flex-start",
             alignItems: "center",
-            justifyContent: "space-between",
-            paddingLeft: 12
+            boxSizing: "border-box"
           },
           width: "100%",
-          height: titleH,
+          height: "100%",
           children: [
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 12,
-              width: 120,
-              height: 16,
-              style: { color: C.subtle },
-              children: "Calculator"
-            }),
             /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: { flexDirection: "row", gap: 4, paddingRight: 4 },
+              veloxDraggable: true,
+              style: {
+                backgroundColor: C.surfaceAlt,
+                borderRadius: 8,
+                flexDirection: "row",
+                alignItems: "center",
+                paddingLeft: 12,
+                boxSizing: "border-box"
+              },
+              width: "100%",
+              height: titleH,
               children: [
-                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-                  onPress: () => setShowHistory((s) => !s),
-                  width: 24,
-                  height: 24,
-                  style: { backgroundColor: showHistory ? C.green : C.overlay, borderRadius: 6, alignItems: "center", justifyContent: "center" },
-                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                    fontSize: 10,
-                    height: 12,
-                    style: { color: "#fff" },
-                    children: "H"
-                  })
+                /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                  fontSize: 12,
+                  width: 120,
+                  height: 16,
+                  style: { color: C.subtle },
+                  children: "Calculator"
                 }),
-                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-                  onPress: () => setGridMode((m) => !m),
-                  width: 36,
-                  height: 24,
-                  style: { backgroundColor: C.mauve, borderRadius: 6, alignItems: "center", justifyContent: "center" },
-                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                    fontSize: 10,
-                    height: 12,
-                    style: { color: "#fff" },
-                    children: gridMode ? "Std" : "Sci"
-                  })
+                /* @__PURE__ */ jsx_runtime.jsx(View, {
+                  style: { flex: 1 }
                 }),
-                /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-                  onPress: () => __velox_quit(),
-                  width: 24,
-                  height: 24,
-                  style: { backgroundColor: C.red, borderRadius: 12, alignItems: "center", justifyContent: "center" },
-                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                    fontSize: 10,
-                    height: 12,
-                    style: { color: "#fff" },
-                    children: "×"
-                  })
+                /* @__PURE__ */ jsx_runtime.jsxs(View, {
+                  style: { flexDirection: "row", gap: 4, paddingRight: 4 },
+                  children: [
+                    /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                      onPress: () => setShowHistory((s) => !s),
+                      width: 24,
+                      height: 24,
+                      style: { backgroundColor: showHistory ? C.green : C.overlay, borderRadius: 6, alignItems: "center", justifyContent: "center" },
+                      children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                        fontSize: 10,
+                        height: 12,
+                        style: { color: "#fff" },
+                        children: "H"
+                      })
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                      onPress: () => setGridMode((m) => !m),
+                      width: 36,
+                      height: 24,
+                      style: { backgroundColor: C.mauve, borderRadius: 6, alignItems: "center", justifyContent: "center" },
+                      children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                        fontSize: 10,
+                        height: 12,
+                        style: { color: "#fff" },
+                        children: gridMode ? "Std" : "Sci"
+                      })
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+                      onPress: () => __velox_quit(),
+                      width: 24,
+                      height: 24,
+                      style: { backgroundColor: C.red, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+                      children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                        fontSize: 10,
+                        height: 12,
+                        style: { color: "#fff" },
+                        children: "×"
+                      })
+                    })
+                  ]
                 })
               ]
-            })
-          ]
-        }),
-        showHistory && history.length > 0 && /* @__PURE__ */ jsx_runtime.jsxs(View, {
-          position: "absolute",
-          top: titleH + 8,
-          right: pad,
-          width: 180,
-          height: 260,
-          style: {
-            backgroundColor: C.surface,
-            borderRadius: 8,
-            borderWidth: 1,
-            borderColor: C.overlay,
-            overflow: "hidden",
-            zIndex: 10
-          },
-          children: [
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 10,
+            }),
+            showHistory && history.length > 0 && /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              position: "absolute",
+              top: titleH + 8,
+              right: pad,
+              width: 180,
+              height: 260,
+              style: {
+                backgroundColor: C.surface,
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: C.overlay,
+                overflow: "hidden",
+                zIndex: 10
+              },
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                  fontSize: 10,
+                  height: 20,
+                  style: { color: C.subtle, padding: 4 },
+                  children: "History"
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
+                  width: 178,
+                  showScrollbar: true,
+                  scrollbarWidth: 6,
+                  scrollbarColor: "#8c8caa99",
+                  contentHeight: history.length * 24,
+                  height: 236,
+                  children: history.map((entry, i) => /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 11,
+                    height: 24,
+                    style: {
+                      color: C.text,
+                      paddingLeft: 4,
+                      paddingRight: 16
+                    },
+                    children: entry
+                  }, i))
+                })
+              ]
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(View, {
+              backgroundGradient: "#1e1e2e #313244",
+              style: {
+                borderRadius: 12,
+                padding: 12,
+                justifyContent: "center",
+                alignItems: "flex-end",
+                overflow: "hidden"
+              },
+              width: "90%",
+              height: dispH,
+              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 28,
+                height: 36,
+                width: "100%",
+                style: { color: C.text, textAlign: "right" },
+                numberOfLines: 1,
+                children: state.disp
+              })
+            }),
+            /* @__PURE__ */ jsx_runtime.jsx(View, {
+              opacity: 0.6,
+              style: { alignItems: "flex-end" },
+              width: "90%",
               height: 20,
-              style: { color: C.subtle, padding: 4 },
-              children: "History"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
-              width: 178,
-              showScrollbar: true,
-              scrollbarWidth: 6,
-              scrollbarColor: "#8c8caa99",
-              contentHeight: history.length * 26,
-              height: 236,
-              children: history.map((entry, i) => /* @__PURE__ */ jsx_runtime.jsx(Text, {
+              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
                 fontSize: 11,
-                height: 24,
-                style: {
-                  color: C.text,
-                  paddingLeft: 4,
-                  paddingRight: 16
-                },
-                children: entry
-              }, i))
-            })
-          ]
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(View, {
-          backgroundGradient: "#1e1e2e #313244",
-          alignSelf: "stretch",
-          flexGrow: 1,
-          style: {
-            borderRadius: 12,
-            padding: 12,
-            justifyContent: "center",
-            alignItems: "flex-end",
-            minWidth: 200,
-            overflow: "hidden"
-          },
-          height: dispH,
-          children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-            fontSize: 28,
-            height: 36,
-            width: "100%",
-            style: { color: C.text, textAlign: "right" },
-            numberOfLines: 1,
-            children: state.disp
-          })
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(View, {
-          opacity: 0.6,
-          style: { alignItems: "flex-end" },
-          width: "100%",
-          height: 20,
-          children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-            fontSize: 11,
-            height: 16,
-            style: { color: C.dim },
-            children: state.expr
-          })
-        }),
-        gridMode ? /* @__PURE__ */ jsx_runtime.jsxs(View, {
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr 1fr 1fr",
-          gridTemplateRows: "repeat(7, 1fr)",
-          width: "100%",
-          style: { gap: 0, flexGrow: 1 },
-          children: [
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "sin",
-              gridColumn: "1",
-              gridRow: "1",
-              color: C.teal
+                height: 16,
+                style: { color: C.dim },
+                children: state.expr
+              })
             }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "cos",
-              gridColumn: "2",
-              gridRow: "1",
-              color: C.teal
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "tan",
-              gridColumn: "3",
-              gridRow: "1",
-              color: C.teal
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "log",
-              gridColumn: "4",
-              gridRow: "1",
-              color: C.teal
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "ln",
-              gridColumn: "1",
-              gridRow: "2",
-              color: C.teal
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "√",
-              gridColumn: "2",
-              gridRow: "2",
-              color: C.teal
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "xⁿ",
-              gridColumn: "3",
-              gridRow: "2",
-              color: C.teal
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "(",
-              gridColumn: "4",
-              gridRow: "2",
-              color: C.overlay
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "C",
-              gridColumn: "1",
-              gridRow: "3",
-              color: C.red
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "⌫",
-              gridColumn: "2",
-              gridRow: "3",
-              color: C.overlay
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "%",
-              gridColumn: "3",
-              gridRow: "3",
-              color: C.overlay
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "÷",
-              gridColumn: "4",
-              gridRow: "3",
-              color: C.mauve
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "7",
-              gridColumn: "1",
-              gridRow: "4"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "8",
-              gridColumn: "2",
-              gridRow: "4"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "9",
-              gridColumn: "3",
-              gridRow: "4"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "×",
-              gridColumn: "4",
-              gridRow: "4",
-              color: C.mauve
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "4",
-              gridColumn: "1",
-              gridRow: "5"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "5",
-              gridColumn: "2",
-              gridRow: "5"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "6",
-              gridColumn: "3",
-              gridRow: "5"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "−",
-              gridColumn: "4",
-              gridRow: "5",
-              color: C.mauve
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "1",
-              gridColumn: "1",
-              gridRow: "6"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "2",
-              gridColumn: "2",
-              gridRow: "6"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "3",
-              gridColumn: "3",
-              gridRow: "6"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "+",
-              gridColumn: "4",
-              gridRow: "6",
-              color: C.mauve
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "0",
-              gridColumn: "1 / 3",
-              gridRow: "7",
-              span: 2
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: ".",
-              gridColumn: "3",
-              gridRow: "7"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-              label: "=",
-              gridColumn: "4",
-              gridRow: "7",
-              color: C.accent
-            })
-          ]
-        }) : /* @__PURE__ */ jsx_runtime.jsxs(jsx_runtime.Fragment, {
-          children: [
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: { flexDirection: "row", gap: 4 },
-              width: "100%",
-              height: btnH,
+            gridMode ? /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr 1fr 1fr",
+              gridTemplateRows: "repeat(7, 1fr)",
+              width: "90%",
+              style: { gap: 0, flexGrow: 1 },
               children: [
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "sin",
+                  gridColumn: "1",
+                  gridRow: "1",
+                  color: C.teal
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "cos",
+                  gridColumn: "2",
+                  gridRow: "1",
+                  color: C.teal
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "tan",
+                  gridColumn: "3",
+                  gridRow: "1",
+                  color: C.teal
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "log",
+                  gridColumn: "4",
+                  gridRow: "1",
+                  color: C.teal
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "ln",
+                  gridColumn: "1",
+                  gridRow: "2",
+                  color: C.teal
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "√",
+                  gridColumn: "2",
+                  gridRow: "2",
+                  color: C.teal
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "xⁿ",
+                  gridColumn: "3",
+                  gridRow: "2",
+                  color: C.teal
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "(",
+                  gridColumn: "4",
+                  gridRow: "2",
+                  color: C.overlay
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
                   label: "C",
+                  gridColumn: "1",
+                  gridRow: "3",
                   color: C.red
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
                   label: "⌫",
+                  gridColumn: "2",
+                  gridRow: "3",
                   color: C.overlay
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
                   label: "%",
+                  gridColumn: "3",
+                  gridRow: "3",
                   color: C.overlay
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
                   label: "÷",
-                  color: C.mauve,
-                  disabled: state.disp === "0"
-                })
-              ]
-            }),
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: { flexDirection: "row", gap: 4 },
-              width: "100%",
-              height: btnH,
-              children: [
-                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-                  label: "7"
+                  gridColumn: "4",
+                  gridRow: "3",
+                  color: C.mauve
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-                  label: "8"
+                  label: "7",
+                  gridColumn: "1",
+                  gridRow: "4"
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-                  label: "9"
+                  label: "8",
+                  gridColumn: "2",
+                  gridRow: "4"
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "9",
+                  gridColumn: "3",
+                  gridRow: "4"
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
                   label: "×",
+                  gridColumn: "4",
+                  gridRow: "4",
                   color: C.mauve
-                })
-              ]
-            }),
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: { flexDirection: "row", gap: 4 },
-              width: "100%",
-              height: btnH,
-              children: [
-                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-                  label: "4"
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-                  label: "5"
+                  label: "4",
+                  gridColumn: "1",
+                  gridRow: "5"
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-                  label: "6"
+                  label: "5",
+                  gridColumn: "2",
+                  gridRow: "5"
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "6",
+                  gridColumn: "3",
+                  gridRow: "5"
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
                   label: "−",
+                  gridColumn: "4",
+                  gridRow: "5",
                   color: C.mauve
-                })
-              ]
-            }),
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: { flexDirection: "row", gap: 4 },
-              width: "100%",
-              height: btnH,
-              children: [
-                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-                  label: "1"
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-                  label: "2"
+                  label: "1",
+                  gridColumn: "1",
+                  gridRow: "6"
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-                  label: "3"
+                  label: "2",
+                  gridColumn: "2",
+                  gridRow: "6"
+                }),
+                /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                  label: "3",
+                  gridColumn: "3",
+                  gridRow: "6"
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
                   label: "+",
+                  gridColumn: "4",
+                  gridRow: "6",
                   color: C.mauve
-                })
-              ]
-            }),
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: { flexDirection: "row", gap: 4, flexWrap: "wrap" },
-              width: "100%",
-              height: btnH,
-              children: [
+                }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
                   label: "0",
+                  gridColumn: "1 / 3",
+                  gridRow: "7",
                   span: 2
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-                  label: "."
+                  label: ".",
+                  gridColumn: "3",
+                  gridRow: "7"
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
                   label: "=",
+                  gridColumn: "4",
+                  gridRow: "7",
                   color: C.accent
+                })
+              ]
+            }) : /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              style: { flexGrow: 1, gap: 4 },
+              width: "90%",
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsxs(View, {
+                  style: { flexDirection: "row", gap: 4 },
+                  width: "100%",
+                  height: btnH,
+                  children: [
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "C",
+                      color: C.red
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "⌫",
+                      color: C.overlay
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "%",
+                      color: C.overlay
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "÷",
+                      color: C.mauve,
+                      disabled: state.disp === "0"
+                    })
+                  ]
+                }),
+                /* @__PURE__ */ jsx_runtime.jsxs(View, {
+                  style: { flexDirection: "row", gap: 4 },
+                  width: "100%",
+                  height: btnH,
+                  children: [
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "7"
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "8"
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "9"
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "×",
+                      color: C.mauve
+                    })
+                  ]
+                }),
+                /* @__PURE__ */ jsx_runtime.jsxs(View, {
+                  style: { flexDirection: "row", gap: 4 },
+                  width: "100%",
+                  height: btnH,
+                  children: [
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "4"
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "5"
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "6"
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "−",
+                      color: C.mauve
+                    })
+                  ]
+                }),
+                /* @__PURE__ */ jsx_runtime.jsxs(View, {
+                  style: { flexDirection: "row", gap: 4 },
+                  width: "100%",
+                  height: btnH,
+                  children: [
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "1"
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "2"
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "3"
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "+",
+                      color: C.mauve
+                    })
+                  ]
+                }),
+                /* @__PURE__ */ jsx_runtime.jsxs(View, {
+                  style: { flexDirection: "row", gap: 4, flexWrap: "wrap" },
+                  width: "100%",
+                  height: btnH,
+                  children: [
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "0",
+                      span: 2
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "."
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Btn, {
+                      label: "=",
+                      color: C.accent
+                    })
+                  ]
                 })
               ]
             })
           ]
         }),
-        state.lastResult !== undefined && /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+        state.lastResult !== undefined && /* @__PURE__ */ jsx_runtime.jsx(View, {
           position: "absolute",
           top: 0,
           left: 0,
           right: 0,
           bottom: 0,
-          onPress: () => setState((s) => ({ ...s, lastResult: undefined })),
           style: {
             backgroundColor: "#00000088",
             justifyContent: "center",
-            alignItems: "center",
-            zIndex: 10
+            alignItems: "center"
           },
           children: /* @__PURE__ */ jsx_runtime.jsxs(View, {
             style: {
@@ -7691,26 +7702,6 @@ No matching component was found for:
                 })
               })
             ]
-          })
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(View, {
-          position: "absolute",
-          bottom: 8,
-          right: 8,
-          width: 56,
-          height: 22,
-          transform: "rotate(-6)",
-          style: {
-            backgroundColor: C.mauve,
-            borderTopLeftRadius: 8,
-            justifyContent: "center",
-            alignItems: "center"
-          },
-          children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-            fontSize: 9,
-            height: 13,
-            style: { color: "#fff", textAlign: "center" },
-            children: "About"
           })
         })
       ]

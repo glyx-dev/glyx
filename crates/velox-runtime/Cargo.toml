@@ -32,6 +32,7 @@ global-hotkey       = { workspace = true }
 rodio               = { workspace = true }
 hidapi              = { workspace = true }
 self_update         = { workspace = true }
+sha2                = { workspace = true }
 velox-media         = { path = "../velox-media" }
 serde               = { workspace = true }
 velox-3d            = { path = "../velox-3d" }

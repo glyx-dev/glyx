@@ -77,7 +77,8 @@ impl V8Runtime {
         let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
         let perf_state     = Arc::new(std::sync::Mutex::new(velox_perf::PerfState::new()));
         Self::new_with_ipc(tokio_handle, window, ipc_bus, 0, next_window_id, perf_state,
-            std::sync::Arc::new(std::collections::HashMap::new()))
+            std::sync::Arc::new(std::collections::HashMap::new()),
+            std::sync::Arc::new(vec![]))
     }
 
     /// Create a new VeloxRuntime and join it to the shared IPC bus.
@@ -94,6 +95,7 @@ impl V8Runtime {
         next_window_id: Arc<std::sync::atomic::AtomicU32>,
         perf_state:     Arc<std::sync::Mutex<velox_perf::PerfState>>,
         backend_commands: BackendRegistry,
+        js_plugins:     crate::JsPlugins,
     ) -> Self {
         // Register this window's inbox in the shared bus.
         ipc_bus.lock().unwrap()
@@ -138,6 +140,7 @@ impl V8Runtime {
                 Arc::clone(&video_events),
                 Arc::clone(&cdp_log_tx),
                 backend_commands,
+                js_plugins,
             );
 
             (v8::Global::new(scope, ctx), queue, scene)
@@ -171,7 +174,8 @@ impl V8Runtime {
         let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
         let perf_state     = Arc::new(std::sync::Mutex::new(velox_perf::PerfState::new()));
         Self::new_from_snapshot_with_ipc(snapshot_blob, tokio_handle, window, ipc_bus, 0, next_window_id, perf_state,
-            std::sync::Arc::new(std::collections::HashMap::new()))
+            std::sync::Arc::new(std::collections::HashMap::new()),
+            std::sync::Arc::new(vec![]))
     }
 
     /// Restore from snapshot and join the shared IPC bus.
@@ -184,6 +188,7 @@ impl V8Runtime {
         next_window_id: Arc<std::sync::atomic::AtomicU32>,
         perf_state:     Arc<std::sync::Mutex<velox_perf::PerfState>>,
         backend_commands: BackendRegistry,
+        js_plugins:     crate::JsPlugins,
     ) -> Result<Self, RuntimeError> {
         // Register this window's inbox in the bus.
         ipc_bus.lock().unwrap()
@@ -231,6 +236,7 @@ impl V8Runtime {
                 Arc::clone(&video_events),
                 Arc::clone(&cdp_log_tx),
                 backend_commands,
+                js_plugins,
             );
 
             (v8::Global::new(scope, ctx), queue, scene)
@@ -280,7 +286,24 @@ impl V8Runtime {
 
             let mut try_catch = v8::TryCatch::new(scope);
 
-            let script = v8::Script::compile(&mut try_catch, code, None)
+            // Set a script origin so V8 labels stack frames as "app.js" instead
+            // of "vm".  With --source-map=inline in bun and --enable_source_maps
+            // in V8 (dev builds), positions are automatically translated back to
+            // the original .jsx/.tsx source file and line.
+            let resource_name: v8::Local<v8::Value> =
+                v8::String::new(&mut try_catch, "app.js").unwrap().into();
+            let source_map_url: v8::Local<v8::Value> =
+                v8::String::new(&mut try_catch, "").unwrap().into();
+            let origin = v8::ScriptOrigin::new(
+                &mut *try_catch,
+                resource_name,
+                0, 0,
+                false, -1,
+                source_map_url,
+                false, false, false,
+            );
+
+            let script = v8::Script::compile(&mut try_catch, code, Some(&origin))
                 .ok_or_else(|| {
                     let exc = try_catch.exception().unwrap();
                     let msg = exc
@@ -300,10 +323,21 @@ impl V8Runtime {
                 }
                 None => {
                     let exc = try_catch.exception().unwrap();
-                    let msg = exc
-                        .to_string(&mut try_catch)
-                        .map(|s| s.to_rust_string_lossy(&mut try_catch))
-                        .unwrap_or_else(|| "Unknown JS exception".into());
+                    // Prefer Error.stack — it includes message + all frames.
+                    // Fall back to exc.to_string() for non-Error throws.
+                    let msg = {
+                        let key = v8::String::new(&mut try_catch, "stack").unwrap();
+                        exc.to_object(&mut try_catch)
+                            .and_then(|o| o.get(&mut try_catch, key.into()))
+                            .and_then(|v| v.to_string(&mut try_catch))
+                            .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| {
+                                exc.to_string(&mut try_catch)
+                                    .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                                    .unwrap_or_else(|| "Unknown JS exception".into())
+                            })
+                    };
                     Err(RuntimeError::JsException(msg))
                 }
             }

@@ -47,6 +47,25 @@ pub use bindings::{
 };
 pub use snapshot::{SnapshotBlob, create_stub_bindings_script};
 
+// ── JS plugin type ────────────────────────────────────────────────────────────
+
+/// A bundled JS plugin ready to be evaluated in the V8 context.
+///
+/// Defined here (in velox-runtime) so it can be passed into `new_with_ipc` without
+/// a circular dependency. velox-core re-exports this as `velox_core::JsPlugin`.
+#[derive(Clone)]
+pub struct JsPlugin {
+    /// Command prefix — `Some("db")` → commands named `"db.<fn>"`, `None` → `"<fn>"`.
+    pub prefix: Option<String>,
+    /// Bundled IIFE source. After eval, `globalThis.<global_name>` holds the exports.
+    pub bundled_js: String,
+    /// The global variable name set by the IIFE (e.g. `"__velox_plugin_db"`).
+    pub global_name: String,
+}
+
+/// Shared list of bundled JS plugins passed to every V8 runtime instance.
+pub type JsPlugins = std::sync::Arc<Vec<JsPlugin>>;
+
 // ── Backend command registry ──────────────────────────────────────────────────
 
 /// A single async Rust command callable from JS via `backend.<name>(args)`.
@@ -172,6 +191,10 @@ pub fn init_v8() {
         v8::V8::set_flags_from_string(
             "--lite-mode --optimize-for-size --no-expose-wasm"
         );
+        // In dev builds: translate source-map positions in V8 stack traces so
+        // frames show original .jsx/.tsx file + line instead of bundle offsets.
+        #[cfg(feature = "dev")]
+        v8::V8::set_flags_from_string("--enable_source_maps");
 
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);

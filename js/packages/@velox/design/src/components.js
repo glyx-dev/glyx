@@ -150,6 +150,53 @@ export function Heading({ children, level = 1, style }) {
   );
 }
 
+// ── IconButton ────────────────────────────────────────────────────────────────
+//
+// Square pressable button with a single icon (emoji or text glyph).
+//
+// Props:
+//   icon     — string icon/emoji to render
+//   onPress  — press handler
+//   size     — button diameter in px (default 36)
+//   variant  — 'secondary' | 'primary' | 'ghost' | 'danger' (default 'secondary')
+//   disabled — grays out and blocks interaction
+//   label    — accessibility label (not rendered)
+
+export function IconButton({ icon, onPress, size = 36, variant = 'secondary', disabled = false, label, style }) {
+  const { colors, radius } = useTheme();
+
+  const bg = disabled          ? colors.textDisabled
+           : variant === 'primary'   ? colors.primary
+           : variant === 'danger'    ? colors.error
+           : variant === 'ghost'     ? 'transparent'
+           : colors.surfaceRaised;
+
+  const fg = variant === 'primary' ? colors.primaryText
+           : variant === 'danger'  ? '#ffffff'
+           : colors.text;
+
+  return (
+    <Pressable
+      onPress={disabled ? undefined : onPress}
+      style={{
+        width:           size,
+        height:          size,
+        borderRadius:    radius.md,
+        backgroundColor: bg,
+        alignItems:      'center',
+        justifyContent:  'center',
+        opacity:         disabled ? 0.5 : 1,
+        ...(variant === 'ghost' ? { borderWidth: 1, borderColor: colors.border } : {}),
+        ...style,
+      }}
+    >
+      <Text fontSize={Math.round(size * 0.5)} style={{ color: fg }}>
+        {icon}
+      </Text>
+    </Pressable>
+  );
+}
+
 // ── Badge ─────────────────────────────────────────────────────────────────────
 
 /**

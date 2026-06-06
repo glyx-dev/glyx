@@ -92,8 +92,24 @@ struct SplashCfgJson {
     minimum_ms:  u64,
 }
 
+/// A single JS plugin entry from `velox.config.json`.
+#[derive(serde::Deserialize, Default)]
+struct PluginConfigJson {
+    /// Path to the plugin entry file (JS/TS). Required.
+    entry: String,
+    /// Optional namespace name. If set, functions are callable as `backend.<name>.<fn>()`.
+    /// If omitted, functions are registered flat: `backend.<fn>()`.
+    name: Option<String>,
+    /// Capability declarations (informational — used for docs/tooling; not enforced at runtime).
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
 #[derive(serde::Deserialize, Default)]
 struct VeloxConfigFile {
+    /// Semantic version string for this app, e.g. `"1.2.0"`.
+    /// Exposed via `updater.getVersion()` and used by `updater.checkManifest()`.
+    version:      Option<String>,
     window:       Option<WindowCfgJson>,
     capabilities: Option<Capabilities>,
     /// Path to the app icon (PNG, 512×512 or 1024×1024 recommended).
@@ -102,6 +118,10 @@ struct VeloxConfigFile {
     icon:         Option<String>,
     /// Splash screen configuration. Optional — omit for no splash.
     splash:       Option<SplashCfgJson>,
+    /// JS plugin extensions. Each plugin is bundled by bun at startup and its
+    /// exported async functions are registered as backend commands.
+    #[serde(default)]
+    plugins:      Vec<PluginConfigJson>,
 }
 
 /// Window settings from `velox.config.json`.
@@ -157,8 +177,69 @@ fn read_config_json() -> Option<String> {
     std::fs::read_to_string("velox.config.json").ok()
 }
 
-/// Parse a velox config JSON string, apply window overrides, and return capabilities.
-fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> Capabilities {
+// ── JS plugin bundling ────────────────────────────────────────────────────────
+
+pub use velox_runtime::{JsPlugin, JsPlugins};
+
+/// Bundle a single plugin entry using bun.
+/// Returns `None` on failure (error already logged).
+fn bundle_plugin(entry: &str, safe_name: &str) -> Option<String> {
+    let global_name = format!("__velox_plugin_{safe_name}");
+    let tmp_out = std::env::temp_dir().join(format!("velox_plugin_{safe_name}.js"));
+
+    let run = |args: &[&str]| -> std::io::Result<std::process::Output> {
+        #[cfg(target_os = "windows")]
+        {
+            match std::process::Command::new("bun").args(args).output() {
+                Ok(o) => return Ok(o),
+                Err(_) => {
+                    let mut cmd = vec!["/C", "bun"];
+                    cmd.extend_from_slice(args);
+                    return std::process::Command::new("cmd").args(&cmd).output();
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        std::process::Command::new("bun").args(args).output()
+    };
+
+    let out_str = tmp_out.to_str()?;
+    let bun_args = [
+        "build", entry,
+        "--outfile", out_str,
+        "--target", "browser",
+        "--format", "iife",
+        "--global-name", &global_name,
+    ];
+
+    match run(&bun_args) {
+        Ok(o) if o.status.success() => {
+            match std::fs::read_to_string(&tmp_out) {
+                Ok(js) => {
+                    log::info!("[plugins] bundled '{entry}' → {global_name}");
+                    let _ = std::fs::remove_file(&tmp_out);
+                    Some(js)
+                }
+                Err(e) => {
+                    log::error!("[plugins] could not read bundle for '{entry}': {e}");
+                    None
+                }
+            }
+        }
+        Ok(o) => {
+            let msg = String::from_utf8_lossy(&o.stderr);
+            log::error!("[plugins] bun build failed for '{entry}': {msg}");
+            None
+        }
+        Err(e) => {
+            log::error!("[plugins] failed to run bun for '{entry}': {e}");
+            None
+        }
+    }
+}
+
+/// Parse a velox config JSON string, apply window overrides, and return capabilities + plugins.
+fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabilities, Vec<JsPlugin>) {
     let file: Option<VeloxConfigFile> = serde_json::from_str::<VeloxConfigFile>(json)
         .map_err(|e| { log::error!("velox config parse error: {e}"); e })
         .ok();
@@ -191,7 +272,33 @@ fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> Capabilities {
         cfg.icon_rgba = load_icon_from_bytes(DEFAULT_ICON_BYTES);
     }
 
-    file.and_then(|f| f.capabilities).unwrap_or_default()
+    // Bundle JS plugins.
+    let plugins = file.as_ref().map(|f| {
+        f.plugins.iter().enumerate().filter_map(|(i, p)| {
+            if p.entry.is_empty() { return None; }
+            // Safe identifier: use name if set, else "plugin<i>".
+            let safe = p.name.as_deref()
+                .map(|n| n.replace(|c: char| !c.is_alphanumeric() && c != '_', "_"))
+                .unwrap_or_else(|| format!("plugin{i}"));
+            let global_name = format!("__velox_plugin_{safe}");
+            let bundled_js = bundle_plugin(&p.entry, &safe)?;
+            Some(JsPlugin {
+                prefix: p.name.clone(),
+                bundled_js,
+                global_name,
+            })
+        }).collect::<Vec<_>>()
+    }).unwrap_or_default();
+
+    // Store app version for updater bindings.
+    let version = file.as_ref()
+        .and_then(|f| f.version.as_ref())
+        .cloned()
+        .unwrap_or_else(|| "0.0.0".to_string());
+    velox_security::init_version(version);
+
+    let caps = file.and_then(|f| f.capabilities).unwrap_or_default();
+    (caps, plugins)
 }
 
 /// Decode a PNG at `path` to raw RGBA bytes for use as a winit window icon.
@@ -324,9 +431,9 @@ fn load_splash_state() -> Option<SplashState> {
 
 /// Load the Velox config from the current working directory.
 ///
-/// Applies any `window` overrides to `cfg` and returns the parsed capabilities.
-/// Missing file → warning + all capabilities OFF (fail-closed).
-fn load_velox_config(cfg: &mut WindowConfig) -> Capabilities {
+/// Applies any `window` overrides to `cfg` and returns (capabilities, js_plugins).
+/// Missing file → warning + all capabilities OFF, no plugins (fail-closed).
+fn load_velox_config(cfg: &mut WindowConfig) -> (Capabilities, Vec<JsPlugin>) {
     let json = match read_config_json() {
         Some(j) => j,
         None => {
@@ -334,11 +441,11 @@ fn load_velox_config(cfg: &mut WindowConfig) -> Capabilities {
                 "velox-security: no velox.config.ts / velox.config.json found or no capabilities declared \
                  — all capabilities default to OFF"
             );
-            return Capabilities::default();
+            return (Capabilities::default(), vec![]);
         }
     };
 
-    let caps = apply_config_json(&json, cfg);
+    let (caps, plugins) = apply_config_json(&json, cfg);
 
     if caps.can_read_fs() || caps.db || caps.network.is_some() {
         log::info!(
@@ -354,7 +461,7 @@ fn load_velox_config(cfg: &mut WindowConfig) -> Capabilities {
         );
     }
 
-    caps
+    (caps, plugins)
 }
 
 pub use velox_shell::ShellConfig as WindowConfig;
@@ -475,6 +582,9 @@ pub struct AppConfig {
     pub dev_mode: Option<DevModeConfig>,
     /// Optional native Rust extensions that register custom __velox_* bindings.
     pub extensions: Vec<Box<dyn VeloxExtension>>,
+    /// Bundled JS plugins from `velox.config.json` `plugins` array.
+    /// Each plugin's exported async functions are callable via `backend.<name>.<fn>()`.
+    pub js_plugins: Vec<JsPlugin>,
 }
 
 impl AppConfig {
@@ -489,7 +599,7 @@ impl AppConfig {
     /// ```
     pub fn from_config() -> Self {
         let mut window = WindowConfig::default();
-        let caps = load_velox_config(&mut window);
+        let (caps, js_plugins) = load_velox_config(&mut window);
         velox_security::init(caps);
         let snapshot_blob = embedded_snapshot_blob();
         // Prefer build-time embedded app JS (snapshot mode), fall back to reading from disk.
@@ -501,6 +611,7 @@ impl AppConfig {
             snapshot_blob,
             dev_mode:      build_dev_mode_config(),
             extensions:    vec![],
+            js_plugins,
         }
     }
 
@@ -511,7 +622,7 @@ impl AppConfig {
     /// without invoking cargo.
     pub fn from_trailer(snapshot_blob: Vec<u8>, js_src: String, config_json: &str) -> Self {
         let mut window = WindowConfig::default();
-        let caps = apply_config_json(config_json, &mut window);
+        let (caps, js_plugins) = apply_config_json(config_json, &mut window);
         velox_security::init(caps);
         AppConfig {
             window,
@@ -519,6 +630,7 @@ impl AppConfig {
             snapshot_blob: Some(snapshot_blob),
             dev_mode: None,
             extensions: vec![],
+            js_plugins,
         }
     }
 }
@@ -895,8 +1007,26 @@ fn start_dev_mode_worker(
     }
 
     let (out_tx, out_rx) = mpsc::channel::<DevBuildEvent>();
+
+    // The watch channel is created here (outside the thread) so the stdin
+    // reader can hold a clone of the sender alongside the file-watcher.
+    let (watch_tx, watch_rx) = mpsc::channel::<()>();
+
+    // Stdin reader — press R (+ Enter) in the terminal to force a full rebuild.
+    {
+        let watch_tx = watch_tx.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::stdin().lock().lines().flatten() {
+                if line.trim().eq_ignore_ascii_case("r") {
+                    log::info!("[HMR] full reload triggered (R)");
+                    let _ = watch_tx.send(());
+                }
+            }
+        });
+    }
+
     std::thread::spawn(move || {
-        let (watch_tx, watch_rx) = mpsc::channel::<()>();
         let out_tx_watch = out_tx.clone();
         // The output JS path — we skip events for this file to avoid a circular
         // rebuild loop (bun writes app.js → watcher fires → bun runs again → ...).
@@ -940,7 +1070,7 @@ fn start_dev_mode_worker(
                 log::warn!("[HMR] watch path does not exist: {:?}", wp);
             }
         }
-        log::info!("[HMR] ready — edit {:?} to hot-reload", app_jsx);
+        log::info!("[HMR] ready — edit {:?} to hot-reload  (press R + Enter to force reload)", app_jsx);
 
         while watch_rx.recv().is_ok() {
             while watch_rx.recv_timeout(Duration::from_millis(180)).is_ok() {}
@@ -955,9 +1085,10 @@ fn start_dev_mode_worker(
                     app_jsx.to_str().unwrap_or(""),
                     "--outfile",
                     app_js.to_str().unwrap_or(""),
-                    "--target", "browser",
-                    "--format",  "iife",
-                    "--define",  "process.env.NODE_ENV='production'",
+                    "--target",      "browser",
+                    "--format",      "iife",
+                    "--define",      "process.env.NODE_ENV='production'",
+                    "--source-map",  "inline",  // enables source-mapped V8 stacks in dev
                 ];
                 #[cfg(target_os = "windows")]
                 {
@@ -1164,9 +1295,22 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
     }
 }
 
-/// Draw the JS error overlay — a red banner at the bottom of the window.
-/// Shown whenever a JS exception was thrown during `frame_tick()`.
-/// Always drawn in dev mode regardless of whether the perf overlay is toggled.
+/// Draw the JS error overlay — a panel at the bottom of the window.
+///
+/// Layout:
+///   ─ red top border ─────────────────────────────────────────────────────
+///   ⚠ JavaScript Error  —  fix source and save to dismiss
+///   ─ dim separator ──────────────────────────────────────────────────────
+///   TypeError: Cannot read properties of … (message, up to 2 lines, red)
+///
+///     at App (App.jsx:45:12)          ← amber  (user .jsx/.tsx frame)
+///     at renderWithHooks (app.js:...) ← dim    (framework frame)
+///     … N more frames
+///   ─ footer ─────────────────────────────────────────────────────────────
+///
+/// Requires `--source-map=inline` in bun dev build and V8 `--enable_source_maps`
+/// (set in velox-runtime for dev feature) so that .jsx file names and original
+/// line numbers appear instead of bundle offsets.
 #[cfg(feature = "dev")]
 fn draw_error_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
     let Some(dev) = state.dev_mode.as_ref() else { return };
@@ -1175,44 +1319,107 @@ fn draw_error_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
     let win_w = state.gpu.width()  as f64;
     let win_h = state.gpu.height() as f64;
 
-    // Background panel — 130px tall, full width, anchored to bottom.
-    let panel_h = 140.0_f64;
+    let panel_h = 210.0_f64;
     let panel_y = win_h - panel_h;
-    frame.fill_rounded_rect(0.0, panel_y, win_w, panel_h, 0.0,
-        peniko::Color::from_rgba8(40, 5, 5, 245));
 
-    // Red top border line.
-    frame.fill_rect(0.0, panel_y, win_w, 2.0,
+    // Background
+    frame.fill_rounded_rect(0.0, panel_y, win_w, panel_h, 0.0,
+        peniko::Color::from_rgba8(26, 4, 4, 252));
+
+    // Red top border
+    frame.fill_rect(0.0, panel_y, win_w, 3.0,
         peniko::Color::from_rgba8(220, 50, 50, 255));
 
-    let title_color = peniko::Color::from_rgba8(255, 100, 100, 255);
-    let body_color  = peniko::Color::from_rgba8(240, 200, 200, 255);
-    let dim_color   = peniko::Color::from_rgba8(160, 120, 120, 200);
+    let title_col  = peniko::Color::from_rgba8(255, 100, 100, 210);
+    let msg_col    = peniko::Color::from_rgba8(255, 130, 130, 255); // error message lines
+    let source_col = peniko::Color::from_rgba8(255, 200, 100, 255); // user .jsx/.tsx frames
+    let frame_col  = peniko::Color::from_rgba8(180, 140, 140, 200); // framework frames
+    let dim_col    = peniko::Color::from_rgba8(130, 90,  90,  180); // hints, "more"
 
-    // Title row.
-    let title = state.text_sys.label("⚠  JavaScript Error  (fix and save to dismiss)", 12.0);
-    frame.draw_text(&title, 16.0, panel_y + 12.0, title_color);
+    // Title
+    let title_lbl = state.text_sys.label(
+        "⚠ JavaScript Error  —  fix source and save to dismiss", 11.0);
+    frame.draw_text(&title_lbl, 16.0, panel_y + 10.0, title_col);
 
-    // Error lines — up to 4 lines, truncated at 120 chars each.
-    let max_line_chars = (win_w as usize).saturating_sub(40) / 7; // ~7px per char at 12pt
-    let lines: Vec<&str> = err.lines().take(4).collect();
-    for (i, line) in lines.iter().enumerate() {
-        let truncated = if line.len() > max_line_chars {
-            format!("{}…", &line[..max_line_chars.min(line.len())])
+    // Thin separator
+    frame.fill_rect(0.0, panel_y + 25.0, win_w, 1.0,
+        peniko::Color::from_rgba8(90, 20, 20, 140));
+
+    // ~7 px per char at 11 pt — truncate long lines
+    let max_ch = (win_w as usize).saturating_sub(56) / 7;
+    let trunc = |s: &str| -> String {
+        if s.len() > max_ch {
+            let end = s.char_indices().nth(max_ch).map(|(i, _)| i).unwrap_or(s.len());
+            format!("{}…", &s[..end])
         } else {
-            line.to_string()
-        };
-        let text = state.text_sys.label(&truncated, 11.0);
-        frame.draw_text(&text, 16.0, panel_y + 34.0 + (i as f64 * 18.0), body_color);
+            s.to_owned()
+        }
+    };
+
+    // Split the error string:
+    //   lines before the first "at " frame  → error message
+    //   lines starting with "at "           → stack frames
+    let all_lines: Vec<&str> = err.lines().collect();
+    let first_frame_idx = all_lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("at "))
+        .unwrap_or(all_lines.len());
+    let msg_lines   = &all_lines[..first_frame_idx];
+    let frame_lines = &all_lines[first_frame_idx..];
+
+    // Draw error message (up to 2 non-empty lines)
+    let mut y = panel_y + 32.0;
+    let mut drawn_msg = 0usize;
+    for line in msg_lines.iter().take(3) {
+        let t = line.trim();
+        if t.is_empty() { continue; }
+        if drawn_msg >= 2 { break; }
+        let lbl = state.text_sys.label(&trunc(t), 12.0);
+        frame.draw_text(&lbl, 16.0, y, msg_col);
+        y += 19.0;
+        drawn_msg += 1;
     }
-    if err.lines().count() > 4 {
-        let more = state.text_sys.label("… (more lines in console)", 10.0);
-        frame.draw_text(&more, 16.0, panel_y + 34.0 + (4.0 * 18.0), dim_color);
+    y += 5.0; // gap before frames
+
+    // Draw stack frames (up to 7)
+    let max_frames = 7usize;
+    let mut drawn_frames = 0usize;
+    for line in frame_lines.iter() {
+        let t = line.trim();
+        if t.is_empty() || !t.starts_with("at ") { continue; }
+        if drawn_frames >= max_frames || y > panel_y + panel_h - 22.0 { break; }
+
+        // Amber for frames that point to user source (.jsx / .tsx / .ts);
+        // dim for React internals, node_modules, polyfills, etc.
+        let is_user = t.contains(".jsx") || t.contains(".tsx")
+                   || (t.contains(".ts") && !t.contains("node_modules"))
+                   || (t.contains(".js")
+                       && !t.contains("node_modules")
+                       && !t.contains("polyfills")
+                       && !t.contains("chunk-"));
+        let col = if is_user { source_col } else { frame_col };
+
+        let lbl = state.text_sys.label(&trunc(t), 10.5);
+        frame.draw_text(&lbl, 26.0, y, col);
+        y += 17.0;
+        drawn_frames += 1;
     }
 
-    // Footer hint.
-    let hint = state.text_sys.label("Save any source file to rebuild and dismiss", 10.0);
-    frame.draw_text(&hint, 16.0, panel_y + panel_h - 16.0, dim_color);
+    let total_frames = frame_lines.iter()
+        .filter(|l| l.trim_start().starts_with("at ")).count();
+    if total_frames > max_frames {
+        let more_lbl = state.text_sys.label(
+            &format!("  … {} more frames  (velox dev --inspect for full trace)",
+                     total_frames - max_frames),
+            10.0,
+        );
+        frame.draw_text(&more_lbl, 26.0, y, dim_col);
+    }
+
+    // Footer
+    let hint_lbl = state.text_sys.label(
+        "Save any file to rebuild  ·  velox dev --inspect for Chrome DevTools", 10.0);
+    frame.draw_text(&hint_lbl, 16.0, panel_y + panel_h - 14.0, dim_col);
 }
 
 // ── Window controller builder ─────────────────────────────────────────────────
@@ -1346,7 +1553,7 @@ pub fn run(mut config: AppConfig) -> bool {
         Err(e) => log::warn!("velox: .env parse error: {e}"),
     }
 
-    let caps = load_velox_config(&mut config.window);
+    let (caps, _plugins) = load_velox_config(&mut config.window);
     velox_security::init(caps);
 
     // ── Deep link: check launch args for a URL matching the configured scheme ──
@@ -1450,7 +1657,7 @@ pub fn run(mut config: AppConfig) -> bool {
 
     init_v8();
 
-    let AppConfig { window, js_src, snapshot_blob, dev_mode: _dev_mode, extensions } = config;
+    let AppConfig { window, js_src, snapshot_blob, dev_mode: _dev_mode, extensions, js_plugins } = config;
     // Capture before `window` is moved into velox_shell::run().
     let window_decorations = window.decorations;
 
@@ -1466,6 +1673,7 @@ pub fn run(mut config: AppConfig) -> bool {
     let js_src_arc        = Arc::new(js_src);
     let snapshot_blob_arc = Arc::new(snapshot_blob);
     let extensions_arc    = Arc::new(extensions);
+    let js_plugins_arc: velox_runtime::JsPlugins = Arc::new(js_plugins);
     // Build the backend command registry once; share it across all windows.
     let backend_registry  = Arc::new(velox_runtime::build_backend_registry(&*extensions_arc));
 
@@ -1545,6 +1753,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
                         Arc::clone(&shared_perf),
                         Arc::clone(&backend_registry),
+                        Arc::clone(&js_plugins_arc),
                     ) {
                         Ok(rt) => {
                             log::info!("Window {}: restored from snapshot", window_handle);
@@ -1574,6 +1783,7 @@ pub fn run(mut config: AppConfig) -> bool {
                                 Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
                                 Arc::clone(&shared_perf),
                                 Arc::clone(&backend_registry),
+                                Arc::clone(&js_plugins_arc),
                             )
                         }
                     }
@@ -1583,6 +1793,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
                         Arc::clone(&shared_perf),
                         Arc::clone(&backend_registry),
+                        Arc::clone(&js_plugins_arc),
                     )
                 };
 

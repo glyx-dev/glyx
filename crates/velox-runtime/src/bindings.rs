@@ -469,6 +469,7 @@ pub fn register_all(
     video_events: VideoEvents,
     cdp_log_tx:   Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
     backend_commands: crate::BackendRegistry,
+    js_plugins:   crate::JsPlugins,
 ) {
     set_func(scope, global, "__velox_getTime", get_time);
 
@@ -478,7 +479,7 @@ pub fn register_all(
     // Store all shared state in a heap-allocated struct, hand the raw
     // pointer to V8 via External so callbacks can recover it.
     let hwnd = window.as_ref().and_then(|w| w.hwnd);
-    let state = Box::new(AsyncState {
+    let mut state = Box::new(AsyncState {
         queue,
         tokio,
         request_redraw: window.as_ref().map(|w| Arc::clone(&w.request_redraw)),
@@ -522,7 +523,73 @@ pub fn register_all(
         ai_whisper_model:  Arc::new(Mutex::new(None)),
         cdp_log_tx,
         backend_commands,
+        js_backend_commands: HashMap::new(),
     });
+
+    // ── Evaluate JS plugins and register their exported functions ─────────────
+    //
+    // Each plugin is bundled as an IIFE that sets `globalThis.<global_name>` to
+    // its exports object.  We eval the IIFE then walk own properties and store
+    // any Function values in `state.js_backend_commands` keyed by
+    // `"<prefix>.<fn>"` (or `"<fn>"` for unnamed plugins).
+    for plugin in js_plugins.iter() {
+        // Eval the bundled IIFE.
+        let code_str = match v8::String::new(scope, &plugin.bundled_js) {
+            Some(s) => s,
+            None => { log::warn!("[plugins] could not create V8 string for plugin"); continue; }
+        };
+        let mut try_catch = v8::TryCatch::new(scope);
+        let script = v8::Script::compile(&mut try_catch, code_str, None);
+        if let Some(s) = script {
+            s.run(&mut try_catch);
+        }
+        if try_catch.has_caught() {
+            let msg = try_catch.exception()
+                .and_then(|e| e.to_string(&mut try_catch))
+                .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                .unwrap_or_else(|| "unknown error".into());
+            log::error!("[plugins] eval error for plugin {:?}: {msg}", plugin.prefix);
+            continue;
+        }
+        drop(try_catch);
+
+        // Read exports from globalThis.<global_name>.
+        let gname = match v8::String::new(scope, &plugin.global_name) {
+            Some(s) => s,
+            None => continue,
+        };
+        let ctx = scope.get_current_context();
+        let gobj = ctx.global(scope);
+        let exports_val = gobj.get(scope, gname.into());
+        let exports = match exports_val.and_then(|v| v8::Local::<v8::Object>::try_from(v).ok()) {
+            Some(o) => o,
+            None => {
+                log::warn!("[plugins] plugin {:?} did not set global '{}'", plugin.prefix, plugin.global_name);
+                continue;
+            }
+        };
+
+        // Walk own property names and collect Function values.
+        let prop_names = exports.get_own_property_names(scope);
+        let prop_names = match prop_names { Some(p) => p, None => continue };
+        for i in 0..prop_names.length() {
+            let key = match prop_names.get_index(scope, i) { Some(k) => k, None => continue };
+            let val = match exports.get(scope, key) { Some(v) => v, None => continue };
+            if let Ok(fn_local) = v8::Local::<v8::Function>::try_from(val) {
+                let key_str = key.to_string(scope)
+                    .map(|s| s.to_rust_string_lossy(scope))
+                    .unwrap_or_default();
+                if key_str.is_empty() { continue; }
+                let cmd_name = match &plugin.prefix {
+                    Some(ns) => format!("{ns}.{key_str}"),
+                    None     => key_str.clone(),
+                };
+                state.js_backend_commands.insert(cmd_name, v8::Global::new(scope, fn_local));
+                log::info!("[plugins] registered JS command '{}' from plugin {:?}", key_str, plugin.prefix);
+            }
+        }
+    }
+
     let ptr   = Box::into_raw(state) as *mut std::ffi::c_void;
     // Safety: ptr is valid for the lifetime of the isolate.
     let ext   = v8::External::new(scope, ptr);
@@ -695,8 +762,11 @@ pub fn register_all(
     register!("__velox_hid_write",     hid_write_callback);
     register!("__velox_hid_close",     hid_close_callback);
     // ── Updater ──────────────────────────────────────────────────────────────
-    register!("__velox_updater_check",  updater_check_callback);
-    register!("__velox_updater_update", updater_update_callback);
+    register!("__velox_updater_check",            updater_check_callback);
+    register!("__velox_updater_update",           updater_update_callback);
+    register!("__velox_updater_get_version",      updater_get_version_callback);
+    register!("__velox_updater_check_manifest",   updater_check_manifest_callback);
+    register!("__velox_updater_download_js",      updater_download_js_callback);
     // ── Crash reporter ───────────────────────────────────────────────────────
     register!("__velox_crash_report_js",    crash_report_js_callback);
     register!("__velox_crash_get_reports",  crash_get_reports_callback);
@@ -789,6 +859,9 @@ struct AsyncState {
     /// Named async commands registered by `VeloxExtension::register_commands`.
     /// Dispatched by `__velox_backend_call(name, argsJson) → Promise<resultJson>`.
     backend_commands: crate::BackendRegistry,
+    /// Named JS plugin commands collected at startup (from `velox.config.json` plugins).
+    /// These are called synchronously in V8 (they return Promises) — no Tokio bridge needed.
+    js_backend_commands: HashMap<String, v8::Global<v8::Function>>,
 }
 
 /// Tracks playback position for a rodio audio handle.
@@ -4776,6 +4849,183 @@ fn updater_update_callback(
     });
 }
 
+/// Returns the staging path for a pending JS-only update.
+/// `~/.velox/updates/<exe_stem>/pending.js`
+fn pending_js_staging_path() -> Option<std::path::PathBuf> {
+    let exe  = std::env::current_exe().ok()?;
+    let stem = exe.file_stem()?.to_string_lossy().into_owned();
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME")).ok()?;
+    Some(std::path::PathBuf::from(home)
+        .join(".velox").join("updates").join(stem).join("pending.js"))
+}
+
+/// `__velox_updater_get_version() → string`
+///
+/// Returns the app version declared in `velox.config.json` (`version` field),
+/// or `"0.0.0"` if not set.
+fn updater_get_version_callback(
+    scope: &mut v8::HandleScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let v = v8::String::new(scope, velox_security::app_version()).unwrap();
+    rv.set(v.into());
+}
+
+/// `__velox_updater_check_manifest(url, currentVersion) → Promise<manifest_json | "null">`
+///
+/// Fetches a JSON manifest from `url`, then:
+/// 1. Compares `manifest.version` against `currentVersion` — returns `"null"` if up to date.
+/// 2. Checks `manifest.platforms` (optional string array) — returns `"null"` if the current
+///    OS is not listed.
+/// 3. Injects `"_platform"` into the returned object so JS can pick platform-specific asset
+///    URLs (e.g. `manifest[manifest._platform].runner_url`).
+///
+/// Platform values match Rust's `std::env::consts::OS`: `"windows"`, `"macos"`, `"linux"`.
+///
+/// Manifest shape:
+/// ```json
+/// {
+///   "version":     "2.1.0",
+///   "update_type": "js_only",              // "js_only" | "runner" | "full"
+///   "platforms":   ["windows", "macos"],   // omit = applies to all platforms
+///   "notes":       "Bug fixes",
+///   "js_url":      "https://cdn.example.com/2.1.0/app.js",
+///   "js_sha256":   "abc123...",
+///   "windows": {
+///     "runner_url":    "https://cdn.example.com/2.1.0/myapp-windows.zip",
+///     "runner_sha256": "def..."
+///   },
+///   "macos": {
+///     "runner_url":    "https://cdn.example.com/2.1.0/myapp-macos.tar.gz",
+///     "runner_sha256": "ghi..."
+///   }
+/// }
+/// ```
+fn updater_check_manifest_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().updater {
+        rv.set(reject_cap_promise(scope, "updater").into()); return;
+    }
+
+    let url     = v8_arg_to_string(scope, &args, 0);
+    let current = v8_arg_to_string(scope, &args, 1);
+
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result: Result<String, String> = async {
+            let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
+            if !resp.status().is_success() {
+                return Err(format!("manifest fetch failed: HTTP {}", resp.status()));
+            }
+            let mut manifest: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+
+            // Version check.
+            let latest = manifest["version"].as_str().unwrap_or("0.0.0");
+            let has_update = self_update::version::bump_is_greater(&current, latest)
+                .unwrap_or(false);
+            if !has_update {
+                return Ok("null".to_string());
+            }
+
+            // Platform filter: if manifest specifies platforms, skip if ours isn't listed.
+            let current_os = std::env::consts::OS; // "windows" | "macos" | "linux" | ...
+            if let Some(platforms) = manifest["platforms"].as_array() {
+                let supported = platforms.iter()
+                    .any(|p| p.as_str().map(|s| s == current_os).unwrap_or(false));
+                if !supported {
+                    return Ok("null".to_string());
+                }
+            }
+
+            // Inject current platform so JS can resolve platform-specific asset URLs.
+            if let Some(obj) = manifest.as_object_mut() {
+                obj.insert("_platform".to_string(), serde_json::Value::String(current_os.to_string()));
+            }
+
+            serde_json::to_string(&manifest).map_err(|e| e.to_string())
+        }.await;
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__velox_updater_download_js(url, sha256) → Promise<void>`
+///
+/// Downloads a JS bundle from `url`, verifies its SHA-256 hex digest against
+/// `sha256` (pass `""` to skip verification), and writes it to the staging
+/// location `~/.velox/updates/<exe_stem>/pending.js`.
+///
+/// On the next restart, `velox-runner` automatically loads this file instead of
+/// the bundled JS from the binary trailer, completing the JS-only update.
+fn updater_download_js_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    if !velox_security::get().updater {
+        rv.set(reject_cap_promise(scope, "updater").into()); return;
+    }
+
+    let url    = v8_arg_to_string(scope, &args, 0);
+    let sha256 = v8_arg_to_string(scope, &args, 1);
+
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result: Result<String, String> = async {
+            use sha2::{Sha256, Digest};
+
+            let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
+            if !resp.status().is_success() {
+                return Err(format!("JS bundle fetch failed: HTTP {}", resp.status()));
+            }
+            let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+
+            // Verify SHA-256 if a digest was supplied.
+            if !sha256.is_empty() {
+                let mut hasher = Sha256::new();
+                hasher.update(&bytes);
+                let computed = format!("{:x}", hasher.finalize());
+                if computed != sha256.to_lowercase() {
+                    return Err(format!(
+                        "SHA-256 mismatch: expected {sha256}, got {computed}"
+                    ));
+                }
+            }
+
+            let js = String::from_utf8(bytes.to_vec())
+                .map_err(|e| format!("JS bundle is not valid UTF-8: {e}"))?;
+
+            let staging = pending_js_staging_path()
+                .ok_or_else(|| "could not determine staging path".to_string())?;
+
+            if let Some(parent) = staging.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&staging, &js).map_err(|e| e.to_string())?;
+
+            log::info!("[updater] JS update staged at {}", staging.display());
+            Ok("{}".to_string())
+        }.await;
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
 // ── Video player bindings ─────────────────────────────────────────────────────
 
 /// `__velox_video_open(url) → Promise<handleId: string>`
@@ -5072,6 +5322,25 @@ fn backend_call_callback(
     let name      = v8_arg_to_string(scope, &args, 0);
     let args_json = v8_arg_to_string(scope, &args, 1);
 
+    // ── JS plugin commands — called synchronously in V8, return their own Promise ──
+    if let Some(global_fn) = state.js_backend_commands.get(&name) {
+        let fn_local = v8::Local::new(scope, global_fn);
+        // Parse the JSON args string into a JS value so the plugin receives an object.
+        let args_str = v8::String::new(scope, &args_json).unwrap_or_else(|| {
+            v8::String::new(scope, "{}").unwrap()
+        });
+        let parsed_args = v8::json::parse(scope, args_str)
+            .unwrap_or_else(|| v8::undefined(scope).into());
+        let ctx = scope.get_current_context();
+        let global = ctx.global(scope);
+        let result = fn_local.call(scope, global.into(), &[parsed_args]);
+        if let Some(ret) = result {
+            rv.set(ret);
+        }
+        return;
+    }
+
+    // ── Rust async commands — dispatched via Tokio ─────────────────────────────
     let handler = state.backend_commands.get(&name).cloned();
 
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);

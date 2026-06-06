@@ -118,18 +118,39 @@ fn read_trailer() -> Option<TrailerPayload> {
     Some(TrailerPayload { snapshot, js_src, config_json })
 }
 
+/// Returns the path where a pending JS-only update is staged.
+/// Mirrors the helper in `velox-runtime` — must stay in sync.
+fn pending_js_staging_path() -> Option<std::path::PathBuf> {
+    let exe  = std::env::current_exe().ok()?;
+    let stem = exe.file_stem()?.to_string_lossy().into_owned();
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME")).ok()?;
+    Some(std::path::PathBuf::from(home)
+        .join(".velox").join("updates").join(stem).join("pending.js"))
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
         .format_module_path(false)
         .init();
 
-    let config = if let Some(payload) = read_trailer() {
+    // Check for a staged JS-only update before loading the normal bundle.
+    let pending_js = pending_js_staging_path()
+        .filter(|p| p.exists())
+        .and_then(|p| std::fs::read_to_string(&p).ok());
+
+    let mut config = if let Some(payload) = read_trailer() {
         eprintln!("[velox] Loading app from embedded binary trailer.");
         velox_core::AppConfig::from_trailer(payload.snapshot, payload.js_src, &payload.config_json)
     } else {
         velox_core::AppConfig::from_config()
     };
+
+    if let Some(js) = pending_js {
+        eprintln!("[velox] Applying pending JS update.");
+        config.js_src = Some(js);
+    }
 
     let restart = velox_core::run(config);
 

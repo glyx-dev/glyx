@@ -114,6 +114,14 @@ enum GenerateCommands {
         /// Command name in camelCase (e.g. `fetchUser`). Snake-case is also accepted.
         name: String,
     },
+    /// Scaffold a new JS plugin for the `plugins` array in velox.config.json.
+    ///
+    /// Creates `src/plugins/<name>.plugin.js` with example async exports and
+    /// prints the config snippet to add to velox.config.json.
+    Plugin {
+        /// Plugin name used as the namespace (e.g. `db`, `api`, `auth`).
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -291,6 +299,20 @@ fn app_jsx_blank(name: &str) -> String {
 import React, {{ useState }} from 'react';
 import {{ View, Text, Pressable, render, useWindowSize }} from '@velox/react';
 
+// Velox logo — four squares, mirroring the velox.dev favicon.
+function VeloxLogo({{ size = 56 }}) {{
+  const sq = Math.round(size * 0.42);
+  const gap = Math.round(size * 0.08);
+  return (
+    <View style={{{{ flexDirection: 'row', flexWrap: 'wrap', width: size, gap }}}}>
+      <View style={{{{ width: sq, height: sq, borderRadius: 5, backgroundColor: '#00A878', opacity: 0.55 }}}} />
+      <View style={{{{ width: sq, height: sq, borderRadius: 5, borderWidth: 1.5, borderColor: '#00A87888' }}}} />
+      <View style={{{{ width: sq, height: sq, borderRadius: 5, backgroundColor: '#00A878', opacity: 0.28 }}}} />
+      <View style={{{{ width: sq, height: sq, borderRadius: 5, backgroundColor: '#00A878' }}}} />
+    </View>
+  );
+}}
+
 function App() {{
   const {{ width, height }} = useWindowSize();
   const [count, setCount] = useState(0);
@@ -299,19 +321,20 @@ function App() {{
     <View
       width={{width}}
       height={{height}}
-      style={{{{ backgroundColor: '#1e1e2e', justifyContent: 'center', alignItems: 'center', gap: 16 }}}}
+      style={{{{ backgroundColor: '#1e1e2e', justifyContent: 'center', alignItems: 'center', gap: 20 }}}}
     >
-      <Text fontSize={{32}} style={{{{ color: '#cdd6f4' }}}}>
+      <VeloxLogo size={{64}} />
+      <Text fontSize={{28}} style={{{{ color: '#cdd6f4', fontWeight: '700' }}}}>
         {name}
       </Text>
-      <Text fontSize={{18}} style={{{{ color: '#a6adc8' }}}}>
+      <Text fontSize={{16}} style={{{{ color: '#a6adc8' }}}}>
         count: {{count}}
       </Text>
       <Pressable
         onPress={{() => setCount(c => c + 1)}}
-        style={{{{ backgroundColor: '#89b4fa', padding: 12, borderRadius: 8 }}}}
+        style={{{{ backgroundColor: '#89b4fa', paddingVertical: 10, paddingHorizontal: 24, borderRadius: 8 }}}}
       >
-        <Text fontSize={{16}} style={{{{ color: '#1e1e2e' }}}}>increment</Text>
+        <Text fontSize={{15}} style={{{{ color: '#1e1e2e', fontWeight: '600' }}}}>increment</Text>
       </Pressable>
     </View>
   );
@@ -1896,6 +1919,7 @@ fn build_app_bundle(project_name: &str, entry: &str) -> Result<PathBuf> {
 fn cmd_generate(cmd: GenerateCommands) -> Result<()> {
     match cmd {
         GenerateCommands::Command { name } => cmd_generate_command(&name),
+        GenerateCommands::Plugin  { name } => cmd_generate_plugin(&name),
     }
 }
 
@@ -1965,6 +1989,82 @@ async fn handler(args_json: String) -> Result<String, String> {{
     println!("  3. Call from JS:");
     println!("       import {{ backend }} from '@velox/react';");
     println!("       const result = await backend.{camel}({{ /* args */ }});");
+
+    Ok(())
+}
+
+fn cmd_generate_plugin(name: &str) -> Result<()> {
+    // Sanitize: lowercase, allow alphanumeric + underscore.
+    let safe_name: String = name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' { c.to_ascii_lowercase() } else { '_' })
+        .collect();
+    if safe_name.is_empty() {
+        bail!("plugin name must contain at least one alphanumeric character");
+    }
+
+    let dir = PathBuf::from("src").join("plugins");
+    std::fs::create_dir_all(&dir)?;
+
+    let file_path = dir.join(format!("{safe_name}.plugin.js"));
+    if file_path.exists() {
+        bail!("'{}' already exists", file_path.display());
+    }
+
+    let content = format!(
+r#"/**
+ * Velox JS plugin: {safe_name}
+ *
+ * This file runs in the same V8 context as your React app.
+ * Export async functions — they'll be callable from the React side as:
+ *   await backend.{safe_name}.functionName(args)
+ *
+ * Add to velox.config.json:
+ *   "plugins": [
+ *     {{ "entry": "src/plugins/{safe_name}.plugin.js", "name": "{safe_name}" }}
+ *   ]
+ */
+
+import {{ db }} from '@velox/react';
+
+/**
+ * Example: query all items from a table.
+ * @param {{ table: string }} args
+ * @returns {{ rows: any[] }}
+ */
+export async function getAll(args) {{
+  const rows = await db.query(`SELECT * FROM ${{args.table ?? 'items'}}`);
+  return {{ rows }};
+}}
+
+/**
+ * Example: insert a row.
+ * @param {{ table: string, data: Record<string, any> }} args
+ * @returns {{ id: number }}
+ */
+export async function insert(args) {{
+  const cols = Object.keys(args.data).join(', ');
+  const vals = Object.values(args.data).map(() => '?').join(', ');
+  const id = await db.exec(
+    `INSERT INTO ${{args.table}} (${{cols}}) VALUES (${{vals}})`,
+    Object.values(args.data),
+  );
+  return {{ id }};
+}}
+"#
+    );
+
+    std::fs::write(&file_path, content)?;
+
+    println!("Created {}", file_path.display());
+    println!();
+    println!("Add to velox.config.json:");
+    println!("  \"plugins\": [");
+    println!("    {{ \"entry\": \"src/plugins/{safe_name}.plugin.js\", \"name\": \"{safe_name}\" }}");
+    println!("  ]");
+    println!();
+    println!("Then call from any React component:");
+    println!("  import {{ backend }} from '@velox/react';");
+    println!("  const {{ rows }} = await backend.{safe_name}.getAll({{ table: 'items' }});");
 
     Ok(())
 }
@@ -2285,7 +2385,8 @@ fn bun_build(entry: &str, output: &str) -> Result<()> {
     let status = cmd
         .arg(entry)
         .args(["--outfile", output, "--target", "browser", "--format", "iife",
-               "--define", "process.env.NODE_ENV='production'"])
+               "--define", "process.env.NODE_ENV='production'",
+               "--source-map", "inline"])
         .status()
         .context("Failed to run `bun`; is Bun installed? https://bun.sh")?;
     if !status.success() { bail!("bun build failed"); }

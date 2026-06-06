@@ -418,6 +418,129 @@ export function ScrollView({
   );
 }
 
+// ── VirtualizedList ───────────────────────────────────────────────────────────
+//
+// A windowed list that renders only the items currently visible in the
+// viewport, plus an `overscan` buffer on each side.  Large datasets (thousands
+// of items) incur no layout or draw cost for off-screen rows.
+//
+// Unlike ScrollView (which renders all children), VirtualizedList replaces
+// invisible items with lightweight spacer Views, so Taffy only lays out the
+// visible slice.
+//
+// Requirements:
+//   • `itemHeight` must be a fixed number (uniform-height rows).
+//     Variable-height support (measured items) is planned for a future release.
+//   • `height`     — visible container height in px (required)
+//   • `width`      — container width in px (required)
+//
+// Usage:
+//   <VirtualizedList
+//     data={items}
+//     renderItem={({ item, index }) => <Row item={item} />}
+//     keyExtractor={(item) => String(item.id)}
+//     itemHeight={56}
+//     height={600}
+//     width={400}
+//   />
+
+export function VirtualizedList({
+  data,
+  renderItem,
+  keyExtractor,
+  itemHeight,
+  height,
+  width,
+  overscan       = 5,
+  showScrollbar  = true,
+  scrollbarWidth = 8,
+  scrollbarColor = '#8c8caa99',
+  style,
+  ...props
+}) {
+  const nodeIdRef    = useRef(null);
+  const maxScrollRef = useRef(0);
+  const [scrollY, setScrollY] = useState(0);
+
+  const totalItems    = data ? data.length : 0;
+  const totalContentH = totalItems * itemHeight;
+
+  // Keep maxScroll current without re-registering the scroll handler.
+  maxScrollRef.current = Math.max(0, totalContentH - height);
+
+  // Visible window (item indices).
+  const firstVisible = Math.max(0, Math.floor(scrollY / itemHeight) - overscan);
+  const lastVisible  = Math.min(totalItems, Math.ceil((scrollY + height) / itemHeight) + overscan);
+
+  const topSpacerH    = firstVisible * itemHeight;
+  const bottomSpacerH = Math.max(0, (totalItems - lastVisible) * itemHeight);
+
+  // Stable handlers — never re-registered between renders.
+  const onScroll = useCallback((deltaY) => {
+    setScrollY((prev) => Math.min(maxScrollRef.current, Math.max(0, prev + deltaY)));
+  }, []);
+
+  const onAbsoluteScroll = useCallback((y) => {
+    setScrollY(Math.min(maxScrollRef.current, Math.max(0, y)));
+  }, []);
+
+  const onMount = useCallback((id) => {
+    nodeIdRef.current = id;
+    registerScrollView(id, { onScroll, onAbsoluteScroll });
+  }, [onScroll, onAbsoluteScroll]);
+
+  useEffect(() => {
+    return () => {
+      if (nodeIdRef.current !== null) unregisterScrollView(nodeIdRef.current);
+    };
+  }, []);
+
+  // Build the visible slice.
+  const visibleChildren = [];
+
+  if (topSpacerH > 0) {
+    visibleChildren.push(
+      React.createElement(View, { key: '__vl_top', height: topSpacerH, width })
+    );
+  }
+
+  for (let i = firstVisible; i < lastVisible; i++) {
+    const item = data[i];
+    const key  = keyExtractor ? keyExtractor(item, i) : String(i);
+    visibleChildren.push(
+      React.createElement(
+        View,
+        { key, height: itemHeight, width },
+        renderItem({ item, index: i })
+      )
+    );
+  }
+
+  if (bottomSpacerH > 0) {
+    visibleChildren.push(
+      React.createElement(View, { key: '__vl_bot', height: bottomSpacerH, width })
+    );
+  }
+
+  const viewStyle = {
+    justifyContent: 'flex-start',
+    alignItems:     'flex-start',
+    clip:           true,
+    scrollOffsetY:  scrollY,
+    showScrollbar,
+    scrollbarWidth,
+    scrollbarColor,
+    scrollContentH: totalContentH,
+    ...style,
+  };
+
+  return React.createElement(
+    'view',
+    { _veloxOnMount: onMount, style: viewStyle, width, height, ...props },
+    ...visibleChildren,
+  );
+}
+
 // ── TextInput ─────────────────────────────────────────────────────────────────
 
 export function TextInput({
@@ -935,6 +1058,138 @@ export const db = {
       ? __velox_db_transaction(handle, JSON.stringify(stmts))
       : _noBinding('db.transaction');
   },
+
+  /**
+   * Run versioned schema migrations against an open database.
+   *
+   * Applied versions are tracked in the `_velox_migrations` table so only
+   * pending migrations run. Each migration is committed atomically together
+   * with its tracking record — a partial failure leaves the database clean.
+   *
+   * Overloaded — handle is optional when a default is set:
+   *   await db.migrate([{ version: 1, up: 'CREATE TABLE ...' }])
+   *   await db.migrate(handle, [{ version: 1, up: '...' }])
+   *
+   * `up` can be a string (single statement) or array of strings (multiple).
+   * An optional `name` field is stored for human-readable history.
+   *
+   * @returns {Promise<number>} Number of migrations applied this run.
+   *
+   * @example
+   * await db.migrate([
+   *   { version: 1, name: 'create_users',
+   *     up: 'CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)' },
+   *   { version: 2, name: 'add_email',
+   *     up: 'ALTER TABLE users ADD COLUMN email TEXT' },
+   *   { version: 3, name: 'create_indexes',
+   *     up: ['CREATE INDEX idx_users_email ON users(email)',
+   *          'CREATE INDEX idx_users_name  ON users(name)'] },
+   * ]);
+   */
+  migrate: async (handleOrMigrations, migrationsOrUndef) => {
+    const isExplicit = typeof handleOrMigrations === 'number';
+    const handle     = isExplicit ? handleOrMigrations : _dbHandle(null);
+    const migrations = isExplicit ? migrationsOrUndef  : handleOrMigrations;
+
+    if (!Array.isArray(migrations) || migrations.length === 0) return 0;
+
+    const sorted = [...migrations].sort((a, b) => a.version - b.version);
+
+    // Ensure tracking table exists.
+    await db.run(handle,
+      'CREATE TABLE IF NOT EXISTS _velox_migrations ' +
+      '(version INTEGER PRIMARY KEY, name TEXT, applied_at INTEGER DEFAULT (unixepoch()))'
+    );
+
+    const applied    = await db.query(handle, 'SELECT version FROM _velox_migrations');
+    const appliedSet = new Set(applied.map(r => r.version));
+    const pending    = sorted.filter(m => !appliedSet.has(m.version));
+
+    for (const m of pending) {
+      const upSqls = Array.isArray(m.up) ? m.up : [m.up];
+      // Run all up statements + tracking insert in a single transaction.
+      await db.transaction(handle, [
+        ...upSqls.map(sql => ({ sql })),
+        {
+          sql:    'INSERT INTO _velox_migrations (version, name) VALUES (?, ?)',
+          params: [m.version, m.name ?? 'migration_' + m.version],
+        },
+      ]);
+    }
+
+    if (pending.length > 0) {
+      console.log(
+        '[db] applied ' + pending.length + ' migration(s): ' +
+        pending.map(m => 'v' + m.version + (m.name ? '(' + m.name + ')' : '')).join(', ')
+      );
+    }
+    return pending.length;
+  },
+
+  /**
+   * Run a seed function, optionally tracked so it only executes once per name.
+   *
+   * **Untracked** (no name): always runs — use when the function is already
+   * idempotent (e.g. `INSERT OR IGNORE`).
+   *
+   * **Tracked** (with name): runs once and records in `_velox_seeds`. On
+   * subsequent starts the seed is skipped. Useful for dev fixtures or
+   * default-settings rows.
+   *
+   * Overloaded — handle is optional when a default is set:
+   *   db.seed(fn)                     // untracked, default handle
+   *   db.seed('initial_data', fn)     // tracked by name, default handle
+   *   db.seed(handle, fn)             // untracked, explicit handle
+   *   db.seed(handle, 'initial', fn)  // tracked, explicit handle
+   *
+   * @example
+   * // Always run (idempotent SQL):
+   * await db.seed(async () => {
+   *   await db.run('INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)',
+   *                ['theme','dark']);
+   * });
+   *
+   * // Run once (dev fixtures):
+   * await db.seed('sample_notes', async () => {
+   *   await db.run('INSERT INTO notes (title,body) VALUES (?,?)',
+   *                ['Welcome','Hello from Velox!']);
+   * });
+   */
+  seed: async (handleOrNameOrFn, nameOrFnOrUndef, fnOrUndef) => {
+    let handle, name, fn;
+
+    if (typeof handleOrNameOrFn === 'number') {
+      handle = handleOrNameOrFn;
+      if (typeof nameOrFnOrUndef === 'string') { name = nameOrFnOrUndef; fn = fnOrUndef; }
+      else                                      { fn   = nameOrFnOrUndef; }
+    } else if (typeof handleOrNameOrFn === 'string') {
+      handle = _dbHandle(null);
+      name   = handleOrNameOrFn;
+      fn     = nameOrFnOrUndef;
+    } else {
+      handle = _dbHandle(null);
+      fn     = handleOrNameOrFn;
+    }
+
+    if (typeof fn !== 'function') throw new Error('db.seed: expected a function');
+
+    if (name !== undefined) {
+      // Tracked — runs once per name.
+      await db.run(handle,
+        'CREATE TABLE IF NOT EXISTS _velox_seeds ' +
+        '(name TEXT PRIMARY KEY, seeded_at INTEGER DEFAULT (unixepoch()))'
+      );
+      const existing = await db.query(
+        handle, 'SELECT name FROM _velox_seeds WHERE name = ?', [name]
+      );
+      if (existing.length > 0) return;
+      await fn();
+      await db.run(handle, 'INSERT INTO _velox_seeds (name) VALUES (?)', [name]);
+      console.log('[db] seed applied: ' + name);
+    } else {
+      await fn();
+    }
+  },
 };
 
 // ── Vector Database ────────────────────────────────────────────────────────────
@@ -1450,16 +1705,38 @@ export const crash = {
 //   });
 //
 // `backend` is a Proxy so any property access returns an async function.
-// The resolved value is JSON-parsed — return a JSON string from Rust.
+// The resolved value is JSON-parsed — return a JSON string from Rust/JS plugin.
+//
+// Two call styles are supported:
+//   backend.myCommand(args)        — flat Rust command
+//   backend.db.getUsers(args)      — namespaced JS plugin command ("db.getUsers")
+//
+// `backend.db` returns a namespace Proxy; calling it directly also works
+// (backend.db(args) dispatches "db") for backward compatibility.
+
+function _backendCall(cmd, args) {
+  var json = args === undefined ? '{}' : JSON.stringify(args);
+  return __velox_backend_call(cmd, json).then(function(raw) {
+    try { return JSON.parse(raw); } catch (_) { return raw; }
+  });
+}
+
+function _backendNs(prefix) {
+  // A Proxy over a function so it's both callable (backend.cmd(args)) and
+  // has properties (backend.ns.fn(args)).
+  return new Proxy(function() {}, {
+    get: function(_, fn) {
+      if (typeof fn !== 'string') return undefined;
+      return function(args) { return _backendCall(prefix + '.' + fn, args); };
+    },
+    apply: function(_, __, a) { return _backendCall(prefix, a[0]); },
+  });
+}
 
 export const backend = new Proxy(Object.create(null), {
-  get(_, name) {
-    return function(args) {
-      const json = typeof args === 'undefined' ? '{}' : JSON.stringify(args);
-      return __velox_backend_call(String(name), json).then(function(raw) {
-        try { return JSON.parse(raw); } catch (_) { return raw; }
-      });
-    };
+  get: function(_, name) {
+    if (typeof name !== 'string') return undefined;
+    return _backendNs(name);
   },
 });
 
@@ -2005,18 +2282,102 @@ export const hid = {
 // ── Auto-updater API ──────────────────────────────────────────────────────────
 
 /**
- * Auto-updater — check for and apply GitHub release updates.
+ * Auto-updater — check for and apply updates.
  *
  * Requires `updater: true` in velox.config.json.
  *
- * Flow:
- *   const info = await updater.check('myorg', 'myapp', '1.0.0');
- *   if (info.hasUpdate) {
- *     const result = await updater.update('myorg', 'myapp', 'myapp', '1.0.0');
- *     if (result.updated) { // show "restart required" dialog }
+ * ## Manifest-based flow (recommended)
+ *
+ * Host a `latest.json` on any static server:
+ * ```json
+ * {
+ *   "version":     "2.1.0",
+ *   "update_type": "js_only",   // "js_only" | "runner" | "full"
+ *   "notes":       "Bug fixes",
+ *   "js_url":      "https://cdn.example.com/2.1.0/app.js",
+ *   "js_sha256":   "abc123..."
+ * }
+ * ```
+ *
+ * Then in your app:
+ * ```js
+ * const manifest = await updater.checkManifest('https://cdn.example.com/latest.json');
+ * if (manifest) {
+ *   if (manifest.update_type === 'js_only') {
+ *     await updater.downloadJs(manifest.js_url, manifest.js_sha256);
+ *     veloxWindow.restart();   // applies on next launch automatically
+ *   } else {
+ *     // runner/full: use updater.update() for GitHub releases, or direct download
  *   }
+ * }
+ * ```
+ *
+ * ## GitHub-release flow (binary updates)
+ *
+ * ```js
+ * const info = await updater.check('myorg', 'myapp', '1.0.0');
+ * if (info.hasUpdate) {
+ *   const result = await updater.update('myorg', 'myapp', 'myapp', '1.0.0');
+ *   if (result.updated) { // show "restart required" dialog }
+ * }
+ * ```
  */
 export const updater = {
+  /**
+   * Returns the app version declared in `velox.config.json` (`version` field),
+   * or `"0.0.0"` if not set.
+   * @returns {string}
+   */
+  getVersion() {
+    return __velox_updater_get_version();
+  },
+
+  /**
+   * Returns the current platform identifier: `"windows"`, `"macos"`, or `"linux"`.
+   * Matches the `_platform` field injected into manifests by `checkManifest`.
+   * @returns {string}
+   */
+  getPlatform() {
+    return __velox_platform();
+  },
+
+  /**
+   * Fetch a JSON manifest from `url` and compare its `version` field against
+   * `currentVersion` (defaults to `updater.getVersion()` when omitted).
+   *
+   * Returns `null` when already up to date **or** when the manifest's optional
+   * `platforms` array does not include the current OS.
+   *
+   * The returned manifest includes a `_platform` key (e.g. `"windows"`) so you
+   * can read platform-specific asset URLs:
+   * ```js
+   * const m = await updater.checkManifest('https://cdn.example.com/latest.json');
+   * if (m && m.update_type === 'runner') {
+   *   const { runner_url, runner_sha256 } = m[m._platform] ?? {};
+   * }
+   * ```
+   * @param {string}  url            URL of the JSON manifest.
+   * @param {string=} currentVersion Semver string to compare against. Defaults to app version.
+   * @returns {Promise<object|null>}  Manifest object if a newer version exists, otherwise null.
+   */
+  async checkManifest(url, currentVersion) {
+    const current = currentVersion ?? updater.getVersion();
+    const raw = await __velox_updater_check_manifest(url, current);
+    return raw === 'null' ? null : JSON.parse(raw);
+  },
+
+  /**
+   * Download a JS bundle from `url`, verify its SHA-256 digest, and stage it
+   * for the next restart. On next launch the runner loads the staged JS
+   * instead of the trailer bundle — completing a JS-only update with zero downtime.
+   * @param {string}  url    Direct download URL of the new `app.js`.
+   * @param {string=} sha256 Expected SHA-256 hex digest. Pass `""` to skip verification.
+   * @returns {Promise<void>}
+   */
+  async downloadJs(url, sha256 = '') {
+    await __velox_updater_download_js(url, sha256);
+  },
+
   /**
    * Check GitHub releases for a newer version.
    * @param {string} owner          GitHub owner (user or org).
@@ -2027,12 +2388,13 @@ export const updater = {
   async check(owner, repo, currentVersion) {
     return JSON.parse(await __velox_updater_check(owner, repo, currentVersion));
   },
+
   /**
    * Download the latest GitHub release and replace the running binary.
    * The caller should prompt the user to restart the app after this resolves.
    * @param {string} owner          GitHub owner.
    * @param {string} repo           Repository name.
-   * @param {string} binName        Binary asset name (without .exe — added automatically on Windows).
+   * @param {string} binName        Binary asset name (without .exe — added on Windows).
    * @param {string} currentVersion Current semver string.
    * @returns {Promise<{updated:boolean, latestVersion:string}>}
    */

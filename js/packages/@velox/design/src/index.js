@@ -5,10 +5,27 @@
 //   ThemeProvider      — wraps your app with a theme context; handles light/dark/system
 //   useTheme()         — hook that returns the current theme tokens
 //   createTheme(base, overrides) — build a custom theme object
-//   Button, Card, Divider, Label, Heading, Badge — pre-themed base components
+//
+// Base components (components.js):
+//   Button, IconButton, Card, Divider, Label, Heading, Badge
+//
+// Form components (form.js):
+//   TextField, SwitchRow, CheckboxRow, NumberInput, SearchInput
+//
+// Feedback components (feedback.js):
+//   Alert, ProgressBar, Spinner, Skeleton, ToastProvider, useToast
+//
+// Overlay components (overlay.js):
+//   Modal, ModalFooter, Tooltip, Sheet
+//
+// Display components (display.js):
+//   Avatar, AvatarGroup, Chip, Empty, Stat, KVRow
+//
+// Navigation components (navigation.js):
+//   Tabs, Accordion, Stepper, Breadcrumb
 //
 // Quick-start:
-//   import { ThemeProvider, useTheme, Button, Card } from '@velox/design';
+//   import { ThemeProvider, Button, Card, TextField, Alert } from '@velox/design';
 //
 //   render(
 //     <ThemeProvider colorScheme="system">
@@ -18,4 +35,9 @@
 
 export { tokens, darkTokens } from './tokens.js';
 export { ThemeProvider, useTheme, createTheme } from './theme.js';
-export { Button, Card, Divider, Label, Heading, Badge } from './components.js';
+export { Button, IconButton, Card, Divider, Label, Heading, Badge } from './components.js';
+export { TextField, SwitchRow, CheckboxRow, NumberInput, SearchInput } from './form.js';
+export { Alert, ProgressBar, Spinner, Skeleton, ToastProvider, useToast } from './feedback.js';
+export { Modal, ModalFooter, Tooltip, Sheet } from './overlay.js';
+export { Avatar, AvatarGroup, Chip, Empty, Stat, KVRow } from './display.js';
+export { Tabs, Accordion, Stepper, Breadcrumb } from './navigation.js';

@@ -183,6 +183,21 @@ impl Capabilities {
 
 static CAPS: OnceLock<Capabilities> = OnceLock::new();
 
+// ── App version store ─────────────────────────────────────────────────────────
+
+static APP_VERSION: OnceLock<String> = OnceLock::new();
+
+/// Store the app version declared in `velox.config.json`.
+/// Must be called once during startup. Subsequent calls are silently ignored.
+pub fn init_version(version: String) {
+    let _ = APP_VERSION.set(version);
+}
+
+/// Returns the app version string, or `"0.0.0"` if not set.
+pub fn app_version() -> &'static str {
+    APP_VERSION.get().map(|s| s.as_str()).unwrap_or("0.0.0")
+}
+
 /// Lock in the capability set from the parsed config.
 ///
 /// Must be called once during startup before any JS bindings execute.

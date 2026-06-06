@@ -116,6 +116,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 if state.js_root.is_none() {
                     state.js_root = Some(id);
                 }
+                state.dirty_nodes.insert(id);
                 layout_changed   = true;
                 structure_changed = true;
             }
@@ -149,6 +150,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         parent.children.push(child_id);
                     }
                 }
+                state.dirty_nodes.insert(parent_id);
                 layout_changed   = true;
                 structure_changed = true;
             }
@@ -166,6 +168,8 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 if let Some(node) = state.js_nodes.get_mut(&id) {
                     node.props = props.clone();
                 }
+                // Any UpdateNode is a visual change — mark dirty regardless of layout impact.
+                state.dirty_nodes.insert(id);
                 if changed {
                     layout_changed = true;
                     // Incremental path: update Taffy style in-place + mark dirty.
@@ -194,6 +198,10 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     r3d.remove_canvas(id);
                 }
                 state.js_nodes.remove(&id);
+                // Clean up dirty tracking for the removed node.
+                state.dirty_nodes.remove(&id);
+                state.dirty_subtrees.remove(&id);
+                state.prev_resolved.remove(&id);
                 // If a scrollbar drag was active on this node, cancel it so the
                 // stale node_id is never used for scroll updates after removal.
                 if state.scrollbar_drag.as_ref().is_some_and(|d| d.node_id == id) {
@@ -202,23 +210,34 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 // Unlink from any parent's children list so stale ghost IDs don't
                 // accumulate in the renderer's traversal.  O(n × avg_children) but
                 // n < 1000 in practice so this is negligible.
-                for node in state.js_nodes.values_mut() {
+                let mut dirtied_parents: SmallVec<[u32; 2]> = SmallVec::new();
+                for (&parent_id, node) in state.js_nodes.iter_mut() {
+                    let before = node.children.len();
                     node.children.retain(|c| *c != id);
+                    if node.children.len() != before {
+                        dirtied_parents.push(parent_id);
+                    }
+                }
+                for pid in dirtied_parents {
+                    state.dirty_nodes.insert(pid);
                 }
                 layout_changed   = true;
                 structure_changed = true;
             }
             SceneCommand::SetRoot { id } => {
                 state.js_root = Some(id);
+                state.dirty_nodes.insert(id);
                 layout_changed   = true;
                 structure_changed = true;
             }
             SceneCommand::CanvasUpdate { id, cmds } => {
                 state.canvas_cmds.insert(id, cmds);
+                state.dirty_nodes.insert(id);
                 // Canvas draw commands don't affect layout.
             }
             SceneCommand::Canvas3DUpdate { id, scene } => {
                 state.canvas3d_scenes.insert(id, scene);
+                state.dirty_nodes.insert(id);
                 // 3D scenes don't affect layout — they blit on top of Vello.
             }
             SceneCommand::OpenCamera { handle_id, device_index } => {
@@ -640,6 +659,72 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
     if layout_changed   { state.layout_dirty           = true; }
     if structure_changed { state.layout_structure_dirty = true; }
     true
+}
+
+/// Compare the freshly computed layout positions against the previous frame's
+/// snapshot.  Any node whose x/y/width/height changed is added to `dirty_nodes`.
+///
+/// Call this **after** `recompute_layout` and **before** `build_dirty_subtrees`.
+/// Returns `true` if at least one node moved/resized (feeds the frame gate).
+pub(crate) fn update_dirty_from_layout(state: &mut PerWindowState) -> bool {
+    // Build reverse map: Taffy NodeId → JS node u32
+    let node_id_to_js: std::collections::HashMap<NodeId, u32> = state.js_nodes
+        .iter()
+        .filter_map(|(&js_id, node)| node.layout_id.map(|lid| (lid, js_id)))
+        .collect();
+
+    let mut any_changed = false;
+    for &(nid, ref rl) in &state.resolved {
+        let Some(&js_id) = node_id_to_js.get(&nid) else { continue };
+        let changed = match state.prev_resolved.get(&js_id) {
+            Some(prev) => {
+                prev.x != rl.x || prev.y != rl.y
+                    || prev.width != rl.width || prev.height != rl.height
+            }
+            None => true, // new node — treat as dirty
+        };
+        if changed {
+            state.dirty_nodes.insert(js_id);
+            any_changed = true;
+        }
+    }
+    any_changed
+}
+
+/// Update `prev_resolved` snapshot with the positions computed this frame.
+/// Call this **after** `render_subtree` (once the frame is definitely going to screen).
+pub(crate) fn snapshot_resolved(state: &mut PerWindowState) {
+    let node_id_to_js: std::collections::HashMap<NodeId, u32> = state.js_nodes
+        .iter()
+        .filter_map(|(&js_id, node)| node.layout_id.map(|lid| (lid, js_id)))
+        .collect();
+
+    state.prev_resolved.clear();
+    for &(nid, rl) in &state.resolved {
+        if let Some(&js_id) = node_id_to_js.get(&nid) {
+            state.prev_resolved.insert(js_id, rl);
+        }
+    }
+}
+
+/// Build `dirty_subtrees` by cascading `dirty_nodes` to all ancestors (needed
+/// for the render traversal to reach dirty leaves) and all descendants (needed
+/// to repaint subtrees of dirty containers).
+///
+/// Current policy: when *any* node is dirty, include every node — this ensures
+/// correctness until O4b adds per-subtree scene caching.  The infrastructure
+/// (dirty_nodes, dirty_subtrees) is the O4b hook.
+pub(crate) fn build_dirty_subtrees(state: &mut PerWindowState) {
+    state.dirty_subtrees.clear();
+    if state.dirty_nodes.is_empty() {
+        // Nothing changed → render_subtree will get an empty set, meaning
+        // "render everything" (the early-return guard checks `is_empty()` first).
+        return;
+    }
+    // O4b: replace with proper ancestor+descendant cascade.
+    // For now, include all known nodes so the early-return guard never fires
+    // and frames remain visually correct.
+    state.dirty_subtrees.extend(state.js_nodes.keys().copied());
 }
 
 /// Spawn a self-contained audio thread for a video file.

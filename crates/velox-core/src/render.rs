@@ -16,6 +16,10 @@ pub(crate) struct RenderCtx<'a> {
     pub video_streams: &'a std::collections::HashMap<u32, VideoStream>,
     pub cursor_blink_on: bool,
     pub any_cursor_active: &'a mut bool,
+    /// Set of node IDs that must be redrawn this frame (dirty_nodes + ancestors + descendants).
+    /// An **empty** set means "render everything" (first frame / full invalidation).
+    /// A **non-empty** set enables early-return skipping of clean subtrees (O4b hooks into this).
+    pub dirty_subtrees: &'a std::collections::HashSet<u32>,
 }
 
 fn apply_opacity(c: peniko::Color, opacity: f32) -> peniko::Color {
@@ -92,6 +96,13 @@ fn parse_transform(s: &str) -> Option<peniko::kurbo::Affine> {
 }
 
 pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut RenderCtx<'_>) {
+    // Skip subtrees that didn't change this frame.
+    // An empty dirty_subtrees means "render everything" (first frame, full invalidation,
+    // or O4b not yet providing selective caching).  Once O4b adds per-subtree scene
+    // caching the early-return here will avoid re-traversing and re-drawing clean nodes.
+    if !ctx.dirty_subtrees.is_empty() && !ctx.dirty_subtrees.contains(&id) {
+        return;
+    }
     let Some(node)      = ctx.nodes.get(&id)                                        else { return };
     // Hidden nodes and their entire subtree are invisible — skip rendering.
     if node.props.hidden.unwrap_or(false) { return; }

@@ -520,7 +520,7 @@ mod scene;
 mod layout;
 mod render;
 
-use scene::apply_scene_commands;
+use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, snapshot_resolved};
 use layout::{recompute_layout, update_scroll_positions};
 use render::{render_subtree, RenderCtx, compute_scrollbar_thumb};
 
@@ -851,6 +851,19 @@ struct PerWindowState {
     drag_window_fn: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Active scrollbar thumb drag, if any.
     scrollbar_drag: Option<ScrollbarDragState>,
+    /// Node IDs whose visual props or layout positions changed this frame.
+    /// Populated by `apply_scene_commands` (prop changes) and
+    /// `update_dirty_from_layout` (position changes). Cleared after render.
+    dirty_nodes: std::collections::HashSet<u32>,
+    /// `dirty_nodes` ∪ all their ancestors ∪ all their descendants.
+    /// Built each frame by `build_dirty_subtrees` after layout.
+    /// Used by `render_subtree` to skip clean subtrees once O4b caching lands.
+    /// An empty set means "render everything" (first frame, full invalidation).
+    dirty_subtrees: std::collections::HashSet<u32>,
+    /// Per-node layout snapshot from the previous rendered frame.
+    /// Compared post-layout in `update_dirty_from_layout` to detect
+    /// position/size changes caused by incremental layout cascades.
+    prev_resolved: std::collections::HashMap<u32, ResolvedLayout>,
     #[cfg(feature = "dev")]
     dev_mode: Option<DevModeState>,
 }
@@ -1921,6 +1934,9 @@ pub fn run(mut config: AppConfig) -> bool {
                     decorations:     window_decorations,
                     drag_window_fn,
                     scrollbar_drag:  None,
+                    dirty_nodes:    std::collections::HashSet::new(),
+                    dirty_subtrees: std::collections::HashSet::new(),
+                    prev_resolved:  std::collections::HashMap::new(),
                     #[cfg(feature = "dev")]
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
@@ -2179,6 +2195,10 @@ pub fn run(mut config: AppConfig) -> bool {
                 // 5. Single layout pass.
                 let layout_start = Instant::now();
                 recompute_layout(s);
+                // Detect any position/size changes that cascaded out of layout and
+                // add them to dirty_nodes before building the dirty subtree set.
+                update_dirty_from_layout(s);
+                build_dirty_subtrees(s);
                 let layout_time_ms = layout_start.elapsed().as_secs_f64() * 1000.0;
 
                 // Placeholder for gpu_time_ms; set after render_frame+present below.
@@ -2246,6 +2266,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         video_streams:     &s.video_streams,
                         cursor_blink_on:   s.cursor_blink_on,
                         any_cursor_active: &mut any_cursor_active,
+                        dirty_subtrees:    &s.dirty_subtrees,
                     };
                     render_subtree(root_id, 0.0, 1.0, &mut render_ctx);
                 }
@@ -2321,6 +2342,12 @@ pub fn run(mut config: AppConfig) -> bool {
                 }
 
                 texture.present();
+
+                // Update prev_resolved snapshot and clear per-frame dirty sets.
+                snapshot_resolved(s);
+                s.dirty_nodes.clear();
+                s.dirty_subtrees.clear();
+
                 let gpu_time_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
 
                 // Record perf sample (skips the first frame where frame_time_ms = 0).

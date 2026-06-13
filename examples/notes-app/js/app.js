@@ -5852,12 +5852,304 @@ No matching component was found for:
 
   // ../../js/packages/@velox/react/src/hostConfig.js
   var import_constants = __toESM(require_constants(), 1);
+
+  // ../../js/packages/@velox/react/src/events.js
+  var pressableRegistry = new Map;
+  var inputRegistry = new Map;
+  var scrollRegistry = new Map;
+  var dragRegistry = new Map;
+  var disabledRegistry = new Map;
+  var pointerEventsNoneRegistry = new Set;
+  var solidRegistry = [];
+  var parentMap = new Map;
+  var activeDragId = null;
+  var windowSizeListeners = [];
+  var keyListeners = [];
+  var globalClickListeners = [];
+  var focusedNodeId = null;
+  var hoveredPressableId = null;
+  var ctrlHeld = false;
+  var shiftHeld = false;
+  var cursorX = 0;
+  var cursorY = 0;
+  function registerPressable(nodeId, handlers) {
+    pressableRegistry.set(nodeId, handlers);
+  }
+  function unregisterPressable(nodeId) {
+    pressableRegistry.delete(nodeId);
+  }
+  function registerInput(nodeId, handlers) {
+    inputRegistry.set(nodeId, handlers);
+  }
+  function unregisterInput(nodeId) {
+    if (focusedNodeId === nodeId)
+      focusedNodeId = null;
+    inputRegistry.delete(nodeId);
+  }
+  function registerScrollView(nodeId, handlers) {
+    scrollRegistry.set(nodeId, handlers);
+  }
+  function unregisterScrollView(nodeId) {
+    scrollRegistry.delete(nodeId);
+  }
+  function registerDraggable(nodeId, handlers) {
+    dragRegistry.set(nodeId, handlers);
+  }
+  function unregisterDraggable(nodeId) {
+    if (activeDragId === nodeId)
+      activeDragId = null;
+    dragRegistry.delete(nodeId);
+  }
+  function registerDisabledNode(nodeId, disabled) {
+    if (disabled) {
+      disabledRegistry.set(nodeId, true);
+    } else {
+      disabledRegistry.delete(nodeId);
+    }
+  }
+  function unregisterDisabledNode(nodeId) {
+    disabledRegistry.delete(nodeId);
+  }
+  function registerSolid(nodeId) {
+    solidRegistry.push(nodeId);
+  }
+  function unregisterSolid(nodeId) {
+    const i = solidRegistry.indexOf(nodeId);
+    if (i !== -1)
+      solidRegistry.splice(i, 1);
+  }
+  function setNodeParent(childId, parentId) {
+    parentMap.set(childId, parentId);
+  }
+  function removeNodeFromTree(nodeId) {
+    parentMap.delete(nodeId);
+    unregisterSolid(nodeId);
+  }
+  function addWindowSizeListener(fn) {
+    windowSizeListeners.push(fn);
+  }
+  function removeWindowSizeListener(fn) {
+    const idx = windowSizeListeners.indexOf(fn);
+    if (idx >= 0)
+      windowSizeListeners.splice(idx, 1);
+  }
+  function addKeyListener(fn) {
+    keyListeners.push(fn);
+  }
+  function addGlobalClickListener(fn) {
+    globalClickListeners.push(fn);
+  }
+  function removeGlobalClickListener(fn) {
+    const idx = globalClickListeners.indexOf(fn);
+    if (idx >= 0)
+      globalClickListeners.splice(idx, 1);
+  }
+  function setFocus(nodeId) {
+    if (focusedNodeId !== nodeId) {
+      if (focusedNodeId !== null) {
+        const prev = inputRegistry.get(focusedNodeId);
+        prev?.onBlur?.();
+      }
+      focusedNodeId = nodeId;
+      const handlers = inputRegistry.get(nodeId);
+      handlers?.onFocus?.();
+    }
+  }
+  function hitTest(nodeId, px, py) {
+    if (pointerEventsNoneRegistry.has(nodeId))
+      return false;
+    const layout = __velox_getLayout(nodeId);
+    if (!layout)
+      return false;
+    return px >= layout.x && px < layout.x + layout.width && py >= layout.y && py < layout.y + layout.height;
+  }
+  function isDisabled(nodeId) {
+    return disabledRegistry.has(nodeId);
+  }
+  function isAncestorOf(ancestorId, descendantId) {
+    let id = parentMap.get(descendantId);
+    while (id !== undefined) {
+      if (id === ancestorId)
+        return true;
+      id = parentMap.get(id);
+    }
+    return false;
+  }
+  function findTopmostSolid(x, y) {
+    const covering = [];
+    for (const id of solidRegistry) {
+      if (hitTest(id, x, y))
+        covering.push(id);
+    }
+    if (covering.length === 0)
+      return null;
+    if (covering.length === 1)
+      return covering[0];
+    const deepest = covering.filter((id) => !covering.some((other) => other !== id && isAncestorOf(id, other)));
+    if (deepest.length === 1)
+      return deepest[0];
+    let bestId = deepest[0];
+    let bestIdx = solidRegistry.lastIndexOf(deepest[0]);
+    for (let i = 1;i < deepest.length; i++) {
+      const idx = solidRegistry.lastIndexOf(deepest[i]);
+      if (idx > bestIdx) {
+        bestIdx = idx;
+        bestId = deepest[i];
+      }
+    }
+    return bestId;
+  }
+  function dispatchEvents() {
+    const events = __velox_pollEvents();
+    if (!events || events.length === 0)
+      return;
+    let cursorMovedThisFrame = false;
+    for (const ev of events) {
+      switch (ev.type) {
+        case "mouseButton": {
+          if (!ev.pressed)
+            break;
+          if (globalClickListeners.length > 0) {
+            const gev = { x: ev.x, y: ev.y };
+            for (const fn of globalClickListeners)
+              try {
+                fn(gev);
+              } catch {}
+          }
+          const topmostId = findTopmostSolid(ev.x, ev.y);
+          if (topmostId !== null) {
+            const ph = pressableRegistry.get(topmostId);
+            if (ph && !isDisabled(topmostId)) {
+              const layout = __velox_getLayout(topmostId);
+              ph.onPress?.({
+                x: ev.x,
+                y: ev.y,
+                locationX: layout ? ev.x - layout.x : 0,
+                locationY: layout ? ev.y - layout.y : 0
+              });
+            }
+            const ih = inputRegistry.get(topmostId);
+            if (ih && !isDisabled(topmostId)) {
+              setFocus(topmostId);
+              const layout = __velox_getLayout(topmostId);
+              if (layout)
+                ih.onClickAt?.(ev.x - layout.x, ev.y - layout.y);
+            }
+          }
+          if (focusedNodeId !== null && focusedNodeId !== topmostId) {
+            inputRegistry.get(focusedNodeId)?.onBlur?.();
+            focusedNodeId = null;
+          }
+          break;
+        }
+        case "keyInput": {
+          if (ev.key === "ControlLeft" || ev.key === "ControlRight") {
+            ctrlHeld = ev.pressed;
+            break;
+          }
+          if (ev.key === "ShiftLeft" || ev.key === "ShiftRight") {
+            shiftHeld = ev.pressed;
+            break;
+          }
+          if (keyListeners.length > 0) {
+            const kev = { key: ev.key, ctrl: ctrlHeld, shift: shiftHeld, pressed: ev.pressed };
+            for (const fn of keyListeners)
+              try {
+                fn(kev);
+              } catch {}
+          }
+          if (!ev.pressed || focusedNodeId === null)
+            break;
+          const handlers = inputRegistry.get(focusedNodeId);
+          if (!handlers)
+            break;
+          handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld });
+          break;
+        }
+        case "cursorMoved": {
+          cursorX = ev.x;
+          cursorY = ev.y;
+          cursorMovedThisFrame = true;
+          break;
+        }
+        case "scroll": {
+          for (const [nodeId, handlers] of [...scrollRegistry].reverse()) {
+            if (hitTest(nodeId, cursorX, cursorY)) {
+              if (isDisabled(nodeId))
+                break;
+              handlers.onScroll?.(ev.deltaY);
+              break;
+            }
+          }
+          break;
+        }
+        case "scrollbarDrag": {
+          const handlers = scrollRegistry.get(ev.nodeId);
+          handlers?.onAbsoluteScroll?.(ev.scrollY);
+          break;
+        }
+        case "resize": {
+          const size = { width: ev.width, height: ev.height };
+          for (const fn of windowSizeListeners)
+            fn(size);
+          break;
+        }
+        case "dragStart": {
+          for (const [nodeId, handlers] of dragRegistry) {
+            if (hitTest(nodeId, ev.x, ev.y)) {
+              if (isDisabled(nodeId))
+                break;
+              activeDragId = nodeId;
+              handlers.onDragStart?.({ x: ev.x, y: ev.y });
+              break;
+            }
+          }
+          break;
+        }
+        case "dragMove": {
+          if (activeDragId !== null) {
+            const handlers = dragRegistry.get(activeDragId);
+            handlers?.onDragMove?.({ x: ev.x, y: ev.y, dx: ev.dx, dy: ev.dy });
+          }
+          break;
+        }
+        case "dragEnd": {
+          if (activeDragId !== null) {
+            const handlers = dragRegistry.get(activeDragId);
+            handlers?.onDragEnd?.({ x: ev.x, y: ev.y });
+            activeDragId = null;
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
+    if (cursorMovedThisFrame) {
+      const topSolid = findTopmostSolid(cursorX, cursorY);
+      const newHoveredId = topSolid !== null && !isDisabled(topSolid) && pressableRegistry.has(topSolid) ? topSolid : null;
+      if (newHoveredId !== hoveredPressableId) {
+        if (hoveredPressableId !== null) {
+          pressableRegistry.get(hoveredPressableId)?.onHoverOut?.();
+        }
+        if (newHoveredId !== null) {
+          pressableRegistry.get(newHoveredId)?.onHoverIn?.();
+        }
+        hoveredPressableId = newHoveredId;
+      }
+    }
+  }
+
+  // ../../js/packages/@velox/react/src/hostConfig.js
   function createInstance(type, props) {
     const { children, style, ref: _ref, _veloxOnMount, veloxDraggable, ...rest } = props;
     const nodeProps = { ...rest, ...style };
     if (veloxDraggable)
       nodeProps.draggable = true;
     const id = __velox_createNode(type, nodeProps);
+    if (type === "view") {
+      registerSolid(id);
+    }
     if (typeof _veloxOnMount === "function") {
       _veloxOnMount(id);
     }
@@ -5870,11 +6162,13 @@ No matching component was found for:
   function appendInitialChild(parentInstance, child) {
     if (child.id !== -1) {
       __velox_appendChild(parentInstance.id, child.id);
+      setNodeParent(child.id, parentInstance.id);
     }
   }
   function appendChild(parentInstance, child) {
     if (child.id !== -1) {
       __velox_appendChild(parentInstance.id, child.id);
+      setNodeParent(child.id, parentInstance.id);
     }
   }
   function appendChildToContainer(_container, child) {
@@ -5885,6 +6179,7 @@ No matching component was found for:
   function insertBefore(parentInstance, child, _beforeChild) {
     if (child.id !== -1) {
       __velox_appendChild(parentInstance.id, child.id);
+      setNodeParent(child.id, parentInstance.id);
     }
   }
   function insertInContainerBefore(_container, child, _beforeChild) {
@@ -5906,6 +6201,7 @@ No matching component was found for:
   function detachDeletedInstance(instance) {
     if (instance.id !== -1) {
       __velox_removeNode(instance.id);
+      removeNodeFromTree(instance.id);
     }
   }
   function prepareUpdate(_instance, _type, _oldProps, newProps) {
@@ -5999,262 +6295,6 @@ No matching component was found for:
     getInstanceFromScope
   };
   var hostConfig_default = HostConfig;
-
-  // ../../js/packages/@velox/react/src/events.js
-  var pressableRegistry = new Map;
-  var inputRegistry = new Map;
-  var scrollRegistry = new Map;
-  var dragRegistry = new Map;
-  var disabledRegistry = new Map;
-  var pointerEventsNoneRegistry = new Set;
-  var activeDragId = null;
-  var windowSizeListeners = [];
-  var keyListeners = [];
-  var globalClickListeners = [];
-  var focusedNodeId = null;
-  var hoveredPressableId = null;
-  var ctrlHeld = false;
-  var shiftHeld = false;
-  var cursorX = 0;
-  var cursorY = 0;
-  function registerPressable(nodeId, handlers) {
-    pressableRegistry.set(nodeId, handlers);
-  }
-  function unregisterPressable(nodeId) {
-    pressableRegistry.delete(nodeId);
-  }
-  function registerInput(nodeId, handlers) {
-    inputRegistry.set(nodeId, handlers);
-  }
-  function unregisterInput(nodeId) {
-    if (focusedNodeId === nodeId)
-      focusedNodeId = null;
-    inputRegistry.delete(nodeId);
-  }
-  function registerScrollView(nodeId, handlers) {
-    scrollRegistry.set(nodeId, handlers);
-  }
-  function unregisterScrollView(nodeId) {
-    scrollRegistry.delete(nodeId);
-  }
-  function registerDraggable(nodeId, handlers) {
-    dragRegistry.set(nodeId, handlers);
-  }
-  function unregisterDraggable(nodeId) {
-    if (activeDragId === nodeId)
-      activeDragId = null;
-    dragRegistry.delete(nodeId);
-  }
-  function registerDisabledNode(nodeId, disabled) {
-    if (disabled) {
-      disabledRegistry.set(nodeId, true);
-    } else {
-      disabledRegistry.delete(nodeId);
-    }
-  }
-  function unregisterDisabledNode(nodeId) {
-    disabledRegistry.delete(nodeId);
-  }
-  function addWindowSizeListener(fn) {
-    windowSizeListeners.push(fn);
-  }
-  function removeWindowSizeListener(fn) {
-    const idx = windowSizeListeners.indexOf(fn);
-    if (idx >= 0)
-      windowSizeListeners.splice(idx, 1);
-  }
-  function addKeyListener(fn) {
-    keyListeners.push(fn);
-  }
-  function addGlobalClickListener(fn) {
-    globalClickListeners.push(fn);
-  }
-  function removeGlobalClickListener(fn) {
-    const idx = globalClickListeners.indexOf(fn);
-    if (idx >= 0)
-      globalClickListeners.splice(idx, 1);
-  }
-  function setFocus(nodeId) {
-    if (focusedNodeId !== nodeId) {
-      if (focusedNodeId !== null) {
-        const prev = inputRegistry.get(focusedNodeId);
-        prev?.onBlur?.();
-      }
-      focusedNodeId = nodeId;
-      const handlers = inputRegistry.get(nodeId);
-      handlers?.onFocus?.();
-    }
-  }
-  function hitTest(nodeId, px, py) {
-    if (pointerEventsNoneRegistry.has(nodeId))
-      return false;
-    const layout = __velox_getLayout(nodeId);
-    if (!layout)
-      return false;
-    return px >= layout.x && px < layout.x + layout.width && py >= layout.y && py < layout.y + layout.height;
-  }
-  function isDisabled(nodeId) {
-    return disabledRegistry.has(nodeId);
-  }
-  function dispatchEvents() {
-    const events = __velox_pollEvents();
-    if (!events || events.length === 0)
-      return;
-    let cursorMovedThisFrame = false;
-    for (const ev of events) {
-      switch (ev.type) {
-        case "mouseButton": {
-          if (!ev.pressed)
-            break;
-          if (globalClickListeners.length > 0) {
-            const gev = { x: ev.x, y: ev.y };
-            for (const fn of globalClickListeners)
-              try {
-                fn(gev);
-              } catch {}
-          }
-          let handled = false;
-          for (const [nodeId, handlers] of [...pressableRegistry].reverse()) {
-            if (hitTest(nodeId, ev.x, ev.y)) {
-              if (isDisabled(nodeId))
-                break;
-              const layout = __velox_getLayout(nodeId);
-              const pressEv = {
-                x: ev.x,
-                y: ev.y,
-                locationX: layout ? ev.x - layout.x : 0,
-                locationY: layout ? ev.y - layout.y : 0
-              };
-              handlers.onPress?.(pressEv);
-              handled = true;
-              break;
-            }
-          }
-          for (const [nodeId, handlers] of [...inputRegistry].reverse()) {
-            if (hitTest(nodeId, ev.x, ev.y)) {
-              if (isDisabled(nodeId))
-                break;
-              setFocus(nodeId);
-              if (handlers.onClickAt) {
-                const layout = __velox_getLayout(nodeId);
-                if (layout)
-                  handlers.onClickAt(ev.x - layout.x, ev.y - layout.y);
-              }
-              handled = true;
-              break;
-            }
-          }
-          if (!handled && focusedNodeId !== null) {
-            const prev = inputRegistry.get(focusedNodeId);
-            prev?.onBlur?.();
-            focusedNodeId = null;
-          }
-          break;
-        }
-        case "keyInput": {
-          if (ev.key === "ControlLeft" || ev.key === "ControlRight") {
-            ctrlHeld = ev.pressed;
-            break;
-          }
-          if (ev.key === "ShiftLeft" || ev.key === "ShiftRight") {
-            shiftHeld = ev.pressed;
-            break;
-          }
-          if (keyListeners.length > 0) {
-            const kev = { key: ev.key, ctrl: ctrlHeld, shift: shiftHeld, pressed: ev.pressed };
-            for (const fn of keyListeners)
-              try {
-                fn(kev);
-              } catch {}
-          }
-          if (!ev.pressed || focusedNodeId === null)
-            break;
-          const handlers = inputRegistry.get(focusedNodeId);
-          if (!handlers)
-            break;
-          handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld });
-          break;
-        }
-        case "cursorMoved": {
-          cursorX = ev.x;
-          cursorY = ev.y;
-          cursorMovedThisFrame = true;
-          break;
-        }
-        case "scroll": {
-          for (const [nodeId, handlers] of [...scrollRegistry].reverse()) {
-            if (hitTest(nodeId, cursorX, cursorY)) {
-              if (isDisabled(nodeId))
-                break;
-              handlers.onScroll?.(ev.deltaY);
-              break;
-            }
-          }
-          break;
-        }
-        case "scrollbarDrag": {
-          const handlers = scrollRegistry.get(ev.nodeId);
-          handlers?.onAbsoluteScroll?.(ev.scrollY);
-          break;
-        }
-        case "resize": {
-          const size = { width: ev.width, height: ev.height };
-          for (const fn of windowSizeListeners)
-            fn(size);
-          break;
-        }
-        case "dragStart": {
-          for (const [nodeId, handlers] of dragRegistry) {
-            if (hitTest(nodeId, ev.x, ev.y)) {
-              if (isDisabled(nodeId))
-                break;
-              activeDragId = nodeId;
-              handlers.onDragStart?.({ x: ev.x, y: ev.y });
-              break;
-            }
-          }
-          break;
-        }
-        case "dragMove": {
-          if (activeDragId !== null) {
-            const handlers = dragRegistry.get(activeDragId);
-            handlers?.onDragMove?.({ x: ev.x, y: ev.y, dx: ev.dx, dy: ev.dy });
-          }
-          break;
-        }
-        case "dragEnd": {
-          if (activeDragId !== null) {
-            const handlers = dragRegistry.get(activeDragId);
-            handlers?.onDragEnd?.({ x: ev.x, y: ev.y });
-            activeDragId = null;
-          }
-          break;
-        }
-        default:
-          break;
-      }
-    }
-    if (cursorMovedThisFrame) {
-      let newHoveredId = null;
-      for (const [nodeId] of pressableRegistry) {
-        if (isDisabled(nodeId))
-          continue;
-        if (hitTest(nodeId, cursorX, cursorY)) {
-          newHoveredId = nodeId;
-          break;
-        }
-      }
-      if (newHoveredId !== hoveredPressableId) {
-        if (hoveredPressableId !== null) {
-          pressableRegistry.get(hoveredPressableId)?.onHoverOut?.();
-        }
-        if (newHoveredId !== null) {
-          pressableRegistry.get(newHoveredId)?.onHoverIn?.();
-        }
-        hoveredPressableId = newHoveredId;
-      }
-    }
-  }
 
   // ../../js/packages/@velox/react/src/index.js
   var VeloxReconciler = import_react_reconciler.default(hostConfig_default);
@@ -6953,6 +6993,64 @@ No matching component was found for:
       const handle = isExplicit ? handleOrStmts : _dbHandle(null);
       const stmts = isExplicit ? stmtsOrUndef : handleOrStmts;
       return typeof __velox_db_transaction !== "undefined" ? __velox_db_transaction(handle, JSON.stringify(stmts)) : _noBinding("db.transaction");
+    },
+    migrate: async (handleOrMigrations, migrationsOrUndef) => {
+      const isExplicit = typeof handleOrMigrations === "number";
+      const handle = isExplicit ? handleOrMigrations : _dbHandle(null);
+      const migrations = isExplicit ? migrationsOrUndef : handleOrMigrations;
+      if (!Array.isArray(migrations) || migrations.length === 0)
+        return 0;
+      const sorted = [...migrations].sort((a, b) => a.version - b.version);
+      await db.run(handle, "CREATE TABLE IF NOT EXISTS _velox_migrations " + "(version INTEGER PRIMARY KEY, name TEXT, applied_at INTEGER DEFAULT (unixepoch()))");
+      const applied = await db.query(handle, "SELECT version FROM _velox_migrations");
+      const appliedSet = new Set(applied.map((r) => r.version));
+      const pending = sorted.filter((m) => !appliedSet.has(m.version));
+      for (const m of pending) {
+        const upSqls = Array.isArray(m.up) ? m.up : [m.up];
+        await db.transaction(handle, [
+          ...upSqls.map((sql) => ({ sql })),
+          {
+            sql: "INSERT INTO _velox_migrations (version, name) VALUES (?, ?)",
+            params: [m.version, m.name ?? "migration_" + m.version]
+          }
+        ]);
+      }
+      if (pending.length > 0) {
+        console.log("[db] applied " + pending.length + " migration(s): " + pending.map((m) => "v" + m.version + (m.name ? "(" + m.name + ")" : "")).join(", "));
+      }
+      return pending.length;
+    },
+    seed: async (handleOrNameOrFn, nameOrFnOrUndef, fnOrUndef) => {
+      let handle, name, fn;
+      if (typeof handleOrNameOrFn === "number") {
+        handle = handleOrNameOrFn;
+        if (typeof nameOrFnOrUndef === "string") {
+          name = nameOrFnOrUndef;
+          fn = fnOrUndef;
+        } else {
+          fn = nameOrFnOrUndef;
+        }
+      } else if (typeof handleOrNameOrFn === "string") {
+        handle = _dbHandle(null);
+        name = handleOrNameOrFn;
+        fn = nameOrFnOrUndef;
+      } else {
+        handle = _dbHandle(null);
+        fn = handleOrNameOrFn;
+      }
+      if (typeof fn !== "function")
+        throw new Error("db.seed: expected a function");
+      if (name !== undefined) {
+        await db.run(handle, "CREATE TABLE IF NOT EXISTS _velox_seeds " + "(name TEXT PRIMARY KEY, seeded_at INTEGER DEFAULT (unixepoch()))");
+        const existing = await db.query(handle, "SELECT name FROM _velox_seeds WHERE name = ?", [name]);
+        if (existing.length > 0)
+          return;
+        await fn();
+        await db.run(handle, "INSERT INTO _velox_seeds (name) VALUES (?)", [name]);
+        console.log("[db] seed applied: " + name);
+      } else {
+        await fn();
+      }
     }
   };
   var vectorDb = {
@@ -7216,18 +7314,35 @@ No matching component was found for:
         prevUnhandled(event);
     };
   })();
+  function _backendCall(cmd, args) {
+    var json = args === undefined ? "{}" : JSON.stringify(args);
+    return __velox_backend_call(cmd, json).then(function(raw) {
+      try {
+        return JSON.parse(raw);
+      } catch (_) {
+        return raw;
+      }
+    });
+  }
+  function _backendNs(prefix) {
+    return new Proxy(function() {}, {
+      get: function(_, fn) {
+        if (typeof fn !== "string")
+          return;
+        return function(args) {
+          return _backendCall(prefix + "." + fn, args);
+        };
+      },
+      apply: function(_, __, a) {
+        return _backendCall(prefix, a[0]);
+      }
+    });
+  }
   var backend = new Proxy(Object.create(null), {
-    get(_, name) {
-      return function(args) {
-        const json = typeof args === "undefined" ? "{}" : JSON.stringify(args);
-        return __velox_backend_call(String(name), json).then(function(raw) {
-          try {
-            return JSON.parse(raw);
-          } catch (_2) {
-            return raw;
-          }
-        });
-      };
+    get: function(_, name) {
+      if (typeof name !== "string")
+        return;
+      return _backendNs(name);
     }
   });
   var perf = {

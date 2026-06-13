@@ -5860,6 +5860,7 @@ No matching component was found for:
   var dragRegistry = new Map;
   var disabledRegistry = new Map;
   var pointerEventsNoneRegistry = new Set;
+  var zIndexMap = new Map;
   var solidRegistry = [];
   var parentMap = new Map;
   var activeDragId = null;
@@ -5908,6 +5909,14 @@ No matching component was found for:
   function removeNodeFromTree(nodeId) {
     parentMap.delete(nodeId);
     unregisterSolid(nodeId);
+    zIndexMap.delete(nodeId);
+  }
+  function setNodeZIndex(nodeId, zIndex) {
+    if (zIndex !== 0) {
+      zIndexMap.set(nodeId, zIndex);
+    } else {
+      zIndexMap.delete(nodeId);
+    }
   }
   function addWindowSizeListener(fn) {
     windowSizeListeners.push(fn);
@@ -5966,11 +5975,14 @@ No matching component was found for:
       return deepest[0];
     let bestId = deepest[0];
     let bestIdx = solidRegistry.lastIndexOf(deepest[0]);
+    let bestZ = zIndexMap.get(deepest[0]) ?? 0;
     for (let i = 1;i < deepest.length; i++) {
+      const z = zIndexMap.get(deepest[i]) ?? 0;
       const idx = solidRegistry.lastIndexOf(deepest[i]);
-      if (idx > bestIdx) {
-        bestIdx = idx;
+      if (z > bestZ || z === bestZ && idx > bestIdx) {
         bestId = deepest[i];
+        bestIdx = idx;
+        bestZ = z;
       }
     }
     return bestId;
@@ -6125,6 +6137,8 @@ No matching component was found for:
     const id = __velox_createNode(type, nodeProps);
     if (type === "view") {
       registerSolid(id);
+      if (nodeProps.zIndex)
+        setNodeZIndex(id, nodeProps.zIndex);
     }
     if (typeof _veloxOnMount === "function") {
       _veloxOnMount(id);
@@ -6189,6 +6203,7 @@ No matching component was found for:
     if (veloxDraggable)
       nodeProps.draggable = true;
     __velox_updateNode(instance.id, nodeProps);
+    setNodeZIndex(instance.id, nodeProps.zIndex ?? 0);
   }
   function commitTextUpdate() {}
   function commitMount() {}
@@ -6568,7 +6583,8 @@ No matching component was found for:
         }
       };
     }, []);
-    const mergedStyle = pressed ? { ...style, borderWidth: 2, borderColor: "#ffffffaa" } : hovered ? { ...style, borderWidth: 1, borderColor: "#ffffff55" } : style;
+    const baseOpacity = style?.opacity ?? 1;
+    const mergedStyle = pressed ? { ...style, opacity: baseOpacity * 0.65 } : hovered ? { ...style, opacity: baseOpacity * 0.85 } : style;
     return import_react.default.createElement("view", { _veloxOnMount: onMount, style: mergedStyle, ...props }, children);
   }
   function ScrollView({
@@ -7144,29 +7160,29 @@ No matching component was found for:
     if (key === "⌫") {
       const d = state.disp;
       const next = d.length > 1 ? d.slice(0, -1) : "0";
-      return { ...state, disp: next };
+      return { ...state, disp: next, lastResult: undefined };
     }
     if (key >= "0" && key <= "9") {
       if (state.wait) {
-        return { ...state, disp: key, wait: false };
+        return { ...state, disp: key, wait: false, lastResult: undefined };
       }
       const d = state.disp === "0" ? key : state.disp + key;
-      return { ...state, disp: d };
+      return { ...state, disp: d, lastResult: undefined };
     }
     if (key === ".") {
       if (state.wait) {
-        return { ...state, disp: "0.", wait: false };
+        return { ...state, disp: "0.", wait: false, lastResult: undefined };
       }
       if (state.disp.includes("."))
         return state;
-      return { ...state, disp: state.disp + "." };
+      return { ...state, disp: state.disp + ".", lastResult: undefined };
     }
     if (["+", "−", "×", "÷"].includes(key)) {
       if (state.op && !state.wait) {
         const result = compute(state.prev, state.disp, state.op);
         return { disp: String(result), prev: result, op: key, wait: true, expr: state.prev + " " + state.op + " " + state.disp + " " + key };
       }
-      return { ...state, prev: state.disp, op: key, wait: true, expr: state.disp + " " + key + " " };
+      return { ...state, prev: state.disp, op: key, wait: true, lastResult: undefined, expr: state.disp + " " + key + " " };
     }
     if (key === "=") {
       if (!state.op)
@@ -7216,11 +7232,11 @@ No matching component was found for:
       borderRadius: 8,
       alignItems: "center",
       justifyContent: "center",
-      margin: 2,
       boxShadow: "0 2 4 #00000044"
     });
     const Btn = ({ label, color = C.surfaceAlt, span = 1, disabled = false, gridColumn, gridRow }) => /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
       disabled,
+      opacity: disabled ? 0 : 1,
       onPress: () => press(label),
       flex: gridMode ? undefined : span,
       gridColumn,
@@ -7230,7 +7246,7 @@ No matching component was found for:
       children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
         fontSize: 20,
         height: 28,
-        style: { color: disabled ? C.dim : C.text, textAlign: "center" },
+        style: { color: C.text, textAlign: "center" },
         children: label
       })
     });
@@ -7318,47 +7334,6 @@ No matching component was found for:
                       })
                     })
                   ]
-                })
-              ]
-            }),
-            showHistory && history.length > 0 && /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              position: "absolute",
-              top: titleH + 8,
-              right: pad,
-              width: 180,
-              height: 260,
-              style: {
-                backgroundColor: C.surface,
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: C.overlay,
-                overflow: "hidden",
-                zIndex: 10
-              },
-              children: [
-                /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                  fontSize: 10,
-                  height: 20,
-                  style: { color: C.subtle, padding: 4 },
-                  children: "History"
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
-                  width: 178,
-                  showScrollbar: true,
-                  scrollbarWidth: 6,
-                  scrollbarColor: "#8c8caa99",
-                  contentHeight: history.length * 24,
-                  height: 236,
-                  children: history.map((entry, i) => /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                    fontSize: 11,
-                    height: 24,
-                    style: {
-                      color: C.text,
-                      paddingLeft: 4,
-                      paddingRight: 16
-                    },
-                    children: entry
-                  }, i))
                 })
               ]
             }),
@@ -7661,6 +7636,55 @@ No matching component was found for:
                   ]
                 })
               ]
+            }),
+            showHistory && /* @__PURE__ */ jsx_runtime.jsxs(View, {
+              position: "absolute",
+              top: titleH + 8,
+              right: pad,
+              width: 180,
+              height: 260,
+              zIndex: 10,
+              style: {
+                backgroundColor: C.surface,
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: C.overlay,
+                overflow: "hidden"
+              },
+              children: [
+                /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                  fontSize: 10,
+                  height: 20,
+                  style: { color: C.subtle, padding: 4 },
+                  children: "History"
+                }),
+                history.length === 0 ? /* @__PURE__ */ jsx_runtime.jsx(View, {
+                  style: { flex: 1, justifyContent: "center", alignItems: "center" },
+                  children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 11,
+                    height: 16,
+                    style: { color: C.dim },
+                    children: "No history yet"
+                  })
+                }) : /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
+                  width: 178,
+                  showScrollbar: true,
+                  scrollbarWidth: 6,
+                  scrollbarColor: "#8c8caa99",
+                  contentHeight: history.length * 24,
+                  height: 236,
+                  children: history.map((entry, i) => /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                    fontSize: 11,
+                    height: 24,
+                    style: {
+                      color: C.text,
+                      paddingLeft: 4,
+                      paddingRight: 16
+                    },
+                    children: entry
+                  }, i))
+                })
+              ]
             })
           ]
         }),
@@ -7668,11 +7692,11 @@ No matching component was found for:
           position: "absolute",
           top: 0,
           left: 0,
-          right: 0,
-          bottom: 0,
+          width: winW,
+          height: winH,
           style: {
             backgroundColor: "#00000088",
-            justifyContent: "center",
+            justifyContent: "flex-start",
             alignItems: "center"
           },
           children: /* @__PURE__ */ jsx_runtime.jsxs(View, {
@@ -7681,25 +7705,21 @@ No matching component was found for:
               borderRadius: 16,
               padding: 24,
               alignItems: "center",
-              boxShadow: "0 4 12 #00000066"
+              boxShadow: "0 4 12 #00000066",
+              marginTop: Math.round((winH - 158) / 2)
             },
             children: [
-              /* @__PURE__ */ jsx_runtime.jsxs(View, {
-                transform: "scale(1.15)",
-                children: [
-                  /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                    fontSize: 12,
-                    height: 16,
-                    style: { color: C.subtle },
-                    children: "Result"
-                  }),
-                  /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                    fontSize: 40,
-                    height: 48,
-                    style: { color: C.text },
-                    children: state.lastResult
-                  })
-                ]
+              /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 12,
+                height: 16,
+                style: { color: C.subtle },
+                children: "Result"
+              }),
+              /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                fontSize: 40,
+                height: 48,
+                style: { color: C.text },
+                children: state.lastResult
               }),
               /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
                 onPress: () => setState((s) => ({ ...s, lastResult: undefined })),

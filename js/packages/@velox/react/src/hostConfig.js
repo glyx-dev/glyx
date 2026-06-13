@@ -8,7 +8,7 @@
 // Only `supportsMutation: true` is enabled — no persistence, no hydration.
 
 import { DefaultEventPriority } from 'react-reconciler/constants';
-import { registerSolid, setNodeParent, removeNodeFromTree } from './events.js';
+import { registerSolid, setNodeParent, removeNodeFromTree, setNodeZIndex } from './events.js';
 
 // ── Instance creation ─────────────────────────────────────────────────────────
 
@@ -26,6 +26,7 @@ function createInstance(type, props) {
   // pointerEvents:'none' are still registered but excluded at lookup time.
   if (type === 'view') {
     registerSolid(id);
+    if (nodeProps.zIndex) setNodeZIndex(id, nodeProps.zIndex);
   }
   // Fire the mount callback immediately so the component can register its ID
   // before any useEffect / useLayoutEffect runs.
@@ -123,6 +124,7 @@ function commitUpdate(instance, updatePayload) {
   const nodeProps = { ...rest, ...style };
   if (veloxDraggable) nodeProps.draggable = true;
   __velox_updateNode(instance.id, nodeProps);
+  setNodeZIndex(instance.id, nodeProps.zIndex ?? 0);
 }
 
 function commitTextUpdate() {

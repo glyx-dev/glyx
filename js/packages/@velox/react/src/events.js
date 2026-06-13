@@ -43,6 +43,11 @@ const disabledRegistry = new Map();
 // hit-testing; events pass through them to nodes underneath.
 const pointerEventsNoneRegistry = new Set();
 
+// Map from nodeId -> zIndex (integer).  Only nodes with an explicit zIndex
+// prop are stored here; absent = 0.  Used by findTopmostSolid to prefer
+// higher-z-index nodes over later-registered ones when both cover a point.
+const zIndexMap = new Map();
+
 // Ordered array of all solid (click-opaque) node ids, in creation order.
 // Later entries were rendered later (on top in z-order).
 // Every 'view' native node is solid by default.  Nodes with pointerEvents:'none'
@@ -222,6 +227,21 @@ export function setNodeParent(childId, parentId) {
 export function removeNodeFromTree(nodeId) {
   parentMap.delete(nodeId);
   unregisterSolid(nodeId);
+  zIndexMap.delete(nodeId);
+}
+
+/**
+ * Record the z-index for a node so hit-testing can prefer visually-higher
+ * nodes over ones with a later solidRegistry index.
+ * @param {number} nodeId
+ * @param {number} zIndex
+ */
+export function setNodeZIndex(nodeId, zIndex) {
+  if (zIndex !== 0) {
+    zIndexMap.set(nodeId, zIndex);
+  } else {
+    zIndexMap.delete(nodeId);
+  }
 }
 
 /**
@@ -352,12 +372,22 @@ function findTopmostSolid(x, y) {
     id => !covering.some(other => other !== id && isAncestorOf(id, other))
   );
   if (deepest.length === 1) return deepest[0];
-  // Among siblings, pick the one with the highest solidRegistry index.
+  // Among siblings, pick the visually topmost node.
+  // z-index takes priority over registration order: a node with a higher
+  // z-index beats one registered later (which is the common case when an
+  // absolutely-positioned overlay is declared before the content it covers
+  // in JSX but must receive clicks over it).
   let bestId = deepest[0];
   let bestIdx = solidRegistry.lastIndexOf(deepest[0]);
+  let bestZ   = zIndexMap.get(deepest[0]) ?? 0;
   for (let i = 1; i < deepest.length; i++) {
+    const z   = zIndexMap.get(deepest[i]) ?? 0;
     const idx = solidRegistry.lastIndexOf(deepest[i]);
-    if (idx > bestIdx) { bestIdx = idx; bestId = deepest[i]; }
+    if (z > bestZ || (z === bestZ && idx > bestIdx)) {
+      bestId  = deepest[i];
+      bestIdx = idx;
+      bestZ   = z;
+    }
   }
   return bestId;
 }

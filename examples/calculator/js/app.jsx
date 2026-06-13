@@ -32,23 +32,23 @@ function calc(state, key) {
   if (key === '⌫') {
     const d = state.disp;
     const next = d.length > 1 ? d.slice(0, -1) : '0';
-    return { ...state, disp: next };
+    return { ...state, disp: next, lastResult: undefined };
   }
 
   if (key >= '0' && key <= '9') {
     if (state.wait) {
-      return { ...state, disp: key, wait: false };
+      return { ...state, disp: key, wait: false, lastResult: undefined };
     }
     const d = state.disp === '0' ? key : state.disp + key;
-    return { ...state, disp: d };
+    return { ...state, disp: d, lastResult: undefined };
   }
 
   if (key === '.') {
     if (state.wait) {
-      return { ...state, disp: '0.', wait: false };
+      return { ...state, disp: '0.', wait: false, lastResult: undefined };
     }
     if (state.disp.includes('.')) return state;
-    return { ...state, disp: state.disp + '.' };
+    return { ...state, disp: state.disp + '.', lastResult: undefined };
   }
 
   // Operator [+, −, ×, ÷]
@@ -57,7 +57,7 @@ function calc(state, key) {
       const result = compute(state.prev, state.disp, state.op);
       return { disp: String(result), prev: result, op: key, wait: true, expr: state.prev + ' ' + state.op + ' ' + state.disp + ' ' + key };
     }
-    return { ...state, prev: state.disp, op: key, wait: true, expr: state.disp + ' ' + key + ' ' };
+    return { ...state, prev: state.disp, op: key, wait: true, lastResult: undefined, expr: state.disp + ' ' + key + ' ' };
   }
 
   if (key === '=') {
@@ -110,13 +110,13 @@ function App() {
     borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
-    margin: 2,
     boxShadow: '0 2 4 #00000044',
   });
 
   const Btn = ({ label, color = C.surfaceAlt, span = 1, disabled = false, gridColumn, gridRow }) => (
     <Pressable
       disabled={disabled}
+      opacity={disabled ? 0 : 1}
       onPress={() => press(label)}
       flex={gridMode ? undefined : span}
       gridColumn={gridColumn}
@@ -124,7 +124,7 @@ function App() {
       height={btnH}
       style={btnStyle(color)}
     >
-      <Text fontSize={20} height={28} style={{ color: disabled ? C.dim : C.text, textAlign: 'center' }}>
+      <Text fontSize={20} height={28} style={{ color: C.text, textAlign: 'center' }}>
         {label}
       </Text>
     </Pressable>
@@ -182,44 +182,6 @@ function App() {
             </Pressable>
           </View>
         </View>
-
-        {/* Scrollable history panel */}
-        {showHistory && history.length > 0 && (
-          <View
-            position="absolute"
-            top={titleH + 8} right={pad}
-            width={180}
-            height={260}
-            style={{
-              backgroundColor: C.surface,
-              borderRadius: 8,
-              borderWidth: 1,
-              borderColor: C.overlay,
-              overflow: 'hidden',
-              zIndex: 10,
-            }}
-          >
-            <Text fontSize={10} height={20} style={{ color: C.subtle, padding: 4 }}>History</Text>
-            <ScrollView
-              width={178}
-              showScrollbar
-              scrollbarWidth={6}
-              scrollbarColor="#8c8caa99"
-              contentHeight={history.length * 24}
-              height={236}
-            >
-              {history.map((entry, i) => (
-                <Text key={i} fontSize={11} height={24} style={{
-                  color: C.text,
-                  paddingLeft: 4,
-                  paddingRight: 16,
-                }}>
-                  {entry}
-                </Text>
-              ))}
-            </ScrollView>
-          </View>
-        )}
 
         {/* Display */}
         <View
@@ -319,6 +281,51 @@ function App() {
             </View>
           </View>
         )}
+
+        {/* Scrollable history panel — rendered after button grid so its nodes
+            have higher solidRegistry indices and win hit-tests over buttons. */}
+        {showHistory && (
+          <View
+            position="absolute"
+            top={titleH + 8} right={pad}
+            width={180}
+            height={260}
+            zIndex={10}
+            style={{
+              backgroundColor: C.surface,
+              borderRadius: 8,
+              borderWidth: 1,
+              borderColor: C.overlay,
+              overflow: 'hidden',
+            }}
+          >
+            <Text fontSize={10} height={20} style={{ color: C.subtle, padding: 4 }}>History</Text>
+            {history.length === 0 ? (
+              <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                <Text fontSize={11} height={16} style={{ color: C.dim }}>No history yet</Text>
+              </View>
+            ) : (
+              <ScrollView
+                width={178}
+                showScrollbar
+                scrollbarWidth={6}
+                scrollbarColor="#8c8caa99"
+                contentHeight={history.length * 24}
+                height={236}
+              >
+                {history.map((entry, i) => (
+                  <Text key={i} fontSize={11} height={24} style={{
+                    color: C.text,
+                    paddingLeft: 4,
+                    paddingRight: 16,
+                  }}>
+                    {entry}
+                  </Text>
+                ))}
+              </ScrollView>
+            )}
+          </View>
+        )}
       </View>
 
       {/* ── Result modal ── */}
@@ -327,11 +334,11 @@ function App() {
           position="absolute"
           top={0}
           left={0}
-          right={0}
-          bottom={0}
+          width={winW}
+          height={winH}
           style={{
             backgroundColor: '#00000088',
-            justifyContent: 'center',
+            justifyContent: 'flex-start',
             alignItems: 'center',
           }}
         >
@@ -342,14 +349,13 @@ function App() {
               padding: 24,
               alignItems: 'center',
               boxShadow: '0 4 12 #00000066',
+              marginTop: Math.round((winH - 158) / 2),
             }}
           >
-            <View transform="scale(1.15)">
-              <Text fontSize={12} height={16} style={{ color: C.subtle }}>Result</Text>
-              <Text fontSize={40} height={48} style={{ color: C.text }}>
-                {state.lastResult}
-              </Text>
-            </View>
+            <Text fontSize={12} height={16} style={{ color: C.subtle }}>Result</Text>
+            <Text fontSize={40} height={48} style={{ color: C.text }}>
+              {state.lastResult}
+            </Text>
             <Pressable
               onPress={() => setState(s => ({ ...s, lastResult: undefined }))}
               style={{

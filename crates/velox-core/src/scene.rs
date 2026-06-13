@@ -156,15 +156,26 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
             }
             SceneCommand::UpdateNode { id, props } => {
                 // Check layout-prop changes before mutating — need old props for comparison.
-                let (changed, opt_lid, opt_nt) = if let Some(node) = state.js_nodes.get(&id) {
-                    if layout_props_changed(&props, &node.props) {
-                        (true, node.layout_id, Some(node.node_type.clone()))
+                // Also detect prop changes that must cascade dirty state to all descendants:
+                //   • opacity  — child_opacity is a running product; parent change affects leaves
+                //   • scroll_offset_y — absolute y-positions are baked into cached leaf scenes
+                // Other visual changes (background, border, shadow, transform) do NOT cascade
+                // because they are rendered at the container level and leave leaf scenes intact.
+                let (changed, opt_lid, opt_nt, needs_cascade) =
+                    if let Some(node) = state.js_nodes.get(&id) {
+                        let cascade = node.props.opacity         != props.opacity
+                                   || node.props.scroll_offset_y != props.scroll_offset_y;
+                        if layout_props_changed(&props, &node.props) {
+                            (true, node.layout_id, Some(node.node_type.clone()), cascade)
+                        } else {
+                            (false, None, None, cascade)
+                        }
                     } else {
-                        (false, None, None)
-                    }
-                } else {
-                    (false, None, None)
-                };
+                        (false, None, None, false)
+                    };
+                if needs_cascade {
+                    state.descendant_cascade_nodes.insert(id);
+                }
                 if let Some(node) = state.js_nodes.get_mut(&id) {
                     node.props = props.clone();
                 }
@@ -721,7 +732,10 @@ pub(crate) fn snapshot_resolved(state: &mut PerWindowState) {
 pub(crate) fn build_dirty_subtrees(state: &mut PerWindowState) {
     state.dirty_subtrees.clear();
     if state.dirty_nodes.is_empty() {
-        return; // empty → render_subtree early-return guard never fires → full render
+        // Empty → early-return guard in render_subtree never fires → full render.
+        // Also nothing to cascade, so clear the cascade set and return.
+        state.descendant_cascade_nodes.clear();
+        return;
     }
 
     // Seed with the dirty nodes themselves.
@@ -736,7 +750,8 @@ pub(crate) fn build_dirty_subtrees(state: &mut PerWindowState) {
         }
     }
 
-    // Walk ancestors so render_subtree traversal can reach each dirty leaf.
+    // Walk ancestors so render_subtree traversal can reach each dirty node.
+    // Required for ALL dirty nodes (containers need ancestors to recurse into them).
     let dirty_snap: SmallVec<[u32; 16]> = state.dirty_nodes.iter().copied().collect();
     for &start in &dirty_snap {
         let mut cur = start;
@@ -748,17 +763,31 @@ pub(crate) fn build_dirty_subtrees(state: &mut PerWindowState) {
         }
     }
 
-    // Walk descendants — a dirty container means all its children must repaint.
-    let mut stack: SmallVec<[u32; 32]> = dirty_snap.iter().copied().collect();
-    while let Some(cur) = stack.pop() {
-        if let Some(node) = state.js_nodes.get(&cur) {
-            for &cid in &node.children {
-                if state.dirty_subtrees.insert(cid) {
-                    stack.push(cid);
+    // Selectively cascade to descendants — only for opacity and scroll changes.
+    //
+    // Most visual prop changes (background, border, shadow, transform) are
+    // rendered at the container level and do NOT affect cached leaf scenes.
+    // Only opacity and scroll_offset_y changes require descendant cascade:
+    //   • opacity:         child_opacity is a product through the tree; cached
+    //                      leaf draw-calls used the old multiplied opacity.
+    //   • scroll_offset_y: absolute y-positions are baked into cached leaf scenes.
+    //
+    // This avoids invalidating 100 cached leaf nodes when only a hover color
+    // changes on a container, saving the majority of O4b cache hits in practice.
+    if !state.descendant_cascade_nodes.is_empty() {
+        let mut stack: SmallVec<[u32; 32]> =
+            state.descendant_cascade_nodes.iter().copied().collect();
+        while let Some(cur) = stack.pop() {
+            if let Some(node) = state.js_nodes.get(&cur) {
+                for &cid in &node.children {
+                    if state.dirty_subtrees.insert(cid) {
+                        stack.push(cid);
+                    }
                 }
             }
         }
     }
+    state.descendant_cascade_nodes.clear();
 }
 
 /// Spawn a self-contained audio thread for a video file.

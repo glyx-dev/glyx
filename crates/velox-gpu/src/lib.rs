@@ -86,11 +86,17 @@ impl GpuContext {
 
         let (surface, adapter) = Self::pick_adapter(Arc::clone(&window)).await?;
 
+        // Enable optional features only when the adapter actually supports them.
+        // PIPELINE_CACHE is Vulkan-only in wgpu 29; DX12/Metal adapters will
+        // not advertise it, so this is a safe no-op on Windows DX12.
+        let optional_features = wgpu::Features::PIPELINE_CACHE;
+        let enabled_optional  = adapter.features() & optional_features;
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label:             Some("velox-device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features: enabled_optional,
                     required_limits:   wgpu::Limits::default(),
                     // MemoryUsage: prefer smaller allocations over pre-allocated
                     // pools. Costs a small amount of GPU throughput but
@@ -159,6 +165,35 @@ impl GpuContext {
 
     pub fn surface_format(&self) -> wgpu::TextureFormat {
         self.config.format
+    }
+
+    /// Non-blocking poll — frees staging buffers and command allocators from
+    /// completed GPU submissions.  Call once per frame after `present()` to
+    /// prevent wgpu's upload ring buffer from growing unboundedly.
+    pub fn poll(&self) {
+        self.device.poll(wgpu::PollType::Poll).ok();
+    }
+
+    /// Return live wgpu memory counters: `(buffer_bytes, texture_bytes, allocator_reserved_bytes)`.
+    ///
+    /// Uses `device.get_internal_counters()` (atomic reads, zero cost) for
+    /// live buffer/texture sizes, and `device.generate_allocator_report()`
+    /// for the total reserved heap block size.  The difference between
+    /// `allocator_reserved_bytes` and `buffer_bytes + texture_bytes` reveals
+    /// how much wgpu's DX12/Vulkan allocator is over-reserving in heap blocks.
+    /// Returns zeros on backends that do not expose counters.
+    /// Returns `(buffer_bytes, texture_bytes, allocator_reserved_bytes, buffer_count, texture_count)`.
+    pub fn memory_counters(&self) -> (u64, u64, u64, u32, u32) {
+        let c = self.device.get_internal_counters();
+        let buf_bytes  = c.hal.buffer_memory.read().max(0)  as u64;
+        let tex_bytes  = c.hal.texture_memory.read().max(0) as u64;
+        let buf_count  = c.hal.buffers.read().max(0)  as u32;
+        let tex_count  = c.hal.textures.read().max(0) as u32;
+        let reserved   = self.device
+            .generate_allocator_report()
+            .map(|r| r.total_reserved_bytes)
+            .unwrap_or(0);
+        (buf_bytes, tex_bytes, reserved, buf_count, tex_count)
     }
 
     pub fn width(&self)  -> u32 { self.config.width  }

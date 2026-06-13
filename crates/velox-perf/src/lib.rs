@@ -27,10 +27,27 @@ pub struct PerfFrame {
     pub node_count:     usize,
     /// JS heap used bytes at frame time.
     pub heap_used_bytes: usize,
+    /// V8 total heap capacity in bytes (used + free committed pages).
+    /// `heap_used_bytes / heap_total_bytes` gives heap utilisation ratio.
+    pub heap_total_bytes: usize,
     /// Process working-set / RSS in bytes (from sysinfo).
     /// Includes V8 heap, wgpu allocations, and all native memory.
     /// On iGPU systems this is inflated because GPU memory is shared with RAM.
     pub process_rss_bytes: u64,
+    /// wgpu GPU buffer memory in bytes (from HalCounters).
+    /// On iGPU this IS system RAM.  Zero if the backend does not report counters.
+    pub gpu_buffer_bytes: u64,
+    /// wgpu GPU texture memory in bytes (from HalCounters).
+    pub gpu_texture_bytes: u64,
+    /// Total bytes wgpu's heap allocator has reserved (includes fragmentation
+    /// and partially-used blocks).  This is what DX12/Vulkan actually committed.
+    /// `gpu_reserved_bytes - (gpu_buffer_bytes + gpu_texture_bytes)` = heap waste.
+    pub gpu_reserved_bytes: u64,
+    /// Number of live wgpu GPU buffers.  Divide `gpu_buffer_bytes` by this to
+    /// get the average buffer size — useful for spotting a few huge allocations.
+    pub gpu_buffer_count: u32,
+    /// Number of live wgpu GPU textures.
+    pub gpu_texture_count: u32,
 }
 
 /// Rolling performance state kept in each `PerWindowState`.

@@ -855,7 +855,13 @@ struct PerWindowState {
     /// Populated by `apply_scene_commands` (prop changes) and
     /// `update_dirty_from_layout` (position changes). Cleared after render.
     dirty_nodes: std::collections::HashSet<u32>,
-    /// `dirty_nodes` ∪ all their ancestors ∪ all their descendants.
+    /// Subset of `dirty_nodes` whose changed prop requires cascading the dirty
+    /// state to all descendants.  Only opacity and scroll_offset_y changes are
+    /// included: opacity changes affect `child_opacity` in child draw calls, and
+    /// scroll changes affect absolute y-positions baked into cached leaf scenes.
+    /// Other visual-only changes (background, border, shadow) do not cascade.
+    descendant_cascade_nodes: std::collections::HashSet<u32>,
+    /// `dirty_nodes` ∪ all their ancestors ∪ descendants of `descendant_cascade_nodes`.
     /// Built each frame by `build_dirty_subtrees` after layout.
     /// Used by `render_subtree` to skip clean subtrees once O4b caching lands.
     /// An empty set means "render everything" (first frame, full invalidation).
@@ -871,6 +877,10 @@ struct PerWindowState {
     /// Accumulates newly captured scene fragments during the current frame.
     /// Swapped with `scene_cache` after `texture.present()` and then cleared.
     scene_cache_new: std::collections::HashMap<u32, Scene>,
+    /// Set to `true` after the first successful frame render.
+    /// Used to call `renderer.try_save_pipeline_cache()` exactly once,
+    /// ensuring compiled shader bytecode is persisted for future runs.
+    pipeline_cache_saved: bool,
     #[cfg(feature = "dev")]
     dev_mode: Option<DevModeState>,
 }
@@ -918,9 +928,18 @@ struct DevModeState {
     /// so the numbers are readable instead of flickering at 120 fps.
     overlay_lines:        Vec<String>,
     overlay_next_refresh: Instant,
+    /// Throttles the overlay's self-scheduled redraws to ~20 fps.
+    /// Prevents the dev overlay from pinning the GPU at full vsync speed
+    /// when the app content is otherwise static.
+    overlay_next_redraw:  Instant,
     /// Last JS exception from frame_tick — shown as an error overlay.
     /// Cleared on the next successful reload.
     last_js_error: Option<String>,
+    /// RSS at app start — used to show the delta (`+NMB since start`).
+    /// Captured on the first frame where `process_rss_bytes > 0`.
+    startup_rss_bytes: u64,
+    /// V8 total heap at app start (same capture timing as `startup_rss_bytes`).
+    startup_v8_total_bytes: usize,
 }
 
 // ── Colour helpers ─────────────────────────────────────────────────────────────
@@ -1247,18 +1266,51 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
         let gpu_ms = perf_g.avg_gpu_time();
         let last_f = perf_g.last_frame();
         let last_ms = last_f.frame_time_ms;
-        let heap_used_mb = last_f.heap_used_bytes / (1024 * 1024);
-        let rss_mb = last_f.process_rss_bytes / (1024 * 1024);
+        let heap_used_mb  = last_f.heap_used_bytes  as f64 / (1024.0 * 1024.0);
+        let heap_total_mb = last_f.heap_total_bytes  as f64 / (1024.0 * 1024.0);
+        let rss_mb        = last_f.process_rss_bytes as f64 / (1024.0 * 1024.0);
+        let gpu_buf_mb    = last_f.gpu_buffer_bytes    as f64 / (1024.0 * 1024.0);
+        let gpu_tex_mb    = last_f.gpu_texture_bytes   as f64 / (1024.0 * 1024.0);
+        let gpu_resv_mb   = last_f.gpu_reserved_bytes  as f64 / (1024.0 * 1024.0);
+        let gpu_buf_n     = last_f.gpu_buffer_count;
+        let gpu_tex_n     = last_f.gpu_texture_count;
+        // Average buffer size helps distinguish "few huge" vs "many small" allocations.
+        let avg_buf_mb    = if gpu_buf_n > 0 { gpu_buf_mb / gpu_buf_n as f64 } else { 0.0 };
+        // Heap waste = reserved DX12/Vulkan blocks minus actual live allocations.
+        let gpu_waste_mb  = (gpu_resv_mb - gpu_buf_mb - gpu_tex_mb).max(0.0);
         let budget = perf_g.budget_ms;
         drop(perf_g);
+
+        // Startup deltas — show how much RSS and native (non-V8) memory grew.
+        let start_rss_mb   = dev.startup_rss_bytes      as f64 / (1024.0 * 1024.0);
+        let start_v8_mb    = dev.startup_v8_total_bytes  as f64 / (1024.0 * 1024.0);
+        let delta_rss_mb   = rss_mb - start_rss_mb;
+        // "native" = RSS minus V8 total heap — isolates Rust+wgpu from JS growth.
+        let native_mb      = (rss_mb - heap_total_mb).max(0.0);
+        let native_start   = (start_rss_mb - start_v8_mb).max(0.0);
+        let delta_native_mb = native_mb - native_start;
+
         let since = dev.last_reload
             .map(|t| now.saturating_duration_since(t).as_secs())
             .unwrap_or(0);
+        let phys_w = state.gpu.width();
+        let phys_h = state.gpu.height();
         dev.overlay_lines = vec![
-            format!("Dev overlay (Ctrl+Shift+D)  budget {:.1}ms", budget),
+            format!("Dev  {}×{}px  budget {:.1}ms  (Ctrl+Shift+D)", phys_w, phys_h, budget),
             format!("FPS {:.0}  last {:.1}ms  avg {:.1}ms  P99 {:.1}ms", fps, last_ms, avg_ms, p99_ms),
-            format!("JS {:.2}ms  layout {:.2}ms  GPU {:.2}ms  nodes {}  heap {}MB  RSS {}MB",
-                js_ms, lay_ms, gpu_ms, state.js_nodes.len(), heap_used_mb, rss_mb),
+            format!("JS {:.2}ms  layout {:.2}ms  GPU {:.2}ms  nodes {}",
+                js_ms, lay_ms, gpu_ms, state.js_nodes.len()),
+            format!("cache {} frags  img {}/{}  labels {}/256  canvas {}",
+                state.scene_cache.len(),
+                state.images.len(), state.images_by_path.len(),
+                state.label_cache.len(),
+                state.canvas_cmds.len()),
+            // Row 5: V8 heap breakdown + RSS with startup deltas
+            format!("V8 {:.1}/{:.1}MB  RSS {:.1}MB  native {:.1}MB  \u{0394}RSS {:+.1}  \u{0394}nat {:+.1}",
+                heap_used_mb, heap_total_mb, rss_mb, native_mb, delta_rss_mb, delta_native_mb),
+            // Row 6: wgpu GPU memory — buf count reveals avg size (few huge vs many small)
+            format!("wgpu  buf {:.1}MB×{}  avg {:.1}MB  tex {:.1}MB×{}  waste {:.1}MB",
+                gpu_buf_mb, gpu_buf_n, avg_buf_mb, gpu_tex_mb, gpu_tex_n, gpu_waste_mb),
             format!("{}  (reload {}s ago)", dev.last_build_message, since),
         ];
         dev.overlay_next_refresh = now + Duration::from_millis(250);
@@ -1279,22 +1331,25 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
     };
 
     // ── Overlay background ────────────────────────────────────────────────
-    let overlay_w = 490.0_f64;
-    let overlay_h = 130.0_f64;
+    let overlay_w = 530.0_f64;
+    let overlay_h = 195.0_f64;  // 7 text rows × 20px + 35px header margin
     frame.fill_rounded_rect(16.0, 16.0, overlay_w, overlay_h, 8.0, peniko::Color::from_rgba8(15, 15, 25, 225));
 
     // ── Text rows ─────────────────────────────────────────────────────────
-    let txt_color = peniko::Color::from_rgba8(220, 220, 235, 255);
+    let txt_color  = peniko::Color::from_rgba8(220, 220, 235, 255);
+    let mem_color  = peniko::Color::from_rgba8(140, 210, 255, 255); // blue tint for memory rows
     let lines = &dev.overlay_lines;
     for (i, line) in lines.iter().enumerate() {
+        // Rows 4 and 5 (0-indexed) are the memory breakdown rows — highlight them.
+        let col = if i == 4 || i == 5 { mem_color } else { txt_color };
         let text = state.text_sys.label(line, 12.0);
-        frame.draw_text(&text, 26.0, 34.0 + (i as f64 * 20.0), txt_color);
+        frame.draw_text(&text, 26.0, 34.0 + (i as f64 * 20.0), col);
     }
 
     // ── Sparkline — last 60 frame times ──────────────────────────────────
-    // 2 px per bar × 60 bars = 120 px wide; 20 px tall; bottom at y=122
+    // 2 px per bar × 60 bars = 120 px wide; 20 px tall; bottom at y=172
     let spark_x  = 26.0_f64;
-    let spark_y  = 112.0_f64;  // top of sparkline
+    let spark_y  = 177.0_f64;  // top of sparkline (below 7 text rows)
     let bar_w    = 2.0_f64;
     let spark_h  = 18.0_f64;
     let samples: Vec<f64> = sparkline_data.iter()
@@ -1941,11 +1996,13 @@ pub fn run(mut config: AppConfig) -> bool {
                     decorations:     window_decorations,
                     drag_window_fn,
                     scrollbar_drag:  None,
-                    dirty_nodes:     std::collections::HashSet::new(),
-                    dirty_subtrees:  std::collections::HashSet::new(),
+                    dirty_nodes:              std::collections::HashSet::new(),
+                    descendant_cascade_nodes: std::collections::HashSet::new(),
+                    dirty_subtrees:           std::collections::HashSet::new(),
                     prev_resolved:   std::collections::HashMap::new(),
                     scene_cache:     std::collections::HashMap::new(),
-                    scene_cache_new: std::collections::HashMap::new(),
+                    scene_cache_new:       std::collections::HashMap::new(),
+                    pipeline_cache_saved:  false,
                     #[cfg(feature = "dev")]
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
@@ -1955,14 +2012,17 @@ pub fn run(mut config: AppConfig) -> bool {
                         )
                         .map(|rx| DevModeState {
                             rx,
-                            overlay_visible: true,
+                            overlay_visible: false,
                             last_reload: None,
                             last_build_message: "watching changes".to_string(),
                             ctrl_down: false,
                             shift_down: false,
-                            overlay_lines:        Vec::new(),
-                            overlay_next_refresh: Instant::now(),
-                            last_js_error:        None,
+                            overlay_lines:         Vec::new(),
+                            overlay_next_refresh:  Instant::now(),
+                            overlay_next_redraw:    Instant::now(),
+                            last_js_error:          None,
+                            startup_rss_bytes:      0,
+                            startup_v8_total_bytes: 0,
                         })
                     } else {
                         None
@@ -2229,22 +2289,32 @@ pub fn run(mut config: AppConfig) -> bool {
                 };
 
                 // ── Frame gate ────────────────────────────────────────────────
-                // Skip GPU work entirely when nothing changed visually. This covers
-                // async completions that don't produce React state updates (fire-
-                // and-forget DB writes, background network pings, etc.) — the most
-                // common source of unnecessary full-pipeline frames on idle apps.
+                // Skip GPU work entirely when nothing changed visually.
                 //
-                // In dev mode we always render so the perf overlay and error banner
-                // stay live without needing a separate redraw request.
-                let needs_gpu = pre_changed || post_changed || media_changed || blink_changed;
+                // Two-level decision:
+                //   • Release: nothing changed → return immediately, no GPU work.
+                //   • Dev: overlay timer fires every ~50ms regardless of scene changes.
+                //     Full Vello render only when scene changed OR overlay text is due
+                //     for its 250ms refresh.  All other overlay-timer ticks blit the
+                //     previous frame — skipping all 35 compute passes.
+                let scene_needs_gpu = pre_changed || post_changed || media_changed || blink_changed;
+
+                // Release: skip entirely when nothing changed.
+                #[cfg(not(feature = "dev"))]
+                if !scene_needs_gpu { return; }
+
+                // Dev: compute whether a full render is actually required.
                 #[cfg(feature = "dev")]
-                let needs_gpu = {
-                    let _ = needs_gpu; // suppress unused warning in dev path
-                    true
+                let needs_full_render = {
+                    let overlay_refresh_due = s.dev_mode.as_ref().map(|d| {
+                        d.overlay_lines.is_empty()                   // first overlay draw
+                        || Instant::now() >= d.overlay_next_refresh  // 250ms text refresh
+                        || d.last_js_error.is_some()                 // error banner active
+                    }).unwrap_or(false);
+                    scene_needs_gpu || overlay_refresh_due
                 };
-                if !needs_gpu {
-                    return;
-                }
+                #[cfg(not(feature = "dev"))]
+                let needs_full_render = true; // always true here (early return above)
 
                 // 7. Acquire swapchain texture.
                 let texture = match s.gpu.current_texture() {
@@ -2255,6 +2325,43 @@ pub fn run(mut config: AppConfig) -> bool {
                         return;
                     }
                 };
+
+                // ── Overlay timer reschedule ───────────────────────────────────
+                // Placed here — before any early return — so the timer keeps
+                // firing on blit-only frames and static apps don't freeze.
+                #[cfg(feature = "dev")]
+                if let Some(dev) = s.dev_mode.as_mut() {
+                    if dev.overlay_visible {
+                        let now = Instant::now();
+                        if now >= dev.overlay_next_redraw {
+                            dev.overlay_next_redraw = now + Duration::from_millis(200);
+                            let req = Arc::clone(&s.request_redraw);
+                            tokio_handle.spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                                req();
+                            });
+                        }
+                    }
+                }
+
+                // ── Fast path: blit cached frame ──────────────────────────────
+                // Neither the scene nor the overlay text changed.  Re-blit the
+                // previous rendered frame — skips all 35 Vello compute passes.
+                // Guard: scene_cache non-empty proves at least one full render
+                // has completed, so self.target holds a valid frame.
+                #[cfg(feature = "dev")]
+                if !needs_full_render && !s.scene_cache.is_empty() {
+                    // Stamp last_frame_at so FPS reflects the visual refresh rate
+                    // (~20fps from the overlay timer), not the full-render rate (~4fps).
+                    s.perf.lock().unwrap().last_frame_at = Some(frame_start);
+                    if let Err(e) = s.renderer.blit_cached_frame(&s.gpu, &texture) {
+                        log::warn!("blit_cached_frame: {e}");
+                    } else {
+                        texture.present();
+                        s.gpu.poll();
+                    }
+                    return;
+                }
 
                 // 9. Render JS scene graph.
                 let mut frame = s.renderer.begin_frame();
@@ -2310,10 +2417,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 #[cfg(feature = "dev")]
                 draw_error_overlay(s, &mut frame);
 
-                #[cfg(feature = "dev")]
-                if s.dev_mode.as_ref().map(|d| d.overlay_visible).unwrap_or(false) {
-                    (s.request_redraw)();
-                }
+                // (overlay timer reschedule moved to before the blit-only fast path above)
 
                 let gpu_start = Instant::now();
                 if let Err(e) = s.renderer.render_frame(&s.gpu, &texture, frame) {
@@ -2354,6 +2458,20 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 texture.present();
 
+                // Release staging buffers and D3D12 command allocators from
+                // completed GPU submissions.  Without this, wgpu's upload ring
+                // buffer accumulates every frame (especially on DX12/iGPU where
+                // GPU memory = system RAM), causing unbounded RSS growth.
+                s.gpu.poll();
+
+                // Persist compiled shader bytecode once so subsequent launches
+                // skip Vulkan shader recompilation.  Runs exactly once per
+                // process (no-op after the first frame; no-op on DX12/Metal).
+                if !s.pipeline_cache_saved {
+                    s.renderer.try_save_pipeline_cache();
+                    s.pipeline_cache_saved = true;
+                }
+
                 // Update prev_resolved snapshot and clear per-frame dirty sets.
                 snapshot_resolved(s);
                 s.dirty_nodes.clear();
@@ -2373,6 +2491,9 @@ pub fn run(mut config: AppConfig) -> bool {
                     let heap = s.runtime.heap_stats();
                     // RSS is updated by a background tokio task every 2 s — zero OS cost here.
                     let process_rss = s.rss_bytes.load(std::sync::atomic::Ordering::Relaxed);
+                    // wgpu GPU memory counters — reads atomics, zero GPU cost.
+                    let (gpu_buf_bytes, gpu_tex_bytes, gpu_reserved_bytes,
+                         gpu_buf_count, gpu_tex_count) = s.gpu.memory_counters();
                     let mut perf = s.perf.lock().unwrap();
                     perf.last_frame_at = Some(frame_start);
 
@@ -2397,14 +2518,29 @@ pub fn run(mut config: AppConfig) -> bool {
                         }
                     }
 
+                    // Capture startup baseline on first frame with valid RSS.
+                    #[cfg(feature = "dev")]
+                    if let Some(dev) = s.dev_mode.as_mut() {
+                        if dev.startup_rss_bytes == 0 && process_rss > 0 {
+                            dev.startup_rss_bytes      = process_rss;
+                            dev.startup_v8_total_bytes = heap.total_heap_size;
+                        }
+                    }
+
                     perf.push(velox_perf::PerfFrame {
                         frame_time_ms,
                         js_time_ms,
                         layout_time_ms,
                         gpu_time_ms,
                         node_count: perf_node_count,
-                        heap_used_bytes: heap.used_heap_size,
+                        heap_used_bytes:  heap.used_heap_size,
+                        heap_total_bytes: heap.total_heap_size,
                         process_rss_bytes: process_rss,
+                        gpu_buffer_bytes:   gpu_buf_bytes,
+                        gpu_texture_bytes:  gpu_tex_bytes,
+                        gpu_reserved_bytes: gpu_reserved_bytes,
+                        gpu_buffer_count:   gpu_buf_count,
+                        gpu_texture_count:  gpu_tex_count,
                     });
                 } else {
                     s.perf.lock().unwrap().last_frame_at = Some(frame_start);

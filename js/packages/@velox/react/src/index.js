@@ -308,14 +308,15 @@ export function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn,
     };
   }, []);
 
-  // Visual feedback:
-  //   pressed → brighter border (confirms the click)
-  //   hovered → subtle border (indicates interactivity)
-  //   default → no border override
+  // Visual feedback (opacity-based — stays within element bounds):
+  //   pressed → darkened (confirms the click)
+  //   hovered → slightly dimmed (indicates interactivity)
+  //   default → no change
+  const baseOpacity = style?.opacity ?? 1;
   const mergedStyle = pressed
-    ? { ...style, borderWidth: 2, borderColor: '#ffffffaa' }
+    ? { ...style, opacity: baseOpacity * 0.65 }
     : hovered
-    ? { ...style, borderWidth: 1, borderColor: '#ffffff55' }
+    ? { ...style, opacity: baseOpacity * 0.85 }
     : style;
 
   return React.createElement(

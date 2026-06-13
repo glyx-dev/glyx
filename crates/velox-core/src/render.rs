@@ -111,18 +111,31 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     // onto `canvas3d_overlays` as a side-effect, and their Vello scene fragment
     // is empty (3D rendering happens in a separate post-Vello GPU pass).
     if !ctx.dirty_subtrees.is_empty() && !ctx.dirty_subtrees.contains(&id) {
-        // Skip the cache check for Canvas3D — fall through so overlays are recorded.
-        let is_canvas3d = ctx.nodes.get(&id)
-            .map(|n| matches!(n.node_type, NodeType::Canvas3D))
-            .unwrap_or(false);
-        if !is_canvas3d {
-            if let Some(cached) = ctx.scene_cache.remove(&id) {
-                ctx.frame.append_scene(&cached, None);
-                ctx.scene_cache_new.insert(id, cached);
-                return;
+        // Only LEAF nodes (no children) use the scene fragment cache.
+        // Caching at the container level causes O(depth) memory growth: each
+        // ancestor stores all its descendants' draw calls redundantly.  With
+        // leaf-only caching, memory is O(leaf_count × avg_leaf_scene_size).
+        //
+        // Camera and Video nodes are never cached: their image data changes
+        // asynchronously (outside JS props / UpdateNode), so a cached scene
+        // would show a stale frame on frames when another node is dirty.
+        // Canvas3D is never cached: its Vello fragment is empty; 3D rendering
+        // happens in a separate post-Vello GPU pass.
+        if let Some(node_peek) = ctx.nodes.get(&id) {
+            let is_leaf      = node_peek.children.is_empty();
+            let never_cache  = matches!(node_peek.node_type,
+                NodeType::Canvas3D | NodeType::Camera | NodeType::Video);
+            if is_leaf && !never_cache {
+                if let Some(cached) = ctx.scene_cache.remove(&id) {
+                    ctx.frame.append_scene(&cached, None);
+                    ctx.scene_cache_new.insert(id, cached);
+                    return;
+                }
+                // Cache miss on a clean leaf: fall through to full render so
+                // the cache entry is populated for the next frame.
             }
-            // Cache miss (first time seeing this node as clean) — fall through
-            // to full render so the cache is populated for subsequent frames.
+            // Containers: fall through to traverse children and draw own bg/border.
+            // Camera/Video/Canvas3D: fall through to always render fresh.
         }
     }
 
@@ -139,12 +152,14 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
 
     let child_opacity = opacity * node.props.opacity.unwrap_or(1.0);
 
-    // ── O4b: scene capture ───────────────────────────────────────────────
-    // Swap in a fresh Scene so all draw calls for this node + its children go
-    // into an isolated fragment.  On completion we store the fragment in
-    // scene_cache_new for next-frame replay, then append it to the parent scene.
-    // Canvas3D is excluded (its Vello fragment is empty; 3D renders post-Vello).
-    let is_cacheable = !matches!(node.node_type, NodeType::Canvas3D);
+    // ── O4b: scene capture (leaf nodes only) ─────────────────────────────
+    // Capture a Scene fragment only for LEAF nodes (no children).
+    // Caching container scenes is redundant: every ancestor's fragment already
+    // contains its descendants' draw calls, inflating memory O(depth)-fold.
+    // Camera, Video, and Canvas3D are never cached (see early-return comment).
+    let is_cacheable = node.children.is_empty()
+        && !matches!(node.node_type,
+            NodeType::Canvas3D | NodeType::Camera | NodeType::Video);
     let capture_parent: Option<Scene> = if is_cacheable {
         Some(ctx.frame.replace_scene(Scene::new()))
     } else {

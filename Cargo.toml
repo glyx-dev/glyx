@@ -28,7 +28,7 @@ members = [
 [workspace.dependencies]
 # Windowing + GPU
 winit     = "0.30"
-wgpu      = "29"
+wgpu      = { version = "29", features = ["counters"] }
 
 # 2D Rendering
 vello     = "0.9"

@@ -11,11 +11,12 @@
 //! Scene out of the renderer; render_frame() moves it back via assignment.
 //! Zero extra allocation — Scene's internal Vec buffers survive the move.
 
+use std::path::PathBuf;
 use thiserror::Error;
 use velox_gpu::GpuContext;
 use vello::{
     kurbo::{Affine, Circle, Line, Point, RoundedRect, Stroke},
-    peniko::{Brush, Color, Fill, ImageData},
+    peniko::{Brush, Color, Fill, ImageBrushRef, ImageData, ImageQuality},
     AaConfig, Renderer, RendererOptions,
 };
 pub use vello::kurbo;
@@ -87,6 +88,16 @@ pub struct VeloxRenderer {
     /// Set from `window.background` in velox.config.json; defaults to
     /// the Velox dark background so the window is never a blank white flash.
     pub background_color: vello::peniko::Color,
+    /// Wgpu pipeline cache — holds compiled Vello shader bytecode across runs.
+    ///
+    /// wgpu::PipelineCache is Arc-backed and Clone.  We keep a clone here
+    /// so that after Renderer::new() finishes compiling all shaders (using its
+    /// own clone), this handle can call get_data() to retrieve the bytecode
+    /// and persist it to disk for the next launch.
+    ///
+    /// Currently effective only on Vulkan; on DX12/Metal the driver manages
+    /// its own cache automatically, so this is a no-op on those backends.
+    pipeline_cache: Option<wgpu::PipelineCache>,
 }
 
 impl VeloxRenderer {
@@ -98,17 +109,83 @@ impl VeloxRenderer {
             log::warn!("velox-renderer: CPU fallback active (VELOX_CPU_RENDER=1).");
         }
 
+        // ── Pipeline cache ────────────────────────────────────────────────
+        // Load previously saved shader bytecode from disk.  Only available on
+        // Vulkan (wgpu 29); DX12 and Metal manage their own caches internally.
+        // The device must have been created with Features::PIPELINE_CACHE —
+        // velox-gpu enables it only when the adapter advertises support.
+        //
+        // SAFETY: fallback:true means stale or incompatible data is silently
+        // discarded — we never crash even if the cache file is corrupt.
+        let pipeline_cache: Option<wgpu::PipelineCache> =
+            if gpu.device.features().contains(wgpu::Features::PIPELINE_CACHE) {
+                Self::pipeline_cache_path().map(|path| {
+                    let seed = std::fs::read(&path).ok();
+                    let cache = unsafe {
+                        gpu.device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                            label:    Some("velox-pipeline-cache"),
+                            data:     seed.as_deref(),
+                            fallback: true,
+                        })
+                    };
+                    if seed.is_some() {
+                        log::debug!("velox-renderer: pipeline cache loaded from {:?}", path);
+                    }
+                    cache
+                })
+            } else {
+                None
+            };
+
         let renderer = Renderer::new(&gpu.device, RendererOptions {
             use_cpu,
             antialiasing_support: vello::AaSupport::area_only(),
             num_init_threads:     std::num::NonZeroUsize::new(1),
-            pipeline_cache:       None,
+            // Pass a clone so Vello uses the same underlying GPU cache object.
+            // Our `pipeline_cache` field retains a handle for get_data() + save.
+            pipeline_cache:       pipeline_cache.clone(),
         }).map_err(|e| RendererError::Init(e.to_string()))?;
 
         let blit   = wgpu::util::TextureBlitter::new(&gpu.device, gpu.surface_format());
         let target = RenderTarget::new(&gpu.device, gpu.width().max(1), gpu.height().max(1));
 
-        Ok(Self { renderer, blit, target, scene: Scene::new(), background_color: colors::BACKGROUND })
+        Ok(Self {
+            renderer, blit, target,
+            scene: Scene::new(),
+            background_color: colors::BACKGROUND,
+            pipeline_cache,
+        })
+    }
+
+    /// Return the platform-specific path for the shader pipeline cache file.
+    fn pipeline_cache_path() -> Option<PathBuf> {
+        #[cfg(target_os = "windows")]
+        let base = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from)?;
+
+        #[cfg(not(target_os = "windows"))]
+        let base = {
+            let xdg  = std::env::var("XDG_CACHE_HOME").ok().map(PathBuf::from);
+            let home = std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".cache"));
+            xdg.or(home)?
+        };
+
+        let dir = base.join("velox");
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir.join("pipeline_cache.bin"))
+    }
+
+    /// Persist the compiled shader pipeline cache to disk.
+    ///
+    /// Call once after the first successful frame render.  Subsequent launches
+    /// will load this file and skip shader recompilation.
+    pub fn try_save_pipeline_cache(&self) {
+        let Some(ref cache) = self.pipeline_cache else { return };
+        let Some(data)      = cache.get_data()     else { return };
+        let Some(path)      = Self::pipeline_cache_path() else { return };
+        match std::fs::write(&path, &data) {
+            Ok(_)  => log::debug!("velox-renderer: pipeline cache saved ({} bytes)", data.len()),
+            Err(e) => log::warn!("velox-renderer: failed to save pipeline cache: {e}"),
+        }
     }
 
     /// Start a new frame.
@@ -158,6 +235,29 @@ impl VeloxRenderer {
         self.blit.copy(&gpu.device, &mut enc, &self.target.view, &surface_view);
         gpu.queue.submit([enc.finish()]);
 
+        Ok(())
+    }
+
+    /// Re-blit the previously rendered frame to the surface **without** running
+    /// any Vello compute passes.
+    ///
+    /// When neither the scene nor the dev overlay changed, this saves all 35
+    /// GPU compute dispatches (Vello's full path-rendering pipeline) and
+    /// replaces them with a single cheap texture copy.
+    ///
+    /// # Safety
+    /// Only valid after at least one successful `render_frame()` call — the
+    /// internal `RenderTarget` must already contain a rendered frame.
+    pub fn blit_cached_frame(
+        &self,
+        gpu:     &GpuContext,
+        texture: &wgpu::SurfaceTexture,
+    ) -> Result<(), RendererError> {
+        let surface_view = texture.texture.create_view(&Default::default());
+        let mut enc = gpu.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("blit-cached") });
+        self.blit.copy(&gpu.device, &mut enc, &self.target.view, &surface_view);
+        gpu.queue.submit([enc.finish()]);
         Ok(())
     }
 }
@@ -271,7 +371,8 @@ impl FrameBuilder {
     }
 
     pub fn draw_image_with_transform(&mut self, image: &ImageData, transform: Affine) {
-        self.scene.draw_image(image, transform);
+        let brush = ImageBrushRef::from(image).with_quality(ImageQuality::High);
+        self.scene.draw_image(brush, transform);
     }
 
     /// Borrow the inner scene mutably — used for advanced operations like

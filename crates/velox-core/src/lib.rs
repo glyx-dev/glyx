@@ -948,6 +948,36 @@ fn rgba_to_vello(c: [u8; 4]) -> peniko::Color {
     peniko::Color::from_rgba8(c[0], c[1], c[2], c[3])
 }
 
+/// Returns `true` if any descendant of `id` with `pressable=true` covers (cx, cy).
+/// Used by the drag check to yield window-drag priority to interactive children
+/// inside a `veloxDraggable` region (e.g. buttons inside a custom title bar).
+fn has_pressable_descendant_at(
+    id:     u32,
+    cx:     f32,
+    cy:     f32,
+    nodes:  &std::collections::HashMap<u32, JsNode>,
+    cache:  &std::collections::HashMap<u32, [f32; 4]>,
+) -> bool {
+    let Some(node) = nodes.get(&id) else { return false };
+    for &child_id in &node.children {
+        if let Some(child) = nodes.get(&child_id) {
+            // Direct pressable covering cursor → stop drag
+            if child.props.pressable == Some(true) {
+                if cache.get(&child_id).map_or(false, |&[x, y, w, h]| {
+                    cx >= x && cx <= x + w && cy >= y && cy <= y + h
+                }) {
+                    return true;
+                }
+            }
+            // Recurse into non-pressable containers (e.g. a row View wrapping buttons)
+            if has_pressable_descendant_at(child_id, cx, cy, nodes, cache) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Try to start a scrollbar thumb drag at the current cursor position.
 /// Returns `Some(ScrollbarDragState)` if the cursor is over a scrollbar thumb.
 fn try_start_scrollbar_drag(s: &mut PerWindowState) -> Option<ScrollbarDragState> {
@@ -2110,6 +2140,10 @@ pub fn run(mut config: AppConfig) -> bool {
                                         && cache.get(&id).map_or(false, |&[x, y, w, h]| {
                                             cx >= x && cx <= x + w && cy >= y && cy <= y + h
                                         })
+                                        // Skip drag if a Pressable descendant is under cursor.
+                                        // Clicking a button inside the title bar should press
+                                        // the button, not drag the window.
+                                        && !has_pressable_descendant_at(id, cx, cy, &s.js_nodes, &cache)
                                 })
                             };
                             if hit {

@@ -127,12 +127,20 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                 NodeType::Canvas3D | NodeType::Camera | NodeType::Video);
             if is_leaf && !never_cache {
                 if let Some(cached) = ctx.scene_cache.remove(&id) {
-                    ctx.frame.append_scene(&cached, None);
-                    ctx.scene_cache_new.insert(id, cached);
-                    return;
+                    if opacity >= 1.0 {
+                        // Inherited opacity is full — cached colors are correct.
+                        ctx.frame.append_scene(&cached, None);
+                        ctx.scene_cache_new.insert(id, cached);
+                        return;
+                    }
+                    // Inherited opacity < 1.0 — cached fragment has stale baked-in
+                    // colors (captured under a different parent opacity).  Discard it
+                    // and fall through to a fresh render.  is_cacheable below will be
+                    // false (opacity < 1.0), so the fresh render won't re-cache with
+                    // the wrong opacity either.
                 }
-                // Cache miss on a clean leaf: fall through to full render so
-                // the cache entry is populated for the next frame.
+                // Cache miss or stale-opacity discard: fall through to full render so
+                // the cache entry is populated for the next frame (if opacity == 1).
             }
             // Containers: fall through to traverse children and draw own bg/border.
             // Camera/Video/Canvas3D: fall through to always render fresh.
@@ -157,9 +165,14 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     // Caching container scenes is redundant: every ancestor's fragment already
     // contains its descendants' draw calls, inflating memory O(depth)-fold.
     // Camera, Video, and Canvas3D are never cached (see early-return comment).
+    // Only cache when the inherited opacity is exactly 1.0.  If the parent chain
+    // contributes any opacity, colors are baked with that value; caching them would
+    // replay stale colors if the parent's opacity later changes (e.g. a button
+    // toggling between opacity=0 and opacity=1).
     let is_cacheable = node.children.is_empty()
         && !matches!(node.node_type,
-            NodeType::Canvas3D | NodeType::Camera | NodeType::Video);
+            NodeType::Canvas3D | NodeType::Camera | NodeType::Video)
+        && opacity >= 1.0;
     let capture_parent: Option<Scene> = if is_cacheable {
         Some(ctx.frame.replace_scene(Scene::new()))
     } else {

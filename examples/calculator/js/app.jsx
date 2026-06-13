@@ -116,13 +116,12 @@ function App() {
   const Btn = ({ label, color = C.surfaceAlt, span = 1, disabled = false, gridColumn, gridRow }) => (
     <Pressable
       disabled={disabled}
-      opacity={disabled ? 0 : 1}
       onPress={() => press(label)}
       flex={gridMode ? undefined : span}
       gridColumn={gridColumn}
       gridRow={gridRow}
       height={btnH}
-      style={btnStyle(color)}
+      style={{ ...btnStyle(color), opacity: disabled ? 0 : 1 }}
     >
       <Text fontSize={20} height={28} style={{ color: C.text, textAlign: 'center' }}>
         {label}

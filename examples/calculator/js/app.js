@@ -6574,6 +6574,10 @@ No matching component was found for:
       if (nodeIdRef.current !== null) {
         registerDisabledNode(nodeIdRef.current, !!disabled);
       }
+      if (disabled) {
+        setPressed(false);
+        setHovered(false);
+      }
     }, [disabled]);
     import_react.useEffect(() => {
       return () => {
@@ -6584,8 +6588,8 @@ No matching component was found for:
       };
     }, []);
     const baseOpacity = style?.opacity ?? 1;
-    const mergedStyle = pressed ? { ...style, opacity: baseOpacity * 0.65 } : hovered ? { ...style, opacity: baseOpacity * 0.85 } : style;
-    return import_react.default.createElement("view", { _veloxOnMount: onMount, style: mergedStyle, ...props }, children);
+    const mergedStyle = pressed && !disabled ? { ...style, opacity: baseOpacity * 0.65 } : hovered && !disabled ? { ...style, opacity: baseOpacity * 0.85 } : style;
+    return import_react.default.createElement("view", { _veloxOnMount: onMount, style: mergedStyle, pressable: true, ...props }, children);
   }
   function ScrollView({
     children,
@@ -7236,13 +7240,12 @@ No matching component was found for:
     });
     const Btn = ({ label, color = C.surfaceAlt, span = 1, disabled = false, gridColumn, gridRow }) => /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
       disabled,
-      opacity: disabled ? 0 : 1,
       onPress: () => press(label),
       flex: gridMode ? undefined : span,
       gridColumn,
       gridRow,
       height: btnH,
-      style: btnStyle(color),
+      style: { ...btnStyle(color), opacity: disabled ? 0 : 1 },
       children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
         fontSize: 20,
         height: 28,

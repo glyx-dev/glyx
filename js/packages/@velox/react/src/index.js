@@ -291,10 +291,16 @@ export function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn,
     registerDisabledNode(id, !!disabled);
   }, [disabled]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Keep disabled state in sync when the prop changes.
+  // Keep disabled state in sync when the prop changes; also clear any
+  // stuck interaction state so the button doesn't appear hovered/pressed
+  // after becoming disabled.
   useEffect(() => {
     if (nodeIdRef.current !== null) {
       registerDisabledNode(nodeIdRef.current, !!disabled);
+    }
+    if (disabled) {
+      setPressed(false);
+      setHovered(false);
     }
   }, [disabled]);
 
@@ -311,17 +317,19 @@ export function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn,
   // Visual feedback (opacity-based — stays within element bounds):
   //   pressed → darkened (confirms the click)
   //   hovered → slightly dimmed (indicates interactivity)
-  //   default → no change
+  //   disabled / default → no change
   const baseOpacity = style?.opacity ?? 1;
-  const mergedStyle = pressed
+  const mergedStyle = (pressed && !disabled)
     ? { ...style, opacity: baseOpacity * 0.65 }
-    : hovered
+    : (hovered && !disabled)
     ? { ...style, opacity: baseOpacity * 0.85 }
     : style;
 
   return React.createElement(
     'view',
-    { _veloxOnMount: onMount, style: mergedStyle, ...props },
+    // pressable:true tells the Rust drag-check that this node is interactive,
+    // so veloxDraggable regions skip the window drag when this is under cursor.
+    { _veloxOnMount: onMount, style: mergedStyle, pressable: true, ...props },
     children
   );
 }

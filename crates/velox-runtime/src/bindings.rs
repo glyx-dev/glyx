@@ -265,6 +265,10 @@ pub struct NodeProps {
     /// initiates an OS-level window drag. Used to implement custom title bars.
     /// Only effective when `window.decorations` is `false` in the app config.
     pub draggable: Option<bool>,
+    /// Set to `true` by the Pressable component so the drag check can detect
+    /// interactive descendants and skip window-drag when a Pressable is under
+    /// the cursor inside a `veloxDraggable` region.
+    pub pressable: Option<bool>,
 
     // ── Camera ────────────────────────────────────────────────────────────────
     /// Handle ID returned by `__velox_camera_open`. The render loop maps this
@@ -1081,6 +1085,7 @@ fn parse_props(
     props.image_resize_mode = get_str_prop(scope, obj, "resizeMode");
     props.z_index         = get_num_prop(scope, obj, "zIndex").map(|v| v as i32);
     props.draggable       = get_bool_prop(scope, obj, "draggable");
+    props.pressable       = get_bool_prop(scope, obj, "pressable");
     props.camera_handle   = get_num_prop(scope, obj, "cameraHandle").map(|v| v as u32);
     props.mirror          = get_bool_prop(scope, obj, "mirror");
     props.video_handle    = get_num_prop(scope, obj, "videoHandle").map(|v| v as u32);

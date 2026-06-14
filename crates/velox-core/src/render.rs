@@ -4,7 +4,7 @@ pub(crate) struct RenderCtx<'a> {
     pub nodes: &'a std::collections::HashMap<u32, JsNode>,
     pub images: &'a std::collections::HashMap<u32, peniko::ImageData>,
     pub resolved: &'a [(NodeId, ResolvedLayout)],
-    pub frame: &'a mut FrameBuilder,
+    pub frame: &'a mut AnyFrame,
     pub text_sys: &'a mut TextSystem,
     pub label_cache: &'a mut lru::LruCache<LabelKey, CachedLabel>,
     pub canvas_cmds: &'a std::collections::HashMap<u32, Vec<CanvasCmd>>,
@@ -133,7 +133,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             let is_leaf      = node_peek.children.is_empty();
             let never_cache  = matches!(node_peek.node_type,
                 NodeType::Canvas3D | NodeType::Camera | NodeType::Video);
-            if is_leaf && !never_cache {
+            if is_leaf && !never_cache && ctx.frame.supports_caching() {
                 if let Some(cached) = ctx.scene_cache.remove(&id) {
                     if opacity >= 1.0 {
                         // Inherited opacity is full — cached colors are correct.
@@ -208,7 +208,8 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     // contributes any opacity, colors are baked with that value; caching them would
     // replay stale colors if the parent's opacity later changes (e.g. a button
     // toggling between opacity=0 and opacity=1).
-    let is_cacheable = node.children.is_empty()
+    let is_cacheable = ctx.frame.supports_caching()
+        && node.children.is_empty()
         && !matches!(node.node_type,
             NodeType::Canvas3D | NodeType::Camera | NodeType::Video)
         && opacity >= 1.0;
@@ -231,8 +232,10 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
         let centered = peniko::kurbo::Affine::translate((cx, cy))
             * affine
             * peniko::kurbo::Affine::translate((-cx, -cy));
-        let parent = ctx.frame.replace_scene(Scene::new());
-        _transform_sub = Some((parent, centered));
+        if ctx.frame.supports_caching() {
+            let parent = ctx.frame.replace_scene(Scene::new());
+            _transform_sub = Some((parent, centered));
+        }
     }
 
     match node.node_type {
@@ -555,7 +558,10 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             // dirty_subtrees is non-empty = selective render mode), the entire
             // subtree is guaranteed clean: replay the cached fragment and skip
             // all traversal.
-            if !ctx.dirty_subtrees.is_empty() && !ctx.dirty_subtrees.contains(&id) {
+            if ctx.frame.supports_caching()
+                && !ctx.dirty_subtrees.is_empty()
+                && !ctx.dirty_subtrees.contains(&id)
+            {
                 if let Some(cached) = ctx.boundary_cache.remove(&id) {
                     ctx.frame.append_scene(&cached, None);
                     ctx.boundary_cache_new.insert(id, cached);
@@ -564,21 +570,26 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                 // No cache yet (first frame) — fall through to full render.
             }
 
-            // Dirty or first render: capture the subtree into a sub-Scene,
-            // append it to the main scene, and store for next-frame replay.
-            let parent_scene = ctx.frame.replace_scene(Scene::new());
-
             let mut children: Vec<u32> = node.children.to_vec();
             children.sort_by_key(|&cid| {
                 ctx.nodes.get(&cid).and_then(|n| n.props.z_index).unwrap_or(0)
             });
-            for child_id in children {
-                render_subtree(child_id, scroll_y, child_opacity, ctx);
-            }
 
-            let sub = ctx.frame.replace_scene(parent_scene);
-            ctx.frame.append_scene(&sub, None);
-            ctx.boundary_cache_new.insert(id, sub);
+            if ctx.frame.supports_caching() {
+                // Dirty or first render: capture the subtree into a sub-Scene,
+                // append it to the main scene, and store for next-frame replay.
+                let parent_scene = ctx.frame.replace_scene(Scene::new());
+                for child_id in children {
+                    render_subtree(child_id, scroll_y, child_opacity, ctx);
+                }
+                let sub = ctx.frame.replace_scene(parent_scene);
+                ctx.frame.append_scene(&sub, None);
+                ctx.boundary_cache_new.insert(id, sub);
+            } else {
+                for child_id in children {
+                    render_subtree(child_id, scroll_y, child_opacity, ctx);
+                }
+            }
         }
     }
 
@@ -598,7 +609,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     }
 }
 
-fn draw_canvas_cmd(frame: &mut FrameBuilder, cmd: &CanvasCmd, ox: f64, oy: f64) {
+fn draw_canvas_cmd(frame: &mut AnyFrame, cmd: &CanvasCmd, ox: f64, oy: f64) {
     use CanvasCmd::*;
     match cmd {
         Clear => {
@@ -662,7 +673,7 @@ fn draw_scrollbar(
     content_height: f64,
     bar_width: f64,
     bar_color: peniko::Color,
-    frame: &mut FrameBuilder,
+    frame: &mut AnyFrame,
 ) {
     let Some((tx, ty, tw, th)) = compute_scrollbar_thumb(rx, ry, rw, rh, scroll_y, content_height, bar_width)
     else { return };

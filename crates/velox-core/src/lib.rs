@@ -62,7 +62,7 @@ use std::time::{Duration, Instant};
 use smallvec::SmallVec;
 use velox_gpu::GpuContext;
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
-use velox_renderer::{colors, peniko, VeloxRenderer, FrameBuilder, Scene};
+use velox_renderer::{colors, peniko, AnyRenderer, AnyFrame, Scene};
 use velox_runtime::{
     init_v8, new_ipc_bus,
     CanvasCmd, InputEvent, LengthValue, NodeProps, NodeType, SceneCommand,
@@ -275,8 +275,11 @@ fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabilities, Vec<J
 
         if let Some(rm) = w.render_mode.as_deref() {
             cfg.render_mode = match rm {
-                "cpu" => RenderMode::Cpu,
-                _     => RenderMode::Gpu,
+                "cpu"     => RenderMode::Cpu,
+                "skia"    => RenderMode::TinySkia,
+                "femtovg" => RenderMode::Femtovg,
+                "auto"    => RenderMode::Auto,
+                _         => RenderMode::Gpu,
             };
         }
 
@@ -827,7 +830,7 @@ struct VideoStream {
 /// One instance per open window; keyed by `window_handle` (0 = main window).
 struct PerWindowState {
     gpu:          GpuContext,
-    renderer:     VeloxRenderer,
+    renderer:     AnyRenderer,
     text_sys:     TextSystem,
     layout:       LayoutTree,
     runtime:      VeloxRuntime,
@@ -1324,7 +1327,7 @@ fn handle_dev_build_events(state: &mut PerWindowState) {
 }
 
 #[cfg(feature = "dev")]
-fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
+fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut AnyFrame) {
     let Some(dev) = state.dev_mode.as_mut() else { return };
     if !dev.overlay_visible { return; }
 
@@ -1462,7 +1465,7 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
 /// (set in velox-runtime for dev feature) so that .jsx file names and original
 /// line numbers appear instead of bundle offsets.
 #[cfg(feature = "dev")]
-fn draw_error_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
+fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFrame) {
     let Some(dev) = state.dev_mode.as_ref() else { return };
     let Some(ref err) = dev.last_js_error.clone() else { return };
 
@@ -1838,9 +1841,8 @@ pub fn run(mut config: AppConfig) -> bool {
 
     // Save background color and render mode before `window` (ShellConfig) is moved into run().
     let window_bg = window.background_color;
-    // Honor both config renderMode and legacy VELOX_CPU_RENDER=1 env var.
-    let use_cpu_render = window.render_mode == RenderMode::Cpu
-        || std::env::var("VELOX_CPU_RENDER").map(|v| v.trim() == "1").unwrap_or(false);
+    // Capture configured mode; Auto is resolved after GPU adapter is known.
+    let render_mode_config = window.render_mode;
     // Compute V8 heap cap: explicit config wins; otherwise auto-calculate from bundle size.
     let heap_cap_mb: usize = match window.max_js_heap_mb {
         Some(mb) => mb as usize,
@@ -1858,11 +1860,25 @@ pub fn run(mut config: AppConfig) -> bool {
             ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy } => {
                 let gpu_ctx = pollster::block_on(GpuContext::new(window.clone()))
                     .expect("Failed to initialise GPU");
-                let mut renderer = VeloxRenderer::new(&gpu_ctx, use_cpu_render)
-                    .expect("Failed to initialise Vello renderer");
+                // Resolve RenderMode::Auto based on the actual GPU adapter type.
+                // TinySkia / Femtovg fall back to Gpu until sub-branches implement them.
+                let effective_mode = match render_mode_config {
+                    RenderMode::Auto => {
+                        if gpu_ctx.is_software_adapter() { RenderMode::Cpu } else { RenderMode::Gpu }
+                    }
+                    RenderMode::TinySkia | RenderMode::Femtovg => {
+                        log::warn!("RenderMode::{render_mode_config:?} not yet implemented; falling back to Gpu");
+                        RenderMode::Gpu
+                    }
+                    other => other,
+                };
+                let use_cpu = matches!(effective_mode, RenderMode::Cpu)
+                    || std::env::var("VELOX_CPU_RENDER").map(|v| v.trim() == "1").unwrap_or(false);
+                let mut renderer = AnyRenderer::new(&gpu_ctx, use_cpu)
+                    .expect("Failed to initialise renderer");
                 // Apply window background color so the GPU clear matches the
                 // app theme from frame zero — no blank white flash on startup.
-                renderer.background_color = rgba_to_vello(window_bg);
+                renderer.set_background_color(rgba_to_vello(window_bg));
 
                 // Build callbacks that send events to the shell event loop.
                 let proxy_for_fn = ev_proxy.clone();

@@ -198,4 +198,12 @@ impl GpuContext {
 
     pub fn width(&self)  -> u32 { self.config.width  }
     pub fn height(&self) -> u32 { self.config.height }
+
+    /// Returns `true` when the adapter is a CPU/software rasterizer.
+    ///
+    /// Used by velox-core to resolve `RenderMode::Auto` without requiring
+    /// a direct `wgpu` dependency in velox-core.
+    pub fn is_software_adapter(&self) -> bool {
+        self.adapter.get_info().device_type == wgpu::DeviceType::Cpu
+    }
 }

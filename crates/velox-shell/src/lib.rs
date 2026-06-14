@@ -103,15 +103,20 @@ pub enum StartupMode {
     Fullscreen,
 }
 
-/// Selects the rendering backend for the Vello scene.
+/// Selects the 2D rendering backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
-    /// GPU compute via wgpu (default). Best quality and performance.
+    /// Vello GPU compute via wgpu. Best AA quality, highest RAM on iGPU.
     #[default]
     Gpu,
-    /// Vello's built-in CPU execution path (Cranelift JIT).
-    /// Runs on any machine; slower but no discrete GPU required.
+    /// Vello CPU path (Cranelift JIT). No discrete GPU required.
     Cpu,
+    /// tiny-skia CPU rasterizer. Minimal RAM, pure Rust, no GPU pool.
+    TinySkia,
+    /// femtovg GPU triangle renderer. Low GPU buffer footprint, smooth animations.
+    Femtovg,
+    /// Auto-detect: discrete GPU → Gpu, iGPU → Femtovg, no GPU → TinySkia.
+    Auto,
 }
 
 pub struct ShellConfig {

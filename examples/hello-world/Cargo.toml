@@ -3,7 +3,10 @@ name    = "hello-world"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["dev"]
+dev     = ["velox-core/dev"]
+
 [dependencies]
-velox-core = { path = "../../crates/velox-core" }
+velox-core  = { path = "../../crates/velox-core", default-features = false }
 velox-shell = { path = "../../crates/velox-shell" }
-env_logger  = { workspace = true }

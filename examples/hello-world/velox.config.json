@@ -1,27 +1,16 @@
 {
   "window": {
-    "title":       "Velox — Hello World",
-    "width":       1280,
-    "height":      800,
-    "startupMode": "windowed"
+    "title":       "Hello World",
+    "width":       420,
+    "height":      520,
+    "startupMode": "windowed",
+    "background":  "#0f0f14",
+    "renderMode":  "cpu"
   },
-  "capabilities": {
-    "fs": {
-      "read":  ["**"],
-      "write": ["**"]
-    },
-    "network": {
-      "allow": []
-    },
-    "env": {
-      "allow": []
-    },
-    "db":           true,
-    "dialog":       true,
-    "clipboard":    true,
-    "notification": true,
-    "battery":      false,
-    "usb":          false,
-    "shell":        false
+  "capabilities": {},
+  "dev": {
+    "entry":  "js/app.jsx",
+    "output": "js/dist/app.js",
+    "watch":  ["js"]
   }
 }

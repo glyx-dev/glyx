@@ -31,7 +31,7 @@
   };
   var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
 
-  // node_modules/.bun/react@18.3.1/node_modules/react/cjs/react.production.min.js
+  // ../../node_modules/.bun/react@18.3.1/node_modules/react/cjs/react.production.min.js
   var require_react_production_min = __commonJS((exports) => {
     var l = Symbol.for("react.element");
     var n = Symbol.for("react.portal");
@@ -322,14 +322,14 @@
     exports.version = "18.3.1";
   });
 
-  // node_modules/.bun/react@18.3.1/node_modules/react/index.js
+  // ../../node_modules/.bun/react@18.3.1/node_modules/react/index.js
   var require_react = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_production_min();
     } else {}
   });
 
-  // node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/cjs/scheduler.production.min.js
+  // ../../node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/cjs/scheduler.production.min.js
   var require_scheduler_production_min = __commonJS((exports) => {
     function f(a, b) {
       var c = a.length;
@@ -595,14 +595,14 @@
     };
   });
 
-  // node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/index.js
+  // ../../node_modules/.bun/scheduler@0.23.2/node_modules/scheduler/index.js
   var require_scheduler = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_scheduler_production_min();
     } else {}
   });
 
-  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler.production.min.js
+  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler.production.min.js
   var require_react_reconciler_production_min = __commonJS((exports, module) => {
     module.exports = function $$$reconciler($$$hostConfig) {
       var exports2 = {};
@@ -5700,14 +5700,14 @@ No matching component was found for:
     };
   });
 
-  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/index.js
+  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/index.js
   var require_react_reconciler = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_reconciler_production_min();
     } else {}
   });
 
-  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler-constants.production.min.js
+  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/cjs/react-reconciler-constants.production.min.js
   var require_react_reconciler_constants_production_min = __commonJS((exports) => {
     exports.ConcurrentRoot = 1;
     exports.ContinuousEventPriority = 4;
@@ -5717,14 +5717,14 @@ No matching component was found for:
     exports.LegacyRoot = 0;
   });
 
-  // node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/constants.js
+  // ../../node_modules/.bun/react-reconciler@0.29.2+f4eacebf2041cd4f/node_modules/react-reconciler/constants.js
   var require_constants = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_reconciler_constants_production_min();
     } else {}
   });
 
-  // node_modules/.bun/react@18.3.1/node_modules/react/cjs/react-jsx-runtime.production.min.js
+  // ../../node_modules/.bun/react@18.3.1/node_modules/react/cjs/react-jsx-runtime.production.min.js
   var require_react_jsx_runtime_production_min = __commonJS((exports) => {
     var f = require_react();
     var k = Symbol.for("react.element");
@@ -5749,26 +5749,79 @@ No matching component was found for:
     exports.jsxs = q;
   });
 
-  // node_modules/.bun/react@18.3.1/node_modules/react/jsx-runtime.js
+  // ../../node_modules/.bun/react@18.3.1/node_modules/react/jsx-runtime.js
   var require_jsx_runtime = __commonJS((exports, module) => {
     if (true) {
       module.exports = require_react_jsx_runtime_production_min();
     } else {}
   });
 
-  // examples/hello-world/js/polyfills.js
+  // js/app.jsx
+  var import_react2 = __toESM(require_react(), 1);
+
+  // ../../js/packages/@velox/react/src/polyfills.js
   if (typeof performance === "undefined") {
     globalThis.performance = {
       now: () => Number(__velox_getTime())
     };
   }
   if (typeof setTimeout === "undefined") {
-    let _nextId = 1;
-    globalThis.setTimeout = (fn, _ms) => {
-      fn();
-      return _nextId++;
+    let _nextTimerId = 1;
+    const _pendingTimers = new Map;
+    globalThis.setTimeout = (fn, ms) => {
+      const id = _nextTimerId++;
+      const delay = ms > 0 ? ms : 0;
+      _pendingTimers.set(id, { fn, due: performance.now() + delay });
+      if (typeof __velox_request_frame !== "undefined") {
+        __velox_request_frame(delay);
+      }
+      return id;
     };
-    globalThis.clearTimeout = (_id) => {};
+    globalThis.clearTimeout = (id) => {
+      _pendingTimers.delete(id);
+    };
+    globalThis._veloxDrainTimers = () => {
+      if (_pendingTimers.size === 0)
+        return;
+      const now = performance.now();
+      const due = [];
+      for (const [id, t] of _pendingTimers) {
+        if (t.due <= now)
+          due.push([id, t.fn]);
+      }
+      for (const [id] of due)
+        _pendingTimers.delete(id);
+      for (const [, fn] of due)
+        fn();
+    };
+  }
+  if (typeof setInterval === "undefined") {
+    let _nextIntervalId = 1;
+    const _pendingIntervals = new Map;
+    globalThis.setInterval = (fn, ms) => {
+      const id = _nextIntervalId++;
+      const delay = ms > 0 ? ms : 0;
+      _pendingIntervals.set(id, { fn, ms: delay, nextDue: performance.now() + delay });
+      if (typeof __velox_request_frame !== "undefined")
+        __velox_request_frame(delay);
+      return id;
+    };
+    globalThis.clearInterval = (id) => {
+      _pendingIntervals.delete(id);
+    };
+    const _prevDrain = globalThis._veloxDrainTimers;
+    globalThis._veloxDrainTimers = () => {
+      _prevDrain?.();
+      if (_pendingIntervals.size === 0)
+        return;
+      const now = performance.now();
+      for (const [, t] of _pendingIntervals) {
+        if (now >= t.nextDue) {
+          t.nextDue = now + t.ms;
+          t.fn();
+        }
+      }
+    };
   }
   if (typeof queueMicrotask === "undefined") {
     globalThis.queueMicrotask = (fn) => Promise.resolve().then(fn);
@@ -5793,19 +5846,270 @@ No matching component was found for:
     };
   }
 
-  // examples/hello-world/js/app.jsx
-  var import_react3 = __toESM(require_react(), 1);
-
-  // js/packages/@velox/react/src/index.js
+  // ../../js/packages/@velox/react/src/index.js
   var import_react = __toESM(require_react(), 1);
   var import_react_reconciler = __toESM(require_react_reconciler(), 1);
 
-  // js/packages/@velox/react/src/hostConfig.js
+  // ../../js/packages/@velox/react/src/hostConfig.js
   var import_constants = __toESM(require_constants(), 1);
+
+  // ../../js/packages/@velox/react/src/events.js
+  var pressableRegistry = new Map;
+  var inputRegistry = new Map;
+  var scrollRegistry = new Map;
+  var dragRegistry = new Map;
+  var disabledRegistry = new Map;
+  var pointerEventsNoneRegistry = new Set;
+  var zIndexMap = new Map;
+  var solidRegistry = [];
+  var parentMap = new Map;
+  var activeDragId = null;
+  var windowSizeListeners = [];
+  var keyListeners = [];
+  var globalClickListeners = [];
+  var focusedNodeId = null;
+  var hoveredPressableId = null;
+  var ctrlHeld = false;
+  var shiftHeld = false;
+  var cursorX = 0;
+  var cursorY = 0;
+  function registerSolid(nodeId) {
+    solidRegistry.push(nodeId);
+  }
+  function unregisterSolid(nodeId) {
+    const i = solidRegistry.indexOf(nodeId);
+    if (i !== -1)
+      solidRegistry.splice(i, 1);
+  }
+  function setNodeParent(childId, parentId) {
+    parentMap.set(childId, parentId);
+  }
+  function removeNodeFromTree(nodeId) {
+    parentMap.delete(nodeId);
+    unregisterSolid(nodeId);
+    zIndexMap.delete(nodeId);
+  }
+  function setNodeZIndex(nodeId, zIndex) {
+    if (zIndex !== 0) {
+      zIndexMap.set(nodeId, zIndex);
+    } else {
+      zIndexMap.delete(nodeId);
+    }
+  }
+  function addKeyListener(fn) {
+    keyListeners.push(fn);
+  }
+  function setFocus(nodeId) {
+    if (focusedNodeId !== nodeId) {
+      if (focusedNodeId !== null) {
+        const prev = inputRegistry.get(focusedNodeId);
+        prev?.onBlur?.();
+      }
+      focusedNodeId = nodeId;
+      const handlers = inputRegistry.get(nodeId);
+      handlers?.onFocus?.();
+    }
+  }
+  function hitTest(nodeId, px, py) {
+    if (pointerEventsNoneRegistry.has(nodeId))
+      return false;
+    const layout = __velox_getLayout(nodeId);
+    if (!layout)
+      return false;
+    return px >= layout.x && px < layout.x + layout.width && py >= layout.y && py < layout.y + layout.height;
+  }
+  function isDisabled(nodeId) {
+    return disabledRegistry.has(nodeId);
+  }
+  function isAncestorOf(ancestorId, descendantId) {
+    let id = parentMap.get(descendantId);
+    while (id !== undefined) {
+      if (id === ancestorId)
+        return true;
+      id = parentMap.get(id);
+    }
+    return false;
+  }
+  function findTopmostSolid(x, y) {
+    const covering = [];
+    for (const id of solidRegistry) {
+      if (hitTest(id, x, y))
+        covering.push(id);
+    }
+    if (covering.length === 0)
+      return null;
+    if (covering.length === 1)
+      return covering[0];
+    const deepest = covering.filter((id) => !covering.some((other) => other !== id && isAncestorOf(id, other)));
+    if (deepest.length === 1)
+      return deepest[0];
+    let bestId = deepest[0];
+    let bestIdx = solidRegistry.lastIndexOf(deepest[0]);
+    let bestZ = zIndexMap.get(deepest[0]) ?? 0;
+    for (let i = 1;i < deepest.length; i++) {
+      const z = zIndexMap.get(deepest[i]) ?? 0;
+      const idx = solidRegistry.lastIndexOf(deepest[i]);
+      if (z > bestZ || z === bestZ && idx > bestIdx) {
+        bestId = deepest[i];
+        bestIdx = idx;
+        bestZ = z;
+      }
+    }
+    return bestId;
+  }
+  function dispatchEvents() {
+    const events = __velox_pollEvents();
+    if (!events || events.length === 0)
+      return;
+    let cursorMovedThisFrame = false;
+    for (const ev of events) {
+      switch (ev.type) {
+        case "mouseButton": {
+          if (!ev.pressed)
+            break;
+          if (globalClickListeners.length > 0) {
+            const gev = { x: ev.x, y: ev.y };
+            for (const fn of globalClickListeners)
+              try {
+                fn(gev);
+              } catch {}
+          }
+          const topmostId = findTopmostSolid(ev.x, ev.y);
+          if (topmostId !== null) {
+            const ph = pressableRegistry.get(topmostId);
+            if (ph && !isDisabled(topmostId)) {
+              const layout = __velox_getLayout(topmostId);
+              ph.onPress?.({
+                x: ev.x,
+                y: ev.y,
+                locationX: layout ? ev.x - layout.x : 0,
+                locationY: layout ? ev.y - layout.y : 0
+              });
+            }
+            const ih = inputRegistry.get(topmostId);
+            if (ih && !isDisabled(topmostId)) {
+              setFocus(topmostId);
+              const layout = __velox_getLayout(topmostId);
+              if (layout)
+                ih.onClickAt?.(ev.x - layout.x, ev.y - layout.y);
+            }
+          }
+          if (focusedNodeId !== null && focusedNodeId !== topmostId) {
+            inputRegistry.get(focusedNodeId)?.onBlur?.();
+            focusedNodeId = null;
+          }
+          break;
+        }
+        case "keyInput": {
+          if (ev.key === "ControlLeft" || ev.key === "ControlRight") {
+            ctrlHeld = ev.pressed;
+            break;
+          }
+          if (ev.key === "ShiftLeft" || ev.key === "ShiftRight") {
+            shiftHeld = ev.pressed;
+            break;
+          }
+          if (keyListeners.length > 0) {
+            const kev = { key: ev.key, ctrl: ctrlHeld, shift: shiftHeld, pressed: ev.pressed };
+            for (const fn of keyListeners)
+              try {
+                fn(kev);
+              } catch {}
+          }
+          if (!ev.pressed || focusedNodeId === null)
+            break;
+          const handlers = inputRegistry.get(focusedNodeId);
+          if (!handlers)
+            break;
+          handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld });
+          break;
+        }
+        case "cursorMoved": {
+          cursorX = ev.x;
+          cursorY = ev.y;
+          cursorMovedThisFrame = true;
+          break;
+        }
+        case "scroll": {
+          for (const [nodeId, handlers] of [...scrollRegistry].reverse()) {
+            if (hitTest(nodeId, cursorX, cursorY)) {
+              if (isDisabled(nodeId))
+                break;
+              handlers.onScroll?.(ev.deltaY);
+              break;
+            }
+          }
+          break;
+        }
+        case "scrollbarDrag": {
+          const handlers = scrollRegistry.get(ev.nodeId);
+          handlers?.onAbsoluteScroll?.(ev.scrollY);
+          break;
+        }
+        case "resize": {
+          const size = { width: ev.width, height: ev.height };
+          for (const fn of windowSizeListeners)
+            fn(size);
+          break;
+        }
+        case "dragStart": {
+          for (const [nodeId, handlers] of dragRegistry) {
+            if (hitTest(nodeId, ev.x, ev.y)) {
+              if (isDisabled(nodeId))
+                break;
+              activeDragId = nodeId;
+              handlers.onDragStart?.({ x: ev.x, y: ev.y });
+              break;
+            }
+          }
+          break;
+        }
+        case "dragMove": {
+          if (activeDragId !== null) {
+            const handlers = dragRegistry.get(activeDragId);
+            handlers?.onDragMove?.({ x: ev.x, y: ev.y, dx: ev.dx, dy: ev.dy });
+          }
+          break;
+        }
+        case "dragEnd": {
+          if (activeDragId !== null) {
+            const handlers = dragRegistry.get(activeDragId);
+            handlers?.onDragEnd?.({ x: ev.x, y: ev.y });
+            activeDragId = null;
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
+    if (cursorMovedThisFrame) {
+      const topSolid = findTopmostSolid(cursorX, cursorY);
+      const newHoveredId = topSolid !== null && !isDisabled(topSolid) && pressableRegistry.has(topSolid) ? topSolid : null;
+      if (newHoveredId !== hoveredPressableId) {
+        if (hoveredPressableId !== null) {
+          pressableRegistry.get(hoveredPressableId)?.onHoverOut?.();
+        }
+        if (newHoveredId !== null) {
+          pressableRegistry.get(newHoveredId)?.onHoverIn?.();
+        }
+        hoveredPressableId = newHoveredId;
+      }
+    }
+  }
+
+  // ../../js/packages/@velox/react/src/hostConfig.js
   function createInstance(type, props) {
-    const { children, style, ref: _ref, _veloxOnMount, ...rest } = props;
+    const { children, style, ref: _ref, _veloxOnMount, veloxDraggable, ...rest } = props;
     const nodeProps = { ...rest, ...style };
+    if (veloxDraggable)
+      nodeProps.draggable = true;
     const id = __velox_createNode(type, nodeProps);
+    if (type === "view") {
+      registerSolid(id);
+      if (nodeProps.zIndex)
+        setNodeZIndex(id, nodeProps.zIndex);
+    }
     if (typeof _veloxOnMount === "function") {
       _veloxOnMount(id);
     }
@@ -5818,11 +6122,13 @@ No matching component was found for:
   function appendInitialChild(parentInstance, child) {
     if (child.id !== -1) {
       __velox_appendChild(parentInstance.id, child.id);
+      setNodeParent(child.id, parentInstance.id);
     }
   }
   function appendChild(parentInstance, child) {
     if (child.id !== -1) {
       __velox_appendChild(parentInstance.id, child.id);
+      setNodeParent(child.id, parentInstance.id);
     }
   }
   function appendChildToContainer(_container, child) {
@@ -5833,6 +6139,7 @@ No matching component was found for:
   function insertBefore(parentInstance, child, _beforeChild) {
     if (child.id !== -1) {
       __velox_appendChild(parentInstance.id, child.id);
+      setNodeParent(child.id, parentInstance.id);
     }
   }
   function insertInContainerBefore(_container, child, _beforeChild) {
@@ -5854,15 +6161,19 @@ No matching component was found for:
   function detachDeletedInstance(instance) {
     if (instance.id !== -1) {
       __velox_removeNode(instance.id);
+      removeNodeFromTree(instance.id);
     }
   }
   function prepareUpdate(_instance, _type, _oldProps, newProps) {
     return newProps;
   }
   function commitUpdate(instance, updatePayload) {
-    const { children, style, ref: _ref, _veloxOnMount, ...rest } = updatePayload;
+    const { children, style, ref: _ref, _veloxOnMount, veloxDraggable, ...rest } = updatePayload;
     const nodeProps = { ...rest, ...style };
+    if (veloxDraggable)
+      nodeProps.draggable = true;
     __velox_updateNode(instance.id, nodeProps);
+    setNodeZIndex(instance.id, nodeProps.zIndex ?? 0);
   }
   function commitTextUpdate() {}
   function commitMount() {}
@@ -5946,151 +6257,246 @@ No matching component was found for:
   };
   var hostConfig_default = HostConfig;
 
-  // js/packages/@velox/react/src/events.js
-  var pressableRegistry = new Map;
-  var inputRegistry = new Map;
-  var scrollRegistry = new Map;
-  var windowSizeListeners = [];
-  var focusedNodeId = null;
-  var hoveredPressableId = null;
-  var cursorX = 0;
-  var cursorY = 0;
-  function registerPressable(nodeId, handlers) {
-    pressableRegistry.set(nodeId, handlers);
-  }
-  function unregisterPressable(nodeId) {
-    pressableRegistry.delete(nodeId);
-  }
-  function registerInput(nodeId, handlers) {
-    inputRegistry.set(nodeId, handlers);
-  }
-  function unregisterInput(nodeId) {
-    if (focusedNodeId === nodeId)
-      focusedNodeId = null;
-    inputRegistry.delete(nodeId);
-  }
-  function registerScrollView(nodeId, handlers) {
-    scrollRegistry.set(nodeId, handlers);
-  }
-  function unregisterScrollView(nodeId) {
-    scrollRegistry.delete(nodeId);
-  }
-  function addWindowSizeListener(fn) {
-    windowSizeListeners.push(fn);
-  }
-  function removeWindowSizeListener(fn) {
-    const idx = windowSizeListeners.indexOf(fn);
-    if (idx >= 0)
-      windowSizeListeners.splice(idx, 1);
-  }
-  function setFocus(nodeId) {
-    if (focusedNodeId !== nodeId) {
-      if (focusedNodeId !== null) {
-        const prev = inputRegistry.get(focusedNodeId);
-        prev?.onBlur?.();
-      }
-      focusedNodeId = nodeId;
-      const handlers = inputRegistry.get(nodeId);
-      handlers?.onFocus?.();
-    }
-  }
-  function hitTest(nodeId, px, py) {
-    const layout = __velox_getLayout(nodeId);
-    if (!layout)
-      return false;
-    return px >= layout.x && px < layout.x + layout.width && py >= layout.y && py < layout.y + layout.height;
-  }
-  function dispatchEvents() {
-    const events = __velox_pollEvents();
-    if (!events || events.length === 0)
-      return;
-    let cursorMovedThisFrame = false;
-    for (const ev of events) {
-      switch (ev.type) {
-        case "mouseButton": {
-          if (!ev.pressed)
-            break;
-          let handled = false;
-          for (const [nodeId, handlers] of pressableRegistry) {
-            if (hitTest(nodeId, ev.x, ev.y)) {
-              handlers.onPress?.();
-              handled = true;
-              break;
-            }
-          }
-          for (const [nodeId] of inputRegistry) {
-            if (hitTest(nodeId, ev.x, ev.y)) {
-              setFocus(nodeId);
-              handled = true;
-              break;
-            }
-          }
-          if (!handled && focusedNodeId !== null) {
-            const prev = inputRegistry.get(focusedNodeId);
-            prev?.onBlur?.();
-            focusedNodeId = null;
-          }
-          break;
-        }
-        case "keyInput": {
-          if (!ev.pressed || focusedNodeId === null)
-            break;
-          const handlers = inputRegistry.get(focusedNodeId);
-          if (!handlers)
-            break;
-          handlers.onKeyPress?.({ key: ev.key, text: ev.text });
-          break;
-        }
-        case "cursorMoved": {
-          cursorX = ev.x;
-          cursorY = ev.y;
-          cursorMovedThisFrame = true;
-          break;
-        }
-        case "scroll": {
-          for (const [nodeId, handlers] of scrollRegistry) {
-            if (hitTest(nodeId, cursorX, cursorY)) {
-              handlers.onScroll?.(ev.deltaY);
-              break;
-            }
-          }
-          break;
-        }
-        case "resize": {
-          const size = { width: ev.width, height: ev.height };
-          for (const fn of windowSizeListeners)
-            fn(size);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-    if (cursorMovedThisFrame) {
-      let newHoveredId = null;
-      for (const [nodeId] of pressableRegistry) {
-        if (hitTest(nodeId, cursorX, cursorY)) {
-          newHoveredId = nodeId;
-          break;
-        }
-      }
-      if (newHoveredId !== hoveredPressableId) {
-        if (hoveredPressableId !== null) {
-          pressableRegistry.get(hoveredPressableId)?.onHoverOut?.();
-        }
-        if (newHoveredId !== null) {
-          pressableRegistry.get(newHoveredId)?.onHoverIn?.();
-        }
-        hoveredPressableId = newHoveredId;
-      }
-    }
-  }
-
-  // js/packages/@velox/react/src/index.js
+  // ../../js/packages/@velox/react/src/index.js
   var VeloxReconciler = import_react_reconciler.default(hostConfig_default);
   var rootContainer = VeloxReconciler.createContainer({ isVeloxRoot: true }, 0, null, false, null, "", (err) => __velox_log("[React] Recoverable error: " + err.message), null);
+  var _wsOpenSockets = new Map;
+  var _ipcListeners = [];
+  var _deeplinkCallbacks = [];
+  var _deeplinkInitialFired = false;
+  function _pollDeeplinks() {
+    if (!_deeplinkInitialFired && _deeplinkCallbacks.length > 0) {
+      _deeplinkInitialFired = true;
+      if (typeof __velox_deeplink_getInitialUrl !== "undefined") {
+        try {
+          const url = __velox_deeplink_getInitialUrl();
+          if (url) {
+            for (const cb of _deeplinkCallbacks) {
+              try {
+                cb(url);
+              } catch (e) {
+                __velox_log("[deeplink] callback error: " + e);
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+    if (typeof __velox_deeplink_poll === "undefined")
+      return;
+    let raw;
+    try {
+      raw = __velox_deeplink_poll();
+    } catch {
+      return;
+    }
+    if (!raw || raw === "[]")
+      return;
+    let urls;
+    try {
+      urls = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    for (const url of urls) {
+      for (const cb of _deeplinkCallbacks) {
+        try {
+          cb(url);
+        } catch (e) {
+          __velox_log("[deeplink] callback error: " + e);
+        }
+      }
+    }
+  }
+  var _globalShortcutCallbacks = new Map;
+  function _pollGlobalShortcuts() {
+    if (typeof __velox_shortcut_poll === "undefined")
+      return;
+    if (_globalShortcutCallbacks.size === 0)
+      return;
+    let raw;
+    try {
+      raw = __velox_shortcut_poll();
+    } catch {
+      return;
+    }
+    if (!raw || raw === "[]")
+      return;
+    let ids;
+    try {
+      ids = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    for (const id of ids) {
+      const cb = _globalShortcutCallbacks.get(id);
+      if (cb)
+        try {
+          cb();
+        } catch (e) {
+          __velox_log("[shortcut] callback error: " + e);
+        }
+    }
+  }
+  function _pollGamepads() {
+    if (typeof __velox_gamepad_poll === "undefined")
+      return;
+    if (!globalThis._gamepadCallbacks || globalThis._gamepadCallbacks.length === 0)
+      return;
+    let raw;
+    try {
+      raw = __velox_gamepad_poll();
+    } catch {
+      return;
+    }
+    if (!raw || raw === "[]")
+      return;
+    let evs;
+    try {
+      evs = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    for (const ev of evs) {
+      for (const cb of globalThis._gamepadCallbacks) {
+        try {
+          cb(ev);
+        } catch (e) {
+          __velox_log("[gamepad] callback error: " + e);
+        }
+      }
+    }
+  }
+  var _localShortcuts = new Map;
+  function _normalizeKey(winitKey) {
+    if (/^Key[A-Z]$/.test(winitKey))
+      return winitKey[3].toLowerCase();
+    if (/^Digit\d$/.test(winitKey))
+      return winitKey[5];
+    return winitKey.toLowerCase();
+  }
+  addKeyListener(function _dispatchLocalShortcuts({ key, ctrl, shift, pressed }) {
+    if (!pressed || _localShortcuts.size === 0)
+      return;
+    const norm = _normalizeKey(key);
+    for (const { mods, key: sKey, cb } of _localShortcuts.values()) {
+      if (sKey === norm && mods.ctrl === ctrl && mods.shift === shift) {
+        try {
+          cb();
+        } catch (e) {
+          __velox_log("[shortcut] local callback error: " + e);
+        }
+      }
+    }
+  });
+  var _perfBudgetCallbacks = [];
+  var _perfLeakCallbacks = [];
+  function _pollPerfViolations() {
+    if (typeof __velox_perf_poll_violations === "undefined")
+      return;
+    if (_perfBudgetCallbacks.length === 0)
+      return;
+    let raw;
+    try {
+      raw = __velox_perf_poll_violations();
+    } catch {
+      return;
+    }
+    if (!raw || raw === "[]")
+      return;
+    let violations;
+    try {
+      violations = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    for (const v of violations) {
+      for (const cb of _perfBudgetCallbacks) {
+        try {
+          cb(v);
+        } catch (e) {
+          __velox_log("[perf] onBudgetExceeded callback error: " + e);
+        }
+      }
+    }
+  }
+  function _pollLeakWarnings() {
+    if (typeof __velox_perf_poll_leak_warnings === "undefined")
+      return;
+    if (_perfLeakCallbacks.length === 0)
+      return;
+    let raw;
+    try {
+      raw = __velox_perf_poll_leak_warnings();
+    } catch {
+      return;
+    }
+    if (!raw || raw === "[]")
+      return;
+    let warnings;
+    try {
+      warnings = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    for (const w of warnings) {
+      for (const cb of _perfLeakCallbacks) {
+        try {
+          cb(w);
+        } catch (e) {
+          __velox_log("[perf] onLeakDetected callback error: " + e);
+        }
+      }
+    }
+  }
+  var _audioCallbacks = new Map;
+  function _pollAudio() {
+    if (typeof __velox_audio_poll === "undefined")
+      return;
+    let raw;
+    try {
+      raw = __velox_audio_poll();
+    } catch {
+      return;
+    }
+    if (!raw || raw === "[]")
+      return;
+    let events;
+    try {
+      events = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    for (const ev of events) {
+      const key = String(ev.handle);
+      const cbs = _audioCallbacks.get(key);
+      if (cbs) {
+        for (const cb of cbs) {
+          if (ev.event === "ended" && cb.onEnded) {
+            try {
+              cb.onEnded();
+            } catch (e) {
+              __velox_log("[audio] onEnded error: " + e);
+            }
+          }
+        }
+        if (ev.event === "ended")
+          _audioCallbacks.delete(key);
+      }
+    }
+  }
   globalThis.__velox_frameCallback = function veloxFrameCallback() {
     VeloxReconciler.flushSync(() => {
+      globalThis._veloxDrainTimers?.();
+      _pollWebSockets();
+      _pollIpc();
+      _pollDeeplinks();
+      _pollGamepads();
+      _pollGlobalShortcuts();
+      _pollPerfViolations();
+      _pollLeakWarnings();
+      _pollAudio();
+      _pollVideo();
       dispatchEvents();
     });
   };
@@ -6099,182 +6505,6 @@ No matching component was found for:
   }
   var View = ({ children, style, ...props }) => import_react.default.createElement("view", { style, ...props }, children);
   var Text = ({ children, style, showCursor, ...props }) => import_react.default.createElement("text", { text: children, style, showCursor, ...props });
-  function Image({ src, width = 120, height = 120, resizeMode = "stretch", style, ...props }) {
-    const imageId = import_react.default.useMemo(() => {
-      if (!src)
-        return null;
-      return __velox_createImage(src);
-    }, [src]);
-    return import_react.default.createElement("image", {
-      imageId,
-      resizeMode,
-      style,
-      width,
-      height,
-      ...props
-    });
-  }
-  function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn, onHoverOut, style, ...props }) {
-    const nodeIdRef = import_react.useRef(null);
-    const handlersRef = import_react.useRef(null);
-    const [pressed, setPressed] = import_react.useState(false);
-    const [hovered, setHovered] = import_react.useState(false);
-    handlersRef.current = {
-      onPress: () => onPress?.(),
-      onPressIn: () => {
-        setPressed(true);
-        onPressIn?.();
-      },
-      onPressOut: () => {
-        setPressed(false);
-        onPressOut?.();
-      },
-      onHoverIn: () => {
-        setHovered(true);
-        onHoverIn?.();
-      },
-      onHoverOut: () => {
-        setHovered(false);
-        onHoverOut?.();
-      }
-    };
-    const onMount = import_react.useCallback((id) => {
-      nodeIdRef.current = id;
-      registerPressable(id, {
-        onPress: () => handlersRef.current.onPress(),
-        onPressIn: () => handlersRef.current.onPressIn(),
-        onPressOut: () => handlersRef.current.onPressOut(),
-        onHoverIn: () => handlersRef.current.onHoverIn(),
-        onHoverOut: () => handlersRef.current.onHoverOut()
-      });
-    }, []);
-    import_react.useEffect(() => {
-      return () => {
-        if (nodeIdRef.current !== null) {
-          unregisterPressable(nodeIdRef.current);
-        }
-      };
-    }, []);
-    const mergedStyle = pressed ? { ...style, borderWidth: 2, borderColor: "#ffffffaa" } : hovered ? { ...style, borderWidth: 1, borderColor: "#ffffff55" } : style;
-    return import_react.default.createElement("view", { _veloxOnMount: onMount, style: mergedStyle, ...props }, children);
-  }
-  function ScrollView({
-    children,
-    style,
-    width = 300,
-    height = 200,
-    contentHeight,
-    ...props
-  }) {
-    const nodeIdRef = import_react.useRef(null);
-    const maxScrollRef = import_react.useRef(0);
-    const [scrollY, setScrollY] = import_react.useState(0);
-    const childArray = import_react.default.Children.toArray(children);
-    const gap = style && style.gap || 0;
-    const padding = style && style.padding || 0;
-    const autoContentH = childArray.reduce((sum, c) => sum + (c.props?.height || 0), 0) + Math.max(0, childArray.length - 1) * gap + 2 * padding;
-    const resolvedContentH = contentHeight ?? autoContentH;
-    maxScrollRef.current = Math.max(0, resolvedContentH - height);
-    const onScroll = import_react.useCallback((deltaY) => {
-      setScrollY((prev) => {
-        const max = maxScrollRef.current;
-        return Math.min(max, Math.max(0, prev + deltaY));
-      });
-    }, []);
-    const onMount = import_react.useCallback((id) => {
-      nodeIdRef.current = id;
-      registerScrollView(id, { onScroll });
-    }, [onScroll]);
-    import_react.useEffect(() => {
-      return () => {
-        if (nodeIdRef.current !== null) {
-          unregisterScrollView(nodeIdRef.current);
-        }
-      };
-    }, []);
-    const viewStyle = {
-      justifyContent: "flex-start",
-      alignItems: "flex-start",
-      clip: true,
-      scrollOffsetY: scrollY,
-      ...style
-    };
-    return import_react.default.createElement("view", { _veloxOnMount: onMount, style: viewStyle, width, height, ...props }, children);
-  }
-  function TextInput({
-    value = "",
-    onChangeText,
-    placeholder = "",
-    fontSize = 16,
-    width = 240,
-    height = 44,
-    style,
-    ...props
-  }) {
-    const nodeIdRef = import_react.useRef(null);
-    const handlersRef = import_react.useRef(null);
-    const [focused, setFocused] = import_react.useState(false);
-    handlersRef.current = {
-      onFocus: () => setFocused(true),
-      onBlur: () => setFocused(false),
-      onKeyPress: ({ key, text }) => {
-        if (key === "Backspace") {
-          onChangeText?.(value.slice(0, -1));
-        } else if (text) {
-          onChangeText?.(value + text);
-        }
-      }
-    };
-    const onMount = import_react.useCallback((id) => {
-      nodeIdRef.current = id;
-      registerInput(id, {
-        onFocus: () => handlersRef.current.onFocus(),
-        onBlur: () => handlersRef.current.onBlur(),
-        onKeyPress: (ev) => handlersRef.current.onKeyPress(ev)
-      });
-    }, []);
-    import_react.useEffect(() => {
-      return () => {
-        if (nodeIdRef.current !== null) {
-          unregisterInput(nodeIdRef.current);
-        }
-      };
-    }, []);
-    const displayText = focused || value ? value : placeholder;
-    const textColor = value ? "#ffffff" : "#888888";
-    const inputStyle = {
-      backgroundColor: focused ? "#4a4a7e" : "#2a2a3e",
-      borderRadius: 6,
-      borderWidth: focused ? 2 : 1,
-      borderColor: focused ? "#8080ff" : "#44446a",
-      ...style
-    };
-    return import_react.default.createElement("view", { _veloxOnMount: onMount, style: inputStyle, width, height, ...props }, import_react.default.createElement("text", {
-      text: displayText,
-      fontSize,
-      width: width - 16,
-      height: height - 16,
-      style: { color: textColor },
-      showCursor: focused,
-      textAlign: "left"
-    }));
-  }
-  function useWindowSize() {
-    const [size, setSize] = import_react.useState(() => {
-      const s = typeof __velox_getWindowSize !== "undefined" ? __velox_getWindowSize() : null;
-      return s ? { width: s.width, height: s.height } : { width: 0, height: 0 };
-    });
-    import_react.useEffect(() => {
-      const handler = (s) => setSize(s);
-      addWindowSizeListener(handler);
-      return () => removeWindowSizeListener(handler);
-    }, []);
-    return size;
-  }
-  function useMediaQuery(minWidth) {
-    const { width } = useWindowSize();
-    return width >= minWidth;
-  }
   var veloxWindow = {
     setFullscreen: (full) => typeof __velox_setFullscreen !== "undefined" && __velox_setFullscreen(full),
     setMaximized: (max) => typeof __velox_setMaximized !== "undefined" && __velox_setMaximized(max),
@@ -6287,1408 +6517,494 @@ No matching component was found for:
     setTitle: (title) => typeof __velox_setTitle !== "undefined" && __velox_setTitle(title)
   };
   var _noBinding = (name) => Promise.reject(new Error(`${name}: binding not available`));
-  var fs = {
-    readFile: (path) => typeof __velox_readFile !== "undefined" ? __velox_readFile(path) : _noBinding("readFile"),
-    writeFile: (path, content) => typeof __velox_writeFile !== "undefined" ? __velox_writeFile(path, content) : _noBinding("writeFile"),
-    appendFile: (path, content) => typeof __velox_appendFile !== "undefined" ? __velox_appendFile(path, content) : _noBinding("appendFile"),
-    listDir: (path) => typeof __velox_listDir !== "undefined" ? __velox_listDir(path).then(JSON.parse) : _noBinding("listDir"),
-    deleteFile: (path) => typeof __velox_deleteFile !== "undefined" ? __velox_deleteFile(path) : _noBinding("deleteFile"),
-    mkdirp: (path) => typeof __velox_mkdirp !== "undefined" ? __velox_mkdirp(path) : _noBinding("mkdirp")
-  };
-  var _defaultHandle = null;
-  function _dbHandle(h) {
-    if (typeof h === "number")
-      return h;
-    if (_defaultHandle !== null)
-      return _defaultHandle;
-    throw new Error("db: no handle provided and no default set (call db.open() first)");
+  function _pollWebSockets() {
+    for (const [id, handlers] of _wsOpenSockets) {
+      let raw;
+      try {
+        raw = __velox_ws_poll(id);
+      } catch {
+        continue;
+      }
+      if (!raw)
+        continue;
+      let msgs;
+      try {
+        msgs = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      for (const m of msgs) {
+        if (m === "__VELOX_WS_CLOSED__") {
+          handlers.onclose?.();
+          _wsOpenSockets.delete(id);
+          break;
+        } else {
+          handlers.onmessage?.({ data: m });
+        }
+      }
+    }
   }
-  var db = {
-    open: (path) => typeof __velox_db_open !== "undefined" ? __velox_db_open(path).then((s) => {
-      const h = Number(s);
-      if (_defaultHandle === null)
-        _defaultHandle = h;
-      return h;
-    }) : _noBinding("db.open"),
-    setDefault: (handle) => {
-      _defaultHandle = handle;
-    },
-    close: (handle) => {
-      const h = handle ?? _defaultHandle;
-      if (h === null || h === undefined)
-        return Promise.resolve();
-      if (_defaultHandle === h)
-        _defaultHandle = null;
-      return typeof __velox_db_close !== "undefined" ? __velox_db_close(h) : _noBinding("db.close");
-    },
-    query: (handleOrSql, sqlOrParams = [], paramsOrUndef = []) => {
-      const isExplicit = typeof handleOrSql === "number";
-      const handle = isExplicit ? handleOrSql : _dbHandle(null);
-      const sql = isExplicit ? sqlOrParams : handleOrSql;
-      const params = isExplicit ? paramsOrUndef : sqlOrParams;
-      return typeof __velox_db_query !== "undefined" ? __velox_db_query(handle, sql, JSON.stringify(params)).then(JSON.parse) : _noBinding("db.query");
-    },
-    run: (handleOrSql, sqlOrParams = [], paramsOrUndef = []) => {
-      const isExplicit = typeof handleOrSql === "number";
-      const handle = isExplicit ? handleOrSql : _dbHandle(null);
-      const sql = isExplicit ? sqlOrParams : handleOrSql;
-      const params = isExplicit ? paramsOrUndef : sqlOrParams;
-      return typeof __velox_db_run !== "undefined" ? __velox_db_run(handle, sql, JSON.stringify(params)).then(JSON.parse) : _noBinding("db.run");
-    },
-    transaction: (handleOrStmts, stmtsOrUndef) => {
-      const isExplicit = typeof handleOrStmts === "number";
-      const handle = isExplicit ? handleOrStmts : _dbHandle(null);
-      const stmts = isExplicit ? stmtsOrUndef : handleOrStmts;
-      return typeof __velox_db_transaction !== "undefined" ? __velox_db_transaction(handle, JSON.stringify(stmts)) : _noBinding("db.transaction");
+  function _pollIpc() {
+    if (typeof __velox_ipc_poll === "undefined")
+      return;
+    let raw;
+    try {
+      raw = __velox_ipc_poll();
+    } catch {
+      return;
     }
-  };
-  var vectorDb = {
-    open: (path) => {
-      if (typeof __velox_vectorDb_open === "undefined")
-        return _noBinding("vectorDb.open");
-      return __velox_vectorDb_open(path).then((s) => {
-        const handle = Number(s);
-        return {
-          upsert(table, id, vector, meta) {
-            const metaStr = meta !== undefined ? JSON.stringify(meta) : "";
-            return __velox_vectorDb_upsert(handle, table, id, JSON.stringify(vector), metaStr);
-          },
-          search(table, queryVector, limit = 10) {
-            return __velox_vectorDb_search(handle, table, JSON.stringify(queryVector), limit).then(JSON.parse);
-          },
-          close() {
-            return __velox_vectorDb_close(handle);
-          }
-        };
-      });
+    if (!raw)
+      return;
+    let msgs;
+    try {
+      msgs = JSON.parse(raw);
+    } catch {
+      return;
     }
-  };
-  var dialog = {
-    openFile({ filters = [], multiple = false } = {}) {
-      if (typeof __velox_dialog_openFile === "undefined")
-        return _noBinding("dialog.openFile");
-      return __velox_dialog_openFile(JSON.stringify(filters), multiple).then(JSON.parse);
-    },
-    saveFile({ defaultName = "", filters = [] } = {}) {
-      if (typeof __velox_dialog_saveFile === "undefined")
-        return _noBinding("dialog.saveFile");
-      return __velox_dialog_saveFile(defaultName, JSON.stringify(filters)).then(JSON.parse);
-    },
-    openFolder() {
-      if (typeof __velox_dialog_openFolder === "undefined")
-        return _noBinding("dialog.openFolder");
-      return __velox_dialog_openFolder().then(JSON.parse);
-    }
-  };
-  var clipboard = {
-    readText() {
-      if (typeof __velox_clipboard_readText === "undefined")
-        return _noBinding("clipboard.readText");
-      return __velox_clipboard_readText();
-    },
-    writeText(text) {
-      if (typeof __velox_clipboard_writeText === "undefined")
-        return _noBinding("clipboard.writeText");
-      return __velox_clipboard_writeText(text);
-    }
-  };
-  var notification = {
-    send({ title, body = "" }) {
-      if (typeof __velox_notification_send === "undefined")
-        return _noBinding("notification.send");
-      return __velox_notification_send(title, body);
-    }
-  };
-
-  // js/packages/@velox/router/src/index.js
-  var import_react2 = __toESM(require_react(), 1);
-  var RouterCtx = import_react2.createContext(null);
-  function Router({ children, initialRoute }) {
-    const routeMap = {};
-    import_react2.Children.forEach(children, (child) => {
-      if (child && child.type === Route) {
-        routeMap[child.props.name] = child.props.component;
+    for (const msg of msgs) {
+      for (const cb of _ipcListeners) {
+        try {
+          cb(msg);
+        } catch {}
       }
-    });
-    const firstName = initialRoute ?? Object.keys(routeMap)[0] ?? null;
-    const [history, setHistory] = import_react2.useState([{ name: firstName, params: {} }]);
-    const navigate = import_react2.useCallback((name, params = {}, opts = {}) => {
-      if (name === "back") {
-        setHistory((h) => h.length > 1 ? h.slice(0, -1) : h);
-      } else if (opts.replace) {
-        setHistory((h) => [...h.slice(0, -1), { name, params }]);
-      } else {
-        setHistory((h) => [...h, { name, params }]);
+    }
+  }
+  var ipc = {
+    send(targetHandle, message) {
+      if (typeof __velox_ipc_send !== "undefined") {
+        __velox_ipc_send(targetHandle, String(message));
       }
-    }, []);
-    const ctx = import_react2.useMemo(() => {
-      const current = history[history.length - 1] ?? { name: null, params: {} };
-      return {
-        routeName: current.name,
-        params: current.params,
-        navigate,
-        canGoBack: history.length > 1,
-        history
+    },
+    on(event, callback) {
+      if (event !== "message")
+        return () => {};
+      _ipcListeners.push(callback);
+      return () => {
+        const idx = _ipcListeners.indexOf(callback);
+        if (idx !== -1)
+          _ipcListeners.splice(idx, 1);
       };
-    }, [history, navigate]);
-    const Screen = ctx.routeName ? routeMap[ctx.routeName] : null;
-    return import_react2.default.createElement(RouterCtx.Provider, { value: ctx }, Screen ? import_react2.default.createElement(Screen) : null);
+    }
+  };
+  veloxWindow.create = function create(opts = {}) {
+    if (typeof __velox_window_create === "undefined")
+      return _noBinding("veloxWindow.create");
+    return __velox_window_create(JSON.stringify(opts)).then((idStr) => {
+      const id = Number(idStr);
+      return {
+        get id() {
+          return id;
+        },
+        send(msg) {
+          ipc.send(id, msg);
+        }
+      };
+    });
+  };
+  veloxWindow.quit = function quit() {
+    if (typeof __velox_quit !== "undefined")
+      __velox_quit();
+  };
+  veloxWindow.restart = function restart() {
+    if (typeof __velox_restart !== "undefined")
+      __velox_restart();
+  };
+  veloxWindow.close = function close() {
+    if (typeof __velox_window_close !== "undefined")
+      __velox_window_close();
+  };
+  var _platformCache = null;
+  veloxWindow.platform = function platform() {
+    if (_platformCache !== null)
+      return _platformCache;
+    _platformCache = typeof __velox_platform !== "undefined" ? __velox_platform() : "unknown";
+    return _platformCache;
+  };
+  veloxWindow.hideSplash = function hideSplash() {
+    if (typeof __velox_splash_hide !== "undefined")
+      __velox_splash_hide();
+  };
+  (function _installCrashHandlers() {
+    function _report(data) {
+      try {
+        if (typeof __velox_crash_report_js !== "undefined") {
+          __velox_crash_report_js(JSON.stringify(data));
+        }
+      } catch (_) {}
+    }
+    const prevOnerror = globalThis.onerror;
+    globalThis.onerror = function(msg, src, line, col, err) {
+      _report({
+        type: "js_error",
+        timestamp: Date.now(),
+        message: String(msg),
+        source: String(src || ""),
+        line: line || 0,
+        col: col || 0,
+        stack: err && err.stack ? String(err.stack) : ""
+      });
+      if (typeof prevOnerror === "function")
+        prevOnerror(msg, src, line, col, err);
+    };
+    const prevUnhandled = globalThis.onunhandledrejection;
+    globalThis.onunhandledrejection = function(event) {
+      const reason = event && event.reason;
+      _report({
+        type: "unhandled_rejection",
+        timestamp: Date.now(),
+        message: reason instanceof Error ? reason.message : String(reason || ""),
+        stack: reason instanceof Error && reason.stack ? String(reason.stack) : ""
+      });
+      if (typeof prevUnhandled === "function")
+        prevUnhandled(event);
+    };
+  })();
+  function _backendCall(cmd, args) {
+    var json = args === undefined ? "{}" : JSON.stringify(args);
+    return __velox_backend_call(cmd, json).then(function(raw) {
+      try {
+        return JSON.parse(raw);
+      } catch (_) {
+        return raw;
+      }
+    });
   }
-  function Route(_props) {
-    return null;
+  function _backendNs(prefix) {
+    return new Proxy(function() {}, {
+      get: function(_, fn) {
+        if (typeof fn !== "string")
+          return;
+        return function(args) {
+          return _backendCall(prefix + "." + fn, args);
+        };
+      },
+      apply: function(_, __, a) {
+        return _backendCall(prefix, a[0]);
+      }
+    });
   }
-  function useNavigate() {
-    const ctx = import_react2.useContext(RouterCtx);
-    if (!ctx)
-      throw new Error("useNavigate must be used inside <Router>");
-    return ctx.navigate;
+  var backend = new Proxy(Object.create(null), {
+    get: function(_, name) {
+      if (typeof name !== "string")
+        return;
+      return _backendNs(name);
+    }
+  });
+  var _RadioCtx = import_react.default.createContext(null);
+  var _videoCallbacks = new Map;
+  function _pollVideo() {
+    const events = JSON.parse(__velox_video_poll());
+    for (const ev of events) {
+      const cbs = _videoCallbacks.get(ev.id);
+      if (!cbs)
+        continue;
+      if (ev.type === "ended" && cbs.onEnded)
+        cbs.onEnded();
+      else if (ev.type === "metadata" && cbs.onMetadata)
+        cbs.onMetadata(ev);
+      else if (ev.type === "timeupdate" && cbs.onTimeUpdate)
+        cbs.onTimeUpdate(ev.currentTime);
+      else if (ev.type === "error" && cbs.onError)
+        cbs.onError(ev.message);
+    }
   }
-  function useRoute() {
-    const ctx = import_react2.useContext(RouterCtx);
-    if (!ctx)
-      throw new Error("useRoute must be used inside <Router>");
-    return { name: ctx.routeName, params: ctx.params, canGoBack: ctx.canGoBack };
+  var video = {
+    async open(url, { onEnded, onMetadata, onTimeUpdate, onError } = {}) {
+      const handleId = parseInt(await __velox_video_open(url));
+      _videoCallbacks.set(handleId, { onEnded, onMetadata, onTimeUpdate, onError });
+      return handleId;
+    },
+    seek(handleId, seconds) {
+      __velox_video_seek(String(handleId), Math.max(0, seconds));
+    },
+    setVolume(handleId, volume) {
+      __velox_video_set_volume(String(handleId), volume);
+    },
+    pause(handleId) {
+      __velox_video_pause(String(handleId));
+    },
+    play(handleId) {
+      __velox_video_play(String(handleId));
+    },
+    close(handleId) {
+      __velox_video_close(String(handleId));
+      _videoCallbacks.delete(handleId);
+    }
+  };
+  var Camera = import_react.default.forwardRef(function Camera2({ mirror, style, ...rest }, ref) {
+    const [cameraHandle, setCameraHandle] = import_react.default.useState(null);
+    import_react.default.useEffect(() => {
+      return () => {
+        if (cameraHandle !== null) {
+          __velox_camera_close(String(cameraHandle));
+        }
+      };
+    }, [cameraHandle]);
+    import_react.default.useImperativeHandle(ref, () => ({
+      get handle() {
+        return cameraHandle;
+      },
+      async start(deviceIndex = 0) {
+        const handle = parseInt(await __velox_camera_open(deviceIndex));
+        setCameraHandle(handle);
+        return handle;
+      },
+      stop() {
+        if (cameraHandle !== null) {
+          __velox_camera_close(String(cameraHandle));
+          setCameraHandle(null);
+        }
+      },
+      async capture() {
+        if (cameraHandle === null)
+          throw new Error("Camera not open");
+        return __velox_camera_capture(String(cameraHandle));
+      },
+      startRecord(outputPath) {
+        if (cameraHandle === null)
+          throw new Error("Camera not open");
+        __velox_camera_record_start(String(cameraHandle), outputPath);
+      },
+      async stopRecord() {
+        if (cameraHandle === null)
+          throw new Error("Camera not open");
+        return __velox_camera_record_stop(String(cameraHandle));
+      }
+    }), [cameraHandle]);
+    return import_react.default.createElement("camera", {
+      cameraHandle,
+      mirror: mirror === true,
+      style,
+      ...rest
+    });
+  });
+  var Video = import_react.default.forwardRef(function Video2({ src, autoPlay = true, loop = false, onEnded, onMetadata, onTimeUpdate, onError, style, ...rest }, ref) {
+    const [videoHandle, setVideoHandle] = import_react.default.useState(null);
+    const currentTimeRef = import_react.default.useRef(0);
+    const durationRef = import_react.default.useRef(-1);
+    import_react.default.useEffect(() => {
+      if (!src)
+        return;
+      let handle = null;
+      let cancelled = false;
+      currentTimeRef.current = 0;
+      durationRef.current = -1;
+      video.open(src, {
+        onEnded: loop ? () => {
+          if (handle !== null)
+            video.seek(handle, 0);
+        } : onEnded,
+        onMetadata: (m) => {
+          durationRef.current = m.durationSecs ?? -1;
+          if (onMetadata)
+            onMetadata(m);
+        },
+        onTimeUpdate: (t) => {
+          currentTimeRef.current = t;
+          if (onTimeUpdate)
+            onTimeUpdate(t);
+        },
+        onError
+      }).then((h) => {
+        if (cancelled) {
+          video.close(h);
+          return;
+        }
+        handle = h;
+        setVideoHandle(h);
+      }).catch((e) => {
+        if (onError)
+          onError(e instanceof Error ? e.message : String(e));
+      });
+      return () => {
+        cancelled = true;
+        if (handle !== null) {
+          video.close(handle);
+          handle = null;
+          setVideoHandle(null);
+        }
+      };
+    }, [src]);
+    import_react.default.useImperativeHandle(ref, () => ({
+      get handle() {
+        return videoHandle;
+      },
+      get currentTime() {
+        return currentTimeRef.current;
+      },
+      get duration() {
+        return durationRef.current;
+      },
+      seek(seconds) {
+        if (videoHandle !== null)
+          video.seek(videoHandle, seconds);
+      },
+      setVolume(vol) {
+        if (videoHandle !== null)
+          video.setVolume(videoHandle, vol);
+      },
+      pause() {
+        if (videoHandle !== null)
+          video.pause(videoHandle);
+      },
+      play() {
+        if (videoHandle !== null)
+          video.play(videoHandle);
+      },
+      close() {
+        if (videoHandle !== null) {
+          video.close(videoHandle);
+          setVideoHandle(null);
+        }
+      }
+    }), [videoHandle]);
+    return import_react.default.createElement("video", { videoHandle, style, ...rest });
+  });
+  function _parseColor(c) {
+    if (Array.isArray(c))
+      return c;
+    if (typeof c === "string" && c.startsWith("#")) {
+      const h = c.slice(1);
+      if (h.length === 3) {
+        const [r, g, b] = h.split("").map((x) => parseInt(x + x, 16));
+        return [r, g, b, 255];
+      }
+      if (h.length === 6) {
+        return [
+          parseInt(h.slice(0, 2), 16),
+          parseInt(h.slice(2, 4), 16),
+          parseInt(h.slice(4, 6), 16),
+          255
+        ];
+      }
+      if (h.length === 8) {
+        return [
+          parseInt(h.slice(0, 2), 16),
+          parseInt(h.slice(2, 4), 16),
+          parseInt(h.slice(4, 6), 16),
+          parseInt(h.slice(6, 8), 16)
+        ];
+      }
+    }
+    return [255, 255, 255, 255];
   }
 
-  // examples/hello-world/js/app.jsx
+  class VeloxCanvasContext {
+    constructor(nativeId) {
+      this._id = nativeId;
+      this._cmds = [];
+      this.fillStyle = [255, 255, 255, 255];
+      this.strokeStyle = [255, 255, 255, 255];
+      this.lineWidth = 1;
+    }
+    clear() {
+      this._cmds = [{ type: "clear" }];
+    }
+    fillRect(x, y, w, h) {
+      this._cmds.push({ type: "fillRect", x, y, w, h, color: _parseColor(this.fillStyle) });
+    }
+    strokeRect(x, y, w, h) {
+      this._cmds.push({ type: "strokeRect", x, y, w, h, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+    }
+    fillCircle(cx, cy, r) {
+      this._cmds.push({ type: "fillCircle", cx, cy, r, color: _parseColor(this.fillStyle) });
+    }
+    strokeCircle(cx, cy, r) {
+      this._cmds.push({ type: "strokeCircle", cx, cy, r, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+    }
+    strokeLine(x0, y0, x1, y1) {
+      this._cmds.push({ type: "strokeLine", x0, y0, x1, y1, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+    }
+    fillText(text, x, y, fontSize = 16) {
+      this._cmds.push({ type: "fillText", text: String(text), x, y, fontSize, color: _parseColor(this.fillStyle) });
+    }
+    flush() {
+      if (typeof __velox_canvas_update === "undefined")
+        return;
+      try {
+        __velox_canvas_update(this._id, JSON.stringify(this._cmds));
+      } catch (e) {
+        __velox_log("[canvas] flush error: " + e);
+      }
+      this._cmds = [];
+    }
+  }
+  var Canvas = import_react.default.forwardRef(function Canvas2({ style, ...props }, ref) {
+    const ctxRef = import_react.useRef(null);
+    const nativeId = import_react.useRef(null);
+    const onMount = import_react.useCallback((id) => {
+      nativeId.current = id;
+      const ctx = new VeloxCanvasContext(id);
+      ctxRef.current = ctx;
+      if (ref) {
+        if (typeof ref === "function")
+          ref(ctx);
+        else
+          ref.current = ctx;
+      }
+    }, [ref]);
+    return import_react.default.createElement("canvas", {
+      _veloxOnMount: onMount,
+      style,
+      ...props
+    });
+  });
+
+  class VeloxCanvas3DContext {
+    constructor(nativeId) {
+      this._id = nativeId;
+    }
+    updateScene(scene) {
+      if (typeof __velox_canvas3d_update === "undefined")
+        return;
+      try {
+        __velox_canvas3d_update(this._id, JSON.stringify(scene));
+      } catch (e) {
+        __velox_log("[canvas3d] updateScene error: " + e);
+      }
+    }
+    loadGltf(path) {
+      if (typeof __velox_canvas3d_load_gltf === "undefined")
+        return;
+      try {
+        __velox_canvas3d_load_gltf(this._id, path);
+      } catch (e) {
+        __velox_log("[canvas3d] loadGltf error: " + e);
+      }
+    }
+  }
+  var Canvas3D = import_react.default.forwardRef(function Canvas3D2({ style, ...props }, ref) {
+    const onMount = import_react.useCallback((id) => {
+      const ctx = new VeloxCanvas3DContext(id);
+      if (ref) {
+        if (typeof ref === "function")
+          ref(ctx);
+        else
+          ref.current = ctx;
+      }
+    }, [ref]);
+    return import_react.default.createElement("canvas3d", {
+      _veloxOnMount: onMount,
+      style,
+      ...props
+    });
+  });
+
+  // js/app.jsx
   var jsx_runtime = __toESM(require_jsx_runtime(), 1);
-  var HEADER_H = 48;
-  var PAD = 16;
-  var ITEM_H = 44;
-  var ITEM_GAP = 8;
-  var SV_PAD = 8;
-  var PALETTE = [
-    { name: "Rosewater", bg: "#dc8a78", fg: "#1e1e2e" },
-    { name: "Flamingo", bg: "#dd7878", fg: "#1e1e2e" },
-    { name: "Pink", bg: "#ea76cb", fg: "#1e1e2e" },
-    { name: "Mauve", bg: "#8839ef", fg: "#ffffff" },
-    { name: "Red", bg: "#d20f39", fg: "#ffffff" },
-    { name: "Maroon", bg: "#e64553", fg: "#ffffff" },
-    { name: "Peach", bg: "#fe640b", fg: "#1e1e2e" },
-    { name: "Yellow", bg: "#df8e1d", fg: "#1e1e2e" },
-    { name: "Green", bg: "#40a02b", fg: "#ffffff" },
-    { name: "Teal", bg: "#179299", fg: "#ffffff" },
-    { name: "Sky", bg: "#04a5e5", fg: "#1e1e2e" },
-    { name: "Sapphire", bg: "#209fb5", fg: "#1e1e2e" },
-    { name: "Blue", bg: "#1e66f5", fg: "#ffffff" },
-    { name: "Lavender", bg: "#7287fd", fg: "#ffffff" }
-  ];
-  function SmallBtn({ label, onPress, width: w = 118 }) {
-    return /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-      onPress,
-      width: w,
-      height: 32,
-      style: { backgroundColor: "#313244", borderRadius: 6, borderWidth: 1, borderColor: "#44446a" },
-      children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-        fontSize: 11,
-        width: w - 20,
-        height: 18,
-        style: { color: "#cdd6f4" },
-        children: label
-      })
-    });
-  }
-  function WinBtn({ label, onPress, active = false }) {
-    return /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-      onPress,
-      width: 96,
-      height: 30,
-      style: { backgroundColor: active ? "#6c63ff" : "#313244", borderRadius: 6 },
-      children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-        fontSize: 12,
-        width: 80,
-        height: 18,
-        style: { color: "#cdd6f4" },
-        children: label
-      })
-    });
-  }
-  function BackBtn({ label = "← Back" }) {
-    const navigate = useNavigate();
-    return /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-      onPress: () => navigate("back"),
-      width: 90,
-      height: 30,
-      style: { backgroundColor: "#313244", borderRadius: 6 },
-      children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-        fontSize: 12,
-        width: 74,
-        height: 18,
-        style: { color: "#cdd6f4" },
-        children: label
-      })
-    });
-  }
-  function DataScreen() {
-    const { width: winW, height: winH } = useWindowSize();
-    const navigate = useNavigate();
-    const [noteText, setNoteText] = import_react3.useState("");
-    const [loadedNote, setLoadedNote] = import_react3.useState("");
-    const [fileList, setFileList] = import_react3.useState([]);
-    const [itemName, setItemName] = import_react3.useState("");
-    const [dbItems, setDbItems] = import_react3.useState([]);
-    const [dbReady, setDbReady] = import_react3.useState(false);
-    const [status, setStatus] = import_react3.useState("Initialising…");
-    import_react3.useEffect(() => {
-      db.open("velox_demo.db").then(async () => {
-        await db.run("CREATE TABLE IF NOT EXISTS items " + "(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)");
-        const rows = await db.query("SELECT * FROM items ORDER BY id DESC");
-        setDbItems(rows);
-        setDbReady(true);
-        setStatus("DB ready. Try writing a note or adding an item.");
-      }).catch((e) => setStatus("DB error: " + e.message));
-    }, []);
-    const saveNote = () => fs.writeFile("velox-note.txt", noteText).then(() => setStatus("Note saved to velox-note.txt")).catch((e) => setStatus("Save error: " + e.message));
-    const loadNote = () => fs.readFile("velox-note.txt").then((t) => {
-      setLoadedNote(t);
-      setStatus("Note loaded.");
-    }).catch((e) => setStatus("Load error: " + e.message));
-    const listFiles = () => fs.listDir(".").then((entries) => {
-      setFileList(entries.slice(0, 10));
-      setStatus(`${entries.length} entries in working dir`);
-    }).catch((e) => setStatus("List error: " + e.message));
-    const addItem = () => {
-      if (!itemName.trim())
-        return;
-      db.run("INSERT INTO items (name) VALUES (?)", [itemName.trim()]).then(() => db.query("SELECT * FROM items ORDER BY id DESC")).then((rows) => {
-        setDbItems(rows);
-        setItemName("");
-        setStatus("Item added.");
-      }).catch((e) => setStatus("Insert error: " + e.message));
-    };
-    const refreshItems = () => db.query("SELECT * FROM items ORDER BY id DESC").then((rows) => {
-      setDbItems(rows);
-      setStatus(`${rows.length} items loaded.`);
-    }).catch((e) => setStatus("Query error: " + e.message));
-    const clearItems = () => db.transaction([{ sql: "DELETE FROM items", params: [] }]).then(() => {
-      setDbItems([]);
-      setStatus("All items deleted.");
-    }).catch((e) => setStatus("Clear error: " + e.message));
-    const contentW = winW - 2 * PAD;
-    const contentH = winH - HEADER_H - 2 * PAD;
-    const inner = contentW - 32;
-    const svH = contentH - 70;
-    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
-      style: {
-        backgroundColor: "#2a2a3e",
-        borderRadius: 16,
-        borderWidth: 1,
-        borderColor: "#44446a",
-        padding: 16,
-        gap: 8,
-        justifyContent: "flex-start",
-        alignItems: "flex-start"
-      },
-      width: contentW,
-      height: contentH,
-      children: [
-        /* @__PURE__ */ jsx_runtime.jsxs(View, {
-          style: { flexDirection: "row", gap: 12, alignItems: "flex-start" },
-          width: inner,
-          height: 32,
-          children: [
-            /* @__PURE__ */ jsx_runtime.jsx(BackBtn, {}),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 14,
-              width: inner - 110,
-              height: 20,
-              style: { color: "#cdd6f4" },
-              children: "Week 18 — File System + SQLite"
-            })
-          ]
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(Text, {
-          fontSize: 11,
-          width: inner,
-          height: 16,
-          style: { color: "#a6e3a1" },
-          children: status
-        }),
-        /* @__PURE__ */ jsx_runtime.jsxs(ScrollView, {
-          width: inner,
-          height: svH,
-          contentHeight: 800,
-          style: { gap: 10, padding: 4 },
-          children: [
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 13,
-              width: inner,
-              height: 20,
-              style: { color: "#89b4fa" },
-              children: "File System  (fs.write + fs.read)"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
-              value: noteText,
-              onChangeText: setNoteText,
-              placeholder: "Type a note to save…",
-              fontSize: 13,
-              width: inner,
-              height: 40
-            }),
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
-              width: inner,
-              height: 34,
-              children: [
-                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-                  label: "Save Note",
-                  onPress: saveNote
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-                  label: "Load Note",
-                  onPress: loadNote
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-                  label: "List Dir",
-                  onPress: listFiles
-                })
-              ]
-            }),
-            loadedNote ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 12,
-              width: inner,
-              style: { color: "#a6adc8" },
-              children: "Loaded: " + loadedNote
-            }) : null,
-            fileList.map((e, i) => /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 11,
-              width: inner,
-              height: 15,
-              style: { color: "#6c7086" },
-              children: (e.isDir ? "▸ " : "  ") + e.name
-            }, i)),
-            /* @__PURE__ */ jsx_runtime.jsx(View, {
-              style: { backgroundColor: "#44446a" },
-              width: inner,
-              height: 1
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 13,
-              width: inner,
-              height: 20,
-              style: { color: "#89b4fa" },
-              children: dbReady ? "SQLite  (velox_demo.db)" : "SQLite — opening…"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
-              value: itemName,
-              onChangeText: setItemName,
-              placeholder: "Item name…",
-              fontSize: 13,
-              width: inner,
-              height: 40
-            }),
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
-              width: inner,
-              height: 34,
-              children: [
-                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-                  label: "Add Item",
-                  onPress: addItem
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-                  label: "Refresh",
-                  onPress: refreshItems
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-                  label: "Clear All",
-                  onPress: clearItems
-                })
-              ]
-            }),
-            dbItems.length === 0 ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 11,
-              width: inner,
-              height: 16,
-              style: { color: "#45475a" },
-              children: dbReady ? "No items yet — add one above." : ""
-            }) : null,
-            dbItems.map((row, i) => /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 12,
-              width: inner,
-              height: 18,
-              style: { color: "#cdd6f4" },
-              children: "#" + row.id + "   " + row.name
-            }, i)),
-            /* @__PURE__ */ jsx_runtime.jsx(View, {
-              style: { backgroundColor: "#44446a" },
-              width: inner,
-              height: 1
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 11,
-              width: inner,
-              style: { color: "#45475a" },
-              children: `"Clear All" uses db.transaction([{sql, params}]) — atomic batch.
-` + `"Add Item" / "Refresh" use db.run() / db.query() without a handle
-` + "(default set automatically by the first db.open() call)."
-            })
-          ]
-        })
-      ]
-    });
-  }
-  function hexToVec(hex) {
-    return [
-      parseInt(hex.slice(1, 3), 16) / 255,
-      parseInt(hex.slice(3, 5), 16) / 255,
-      parseInt(hex.slice(5, 7), 16) / 255
-    ];
-  }
-  function VectorDbScreen() {
-    const { width: winW, height: winH } = useWindowSize();
-    const [status, setStatus] = import_react3.useState("Opening vector store…");
-    const [vdb, setVdb] = import_react3.useState(null);
-    const [queryR, setQueryR] = import_react3.useState("220");
-    const [queryG, setQueryG] = import_react3.useState("80");
-    const [queryB, setQueryB] = import_react3.useState("60");
-    const [results, setResults] = import_react3.useState([]);
-    const contentW = winW - 2 * PAD;
-    const contentH = winH - HEADER_H - 2 * PAD;
-    const inner = contentW - 32;
-    const svH = contentH - 72;
-    import_react3.useEffect(() => {
-      let store;
-      vectorDb.open(":memory:").then((s) => {
-        store = s;
-        return Promise.all(PALETTE.map(({ name, bg }) => store.upsert("colors", name, hexToVec(bg), { hex: bg })));
-      }).then(() => {
-        setVdb(store);
-        setStatus("Ready — enter RGB (0–255) and press Find Nearest.");
-      }).catch((e) => setStatus("Error: " + e.message));
-    }, []);
-    const search = () => {
-      if (!vdb)
-        return;
-      const r = Math.max(0, Math.min(255, parseInt(queryR) || 0)) / 255;
-      const g = Math.max(0, Math.min(255, parseInt(queryG) || 0)) / 255;
-      const b = Math.max(0, Math.min(255, parseInt(queryB) || 0)) / 255;
-      vdb.search("colors", [r, g, b], 5).then((hits) => {
-        setResults(hits);
-        setStatus("Top-" + hits.length + " nearest colours by cosine similarity.");
-      }).catch((e) => setStatus("Search error: " + e.message));
-    };
-    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
-      style: {
-        backgroundColor: "#2a2a3e",
-        borderRadius: 16,
-        borderWidth: 1,
-        borderColor: "#44446a",
-        padding: 16,
-        gap: 8,
-        justifyContent: "flex-start",
-        alignItems: "flex-start"
-      },
-      width: contentW,
-      height: contentH,
-      children: [
-        /* @__PURE__ */ jsx_runtime.jsxs(View, {
-          style: { flexDirection: "row", gap: 12, alignItems: "flex-start" },
-          width: inner,
-          height: 32,
-          children: [
-            /* @__PURE__ */ jsx_runtime.jsx(BackBtn, {}),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 14,
-              width: inner - 110,
-              height: 20,
-              style: { color: "#cdd6f4" },
-              children: "Week 19 — Vector Database"
-            })
-          ]
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(Text, {
-          fontSize: 11,
-          width: inner,
-          height: 16,
-          style: { color: "#a6e3a1" },
-          children: status
-        }),
-        /* @__PURE__ */ jsx_runtime.jsxs(ScrollView, {
-          width: inner,
-          height: svH,
-          contentHeight: 560,
-          style: { gap: 10, padding: 4 },
-          children: [
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 13,
-              width: inner,
-              height: 20,
-              style: { color: "#89b4fa" },
-              children: "Nearest-colour search  (cosine similarity on RGB vectors)"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 11,
-              width: inner,
-              style: { color: "#a6adc8" },
-              children: `14 Catppuccin colours seeded as 3-D RGB unit vectors.
-` + "Enter an RGB value (0–255) to find the nearest matches."
-            }),
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
-              width: inner,
-              height: 36,
-              children: [
-                /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
-                  value: queryR,
-                  onChangeText: setQueryR,
-                  placeholder: "R",
-                  fontSize: 13,
-                  width: 80,
-                  height: 36
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
-                  value: queryG,
-                  onChangeText: setQueryG,
-                  placeholder: "G",
-                  fontSize: 13,
-                  width: 80,
-                  height: 36
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
-                  value: queryB,
-                  onChangeText: setQueryB,
-                  placeholder: "B",
-                  fontSize: 13,
-                  width: 80,
-                  height: 36
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-                  label: "Find Nearest",
-                  onPress: search,
-                  width: 120
-                })
-              ]
-            }),
-            results.length > 0 ? /* @__PURE__ */ jsx_runtime.jsx(View, {
-              style: { gap: 6, alignItems: "flex-start" },
-              width: inner,
-              height: results.length * 38,
-              children: results.map((hit, i) => /* @__PURE__ */ jsx_runtime.jsxs(View, {
-                style: {
-                  flexDirection: "row",
-                  gap: 10,
-                  alignItems: "flex-start",
-                  backgroundColor: "#1e1e2e",
-                  borderRadius: 6,
-                  padding: 8,
-                  borderWidth: 1,
-                  borderColor: "#313244"
-                },
-                width: inner,
-                height: 30,
-                children: [
-                  /* @__PURE__ */ jsx_runtime.jsx(View, {
-                    style: { backgroundColor: hit.metadata?.hex ?? "#888", borderRadius: 4 },
-                    width: 16,
-                    height: 16
-                  }),
-                  /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                    fontSize: 13,
-                    width: 110,
-                    height: 18,
-                    style: { color: "#cdd6f4" },
-                    children: hit.id
-                  }),
-                  /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                    fontSize: 12,
-                    width: 80,
-                    height: 18,
-                    style: { color: "#6c7086" },
-                    children: hit.metadata?.hex ?? ""
-                  }),
-                  /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                    fontSize: 12,
-                    width: 70,
-                    height: 18,
-                    style: { color: "#a6e3a1" },
-                    children: (hit.score * 100).toFixed(1) + "%"
-                  })
-                ]
-              }, i))
-            }) : null,
-            /* @__PURE__ */ jsx_runtime.jsx(View, {
-              style: { backgroundColor: "#44446a" },
-              width: inner,
-              height: 1
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 11,
-              width: inner,
-              style: { color: "#45475a" },
-              children: `vectorDb.open(":memory:")  — ephemeral in-process store
-` + `store.upsert(table, id, vector, metadata)
-` + `store.search(table, queryVec, limit) → [{id, score, metadata}]
-` + "Backed by SQLite BLOB + brute-force cosine similarity (Rust)."
-            })
-          ]
-        })
-      ]
-    });
-  }
-  function HomeScreen() {
-    const { width: winW, height: winH } = useWindowSize();
-    const isWide = useMediaQuery(900);
-    const navigate = useNavigate();
-    const [name, setName] = import_react3.useState("");
-    const [greeted, setGreeted] = import_react3.useState(false);
-    const contentW = winW - 2 * PAD;
-    const contentH = winH - HEADER_H - 2 * PAD;
-    const GAP = 20;
-    const leftW = isWide ? Math.floor(contentW * 0.44) : contentW;
-    const rightW = isWide ? contentW - leftW - GAP : contentW;
-    const leftH = isWide ? contentH : Math.floor(contentH * 0.55);
-    const rightH = isWide ? contentH : Math.floor(contentH * 0.42);
-    const leftIn = leftW - 48;
-    const rightIn = rightW - 32;
-    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
-      style: {
-        flexDirection: isWide ? "row" : "column",
-        gap: isWide ? GAP : 12,
-        justifyContent: "flex-start",
-        alignItems: "flex-start"
-      },
-      width: contentW,
-      height: contentH,
-      children: [
-        /* @__PURE__ */ jsx_runtime.jsxs(View, {
-          style: {
-            backgroundColor: "#2a2a3e",
-            borderRadius: 16,
-            borderWidth: 1,
-            borderColor: "#44446a",
-            padding: 24,
-            gap: 14,
-            justifyContent: "flex-start",
-            alignItems: "flex-start"
-          },
-          width: leftW,
-          height: leftH,
-          children: [
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 15,
-              width: leftIn,
-              height: 24,
-              style: { color: "#cdd6f4" },
-              children: "Week 17B — Named-Route Router"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 12,
-              width: leftIn,
-              style: { color: "#a6adc8" },
-              children: isWide ? "Three screens: Home → Palette → Colour Detail. Navigate with the button below." : "Narrow layout. Widen past 900 px for two columns."
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(View, {
-              style: { backgroundColor: "#44446a" },
-              width: leftIn,
-              height: 1
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
-              value: name,
-              onChangeText: (t) => {
-                setName(t);
-                setGreeted(false);
-              },
-              placeholder: "Type your name...",
-              fontSize: 15,
-              width: leftIn,
-              height: 44
-            }),
-            greeted ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 16,
-              width: leftIn,
-              style: { color: "#a6e3a1" },
-              children: name.trim() ? `Hello, ${name}!` : "Hello, stranger!"
-            }) : /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 12,
-              width: leftIn,
-              style: { color: "#585b70" },
-              children: "Hover the button, then press it."
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-              onPress: () => setGreeted(true),
-              width: 140,
-              height: 40,
-              style: { backgroundColor: "#6c63ff", borderRadius: 8 },
-              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                fontSize: 14,
-                width: 120,
-                height: 22,
-                style: { color: "#ffffff" },
-                children: "Say Hello"
-              })
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(View, {
-              style: { backgroundColor: "#44446a" },
-              width: leftIn,
-              height: 1
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-              onPress: () => navigate("palette"),
-              width: leftIn,
-              height: 40,
-              style: {
-                backgroundColor: "#313244",
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: "#44446a"
-              },
-              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                fontSize: 13,
-                width: leftIn - 20,
-                height: 20,
-                style: { color: "#cdd6f4" },
-                children: "View Colour Palette →"
-              })
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-              onPress: () => navigate("data"),
-              width: leftIn,
-              height: 40,
-              style: {
-                backgroundColor: "#1a2a3e",
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: "#2a4a6e"
-              },
-              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                fontSize: 13,
-                width: leftIn - 20,
-                height: 20,
-                style: { color: "#89b4fa" },
-                children: "File System + SQLite Demo →"
-              })
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-              onPress: () => navigate("vectorDb"),
-              width: leftIn,
-              height: 40,
-              style: {
-                backgroundColor: "#1e2a1e",
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: "#2a6e3a"
-              },
-              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                fontSize: 13,
-                width: leftIn - 20,
-                height: 20,
-                style: { color: "#a6e3a1" },
-                children: "Vector Database Demo →"
-              })
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-              onPress: () => navigate("os"),
-              width: leftIn,
-              height: 40,
-              style: {
-                backgroundColor: "#2a1e2a",
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: "#6e2a6e"
-              },
-              children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                fontSize: 13,
-                width: leftIn - 20,
-                height: 20,
-                style: { color: "#cba6f7" },
-                children: "OS Integration Demo →"
-              })
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Image, {
-              src: "C:/myweb/Apps/velox_project/sample.png",
-              width: leftIn,
-              height: Math.min(160, Math.floor(leftIn * 0.5)),
-              resizeMode: "cover",
-              style: { borderRadius: 8 }
-            })
-          ]
-        }),
-        isWide && /* @__PURE__ */ jsx_runtime.jsxs(View, {
-          style: {
-            backgroundColor: "#2a2a3e",
-            borderRadius: 16,
-            borderWidth: 1,
-            borderColor: "#44446a",
-            padding: 24,
-            gap: 14,
-            justifyContent: "flex-start",
-            alignItems: "flex-start"
-          },
-          width: rightW,
-          height: rightH,
-          children: [
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 14,
-              width: rightIn,
-              height: 20,
-              style: { color: "#cdd6f4" },
-              children: "@velox/router"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 12,
-              width: rightIn,
-              style: { color: "#a6adc8" },
-              children: `Named-route history stack — no URL bar needed.
-Pure React state, zero Rust changes.`
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(View, {
-              style: { backgroundColor: "#44446a" },
-              width: rightIn,
-              height: 1
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 12,
-              width: rightIn,
-              style: { color: "#6c7086" },
-              children: 'navigate("palette")'
-            }),
-            /* @__PURE__ */ jsx_runtime.jsxs(Text, {
-              fontSize: 12,
-              width: rightIn,
-              style: { color: "#6c7086" },
-              children: [
-                'navigate("colorDetail", ',
-                "{ bg, fg, name }",
-                ")",
-                `
-`
-              ]
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 12,
-              width: rightIn,
-              style: { color: "#6c7086" },
-              children: 'navigate("back")'
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(View, {
-              style: { backgroundColor: "#44446a" },
-              width: rightIn,
-              height: 1
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 11,
-              width: rightIn,
-              style: { color: "#45475a" },
-              children: `Router holds history as React state.
-Each navigate() call triggers a
-normal React re-render — no magic.`
-            })
-          ]
-        })
-      ]
-    });
-  }
-  function PaletteScreen() {
-    const { width: winW, height: winH } = useWindowSize();
-    const navigate = useNavigate();
-    const contentW = winW - 2 * PAD;
-    const contentH = winH - HEADER_H - 2 * PAD;
-    const inner = contentW - 32;
-    const svH = Math.max(120, contentH - 90);
-    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
-      style: {
-        backgroundColor: "#2a2a3e",
-        borderRadius: 16,
-        borderWidth: 1,
-        borderColor: "#44446a",
-        padding: 16,
-        gap: 10,
-        justifyContent: "flex-start",
-        alignItems: "flex-start"
-      },
-      width: contentW,
-      height: contentH,
-      children: [
-        /* @__PURE__ */ jsx_runtime.jsxs(View, {
-          style: {
-            flexDirection: "row",
-            gap: 12,
-            alignItems: "flex-start",
-            justifyContent: "flex-start"
-          },
-          width: inner,
-          height: 30,
-          children: [
-            /* @__PURE__ */ jsx_runtime.jsx(BackBtn, {}),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 14,
-              width: inner - 110,
-              height: 20,
-              style: { color: "#cdd6f4" },
-              children: "Catppuccin Palette"
-            })
-          ]
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
-          width: inner,
-          height: svH,
-          contentHeight: PALETTE.length * ITEM_H + (PALETTE.length - 1) * ITEM_GAP + 2 * SV_PAD,
-          style: {
-            gap: ITEM_GAP,
-            padding: SV_PAD,
-            backgroundColor: "#1a1a2e",
-            borderRadius: 8
-          },
-          children: PALETTE.map((item, i) => /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-            onPress: () => navigate("colorDetail", { name: item.name, bg: item.bg, fg: item.fg }),
-            width: inner - 16,
-            height: ITEM_H,
-            style: { backgroundColor: item.bg, borderRadius: 6 },
-            children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 13,
-              width: inner - 48,
-              height: 20,
-              style: { color: item.fg },
-              children: item.name
-            })
-          }, i))
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(Text, {
-          fontSize: 11,
-          width: inner,
-          style: { color: "#45475a" },
-          children: "Tap a colour to navigate to its detail screen (params demo)."
-        })
-      ]
-    });
-  }
-  function ColorDetailScreen() {
-    const { width: winW, height: winH } = useWindowSize();
-    const { params } = useRoute();
-    const navigate = useNavigate();
-    const contentW = winW - 2 * PAD;
-    const contentH = winH - HEADER_H - 2 * PAD;
-    const inner = contentW - 64;
-    const bg = params.bg ?? "#313244";
-    const fg = params.fg ?? "#cdd6f4";
-    const name = params.name ?? "Unknown";
-    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
-      style: {
-        backgroundColor: bg,
-        borderRadius: 16,
-        borderWidth: 2,
-        borderColor: fg + "33",
-        padding: 32,
-        gap: 20,
-        justifyContent: "flex-start",
-        alignItems: "flex-start"
-      },
-      width: contentW,
-      height: contentH,
-      children: [
-        /* @__PURE__ */ jsx_runtime.jsx(Text, {
-          fontSize: 32,
-          width: inner,
-          height: 44,
-          style: { color: fg },
-          children: name
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(View, {
-          style: { backgroundColor: fg + "22" },
-          width: inner,
-          height: 1
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(Text, {
-          fontSize: 15,
-          width: inner,
-          height: 24,
-          style: { color: fg },
-          children: `Background  ${bg}`
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(Text, {
-          fontSize: 15,
-          width: inner,
-          height: 24,
-          style: { color: fg },
-          children: `Foreground   ${fg}`
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(Text, {
-          fontSize: 12,
-          width: inner,
-          style: { color: fg + "aa" },
-          children: `Params were passed via navigate().
-useRoute().params gives them back here.`
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(View, {
-          style: { backgroundColor: fg + "22" },
-          width: inner,
-          height: 1
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-          onPress: () => navigate("back"),
-          width: 130,
-          height: 40,
-          style: {
-            backgroundColor: "#00000033",
-            borderRadius: 8,
-            borderWidth: 1,
-            borderColor: fg + "55"
-          },
-          children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-            fontSize: 13,
-            width: 110,
-            height: 20,
-            style: { color: fg },
-            children: "← Back to Palette"
-          })
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-          onPress: () => navigate("home"),
-          width: 130,
-          height: 40,
-          style: {
-            backgroundColor: "#00000033",
-            borderRadius: 8,
-            borderWidth: 1,
-            borderColor: fg + "33"
-          },
-          children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-            fontSize: 13,
-            width: 110,
-            height: 20,
-            style: { color: fg + "aa" },
-            children: "⌂ Go Home"
-          })
-        })
-      ]
-    });
-  }
-  function OsScreen() {
-    const { width: winW, height: winH } = useWindowSize();
-    const [pickedPath, setPickedPath] = import_react3.useState("");
-    const [savedPath, setSavedPath] = import_react3.useState("");
-    const [folderPath, setFolderPath] = import_react3.useState("");
-    const [clipText, setClipText] = import_react3.useState("Hello from Velox!");
-    const [notifTitle, setNotifTitle] = import_react3.useState("Velox");
-    const [notifBody, setNotifBody] = import_react3.useState("Week 20 — OS integration works!");
-    const [winTitle, setWinTitle] = import_react3.useState("Velox — Hello World");
-    const [alwaysOnTop, setAlwaysOnTop] = import_react3.useState(false);
-    const [status, setStatus] = import_react3.useState("Ready.");
-    const contentW = winW - 2 * PAD;
-    const contentH = winH - HEADER_H - 2 * PAD;
-    const inner = contentW - 32;
-    const svH = contentH - 72;
-    const st = (msg) => setStatus(msg);
-    const openFile = () => dialog.openFile({ filters: [{ name: "All Files", extensions: ["*"] }] }).then((p) => {
-      setPickedPath(p ?? "(cancelled)");
-      st("File dialog closed.");
-    }).catch((e) => st("Dialog error: " + e.message));
-    const saveFile = () => dialog.saveFile({ defaultName: "untitled.txt", filters: [{ name: "Text", extensions: ["txt"] }] }).then((p) => {
-      setSavedPath(p ?? "(cancelled)");
-      st("Save dialog closed.");
-    }).catch((e) => st("Dialog error: " + e.message));
-    const openFolder = () => dialog.openFolder().then((p) => {
-      setFolderPath(p ?? "(cancelled)");
-      st("Folder dialog closed.");
-    }).catch((e) => st("Dialog error: " + e.message));
-    const writeClip = () => clipboard.writeText(clipText).then(() => st("Copied to clipboard.")).catch((e) => st("Clipboard error: " + e.message));
-    const readClip = () => clipboard.readText().then((t) => {
-      setClipText(t);
-      st("Pasted from clipboard.");
-    }).catch((e) => st("Clipboard error: " + e.message));
-    const sendNotif = () => notification.send({ title: notifTitle, body: notifBody }).then(() => st("Notification sent.")).catch((e) => st("Notification error: " + e.message));
-    const applyTitle = () => {
-      veloxWindow.setTitle(winTitle);
-      st("Window title updated.");
-    };
-    const toggleOnTop = () => {
-      const next = !alwaysOnTop;
-      veloxWindow.setAlwaysOnTop(next);
-      setAlwaysOnTop(next);
-      st(next ? "Window pinned on top." : "Normal window level restored.");
-    };
-    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
-      style: {
-        backgroundColor: "#2a2a3e",
-        borderRadius: 16,
-        borderWidth: 1,
-        borderColor: "#44446a",
-        padding: 16,
-        gap: 8,
-        justifyContent: "flex-start",
-        alignItems: "flex-start"
-      },
-      width: contentW,
-      height: contentH,
-      children: [
-        /* @__PURE__ */ jsx_runtime.jsxs(View, {
-          style: { flexDirection: "row", gap: 12, alignItems: "flex-start" },
-          width: inner,
-          height: 32,
-          children: [
-            /* @__PURE__ */ jsx_runtime.jsx(BackBtn, {}),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 14,
-              width: inner - 110,
-              height: 20,
-              style: { color: "#cdd6f4" },
-              children: "Week 20 — OS Integration"
-            })
-          ]
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(Text, {
-          fontSize: 11,
-          width: inner,
-          height: 16,
-          style: { color: "#a6e3a1" },
-          children: status
-        }),
-        /* @__PURE__ */ jsx_runtime.jsxs(ScrollView, {
-          width: inner,
-          height: svH,
-          contentHeight: 700,
-          style: { gap: 10, padding: 4 },
-          children: [
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 13,
-              width: inner,
-              height: 20,
-              style: { color: "#89b4fa" },
-              children: "File Dialogs  (dialog.openFile / saveFile / openFolder)"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
-              width: inner,
-              height: 34,
-              children: [
-                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-                  label: "Open File",
-                  onPress: openFile
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-                  label: "Save File",
-                  onPress: saveFile
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-                  label: "Open Folder",
-                  onPress: openFolder
-                })
-              ]
-            }),
-            pickedPath ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 11,
-              width: inner,
-              height: 15,
-              style: { color: "#a6adc8" },
-              children: "Open: " + pickedPath
-            }) : null,
-            savedPath ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 11,
-              width: inner,
-              height: 15,
-              style: { color: "#a6adc8" },
-              children: "Save: " + savedPath
-            }) : null,
-            folderPath ? /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 11,
-              width: inner,
-              height: 15,
-              style: { color: "#a6adc8" },
-              children: "Folder: " + folderPath
-            }) : null,
-            /* @__PURE__ */ jsx_runtime.jsx(View, {
-              style: { backgroundColor: "#44446a" },
-              width: inner,
-              height: 1
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 13,
-              width: inner,
-              height: 20,
-              style: { color: "#89b4fa" },
-              children: "Clipboard  (clipboard.writeText / readText)"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
-              value: clipText,
-              onChangeText: setClipText,
-              placeholder: "Text to copy…",
-              fontSize: 13,
-              width: inner,
-              height: 36
-            }),
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
-              width: inner,
-              height: 34,
-              children: [
-                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-                  label: "Copy",
-                  onPress: writeClip
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-                  label: "Paste",
-                  onPress: readClip
-                })
-              ]
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(View, {
-              style: { backgroundColor: "#44446a" },
-              width: inner,
-              height: 1
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 13,
-              width: inner,
-              height: 20,
-              style: { color: "#89b4fa" },
-              children: "Notifications  (notification.send)"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
-              value: notifTitle,
-              onChangeText: setNotifTitle,
-              placeholder: "Title…",
-              fontSize: 13,
-              width: inner,
-              height: 36
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
-              value: notifBody,
-              onChangeText: setNotifBody,
-              placeholder: "Body…",
-              fontSize: 13,
-              width: inner,
-              height: 36
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-              label: "Send Notification",
-              onPress: sendNotif,
-              width: 160
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(View, {
-              style: { backgroundColor: "#44446a" },
-              width: inner,
-              height: 1
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 13,
-              width: inner,
-              height: 20,
-              style: { color: "#89b4fa" },
-              children: "Window  (veloxWindow.setTitle / setAlwaysOnTop)"
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(TextInput, {
-              value: winTitle,
-              onChangeText: setWinTitle,
-              placeholder: "Window title…",
-              fontSize: 13,
-              width: inner,
-              height: 36
-            }),
-            /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              style: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
-              width: inner,
-              height: 34,
-              children: [
-                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-                  label: "Set Title",
-                  onPress: applyTitle
-                }),
-                /* @__PURE__ */ jsx_runtime.jsx(SmallBtn, {
-                  label: alwaysOnTop ? "Unpin Window" : "Always on Top",
-                  onPress: toggleOnTop
-                })
-              ]
-            })
-          ]
-        })
-      ]
-    });
-  }
   function App() {
-    const { width: winW, height: winH } = useWindowSize();
-    const [fullscreen, setFullscreen] = import_react3.useState(false);
-    const [maximized, setMaximized] = import_react3.useState(false);
-    const toggleFullscreen = () => {
-      const next = !fullscreen;
-      veloxWindow.setFullscreen(next);
-      setFullscreen(next);
-    };
-    const toggleMaximize = () => {
-      const next = !maximized;
-      veloxWindow.setMaximized(next);
-      setMaximized(next);
-    };
-    const minimize = () => veloxWindow.setMinimized();
-    return /* @__PURE__ */ jsx_runtime.jsxs(View, {
-      style: { backgroundColor: "#1e1e2e" },
-      width: winW,
-      height: winH,
-      children: [
-        /* @__PURE__ */ jsx_runtime.jsxs(View, {
-          style: {
-            flexDirection: "row",
-            backgroundColor: "#181825",
-            borderWidth: 1,
-            borderColor: "#313244",
-            alignItems: "flex-start",
-            justifyContent: "flex-start",
-            gap: 8,
-            padding: 8
-          },
-          width: winW,
-          height: HEADER_H,
-          children: [
-            /* @__PURE__ */ jsx_runtime.jsx(Text, {
-              fontSize: 13,
-              width: 220,
-              height: 28,
-              style: { color: "#cdd6f4" },
-              children: `Velox  ${winW} × ${winH} px`
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(WinBtn, {
-              label: fullscreen ? "Exit Fullscr" : "Fullscreen",
-              onPress: toggleFullscreen,
-              active: fullscreen
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(WinBtn, {
-              label: maximized ? "Restore" : "Maximize",
-              onPress: toggleMaximize,
-              active: maximized
-            }),
-            /* @__PURE__ */ jsx_runtime.jsx(WinBtn, {
-              label: "Minimize",
-              onPress: minimize
-            })
-          ]
-        }),
-        /* @__PURE__ */ jsx_runtime.jsx(View, {
-          style: { padding: PAD, justifyContent: "flex-start", alignItems: "flex-start" },
-          width: winW,
-          height: winH - HEADER_H,
-          children: /* @__PURE__ */ jsx_runtime.jsxs(Router, {
-            initialRoute: "home",
-            children: [
-              /* @__PURE__ */ jsx_runtime.jsx(Route, {
-                name: "home",
-                component: HomeScreen
-              }),
-              /* @__PURE__ */ jsx_runtime.jsx(Route, {
-                name: "palette",
-                component: PaletteScreen
-              }),
-              /* @__PURE__ */ jsx_runtime.jsx(Route, {
-                name: "colorDetail",
-                component: ColorDetailScreen
-              }),
-              /* @__PURE__ */ jsx_runtime.jsx(Route, {
-                name: "data",
-                component: DataScreen
-              }),
-              /* @__PURE__ */ jsx_runtime.jsx(Route, {
-                name: "vectorDb",
-                component: VectorDbScreen
-              }),
-              /* @__PURE__ */ jsx_runtime.jsx(Route, {
-                name: "os",
-                component: OsScreen
-              })
-            ]
-          })
-        })
-      ]
+    return /* @__PURE__ */ jsx_runtime.jsx(View, {
+      style: {
+        flex: 1,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "#0f0f14"
+      },
+      children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+        style: { fontSize: 32, fontWeight: "700", color: "#e8e8f0" },
+        children: "Hello, World!"
+      })
     });
   }
   render(/* @__PURE__ */ jsx_runtime.jsx(App, {}));
-  __velox_log("Week 20: OS integration (dialogs, clipboard, notifications, window extras) loaded.");
 })();

@@ -1176,7 +1176,7 @@ fn start_dev_mode_worker(
                     "--target",      "browser",
                     "--format",      "iife",
                     "--define",      "process.env.NODE_ENV='production'",
-                    "--source-map",  "inline",  // enables source-mapped V8 stacks in dev
+                    "--sourcemap=inline",  // enables source-mapped V8 stacks in dev
                 ];
                 #[cfg(target_os = "windows")]
                 {

@@ -8,7 +8,7 @@
 /// Create the JavaScript stub bindings code.
 /// These stubs are registered during snapshot creation and will be overridden
 /// at runtime by real Rust implementations.
-pub fn create_stub_bindings_script() -> String {
+pub fn create_stub_bindings_script() -> &'static str {
     r#"
 // V8 Snapshot stub bindings
 // Real implementations are registered at runtime via re_register_all()
@@ -207,7 +207,6 @@ globalThis.__velox_splash_hide = function() {};
 // Backend command dispatch
 globalThis.__velox_backend_call = function() { return stubPromise('null'); };
 "#
-    .to_string()
 }
 
 /// Snapshot blob wrapper

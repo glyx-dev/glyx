@@ -148,6 +148,11 @@ struct WindowCfgJson {
     /// Can also be forced via the `VELOX_CPU_RENDER=1` environment variable.
     #[serde(rename = "renderMode")]
     render_mode:  Option<String>,
+    /// Hard cap on V8's old-generation heap in MB.
+    /// Omit to let Velox auto-calculate from bundle size (recommended).
+    /// Explicit values are clamped to [16, 512].
+    #[serde(rename = "maxJsHeapMb")]
+    max_js_heap_mb: Option<u32>,
 }
 
 /// Read the project config as a JSON string.
@@ -272,6 +277,10 @@ fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabilities, Vec<J
                 "cpu" => RenderMode::Cpu,
                 _     => RenderMode::Gpu,
             };
+        }
+
+        if let Some(mb) = w.max_js_heap_mb {
+            cfg.max_js_heap_mb = Some(mb.clamp(16, 512));
         }
     }
 
@@ -439,6 +448,22 @@ fn load_splash_state() -> Option<SplashState> {
     });
 
     Some(SplashState { image: img, background, min_until, auto_hide_at, hidden: false })
+}
+
+/// Calculate a sensible V8 max-heap cap from the JS bundle size.
+///
+/// Formula: `bundle_bytes × 12 / 1 MB`, floored at 32 MB and capped at 256 MB.
+/// The 12× multiplier accounts for runtime object allocation on top of the parsed source:
+/// a typical React app live-heap is 4-8× its minified bundle, plus GC headroom.
+///
+/// Examples:
+///   0.85 MB bundle (hello-world) → 10 MB → floor → **32 MB**
+///   4 MB bundle   (notes-app)    → 48 MB
+///   10 MB bundle  (AI app)       → 120 MB
+///   25 MB bundle  (large game)   → 300 MB → ceil → **256 MB**
+fn calc_heap_mb(bundle_bytes: usize) -> usize {
+    const MB: usize = 1024 * 1024;
+    ((bundle_bytes * 12) / MB).max(32).min(256)
 }
 
 /// Load the Velox config from the current working directory.
@@ -1810,6 +1835,16 @@ pub fn run(mut config: AppConfig) -> bool {
     // Honor both config renderMode and legacy VELOX_CPU_RENDER=1 env var.
     let use_cpu_render = window.render_mode == RenderMode::Cpu
         || std::env::var("VELOX_CPU_RENDER").map(|v| v.trim() == "1").unwrap_or(false);
+    // Compute V8 heap cap: explicit config wins; otherwise auto-calculate from bundle size.
+    let heap_cap_mb: usize = match window.max_js_heap_mb {
+        Some(mb) => mb as usize,
+        None => {
+            let bundle_bytes = (*js_src_arc).as_ref().map(|s| s.len()).unwrap_or(0);
+            let cap = calc_heap_mb(bundle_bytes);
+            log::info!("[v8] heap cap: {cap} MB (auto from {:.2} MB bundle)", bundle_bytes as f64 / (1024.0 * 1024.0));
+            cap
+        }
+    };
 
     let restart = velox_shell::run(window, move |event| {
         match event {
@@ -1881,6 +1916,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         Arc::clone(&shared_perf),
                         Arc::clone(&backend_registry),
                         Arc::clone(&js_plugins_arc),
+                        heap_cap_mb,
                     ) {
                         Ok(rt) => {
                             log::info!("Window {}: restored from snapshot", window_handle);
@@ -1911,6 +1947,7 @@ pub fn run(mut config: AppConfig) -> bool {
                                 Arc::clone(&shared_perf),
                                 Arc::clone(&backend_registry),
                                 Arc::clone(&js_plugins_arc),
+                                heap_cap_mb,
                             )
                         }
                     }
@@ -1921,6 +1958,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         Arc::clone(&shared_perf),
                         Arc::clone(&backend_registry),
                         Arc::clone(&js_plugins_arc),
+                        heap_cap_mb,
                     )
                 };
 

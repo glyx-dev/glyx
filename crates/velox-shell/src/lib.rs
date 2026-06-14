@@ -138,6 +138,9 @@ pub struct ShellConfig {
     /// Rendering backend.  Defaults to `RenderMode::Gpu`.
     /// Controlled by `renderMode` in `velox.config.json` or `VELOX_CPU_RENDER=1`.
     pub render_mode: RenderMode,
+    /// Optional explicit V8 heap cap in MB.  `None` = auto-calculated from bundle size.
+    /// Controlled by `maxJsHeapMb` in `velox.config.json`.
+    pub max_js_heap_mb: Option<u32>,
 }
 
 impl Default for ShellConfig {
@@ -152,6 +155,7 @@ impl Default for ShellConfig {
             icon_rgba:    None,
             background_color: [0x14, 0x14, 0x1A, 0xFF],
             render_mode:  RenderMode::Gpu,
+            max_js_heap_mb: None,
         }
     }
 }

@@ -21,17 +21,16 @@ use std::collections::VecDeque;
 
 /// V8 isolate params shared by fresh and snapshot-restore paths.
 ///
-/// Heap limits:
-///   initial = 2 MB  — V8 starts small; it will grow on demand up to the max.
-///   maximum = 256 MB — hard cap; prevents V8 from speculatively reserving
-///                       the OS-default ~1.5 GB on 64-bit.
+/// `max_heap_mb` is computed by velox-core from the JS bundle size (auto) or
+/// from the `maxJsHeapMb` key in velox.config.json (explicit).
 ///
-/// For a React notes app the live heap is typically 20-50 MB, so 256 MB gives
-/// plenty of headroom while keeping the process working-set well below Electron.
-fn velox_create_params(snapshot: Option<Vec<u8>>) -> v8::CreateParams {
+/// Heap limits:
+///   initial = 2 MB  — V8 starts small; grows on demand.
+///   maximum = max_heap_mb — prevents V8 speculatively reserving the OS-default ~1.5 GB.
+fn velox_create_params(snapshot: Option<Vec<u8>>, max_heap_mb: usize) -> v8::CreateParams {
     const MB: usize = 1024 * 1024;
     let params = v8::CreateParams::default()
-        .heap_limits(2 * MB, 256 * MB);
+        .heap_limits(2 * MB, max_heap_mb * MB);
     if let Some(blob) = snapshot {
         params.snapshot_blob(blob)
     } else {
@@ -78,7 +77,8 @@ impl V8Runtime {
         let perf_state     = Arc::new(std::sync::Mutex::new(velox_perf::PerfState::new()));
         Self::new_with_ipc(tokio_handle, window, ipc_bus, 0, next_window_id, perf_state,
             std::sync::Arc::new(std::collections::HashMap::new()),
-            std::sync::Arc::new(vec![]))
+            std::sync::Arc::new(vec![]),
+            256)
     }
 
     /// Create a new VeloxRuntime and join it to the shared IPC bus.
@@ -96,13 +96,14 @@ impl V8Runtime {
         perf_state:     Arc<std::sync::Mutex<velox_perf::PerfState>>,
         backend_commands: BackendRegistry,
         js_plugins:     crate::JsPlugins,
+        max_heap_mb:    usize,
     ) -> Self {
         // Register this window's inbox in the shared bus.
         ipc_bus.lock().unwrap()
             .entry(my_handle)
             .or_insert_with(|| Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())));
 
-        let mut isolate = v8::Isolate::new(velox_create_params(None));
+        let mut isolate = v8::Isolate::new(velox_create_params(None, max_heap_mb));
 
         let events             = new_event_queue();
         let layout_cache       = new_layout_cache();
@@ -175,7 +176,8 @@ impl V8Runtime {
         let perf_state     = Arc::new(std::sync::Mutex::new(velox_perf::PerfState::new()));
         Self::new_from_snapshot_with_ipc(snapshot_blob, tokio_handle, window, ipc_bus, 0, next_window_id, perf_state,
             std::sync::Arc::new(std::collections::HashMap::new()),
-            std::sync::Arc::new(vec![]))
+            std::sync::Arc::new(vec![]),
+            256)
     }
 
     /// Restore from snapshot and join the shared IPC bus.
@@ -189,13 +191,14 @@ impl V8Runtime {
         perf_state:     Arc<std::sync::Mutex<velox_perf::PerfState>>,
         backend_commands: BackendRegistry,
         js_plugins:     crate::JsPlugins,
+        max_heap_mb:    usize,
     ) -> Result<Self, RuntimeError> {
         // Register this window's inbox in the bus.
         ipc_bus.lock().unwrap()
             .entry(my_handle)
             .or_insert_with(|| Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())));
 
-        let mut isolate = v8::Isolate::new(velox_create_params(Some(snapshot_blob.to_vec())));
+        let mut isolate = v8::Isolate::new(velox_create_params(Some(snapshot_blob.to_vec()), max_heap_mb));
 
         let events             = new_event_queue();
         let layout_cache       = new_layout_cache();
@@ -342,11 +345,9 @@ impl V8Runtime {
                 }
             }
         };
-        // Release parse-time garbage (AST nodes, bytecode, temp strings) only
-        // on success — on error the isolate state is unchanged.
-        if result.is_ok() {
-            self.isolate.low_memory_notification();
-        }
+        // Release parse-time garbage (AST nodes, bytecode, temp strings).
+        // Notify on both success and error — V8 trims what it can regardless.
+        self.isolate.low_memory_notification();
         result
     }
 

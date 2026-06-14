@@ -62,7 +62,7 @@ use std::time::{Duration, Instant};
 use smallvec::SmallVec;
 use velox_gpu::GpuContext;
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
-use velox_renderer::{colors, peniko, AnyRenderer, AnyFrame, Scene};
+use velox_renderer::{colors, peniko, AnyRenderer, AnyFrame, BackendKind, Scene};
 use velox_runtime::{
     init_v8, new_ipc_bus,
     CanvasCmd, InputEvent, LengthValue, NodeProps, NodeType, SceneCommand,
@@ -1860,21 +1860,26 @@ pub fn run(mut config: AppConfig) -> bool {
             ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy } => {
                 let gpu_ctx = pollster::block_on(GpuContext::new(window.clone()))
                     .expect("Failed to initialise GPU");
-                // Resolve RenderMode::Auto based on the actual GPU adapter type.
-                // TinySkia / Femtovg fall back to Gpu until sub-branches implement them.
-                let effective_mode = match render_mode_config {
+                // Resolve RenderMode → BackendKind.  Auto picks based on the GPU adapter type.
+                let force_cpu = std::env::var("VELOX_CPU_RENDER")
+                    .map(|v| v.trim() == "1").unwrap_or(false);
+                let backend_kind = match render_mode_config {
                     RenderMode::Auto => {
-                        if gpu_ctx.is_software_adapter() { RenderMode::Cpu } else { RenderMode::Gpu }
+                        if force_cpu || gpu_ctx.is_software_adapter() {
+                            BackendKind::Vello { use_cpu: true }
+                        } else {
+                            BackendKind::Vello { use_cpu: false }
+                        }
                     }
-                    RenderMode::TinySkia | RenderMode::Femtovg => {
-                        log::warn!("RenderMode::{render_mode_config:?} not yet implemented; falling back to Gpu");
-                        RenderMode::Gpu
+                    RenderMode::Cpu    => BackendKind::Vello { use_cpu: true  },
+                    RenderMode::Gpu    => BackendKind::Vello { use_cpu: force_cpu },
+                    RenderMode::TinySkia => BackendKind::TinySkia,
+                    RenderMode::Femtovg  => {
+                        log::warn!("RenderMode::Femtovg not yet implemented; falling back to Gpu");
+                        BackendKind::Vello { use_cpu: false }
                     }
-                    other => other,
                 };
-                let use_cpu = matches!(effective_mode, RenderMode::Cpu)
-                    || std::env::var("VELOX_CPU_RENDER").map(|v| v.trim() == "1").unwrap_or(false);
-                let mut renderer = AnyRenderer::new(&gpu_ctx, use_cpu)
+                let mut renderer = AnyRenderer::new(&gpu_ctx, backend_kind)
                     .expect("Failed to initialise renderer");
                 // Apply window background color so the GPU clear matches the
                 // app theme from frame zero — no blank white flash on startup.

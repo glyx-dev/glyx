@@ -13,3 +13,5 @@ parley     = { workspace = true }
 wgpu       = { workspace = true }
 log        = { workspace = true }
 thiserror  = { workspace = true }
+tiny-skia  = { workspace = true }
+swash      = { workspace = true }

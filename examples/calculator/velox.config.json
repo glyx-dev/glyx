@@ -11,7 +11,8 @@
     "height":      480,
     "startupMode": "windowed",
     "background":  "#1e1e2e",
-    "decorations": false
+    "decorations": false,
+    "renderMode":  "gpu"
   },
   "capabilities": {
     "fs": { "read": ["**"], "write": ["**"] },

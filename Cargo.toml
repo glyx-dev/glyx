@@ -87,6 +87,8 @@ gilrs               = "0.11"
 global-hotkey       = "0.6"
 lru                 = "0.12"
 dark-light          = "1"
+tiny-skia           = "0.11"
+swash               = "0.1"
 rodio               = { version = "0.17", features = ["symphonia-all"] }
 glam                = "0.28"
 gltf                = { version = "1" }

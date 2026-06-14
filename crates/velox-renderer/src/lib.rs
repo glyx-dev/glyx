@@ -11,6 +11,9 @@
 //! Scene out of the renderer; render_frame() moves it back via assignment.
 //! Zero extra allocation — Scene's internal Vec buffers survive the move.
 
+mod skia;
+pub use skia::{TinySkiaFrame, TinySkiaRenderer};
+
 use std::path::PathBuf;
 use thiserror::Error;
 use velox_gpu::GpuContext;
@@ -456,14 +459,24 @@ impl FrameBuilder {
     }
 }
 
+// ── BackendKind ───────────────────────────────────────────────────────────────
+
+/// Which rendering backend to create.
+///
+/// Resolved from `RenderMode` in velox-core before calling `AnyRenderer::new`.
+pub enum BackendKind {
+    /// Vello GPU compute shaders (`use_cpu = false`) or Cranelift CPU path (`true`).
+    Vello { use_cpu: bool },
+    /// tiny-skia pure-CPU rasterizer — no GPU compute, ~8 MB RAM.
+    TinySkia,
+}
+
 // ── AnyFrame ──────────────────────────────────────────────────────────────────
 
 /// Backend-agnostic frame accumulator.
-///
-/// Currently only the `Vello` variant exists; `TinySkia` and `Femtovg` variants
-/// will be added in their respective experiment sub-branches.
 pub enum AnyFrame {
     Vello(FrameBuilder),
+    TinySkia(TinySkiaFrame),
 }
 
 impl AnyFrame {
@@ -477,114 +490,165 @@ impl AnyFrame {
 
     pub fn fill_rounded_rect(&mut self, x: f64, y: f64, w: f64, h: f64,
                               radius: f64, color: Color) {
-        match self { AnyFrame::Vello(f) => f.fill_rounded_rect(x, y, w, h, radius, color) }
+        match self {
+            AnyFrame::Vello(f)    => f.fill_rounded_rect(x, y, w, h, radius, color),
+            AnyFrame::TinySkia(f) => f.fill_rounded_rect(x, y, w, h, radius, color),
+        }
     }
 
     pub fn fill_rounded_rect_with_brush(&mut self, x: f64, y: f64, w: f64, h: f64,
                                          radius: f64, brush: &Brush) {
-        match self { AnyFrame::Vello(f) => f.fill_rounded_rect_with_brush(x, y, w, h, radius, brush) }
+        match self {
+            AnyFrame::Vello(f)    => f.fill_rounded_rect_with_brush(x, y, w, h, radius, brush),
+            AnyFrame::TinySkia(f) => f.fill_rounded_rect_with_brush(x, y, w, h, radius, brush),
+        }
     }
 
     pub fn fill_rect(&mut self, x: f64, y: f64, w: f64, h: f64, color: Color) {
-        match self { AnyFrame::Vello(f) => f.fill_rect(x, y, w, h, color) }
+        match self {
+            AnyFrame::Vello(f)    => f.fill_rect(x, y, w, h, color),
+            AnyFrame::TinySkia(f) => f.fill_rect(x, y, w, h, color),
+        }
     }
 
     pub fn stroke_rounded_rect(&mut self, x: f64, y: f64, w: f64, h: f64,
                                 radius: f64, stroke_width: f64, color: Color) {
-        match self { AnyFrame::Vello(f) => f.stroke_rounded_rect(x, y, w, h, radius, stroke_width, color) }
+        match self {
+            AnyFrame::Vello(f)    => f.stroke_rounded_rect(x, y, w, h, radius, stroke_width, color),
+            AnyFrame::TinySkia(f) => f.stroke_rounded_rect(x, y, w, h, radius, stroke_width, color),
+        }
     }
 
     pub fn draw_text(&mut self, layout: &velox_text::TextLayout, x: f64, y: f64, color: Color) {
-        match self { AnyFrame::Vello(f) => f.draw_text(layout, x, y, color) }
+        match self {
+            AnyFrame::Vello(f)    => f.draw_text(layout, x, y, color),
+            AnyFrame::TinySkia(f) => f.draw_text(layout, x, y, color),
+        }
     }
 
     pub fn draw_image(&mut self, image: &ImageData, x: f64, y: f64, w: f64, h: f64) {
-        match self { AnyFrame::Vello(f) => f.draw_image(image, x, y, w, h) }
+        match self {
+            AnyFrame::Vello(f)    => f.draw_image(image, x, y, w, h),
+            AnyFrame::TinySkia(f) => f.draw_image(image, x, y, w, h),
+        }
     }
 
     pub fn draw_image_with_transform(&mut self, image: &ImageData, transform: Affine) {
-        match self { AnyFrame::Vello(f) => f.draw_image_with_transform(image, transform) }
+        match self {
+            AnyFrame::Vello(f)    => f.draw_image_with_transform(image, transform),
+            AnyFrame::TinySkia(f) => f.draw_image_with_transform(image, transform),
+        }
     }
 
     /// Borrow the inner Vello scene mutably.
-    ///
-    /// Only available on the Vello variant; panics for other backends.
     /// Always guard with `supports_caching()` before calling.
     pub fn scene_mut(&mut self) -> &mut Scene {
-        match self { AnyFrame::Vello(f) => f.scene_mut() }
+        match self {
+            AnyFrame::Vello(f) => f.scene_mut(),
+            AnyFrame::TinySkia(_) => panic!("scene_mut called on non-Vello backend"),
+        }
     }
 
-    /// Swap out the inner scene and return the old one.
-    ///
-    /// Only meaningful on the Vello variant; panics for other backends.
+    /// Swap out the inner scene — Vello only.
     /// Always guard with `supports_caching()` before calling.
     pub fn replace_scene(&mut self, new: Scene) -> Scene {
-        match self { AnyFrame::Vello(f) => f.replace_scene(new) }
+        match self {
+            AnyFrame::Vello(f) => f.replace_scene(new),
+            AnyFrame::TinySkia(_) => panic!("replace_scene called on non-Vello backend"),
+        }
     }
 
-    /// Append a previously captured sub-scene (with optional transform).
-    ///
-    /// Only meaningful on the Vello variant; panics for other backends.
+    /// Append a captured sub-scene — Vello only.
     /// Always guard with `supports_caching()` before calling.
     pub fn append_scene(&mut self, other: &Scene, transform: Option<Affine>) {
-        match self { AnyFrame::Vello(f) => f.append_scene(other, transform) }
+        match self {
+            AnyFrame::Vello(f) => f.append_scene(other, transform),
+            AnyFrame::TinySkia(_) => panic!("append_scene called on non-Vello backend"),
+        }
     }
 
     pub fn push_layer(&mut self, x: f64, y: f64, w: f64, h: f64) {
-        match self { AnyFrame::Vello(f) => f.push_layer(x, y, w, h) }
+        match self {
+            AnyFrame::Vello(f)    => f.push_layer(x, y, w, h),
+            AnyFrame::TinySkia(f) => f.push_layer(x, y, w, h),
+        }
     }
 
     pub fn push_rounded_layer(&mut self, x: f64, y: f64, w: f64, h: f64, radius: f64) {
-        match self { AnyFrame::Vello(f) => f.push_rounded_layer(x, y, w, h, radius) }
+        match self {
+            AnyFrame::Vello(f)    => f.push_rounded_layer(x, y, w, h, radius),
+            AnyFrame::TinySkia(f) => f.push_rounded_layer(x, y, w, h, radius),
+        }
     }
 
     pub fn push_layer_with_alpha(&mut self, x: f64, y: f64, w: f64, h: f64, alpha: f32) {
-        match self { AnyFrame::Vello(f) => f.push_layer_with_alpha(x, y, w, h, alpha) }
+        match self {
+            AnyFrame::Vello(f)    => f.push_layer_with_alpha(x, y, w, h, alpha),
+            AnyFrame::TinySkia(f) => f.push_layer_with_alpha(x, y, w, h, alpha),
+        }
     }
 
     pub fn pop_layer(&mut self) {
-        match self { AnyFrame::Vello(f) => f.pop_layer() }
+        match self {
+            AnyFrame::Vello(f)    => f.pop_layer(),
+            AnyFrame::TinySkia(f) => f.pop_layer(),
+        }
     }
 
     pub fn fill_circle(&mut self, cx: f64, cy: f64, r: f64, color: Color) {
-        match self { AnyFrame::Vello(f) => f.fill_circle(cx, cy, r, color) }
+        match self {
+            AnyFrame::Vello(f)    => f.fill_circle(cx, cy, r, color),
+            AnyFrame::TinySkia(f) => f.fill_circle(cx, cy, r, color),
+        }
     }
 
     pub fn stroke_circle(&mut self, cx: f64, cy: f64, r: f64, width: f64, color: Color) {
-        match self { AnyFrame::Vello(f) => f.stroke_circle(cx, cy, r, width, color) }
+        match self {
+            AnyFrame::Vello(f)    => f.stroke_circle(cx, cy, r, width, color),
+            AnyFrame::TinySkia(f) => f.stroke_circle(cx, cy, r, width, color),
+        }
     }
 
     pub fn stroke_line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64, width: f64, color: Color) {
-        match self { AnyFrame::Vello(f) => f.stroke_line(x0, y0, x1, y1, width, color) }
+        match self {
+            AnyFrame::Vello(f)    => f.stroke_line(x0, y0, x1, y1, width, color),
+            AnyFrame::TinySkia(f) => f.stroke_line(x0, y0, x1, y1, width, color),
+        }
     }
 }
 
 // ── AnyRenderer ───────────────────────────────────────────────────────────────
 
 /// Backend-agnostic renderer.
-///
-/// Currently wraps `VeloxRenderer` (Vello GPU/CPU).  Future variants
-/// (`TinySkia`, `Femtovg`) are added in their experiment sub-branches.
 pub enum AnyRenderer {
     Vello(VeloxRenderer),
+    TinySkia(TinySkiaRenderer),
 }
 
 impl AnyRenderer {
-    /// Create a renderer.  `use_cpu = true` selects Vello's Cranelift CPU path.
-    ///
-    /// Non-Vello backend construction (TinySkia, Femtovg) is added in their
-    /// respective sub-branches.
-    pub fn new(gpu: &GpuContext, use_cpu: bool) -> Result<Self, RendererError> {
-        VeloxRenderer::new(gpu, use_cpu).map(AnyRenderer::Vello)
+    /// Create a renderer from the resolved `BackendKind`.
+    pub fn new(gpu: &GpuContext, kind: BackendKind) -> Result<Self, RendererError> {
+        match kind {
+            BackendKind::Vello { use_cpu } =>
+                VeloxRenderer::new(gpu, use_cpu).map(AnyRenderer::Vello),
+            BackendKind::TinySkia =>
+                TinySkiaRenderer::new(gpu).map(AnyRenderer::TinySkia),
+        }
     }
 
     /// Set the window background color used to clear the surface each frame.
     pub fn set_background_color(&mut self, color: peniko::Color) {
-        match self { AnyRenderer::Vello(r) => r.background_color = color }
+        match self {
+            AnyRenderer::Vello(r)    => r.background_color = color,
+            AnyRenderer::TinySkia(r) => r.background_color = color,
+        }
     }
 
     pub fn begin_frame(&mut self) -> AnyFrame {
-        match self { AnyRenderer::Vello(r) => AnyFrame::Vello(r.begin_frame()) }
+        match self {
+            AnyRenderer::Vello(r)    => AnyFrame::Vello(r.begin_frame()),
+            AnyRenderer::TinySkia(r) => AnyFrame::TinySkia(r.begin_frame()),
+        }
     }
 
     pub fn render_frame(
@@ -594,7 +658,9 @@ impl AnyRenderer {
         frame:   AnyFrame,
     ) -> Result<(), RendererError> {
         match (self, frame) {
-            (AnyRenderer::Vello(r), AnyFrame::Vello(f)) => r.render_frame(gpu, texture, f),
+            (AnyRenderer::Vello(r),    AnyFrame::Vello(f))    => r.render_frame(gpu, texture, f),
+            (AnyRenderer::TinySkia(r), AnyFrame::TinySkia(f)) => r.render_frame(gpu, texture, f),
+            _ => unreachable!("AnyRenderer/AnyFrame variant mismatch"),
         }
     }
 
@@ -603,14 +669,23 @@ impl AnyRenderer {
         gpu:     &GpuContext,
         texture: &wgpu::SurfaceTexture,
     ) -> Result<(), RendererError> {
-        match self { AnyRenderer::Vello(r) => r.blit_cached_frame(gpu, texture) }
+        match self {
+            AnyRenderer::Vello(r)    => r.blit_cached_frame(gpu, texture),
+            AnyRenderer::TinySkia(r) => r.blit_cached_frame(gpu, texture),
+        }
     }
 
     pub fn trim_resources(&mut self) {
-        match self { AnyRenderer::Vello(r) => r.trim_resources() }
+        match self {
+            AnyRenderer::Vello(r)    => r.trim_resources(),
+            AnyRenderer::TinySkia(r) => r.trim_resources(),
+        }
     }
 
     pub fn try_save_pipeline_cache(&self) {
-        match self { AnyRenderer::Vello(r) => r.try_save_pipeline_cache() }
+        match self {
+            AnyRenderer::Vello(r)    => r.try_save_pipeline_cache(),
+            AnyRenderer::TinySkia(r) => r.try_save_pipeline_cache(),
+        }
     }
 }

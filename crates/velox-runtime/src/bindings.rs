@@ -2,9 +2,10 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+use parking_lot::Mutex;
 
 use base64::Engine as _;
 use tokio::runtime::Handle;
@@ -429,6 +430,7 @@ pub enum SceneCommand {
     RemoveNode    { id: u32 },
     SetRoot       { id: u32 },
     CanvasUpdate  { id: u32, cmds: Vec<CanvasCmd> },
+    #[cfg(feature = "canvas3d")]
     Canvas3DUpdate { id: u32, scene: velox_3d::Scene3D },
     /// Open a camera device and start the capture loop in velox-core.
     OpenCamera  { handle_id: u32, device_index: u32 },
@@ -502,7 +504,9 @@ pub fn register_all(
         next_db_id:    std::sync::atomic::AtomicU32::new(1),
         vector_stores: Arc::new(Mutex::new(HashMap::new())),
         next_vdb_id:   std::sync::atomic::AtomicU32::new(1),
+        #[cfg(feature = "websocket")]
         ws_handles:    Arc::new(Mutex::new(HashMap::new())),
+        #[cfg(feature = "websocket")]
         next_ws_id:    std::sync::atomic::AtomicU32::new(1),
         ipc_bus,
         my_handle,
@@ -510,24 +514,37 @@ pub fn register_all(
         perf_state,
         sleep_guards:   std::cell::RefCell::new(HashMap::new()),
         next_guard_id:  std::sync::atomic::AtomicU32::new(1),
+        #[cfg(feature = "gamepad")]
         gamepad_gilrs:  std::cell::RefCell::new(None),
         hotkey_state:   std::cell::RefCell::new(None),
         next_hotkey_id: std::sync::atomic::AtomicU32::new(1),
         deeplink_url_queue,
+        #[cfg(feature = "audio")]
         audio_stream:   std::cell::RefCell::new(None),
+        #[cfg(feature = "audio")]
         audio_handle:   std::cell::RefCell::new(None),
+        #[cfg(feature = "audio")]
         audio_sinks:    Arc::new(Mutex::new(HashMap::new())),
+        #[cfg(feature = "audio")]
         audio_events:   Arc::new(Mutex::new(VecDeque::new())),
+        #[cfg(feature = "audio")]
         next_audio_id:  std::sync::atomic::AtomicU32::new(1),
+        #[cfg(feature = "audio")]
         audio_trackers: Arc::new(Mutex::new(HashMap::new())),
         next_camera_id: std::sync::atomic::AtomicU32::new(1),
         next_video_id:  std::sync::atomic::AtomicU32::new(1),
         video_events,
+        #[cfg(feature = "hid")]
         hid_api:     Arc::new(Mutex::new(None)),
+        #[cfg(feature = "hid")]
         hid_devices: Arc::new(Mutex::new(HashMap::new())),
+        #[cfg(feature = "hid")]
         next_hid_id: std::sync::atomic::AtomicU32::new(1),
+        #[cfg(feature = "ai")]
         ai_embed_model:    Arc::new(Mutex::new(None)),
+        #[cfg(feature = "ai")]
         ai_generate_model: Arc::new(Mutex::new(None)),
+        #[cfg(feature = "ai")]
         ai_whisper_model:  Arc::new(Mutex::new(None)),
         cdp_log_tx,
         backend_commands,
@@ -673,12 +690,17 @@ pub fn register_all(
     register!("__velox_notification_send", notification_send_callback);
 
     // ── Network ─────────────────────────────────────────────────────────────
+    #[cfg(feature = "fetch")]
     register!("__velox_fetch",      fetch_callback);
 
     // ── WebSocket ────────────────────────────────────────────────────────────
+    #[cfg(feature = "websocket")]
     register!("__velox_ws_connect", ws_connect_callback);
+    #[cfg(feature = "websocket")]
     register!("__velox_ws_send",    ws_send_callback);
+    #[cfg(feature = "websocket")]
     register!("__velox_ws_poll",    ws_poll_callback);
+    #[cfg(feature = "websocket")]
     register!("__velox_ws_close",   ws_close_callback);
 
     // ── mDNS service discovery ───────────────────────────────────────────────
@@ -703,6 +725,7 @@ pub fn register_all(
     register!("__velox_power_preventSleep",     power_prevent_sleep_callback);
     register!("__velox_power_allowSleep",    power_allow_sleep_callback);
     register!("__velox_storage_getDrives",   storage_get_drives_callback);
+    #[cfg(feature = "gamepad")]
     register!("__velox_gamepad_poll",        gamepad_poll_callback);
     register!("__velox_shortcut_register",   shortcut_register_callback);
     register!("__velox_shortcut_unregister", shortcut_unregister_callback);
@@ -714,15 +737,25 @@ pub fn register_all(
     register!("__velox_credentials_delete", credentials_delete_callback);
 
     // ── Audio playback ───────────────────────────────────────────────────────
+    #[cfg(feature = "audio")]
     register!("__velox_audio_play",      audio_play_callback);
+    #[cfg(feature = "audio")]
     register!("__velox_audio_pause",     audio_pause_callback);
+    #[cfg(feature = "audio")]
     register!("__velox_audio_resume",    audio_resume_callback);
+    #[cfg(feature = "audio")]
     register!("__velox_audio_stop",      audio_stop_callback);
+    #[cfg(feature = "audio")]
     register!("__velox_audio_setVolume", audio_set_volume_callback);
+    #[cfg(feature = "audio")]
     register!("__velox_audio_getVolume", audio_get_volume_callback);
+    #[cfg(feature = "audio")]
     register!("__velox_audio_poll",      audio_poll_callback);
+    #[cfg(feature = "audio")]
     register!("__velox_audio_get_time",  audio_get_time_callback);
+    #[cfg(feature = "audio")]
     register!("__velox_audio_duration",  audio_duration_callback);
+    #[cfg(feature = "audio")]
     register!("__velox_audio_seek",      audio_seek_callback);
 
     // ── App lifecycle ────────────────────────────────────────────────────────
@@ -737,12 +770,17 @@ pub fn register_all(
 
     // ── Canvas 2D / 3D ───────────────────────────────────────────────────────
     register!("__velox_canvas_update",   canvas_update_callback);
+    #[cfg(feature = "canvas3d")]
     register!("__velox_canvas3d_update", canvas3d_update_callback);
+    #[cfg(feature = "canvas3d")]
     register!("__velox_canvas3d_load_gltf", canvas3d_load_gltf_callback);
 
     // ── Local AI (Candle) ────────────────────────────────────────────────────
+    #[cfg(feature = "ai")]
     register!("__velox_ai_embed",      ai_embed_callback);
+    #[cfg(feature = "ai")]
     register!("__velox_ai_generate",   ai_generate_callback);
+    #[cfg(feature = "ai")]
     register!("__velox_ai_transcribe", ai_transcribe_callback);
 
     // ── Camera + Microphone ───────────────────────────────────────────────────
@@ -765,16 +803,26 @@ pub fn register_all(
     register!("__velox_video_poll",       video_poll_callback);
 
     // ── HID devices ──────────────────────────────────────────────────────────
+    #[cfg(feature = "hid")]
     register!("__velox_hid_enumerate", hid_enumerate_callback);
+    #[cfg(feature = "hid")]
     register!("__velox_hid_open",      hid_open_callback);
+    #[cfg(feature = "hid")]
     register!("__velox_hid_read",      hid_read_callback);
+    #[cfg(feature = "hid")]
     register!("__velox_hid_write",     hid_write_callback);
+    #[cfg(feature = "hid")]
     register!("__velox_hid_close",     hid_close_callback);
     // ── Updater ──────────────────────────────────────────────────────────────
+    #[cfg(feature = "updater")]
     register!("__velox_updater_check",            updater_check_callback);
+    #[cfg(feature = "updater")]
     register!("__velox_updater_update",           updater_update_callback);
+    #[cfg(feature = "updater")]
     register!("__velox_updater_get_version",      updater_get_version_callback);
+    #[cfg(feature = "updater")]
     register!("__velox_updater_check_manifest",   updater_check_manifest_callback);
+    #[cfg(feature = "updater")]
     register!("__velox_updater_download_js",      updater_download_js_callback);
     // ── Crash reporter ───────────────────────────────────────────────────────
     register!("__velox_crash_report_js",    crash_report_js_callback);
@@ -805,7 +853,9 @@ struct AsyncState {
     vector_stores: Arc<Mutex<HashMap<u32, velox_db::VectorStore>>>,
     next_vdb_id:   std::sync::atomic::AtomicU32,
     // ── WebSocket handles ────────────────────────────────────────────────────
+    #[cfg(feature = "websocket")]
     ws_handles:    Arc<Mutex<HashMap<u32, WsHandle>>>,
+    #[cfg(feature = "websocket")]
     next_ws_id:    std::sync::atomic::AtomicU32,
     // ── Multi-window / IPC ───────────────────────────────────────────────────
     ipc_bus:       IpcBus,
@@ -816,6 +866,7 @@ struct AsyncState {
     // ── OS system APIs (single-threaded, RefCell for interior mutability) ───
     sleep_guards:  std::cell::RefCell<HashMap<u32, velox_sysapi::SleepGuard>>,
     next_guard_id: std::sync::atomic::AtomicU32,
+    #[cfg(feature = "gamepad")]
     gamepad_gilrs: std::cell::RefCell<Option<gilrs::Gilrs>>,
     hotkey_state:  std::cell::RefCell<Option<HotkeyState>>,
     next_hotkey_id: std::sync::atomic::AtomicU32,
@@ -827,17 +878,23 @@ struct AsyncState {
     /// The OutputStream keeps the audio device open for the app lifetime.
     /// Stored in RefCell because rodio::OutputStream is !Send.
     /// Never read directly — held purely to keep the audio device alive.
+    #[cfg(feature = "audio")]
     #[allow(dead_code)]
     audio_stream:  std::cell::RefCell<Option<rodio::OutputStream>>,
     /// Handle cloned into async tasks to create Sinks.
     /// Wrapped in RefCell so lazy init can mutate through &AsyncState.
+    #[cfg(feature = "audio")]
     audio_handle:  std::cell::RefCell<Option<rodio::OutputStreamHandle>>,
     /// Live sink map — keyed by velox audio handle ID.
+    #[cfg(feature = "audio")]
     audio_sinks:   Arc<Mutex<HashMap<u32, rodio::Sink>>>,
     /// Events (e.g. "ended") produced by the audio subsystem, drained each frame.
+    #[cfg(feature = "audio")]
     audio_events:  Arc<Mutex<VecDeque<String>>>,
+    #[cfg(feature = "audio")]
     next_audio_id: std::sync::atomic::AtomicU32,
     /// Wall-clock position tracker for each audio handle (no get_pos in rodio 0.17).
+    #[cfg(feature = "audio")]
     audio_trackers: Arc<Mutex<HashMap<u32, AudioTracker>>>,
     // ── Camera ────────────────────────────────────────────────────────────────
     /// Handle ID counter. CameraStream lives in velox-core; we only track IDs here.
@@ -849,16 +906,22 @@ struct AsyncState {
     video_events: Arc<Mutex<VecDeque<String>>>,
     // ── Local AI model cache (velox-ai / Candle) ─────────────────────────────
     /// Lazily initialised embedding model. Locked during init, then shared.
+    #[cfg(feature = "ai")]
     ai_embed_model:    Arc<Mutex<Option<velox_ai::EmbedModel>>>,
     /// Phi-2 generation model (requires &mut self for KV-cache, so Mutex needed).
+    #[cfg(feature = "ai")]
     ai_generate_model: Arc<Mutex<Option<velox_ai::GenerateModel>>>,
     /// Whisper transcription model (requires &mut self for decoder state).
+    #[cfg(feature = "ai")]
     ai_whisper_model:  Arc<Mutex<Option<velox_ai::WhisperModel>>>,
     // ── HID devices ──────────────────────────────────────────────────────────
     /// Lazily initialised HidApi context (singleton, guarded by Mutex).
+    #[cfg(feature = "hid")]
     hid_api:     Arc<Mutex<Option<hidapi::HidApi>>>,
     /// Open HID device handles keyed by velox handle ID.
+    #[cfg(feature = "hid")]
     hid_devices: Arc<Mutex<HashMap<u32, hidapi::HidDevice>>>,
+    #[cfg(feature = "hid")]
     next_hid_id: std::sync::atomic::AtomicU32,
     // ── CDP Inspector console bridge ──────────────────────────────────────────
     /// When the CDP inspector is active, this holds the outbox sender so
@@ -875,11 +938,13 @@ struct AsyncState {
 
 /// Tracks playback position for a rodio audio handle.
 /// rodio 0.17 has no `get_pos()` — we maintain wall-clock state manually.
+#[cfg(feature = "audio")]
 struct AudioTracker {
     path:        String,
     offset_secs: f64,                        // saved offset when paused / seeked
     started_at:  Option<std::time::Instant>, // None = paused
 }
+#[cfg(feature = "audio")]
 impl AudioTracker {
     fn current_time(&self) -> f64 {
         self.offset_secs
@@ -887,6 +952,7 @@ impl AudioTracker {
     }
 }
 
+#[cfg(feature = "websocket")]
 struct WsHandle {
     outbox_tx: tokio::sync::mpsc::UnboundedSender<String>,
     inbox:     Arc<Mutex<VecDeque<String>>>,
@@ -1198,7 +1264,7 @@ fn js_log(
     // Forward to CDP inspector console if connected.
     let ext   = v8::Local::<v8::External>::try_from(args.data().unwrap()).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-    if let Some(tx) = state.cdp_log_tx.lock().unwrap().as_ref() {
+    if let Some(tx) = state.cdp_log_tx.lock().as_ref() {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1230,7 +1296,7 @@ fn poll_events_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let events: Vec<InputEvent> = {
-        let mut q = state.events.lock().unwrap();
+        let mut q = state.events.lock();
         q.drain(..).collect()
     };
 
@@ -1335,7 +1401,7 @@ fn get_layout_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let id = args.get(0).number_value(scope).unwrap_or_default() as u32;
-    let cache = state.layout_cache.lock().unwrap();
+    let cache = state.layout_cache.lock();
 
     if let Some(&[x, y, w, h]) = cache.get(&id) {
         let obj = v8::Object::new(scope);
@@ -1488,7 +1554,7 @@ fn create_node_callback(
     let node_type = parse_node_type(scope, args.get(0));
     let props = parse_props(scope, args.get(1));
 
-    state.scene.lock().unwrap()
+    state.scene.lock()
         .push_back(SceneCommand::CreateNode { id, node_type, props });
 
     rv.set(v8::Number::new(scope, id as f64).into());
@@ -1510,7 +1576,7 @@ fn create_image_callback(
         .unwrap_or_default();
 
     let id = state.next_image_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state.scene.lock().unwrap()
+    state.scene.lock()
         .push_back(SceneCommand::CreateImage { id, path });
 
     rv.set(v8::Number::new(scope, id as f64).into());
@@ -1528,7 +1594,7 @@ fn append_child_callback(
     let parent_id = args.get(0).number_value(scope).unwrap_or_default() as u32;
     let child_id  = args.get(1).number_value(scope).unwrap_or_default() as u32;
 
-    state.scene.lock().unwrap()
+    state.scene.lock()
         .push_back(SceneCommand::AppendChild { parent_id, child_id });
 
     rv.set(v8::Boolean::new(scope, true).into());
@@ -1546,7 +1612,7 @@ fn update_node_callback(
     let id    = args.get(0).number_value(scope).unwrap_or_default() as u32;
     let props = parse_props(scope, args.get(1));
 
-    state.scene.lock().unwrap().push_back(SceneCommand::UpdateNode { id, props });
+    state.scene.lock().push_back(SceneCommand::UpdateNode { id, props });
     rv.set(v8::Boolean::new(scope, true).into());
 }
 
@@ -1560,7 +1626,7 @@ fn remove_node_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let id = args.get(0).number_value(scope).unwrap_or_default() as u32;
-    state.scene.lock().unwrap().push_back(SceneCommand::RemoveNode { id });
+    state.scene.lock().push_back(SceneCommand::RemoveNode { id });
     rv.set(v8::Boolean::new(scope, true).into());
 }
 
@@ -1574,7 +1640,7 @@ fn set_root_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let id = args.get(0).number_value(scope).unwrap_or_default() as u32;
-    state.scene.lock().unwrap().push_back(SceneCommand::SetRoot { id });
+    state.scene.lock().push_back(SceneCommand::SetRoot { id });
     rv.set(v8::Boolean::new(scope, true).into());
 }
 
@@ -1947,7 +2013,7 @@ fn db_open_callback(
     state.tokio.spawn(async move {
         let result = velox_db::open(&path).await
             .map(|pool| {
-                pools.lock().unwrap().insert(handle, pool);
+                pools.lock().insert(handle, pool);
                 handle.to_string()
             })
             .map_err(|e| e.to_string());
@@ -1974,7 +2040,7 @@ fn db_query_callback(
     let params_json = v8_arg_to_string(scope, &args, 2);
 
     // Resolve the pool before spawning — fail fast if handle is invalid.
-    let pool = match state.db_pools.lock().unwrap().get(&handle).cloned() {
+    let pool = match state.db_pools.lock().get(&handle).cloned() {
         Some(p) => p,
         None => {
             throw_js_error(scope, &format!("db: unknown handle {handle}"));
@@ -2016,7 +2082,7 @@ fn db_run_callback(
     let sql         = v8_arg_to_string(scope, &args, 1);
     let params_json = v8_arg_to_string(scope, &args, 2);
 
-    let pool = match state.db_pools.lock().unwrap().get(&handle).cloned() {
+    let pool = match state.db_pools.lock().get(&handle).cloned() {
         Some(p) => p,
         None => {
             throw_js_error(scope, &format!("db: unknown handle {handle}"));
@@ -2063,7 +2129,7 @@ fn db_close_callback(
 
     let handle = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
     // Remove synchronously so no new queries can grab this pool.
-    let pool = state.db_pools.lock().unwrap().remove(&handle);
+    let pool = state.db_pools.lock().remove(&handle);
 
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
@@ -2100,7 +2166,7 @@ fn db_transaction_callback(
     let handle     = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
     let stmts_json = v8_arg_to_string(scope, &args, 1);
 
-    let pool = match state.db_pools.lock().unwrap().get(&handle).cloned() {
+    let pool = match state.db_pools.lock().get(&handle).cloned() {
         Some(p) => p,
         None => {
             throw_js_error(scope, &format!("db: unknown handle {handle}"));
@@ -2442,7 +2508,7 @@ fn vectordb_open_callback(
     state.tokio.spawn(async move {
         let result = velox_db::open_vector_store(&path).await
             .map(|store| {
-                stores.lock().unwrap().insert(handle, store);
+                stores.lock().insert(handle, store);
                 handle.to_string()
             })
             .map_err(|e| e.to_string());
@@ -2473,7 +2539,7 @@ fn vectordb_upsert_callback(
     let vector_json = v8_arg_to_string(scope, &args, 3);
     let meta_json   = v8_arg_to_string(scope, &args, 4);
 
-    let store = match state.vector_stores.lock().unwrap().get(&handle).cloned() {
+    let store = match state.vector_stores.lock().get(&handle).cloned() {
         Some(s) => s,
         None => {
             throw_js_error(scope, &format!("vectorDb: unknown handle {handle}"));
@@ -2521,7 +2587,7 @@ fn vectordb_search_callback(
     let query_json = v8_arg_to_string(scope, &args, 2);
     let limit      = args.get(3).number_value(scope).unwrap_or(10.0) as usize;
 
-    let store = match state.vector_stores.lock().unwrap().get(&handle).cloned() {
+    let store = match state.vector_stores.lock().get(&handle).cloned() {
         Some(s) => s,
         None => {
             throw_js_error(scope, &format!("vectorDb: unknown handle {handle}"));
@@ -2571,7 +2637,7 @@ fn vectordb_close_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let handle = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
-    let store  = state.vector_stores.lock().unwrap().remove(&handle);
+    let store  = state.vector_stores.lock().remove(&handle);
 
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
@@ -2628,6 +2694,7 @@ fn extract_host(url: &str) -> String {
 /// { "capabilities": { "network": { "allow": ["api.example.com"] } } }
 /// ```
 /// Use `"*"` to allow all outbound requests.
+#[cfg(feature = "fetch")]
 fn fetch_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -2777,6 +2844,7 @@ fn fetch_callback(
 /// Connects via tokio-tungstenite.  Spawns two tasks:
 ///   - read task: pushes incoming Text messages into `WsHandle::inbox`.
 ///   - write task: forwards messages from `outbox_tx` to the socket sink.
+#[cfg(feature = "websocket")]
 fn ws_connect_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -2822,17 +2890,17 @@ fn ws_connect_callback(
                 while let Some(msg) = stream.next().await {
                     match msg {
                         Ok(WsMessage::Text(text)) => {
-                            inbox_read.lock().unwrap().push_back(text.to_string());
+                            inbox_read.lock().push_back(text.to_string());
                         }
                         Ok(WsMessage::Close(_)) | Err(_) => {
-                            inbox_read.lock().unwrap().push_back("__VELOX_WS_CLOSED__".to_string());
+                            inbox_read.lock().push_back("__VELOX_WS_CLOSED__".to_string());
                             break;
                         }
                         _ => {} // ping/pong/binary: ignored
                     }
                 }
                 // Ensure a close sentinel is always pushed (handles clean server closes).
-                inbox_read.lock().unwrap().push_back("__VELOX_WS_CLOSED__".to_string());
+                inbox_read.lock().push_back("__VELOX_WS_CLOSED__".to_string());
             });
 
             // Write task: forward outbox messages to the socket.
@@ -2845,7 +2913,7 @@ fn ws_connect_callback(
                 let _ = sink.close().await;
             });
 
-            ws_handles.lock().unwrap().insert(handle, WsHandle { outbox_tx, inbox });
+            ws_handles.lock().insert(handle, WsHandle { outbox_tx, inbox });
             Ok(handle.to_string())
         }
         .await;
@@ -2855,6 +2923,7 @@ fn ws_connect_callback(
 }
 
 /// `__velox_ws_send(handle, message)` — sync fire-and-forget.
+#[cfg(feature = "websocket")]
 fn ws_send_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -2867,7 +2936,7 @@ fn ws_send_callback(
     let handle = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
     let msg    = v8_arg_to_string(scope, &args, 1);
 
-    if let Some(h) = state.ws_handles.lock().unwrap().get(&handle) {
+    if let Some(h) = state.ws_handles.lock().get(&handle) {
         let _ = h.outbox_tx.send(msg);
     }
 }
@@ -2876,6 +2945,7 @@ fn ws_send_callback(
 ///
 /// Returns `"[]"` if no messages or unknown handle.
 /// Returns `["__VELOX_WS_CLOSED__"]` when the server has closed the connection.
+#[cfg(feature = "websocket")]
 fn ws_poll_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -2887,10 +2957,10 @@ fn ws_poll_callback(
 
     let handle = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
     let msgs: Vec<String> = {
-        let guard = state.ws_handles.lock().unwrap();
+        let guard = state.ws_handles.lock();
         guard
             .get(&handle)
-            .map(|h| h.inbox.lock().unwrap().drain(..).collect())
+            .map(|h| h.inbox.lock().drain(..).collect())
             .unwrap_or_default()
     };
 
@@ -2900,6 +2970,7 @@ fn ws_poll_callback(
 }
 
 /// `__velox_ws_close(handle)` — sync, removes handle (drops outbox tx → write task exits).
+#[cfg(feature = "websocket")]
 fn ws_close_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -2911,7 +2982,7 @@ fn ws_close_callback(
 
     let handle = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
     // Dropping WsHandle drops outbox_tx → write task's recv() returns None → exits.
-    state.ws_handles.lock().unwrap().remove(&handle);
+    state.ws_handles.lock().remove(&handle);
 }
 
 // ── Multi-window + IPC bindings ───────────────────────────────────────────────
@@ -2937,7 +3008,7 @@ fn window_create_callback(
 
     // Cap total open windows (main + all secondaries) to prevent runaway creation.
     const MAX_WINDOWS: usize = 10;
-    let open_count = state.ipc_bus.lock().unwrap().len();
+    let open_count = state.ipc_bus.lock().len();
     if open_count >= MAX_WINDOWS {
         throw_js_error(scope, &format!(
             "veloxWindow.create: window limit reached ({} open, max {})",
@@ -2957,7 +3028,7 @@ fn window_create_callback(
 
     // Pre-register an inbox in the IPC bus so messages can be queued before
     // the secondary window's runtime starts polling.
-    state.ipc_bus.lock().unwrap()
+    state.ipc_bus.lock()
         .entry(new_id)
         .or_insert_with(|| Arc::new(Mutex::new(VecDeque::new())));
 
@@ -2993,9 +3064,9 @@ fn ipc_send_callback(
     let target = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
     let msg    = v8_arg_to_string(scope, &args, 1);
 
-    let guard = state.ipc_bus.lock().unwrap();
+    let guard = state.ipc_bus.lock();
     if let Some(inbox) = guard.get(&target) {
-        inbox.lock().unwrap().push_back(msg);
+        inbox.lock().push_back(msg);
     }
 }
 
@@ -3013,10 +3084,10 @@ fn ipc_poll_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let msgs: Vec<String> = {
-        let guard = state.ipc_bus.lock().unwrap();
+        let guard = state.ipc_bus.lock();
         guard
             .get(&state.my_handle)
-            .map(|inbox| inbox.lock().unwrap().drain(..).collect())
+            .map(|inbox| inbox.lock().drain(..).collect())
             .unwrap_or_default()
     };
 
@@ -3132,7 +3203,7 @@ fn enqueue_completion(
     redraw: Option<&RedrawRequest>,
     completion: Completion,
 ) {
-    queue.lock().unwrap().push_back(completion);
+    queue.lock().push_back(completion);
     if let Some(redraw) = redraw {
         redraw();
     }
@@ -3331,6 +3402,7 @@ fn storage_get_drives_callback(
 }
 
 /// `__velox_gamepad_poll()` → JSON string (sync, drain gilrs events)
+#[cfg(feature = "gamepad")]
 fn gamepad_poll_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -3557,6 +3629,7 @@ fn credentials_delete_callback(
 ///
 /// `optsJson` shape: `{ volume?: f32, loop?: bool }` (loop not yet implemented).
 /// Returns the integer handle ID as a JSON string.
+#[cfg(feature = "audio")]
 fn audio_play_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -3615,8 +3688,8 @@ fn audio_play_callback(
             sink.set_volume(volume);
             sink.append(decoder);
             sink.play();
-            sinks.lock().unwrap().insert(id, sink);
-            trackers.lock().unwrap().insert(id, AudioTracker {
+            sinks.lock().insert(id, sink);
+            trackers.lock().insert(id, AudioTracker {
                 path:        src_path,
                 offset_secs: 0.0,
                 started_at:  Some(std::time::Instant::now()),
@@ -3629,6 +3702,7 @@ fn audio_play_callback(
 }
 
 /// `__velox_audio_pause(handle)` → void (sync)
+#[cfg(feature = "audio")]
 fn audio_pause_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -3638,16 +3712,17 @@ fn audio_pause_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
-    if let Some(sink) = state.audio_sinks.lock().unwrap().get(&id) {
+    if let Some(sink) = state.audio_sinks.lock().get(&id) {
         sink.pause();
     }
-    if let Some(tracker) = state.audio_trackers.lock().unwrap().get_mut(&id) {
+    if let Some(tracker) = state.audio_trackers.lock().get_mut(&id) {
         tracker.offset_secs = tracker.current_time();
         tracker.started_at  = None;
     }
 }
 
 /// `__velox_audio_resume(handle)` → void (sync)
+#[cfg(feature = "audio")]
 fn audio_resume_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -3657,10 +3732,10 @@ fn audio_resume_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
-    if let Some(sink) = state.audio_sinks.lock().unwrap().get(&id) {
+    if let Some(sink) = state.audio_sinks.lock().get(&id) {
         sink.play();
     }
-    if let Some(tracker) = state.audio_trackers.lock().unwrap().get_mut(&id) {
+    if let Some(tracker) = state.audio_trackers.lock().get_mut(&id) {
         tracker.started_at = Some(std::time::Instant::now());
     }
 }
@@ -3668,6 +3743,7 @@ fn audio_resume_callback(
 /// `__velox_audio_stop(handle)` → void (sync)
 ///
 /// Stops playback and removes the sink from the map.
+#[cfg(feature = "audio")]
 fn audio_stop_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -3677,13 +3753,14 @@ fn audio_stop_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
-    if let Some(sink) = state.audio_sinks.lock().unwrap().remove(&id) {
+    if let Some(sink) = state.audio_sinks.lock().remove(&id) {
         sink.stop();
     }
-    state.audio_trackers.lock().unwrap().remove(&id);
+    state.audio_trackers.lock().remove(&id);
 }
 
 /// `__velox_audio_setVolume(handle, volume)` → void (sync)
+#[cfg(feature = "audio")]
 fn audio_set_volume_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -3694,12 +3771,13 @@ fn audio_set_volume_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id  = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
     let vol = args.get(1).number_value(scope).unwrap_or(1.0) as f32;
-    if let Some(sink) = state.audio_sinks.lock().unwrap().get(&id) {
+    if let Some(sink) = state.audio_sinks.lock().get(&id) {
         sink.set_volume(vol.clamp(0.0, 2.0));
     }
 }
 
 /// `__velox_audio_getVolume(handle)` → f32 (sync)
+#[cfg(feature = "audio")]
 fn audio_get_volume_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -3709,7 +3787,7 @@ fn audio_get_volume_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id  = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
-    let vol = state.audio_sinks.lock().unwrap().get(&id).map(|s| s.volume()).unwrap_or(1.0);
+    let vol = state.audio_sinks.lock().get(&id).map(|s| s.volume()).unwrap_or(1.0);
     rv.set(v8::Number::new(scope, vol as f64).into());
 }
 
@@ -3717,6 +3795,7 @@ fn audio_get_volume_callback(
 ///
 /// Scans sinks; for any that have finished playing emits `{"handle":N,"event":"ended"}`.
 /// Finished sinks are removed from the map.
+#[cfg(feature = "audio")]
 fn audio_poll_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -3726,7 +3805,7 @@ fn audio_poll_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let mut sinks_guard = state.audio_sinks.lock().unwrap();
+    let mut sinks_guard = state.audio_sinks.lock();
     let mut ended_ids: Vec<u32> = Vec::new();
     for (&id, sink) in sinks_guard.iter() {
         if sink.empty() {
@@ -3738,13 +3817,13 @@ fn audio_poll_callback(
     }
     drop(sinks_guard);
     // Remove trackers for ended sinks.
-    let mut tr = state.audio_trackers.lock().unwrap();
+    let mut tr = state.audio_trackers.lock();
     for id in &ended_ids { tr.remove(id); }
     drop(tr);
 
     // Merge newly-ended events with the shared events queue, then drain all.
     let json = {
-        let mut evts = state.audio_events.lock().unwrap();
+        let mut evts = state.audio_events.lock();
         for id in ended_ids {
             evts.push_back(format!("{{\"handle\":{id},\"event\":\"ended\"}}"));
         }
@@ -3764,6 +3843,7 @@ fn audio_poll_callback(
 ///
 /// Returns the current playback position. Based on wall-clock tracking since
 /// rodio 0.17 has no built-in get_pos(). Returns 0.0 for unknown handles.
+#[cfg(feature = "audio")]
 fn audio_get_time_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -3773,7 +3853,7 @@ fn audio_get_time_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
-    let t  = state.audio_trackers.lock().unwrap().get(&id).map(|t| t.current_time()).unwrap_or(0.0);
+    let t  = state.audio_trackers.lock().get(&id).map(|t| t.current_time()).unwrap_or(0.0);
     rv.set(v8::Number::new(scope, t).into());
 }
 
@@ -3781,6 +3861,7 @@ fn audio_get_time_callback(
 ///
 /// Opens the file with rodio::Decoder and calls `total_duration()`.
 /// May return -1.0 for formats that don't expose a duration header.
+#[cfg(feature = "audio")]
 fn audio_duration_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -3790,7 +3871,7 @@ fn audio_duration_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id   = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
-    let path = state.audio_trackers.lock().unwrap().get(&id).map(|t| t.path.clone());
+    let path = state.audio_trackers.lock().get(&id).map(|t| t.path.clone());
     let Some(path) = path else {
         rv.set(reject_promise_with_error(scope, "unknown audio handle").into());
         return;
@@ -3813,6 +3894,7 @@ fn audio_duration_callback(
 ///
 /// Stops the current sink, re-opens the file, skips `seconds` via
 /// `skip_duration`, and inserts a fresh sink. Updates the tracker.
+#[cfg(feature = "audio")]
 fn audio_seek_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -3827,13 +3909,13 @@ fn audio_seek_callback(
         rv.set(reject_promise_with_error(scope, "invalid audio handle").into());
         return;
     }
-    let path = state.audio_trackers.lock().unwrap().get(&id).map(|t| t.path.clone());
+    let path = state.audio_trackers.lock().get(&id).map(|t| t.path.clone());
     let Some(path) = path else {
         rv.set(reject_promise_with_error(scope, "unknown audio handle").into());
         return;
     };
     // Was the sink paused before seek?  Keep paused state after seek.
-    let was_paused = state.audio_trackers.lock().unwrap()
+    let was_paused = state.audio_trackers.lock()
         .get(&id).map(|t| t.started_at.is_none()).unwrap_or(false);
 
     // NOTE: do NOT remove the old sink here — that would let audio_poll_callback
@@ -3861,12 +3943,12 @@ fn audio_seek_callback(
             // Atomic swap: remove old + insert new while holding the Mutex so
             // audio_poll_callback never sees the handle missing (no spurious "ended").
             {
-                let mut sg = sinks.lock().unwrap();
+                let mut sg = sinks.lock();
                 if let Some(old) = sg.remove(&id) { old.stop(); }
                 sg.insert(id, sink);
             }
             // Update tracker position.
-            let mut tr = trackers.lock().unwrap();
+            let mut tr = trackers.lock();
             if let Some(t) = tr.get_mut(&id) {
                 t.offset_secs = secs;
                 t.started_at  = if was_paused { None } else { Some(std::time::Instant::now()) };
@@ -3947,7 +4029,7 @@ fn perf_snapshot_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let perf  = state.perf_state.lock().unwrap();
+    let perf  = state.perf_state.lock();
     let last  = perf.last_frame();
     let fps   = perf.fps();
     let avg   = perf.avg_frame_time();
@@ -3980,7 +4062,7 @@ fn perf_set_budget_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let ms = args.get(0).number_value(scope).unwrap_or(16.667);
-    state.perf_state.lock().unwrap().budget_ms = ms;
+    state.perf_state.lock().budget_ms = ms;
 }
 
 /// `__velox_perf_poll_leak_warnings()` → JSON array string; drains leak warnings (dev mode).
@@ -3993,7 +4075,7 @@ fn perf_poll_leak_warnings_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let warnings: Vec<String> = {
-        let mut perf = state.perf_state.lock().unwrap();
+        let mut perf = state.perf_state.lock();
         perf.leak_warnings.drain(..).collect()
     };
     let json = if warnings.is_empty() {
@@ -4015,7 +4097,7 @@ fn perf_poll_violations_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let violations: Vec<String> = {
-        let mut perf = state.perf_state.lock().unwrap();
+        let mut perf = state.perf_state.lock();
         perf.violations.drain(..).collect()
     };
     let json = if violations.is_empty() {
@@ -4106,7 +4188,7 @@ fn deeplink_poll_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let urls: Vec<String> = {
-        let mut q = state.deeplink_url_queue.lock().unwrap();
+        let mut q = state.deeplink_url_queue.lock();
         q.drain(..).collect()
     };
 
@@ -4141,11 +4223,12 @@ fn canvas_update_callback(
         Ok(c)  => c,
         Err(e) => { log::warn!("canvas_update parse error: {e}"); return; }
     };
-    state.scene.lock().unwrap().push_back(SceneCommand::CanvasUpdate { id, cmds });
+    state.scene.lock().push_back(SceneCommand::CanvasUpdate { id, cmds });
 }
 
 /// `__velox_canvas3d_update(id, sceneJson)` — sync.
 /// Parses a JSON Scene3D and pushes a Canvas3DUpdate scene command.
+#[cfg(feature = "canvas3d")]
 fn canvas3d_update_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -4164,12 +4247,13 @@ fn canvas3d_update_callback(
         Ok(s)  => s,
         Err(e) => { log::warn!("canvas3d_update parse error: {e}"); return; }
     };
-    state.scene.lock().unwrap().push_back(SceneCommand::Canvas3DUpdate { id, scene });
+    state.scene.lock().push_back(SceneCommand::Canvas3DUpdate { id, scene });
 }
 
 /// `__velox_canvas3d_load_gltf(id, path)` — sync.
 /// Signals that a GLTF file should be loaded for this canvas on the render side.
 /// (Actual loading happens in velox-core on next frame via renderer_3d.)
+#[cfg(feature = "canvas3d")]
 fn canvas3d_load_gltf_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -4199,7 +4283,7 @@ fn canvas3d_load_gltf_callback(
     let _ = id; // used by canvas3d_update; here we just warm up gltf cache
     // The load itself is triggered by the renderer when it encounters Gltf geometry.
     // Push an info scene command with the path so velox-core can pre-warm the cache.
-    state.scene.lock().unwrap().push_back(SceneCommand::Canvas3DUpdate { id, scene });
+    state.scene.lock().push_back(SceneCommand::Canvas3DUpdate { id, scene });
 }
 
 // ── Local AI bindings (Candle) ────────────────────────────────────────────────
@@ -4208,6 +4292,7 @@ fn canvas3d_load_gltf_callback(
 ///
 /// Returns a JSON array of 384 f32 values (unit-normalised MiniLM-L6-v2 embedding).
 /// Loads the model on first call (~22 MB download from HuggingFace Hub).
+#[cfg(feature = "ai")]
 fn ai_embed_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -4228,7 +4313,7 @@ fn ai_embed_callback(
 
     state.tokio.spawn(async move {
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let mut guard = model_cache.lock().unwrap();
+            let mut guard = model_cache.lock();
             if guard.is_none() {
                 *guard = Some(velox_ai::EmbedModel::load()
                     .map_err(|e| format!("ai.embed model load: {e}"))?);
@@ -4248,6 +4333,7 @@ fn ai_embed_callback(
 ///
 /// Loads Phi-2 Q4_K_M GGUF on first call (~1.7 GB download). Runs entirely on CPU.
 /// Expected latency: 10-30 seconds per 200 tokens on modern desktop CPUs.
+#[cfg(feature = "ai")]
 fn ai_generate_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -4285,7 +4371,7 @@ fn ai_generate_callback(
                 log::info!("[ai] on battery — generation running with default thread count");
             }
 
-            let mut guard = model_cache.lock().unwrap();
+            let mut guard = model_cache.lock();
             if guard.is_none() {
                 *guard = Some(velox_ai::GenerateModel::load()
                     .map_err(|e| format!("ai.generate model load: {e}"))?);
@@ -4302,6 +4388,7 @@ fn ai_generate_callback(
 /// `optsJson` shape: `{ "language": "en" }` (empty string = auto-detect).
 ///
 /// Loads Whisper-tiny on first call (~75 MB download from HuggingFace Hub).
+#[cfg(feature = "ai")]
 fn ai_transcribe_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -4328,7 +4415,7 @@ fn ai_transcribe_callback(
             let language = opts.get("language").and_then(|v| v.as_str())
                 .unwrap_or("").to_string();
 
-            let mut guard = model_cache.lock().unwrap();
+            let mut guard = model_cache.lock();
             if guard.is_none() {
                 *guard = Some(velox_ai::WhisperModel::load()
                     .map_err(|e| format!("ai.transcribe model load: {e}"))?);
@@ -4398,7 +4485,7 @@ fn camera_open_callback(
             if device_index as usize >= devices.len() {
                 return Err(format!("camera device index {device_index} not found"));
             }
-            scene.lock().unwrap().push_back(SceneCommand::OpenCamera { handle_id, device_index });
+            scene.lock().push_back(SceneCommand::OpenCamera { handle_id, device_index });
             Ok(handle_id.to_string())
         }).await.map_err(|e| e.to_string()).and_then(|r| r);
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
@@ -4420,7 +4507,7 @@ fn camera_close_callback(
         .unwrap_or_default()
         .parse::<u32>().unwrap_or(0);
 
-    state.scene.lock().unwrap().push_back(SceneCommand::CloseCamera { handle_id });
+    state.scene.lock().push_back(SceneCommand::CloseCamera { handle_id });
 }
 
 /// `__velox_camera_capture(handleId) → Promise<string>` — saves current frame as PNG.
@@ -4444,7 +4531,7 @@ fn camera_capture_callback(
         .parse::<u32>().unwrap_or(0);
 
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
-    state.scene.lock().unwrap().push_back(SceneCommand::CaptureCamera {
+    state.scene.lock().push_back(SceneCommand::CaptureCamera {
         handle_id,
         tx: OneshotSender(tx),
     });
@@ -4474,7 +4561,7 @@ fn camera_record_start_callback(
         .parse::<u32>().unwrap_or(0);
     let output_path = v8_arg_to_string(scope, &args, 1);
 
-    state.scene.lock().unwrap().push_back(SceneCommand::StartCameraRecord { handle_id, output_path });
+    state.scene.lock().push_back(SceneCommand::StartCameraRecord { handle_id, output_path });
 }
 
 /// `__velox_camera_record_stop(handleId) → Promise<string>` — stops recording.
@@ -4494,7 +4581,7 @@ fn camera_record_stop_callback(
         .parse::<u32>().unwrap_or(0);
 
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
-    state.scene.lock().unwrap().push_back(SceneCommand::StopCameraRecord {
+    state.scene.lock().push_back(SceneCommand::StopCameraRecord {
         handle_id,
         tx: OneshotSender(tx),
     });
@@ -4574,6 +4661,7 @@ fn microphone_record_callback(
 // ── HID callbacks ─────────────────────────────────────────────────────────────
 
 /// `__velox_hid_enumerate() → Promise<JSON>` — list HID devices.
+#[cfg(feature = "hid")]
 fn hid_enumerate_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -4593,7 +4681,7 @@ fn hid_enumerate_callback(
 
     state.tokio.spawn(async move {
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let mut guard = hid_api.lock().unwrap();
+            let mut guard = hid_api.lock();
             if guard.is_none() {
                 *guard = Some(hidapi::HidApi::new().map_err(|e| e.to_string())?);
             }
@@ -4616,6 +4704,7 @@ fn hid_enumerate_callback(
 }
 
 /// `__velox_hid_open(vendorId, productId) → Promise<handleId>` — open a HID device.
+#[cfg(feature = "hid")]
 fn hid_open_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -4640,13 +4729,13 @@ fn hid_open_callback(
 
     state.tokio.spawn(async move {
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let mut guard = hid_api.lock().unwrap();
+            let mut guard = hid_api.lock();
             if guard.is_none() {
                 *guard = Some(hidapi::HidApi::new().map_err(|e| e.to_string())?);
             }
             let api = guard.as_ref().unwrap();
             let device = api.open(vendor_id, product_id).map_err(|e| e.to_string())?;
-            hid_devices.lock().unwrap().insert(handle_id, device);
+            hid_devices.lock().insert(handle_id, device);
             Ok(handle_id.to_string())
         }).await.map_err(|e| e.to_string()).and_then(|r| r);
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
@@ -4654,6 +4743,7 @@ fn hid_open_callback(
 }
 
 /// `__velox_hid_read(handleId, timeoutMs) → Promise<JSON>` — read bytes from device.
+#[cfg(feature = "hid")]
 fn hid_read_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -4676,7 +4766,7 @@ fn hid_read_callback(
 
     state.tokio.spawn(async move {
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let devices = hid_devices.lock().unwrap();
+            let devices = hid_devices.lock();
             let device  = devices.get(&handle_id)
                 .ok_or_else(|| format!("HID handle {} not found", handle_id))?;
             let mut buf = vec![0u8; 64];
@@ -4690,6 +4780,7 @@ fn hid_read_callback(
 }
 
 /// `__velox_hid_write(handleId, dataJson) → Promise<bytesWritten>` — write bytes to device.
+#[cfg(feature = "hid")]
 fn hid_write_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -4714,7 +4805,7 @@ fn hid_write_callback(
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             let bytes: Vec<u8> = serde_json::from_str(&data_json)
                 .map_err(|e| format!("Invalid data JSON: {e}"))?;
-            let devices = hid_devices.lock().unwrap();
+            let devices = hid_devices.lock();
             let device  = devices.get(&handle_id)
                 .ok_or_else(|| format!("HID handle {} not found", handle_id))?;
             let n = device.write(&bytes).map_err(|e| e.to_string())?;
@@ -4725,6 +4816,7 @@ fn hid_write_callback(
 }
 
 /// `__velox_hid_close(handleId)` — close a HID device handle (sync, no promise).
+#[cfg(feature = "hid")]
 fn hid_close_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -4735,7 +4827,7 @@ fn hid_close_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let handle_id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
-    state.hid_devices.lock().unwrap().remove(&handle_id);
+    state.hid_devices.lock().remove(&handle_id);
 }
 
 // ── Updater callbacks ──────────────────────────────────────────────────────────
@@ -4744,6 +4836,7 @@ fn hid_close_callback(
 ///
 /// Fetches the latest GitHub release and returns:
 ///   `{ hasUpdate: bool, latestVersion: string, body: string }`
+#[cfg(feature = "updater")]
 fn updater_check_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -4795,6 +4888,7 @@ fn updater_check_callback(
 /// Downloads the latest GitHub release for this binary and replaces the running executable.
 /// Returns `{ updated: bool, latestVersion: string }`.
 /// The caller should prompt the user to restart.
+#[cfg(feature = "updater")]
 fn updater_update_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -4839,6 +4933,7 @@ fn updater_update_callback(
 
 /// Returns the staging path for a pending JS-only update.
 /// `~/.velox/updates/<exe_stem>/pending.js`
+#[cfg(feature = "updater")]
 fn pending_js_staging_path() -> Option<std::path::PathBuf> {
     let exe  = std::env::current_exe().ok()?;
     let stem = exe.file_stem()?.to_string_lossy().into_owned();
@@ -4852,6 +4947,7 @@ fn pending_js_staging_path() -> Option<std::path::PathBuf> {
 ///
 /// Returns the app version declared in `velox.config.json` (`version` field),
 /// or `"0.0.0"` if not set.
+#[cfg(feature = "updater")]
 fn updater_get_version_callback(
     scope: &mut v8::HandleScope,
     _args: v8::FunctionCallbackArguments,
@@ -4891,6 +4987,7 @@ fn updater_get_version_callback(
 ///   }
 /// }
 /// ```
+#[cfg(feature = "updater")]
 fn updater_check_manifest_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -4955,6 +5052,7 @@ fn updater_check_manifest_callback(
 ///
 /// On the next restart, `velox-runner` automatically loads this file instead of
 /// the bundled JS from the binary trailer, completing the JS-only update.
+#[cfg(feature = "updater")]
 fn updater_download_js_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -5049,7 +5147,7 @@ fn video_open_callback(
                 return Err("VeloxMediaNotAvailable: velox-media DLL not loaded. \
                     Run `velox runtime build` to download and cache the media DLL.".to_string());
             }
-            scene.lock().unwrap().push_back(SceneCommand::OpenVideo { handle_id, url });
+            scene.lock().push_back(SceneCommand::OpenVideo { handle_id, url });
             Ok(handle_id.to_string())
         }).await.map_err(|e| e.to_string()).and_then(|r| r);
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
@@ -5072,7 +5170,7 @@ fn video_seek_callback(
         .parse::<u32>().unwrap_or(0);
     let seconds   = args.get(1).number_value(scope).unwrap_or(0.0);
 
-    state.scene.lock().unwrap()
+    state.scene.lock()
         .push_back(SceneCommand::SeekVideo { handle_id, seconds });
 }
 
@@ -5092,7 +5190,7 @@ fn video_set_volume_callback(
     let handle_id = v8_arg_to_string(scope, &args, 0).parse::<u32>().unwrap_or(0);
     let volume    = args.get(1).number_value(scope).unwrap_or(1.0) as f32;
 
-    state.scene.lock().unwrap()
+    state.scene.lock()
         .push_back(SceneCommand::SetVideoVolume { handle_id, volume });
 }
 
@@ -5111,7 +5209,7 @@ fn video_close_callback(
     let handle_id = v8_arg_to_string(scope, &args, 0)
         .parse::<u32>().unwrap_or(0);
 
-    state.scene.lock().unwrap()
+    state.scene.lock()
         .push_back(SceneCommand::CloseVideo { handle_id });
 }
 
@@ -5127,7 +5225,7 @@ fn video_pause_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let handle_id = v8_arg_to_string(scope, &args, 0).parse::<u32>().unwrap_or(0);
-    state.scene.lock().unwrap().push_back(SceneCommand::PauseVideo { handle_id });
+    state.scene.lock().push_back(SceneCommand::PauseVideo { handle_id });
 }
 
 /// `__velox_video_play(handleId: string)` — sync
@@ -5142,7 +5240,7 @@ fn video_play_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let handle_id = v8_arg_to_string(scope, &args, 0).parse::<u32>().unwrap_or(0);
-    state.scene.lock().unwrap().push_back(SceneCommand::ResumeVideo { handle_id });
+    state.scene.lock().push_back(SceneCommand::ResumeVideo { handle_id });
 }
 
 /// `__velox_video_poll() → JSON`
@@ -5160,7 +5258,7 @@ fn video_poll_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let _ = args; // no arguments
 
-    let mut events = state.video_events.lock().unwrap();
+    let mut events = state.video_events.lock();
     let json = if events.is_empty() {
         "[]".to_string()
     } else {
@@ -5287,7 +5385,7 @@ fn splash_hide_callback(
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-    state.scene.lock().unwrap().push_back(SceneCommand::HideSplash);
+    state.scene.lock().push_back(SceneCommand::HideSplash);
 }
 
 // ── Backend command dispatch ──────────────────────────────────────────────────
@@ -5337,13 +5435,13 @@ fn backend_call_callback(
     if let Some(handler) = handler {
         state.tokio.spawn(async move {
             let result = handler(args_json).await;
-            queue_clone.lock().unwrap().push_back(Completion { resolver_ptr: resolver, result });
+            queue_clone.lock().push_back(Completion { resolver_ptr: resolver, result });
             if let Some(r) = redraw { r(); }
         });
     } else {
         // Unknown command — reject immediately.
         let msg = format!("backend.{name}: no such command registered");
-        queue_clone.lock().unwrap().push_back(Completion {
+        queue_clone.lock().push_back(Completion {
             resolver_ptr: resolver,
             result: Err(msg),
         });

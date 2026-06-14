@@ -23,6 +23,7 @@ winit          = { workspace = true }
 tokio          = { workspace = true }
 pollster       = { workspace = true }
 log            = { workspace = true }
+parking_lot    = { workspace = true }
 thiserror      = { workspace = true }
 env_logger     = { workspace = true }
 taffy          = { workspace = true }

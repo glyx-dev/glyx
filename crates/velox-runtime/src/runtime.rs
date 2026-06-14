@@ -51,10 +51,10 @@ pub struct V8Runtime {
     pub events:   EventQueue,
     pub layout_cache: LayoutCache,
     /// Shared perf ring-buffer — velox-core writes frames; JS bindings read via snapshot.
-    pub perf_state: Arc<std::sync::Mutex<velox_perf::PerfState>>,
+    pub perf_state: Arc<parking_lot::Mutex<velox_perf::PerfState>>,
     /// Forwarded deep-link URL queue.
     /// velox-core's single-instance listener pushes URLs here; `__velox_deeplink_poll` drains them.
-    pub deeplink_url_queue: Arc<std::sync::Mutex<VecDeque<String>>>,
+    pub deeplink_url_queue: Arc<parking_lot::Mutex<VecDeque<String>>>,
     /// Shared SQLite pool map. Cleared on window close for graceful shutdown.
     pub db_pools: DbPools,
     /// Video events pushed by decode threads and forwarded to JS via `__velox_video_poll`.
@@ -74,7 +74,7 @@ impl V8Runtime {
     pub fn new(tokio_handle: Handle, window: Option<WindowController>) -> Self {
         let ipc_bus        = new_ipc_bus();
         let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
-        let perf_state     = Arc::new(std::sync::Mutex::new(velox_perf::PerfState::new()));
+        let perf_state     = Arc::new(parking_lot::Mutex::new(velox_perf::PerfState::new()));
         Self::new_with_ipc(tokio_handle, window, ipc_bus, 0, next_window_id, perf_state,
             std::sync::Arc::new(std::collections::HashMap::new()),
             std::sync::Arc::new(vec![]),
@@ -93,24 +93,24 @@ impl V8Runtime {
         ipc_bus:        IpcBus,
         my_handle:      u32,
         next_window_id: Arc<std::sync::atomic::AtomicU32>,
-        perf_state:     Arc<std::sync::Mutex<velox_perf::PerfState>>,
+        perf_state:     Arc<parking_lot::Mutex<velox_perf::PerfState>>,
         backend_commands: BackendRegistry,
         js_plugins:     crate::JsPlugins,
         max_heap_mb:    usize,
     ) -> Self {
         // Register this window's inbox in the shared bus.
-        ipc_bus.lock().unwrap()
+        ipc_bus.lock()
             .entry(my_handle)
-            .or_insert_with(|| Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())));
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new())));
 
         let mut isolate = v8::Isolate::new(velox_create_params(None, max_heap_mb));
 
         let events             = new_event_queue();
         let layout_cache       = new_layout_cache();
-        let deeplink_url_queue = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+        let deeplink_url_queue = Arc::new(parking_lot::Mutex::new(VecDeque::new()));
         let db_pools           = new_db_pools();
         let video_events       = new_video_events();
-        let cdp_log_tx         = Arc::new(std::sync::Mutex::new(None::<tokio::sync::mpsc::UnboundedSender<String>>));
+        let cdp_log_tx         = Arc::new(parking_lot::Mutex::new(None::<tokio::sync::mpsc::UnboundedSender<String>>));
 
         // Clone handle before moving into register_all; keep one for inspector.
         #[cfg(feature = "dev")]
@@ -173,7 +173,7 @@ impl V8Runtime {
     ) -> Result<Self, RuntimeError> {
         let ipc_bus        = new_ipc_bus();
         let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
-        let perf_state     = Arc::new(std::sync::Mutex::new(velox_perf::PerfState::new()));
+        let perf_state     = Arc::new(parking_lot::Mutex::new(velox_perf::PerfState::new()));
         Self::new_from_snapshot_with_ipc(snapshot_blob, tokio_handle, window, ipc_bus, 0, next_window_id, perf_state,
             std::sync::Arc::new(std::collections::HashMap::new()),
             std::sync::Arc::new(vec![]),
@@ -188,24 +188,24 @@ impl V8Runtime {
         ipc_bus:        IpcBus,
         my_handle:      u32,
         next_window_id: Arc<std::sync::atomic::AtomicU32>,
-        perf_state:     Arc<std::sync::Mutex<velox_perf::PerfState>>,
+        perf_state:     Arc<parking_lot::Mutex<velox_perf::PerfState>>,
         backend_commands: BackendRegistry,
         js_plugins:     crate::JsPlugins,
         max_heap_mb:    usize,
     ) -> Result<Self, RuntimeError> {
         // Register this window's inbox in the bus.
-        ipc_bus.lock().unwrap()
+        ipc_bus.lock()
             .entry(my_handle)
-            .or_insert_with(|| Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())));
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new())));
 
         let mut isolate = v8::Isolate::new(velox_create_params(Some(snapshot_blob.to_vec()), max_heap_mb));
 
         let events             = new_event_queue();
         let layout_cache       = new_layout_cache();
-        let deeplink_url_queue = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+        let deeplink_url_queue = Arc::new(parking_lot::Mutex::new(VecDeque::new()));
         let db_pools           = new_db_pools();
         let video_events       = new_video_events();
-        let cdp_log_tx         = Arc::new(std::sync::Mutex::new(None::<tokio::sync::mpsc::UnboundedSender<String>>));
+        let cdp_log_tx         = Arc::new(parking_lot::Mutex::new(None::<tokio::sync::mpsc::UnboundedSender<String>>));
 
         // Clone handle before moving into register_all; keep one for inspector.
         #[cfg(feature = "dev")]
@@ -357,7 +357,7 @@ impl V8Runtime {
     /// Must be called from the V8 thread (same thread that created the isolate).
     pub fn tick(&mut self) {
         let completions: Vec<(usize, Result<String, String>)> = {
-            let mut q = self.queue.lock().unwrap();
+            let mut q = self.queue.lock();
             q.drain(..).map(|c| (c.resolver_ptr, c.result)).collect()
         };
 
@@ -451,7 +451,7 @@ impl V8Runtime {
 
     /// Push an input event so JS can poll it via `__velox_pollEvents()`.
     pub fn push_event(&self, event: InputEvent) {
-        self.events.lock().unwrap().push_back(event);
+        self.events.lock().push_back(event);
     }
 
     // ── Layout cache ──────────────────────────────────────────────────────────
@@ -459,13 +459,13 @@ impl V8Runtime {
     /// Update the resolved layout for a node so JS can query it via
     /// `__velox_getLayout(id)` for hit-testing.
     pub fn update_layout(&self, js_id: u32, x: f32, y: f32, width: f32, height: f32) {
-        self.layout_cache.lock().unwrap().insert(js_id, [x, y, width, height]);
+        self.layout_cache.lock().insert(js_id, [x, y, width, height]);
     }
 
     // ── Scene commands ────────────────────────────────────────────────────────
 
     pub fn drain_scene_commands(&mut self) -> Vec<SceneCommand> {
-        let mut q = self.scene.lock().unwrap();
+        let mut q = self.scene.lock();
         q.drain(..).collect()
     }
 
@@ -485,7 +485,7 @@ impl V8Runtime {
     /// Clearing the map drops the `SqlitePool` values, which triggers SQLx's
     /// graceful pool shutdown (waits for in-flight queries, then closes connections).
     pub fn shutdown_db_pools(&self) {
-        self.db_pools.lock().unwrap().clear();
+        self.db_pools.lock().clear();
     }
 
     pub fn heap_stats(&mut self) -> HeapStats {
@@ -549,11 +549,11 @@ impl JsRuntime for V8Runtime {
         Arc::clone(&self.events)
     }
 
-    fn perf_state(&self) -> Arc<std::sync::Mutex<velox_perf::PerfState>> {
+    fn perf_state(&self) -> Arc<parking_lot::Mutex<velox_perf::PerfState>> {
         Arc::clone(&self.perf_state)
     }
 
-    fn deeplink_url_queue(&self) -> Arc<std::sync::Mutex<std::collections::VecDeque<String>>> {
+    fn deeplink_url_queue(&self) -> Arc<parking_lot::Mutex<std::collections::VecDeque<String>>> {
         Arc::clone(&self.deeplink_url_queue)
     }
 

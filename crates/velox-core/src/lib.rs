@@ -56,7 +56,8 @@ use std::path::PathBuf;
 use std::process::Command;
 #[cfg(feature = "dev")]
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 use smallvec::SmallVec;
 use velox_gpu::GpuContext;
@@ -1279,7 +1280,7 @@ fn handle_dev_build_events(state: &mut PerWindowState) {
                 state.label_cache.clear();
                 state.resolved.clear();
                 state.layout = LayoutTree::new();
-                state.runtime.layout_cache.lock().unwrap().clear();
+                state.runtime.layout_cache.lock().clear();
                 state.canvas_cmds.clear();
                 state.canvas3d_scenes.clear();
                 // Discard any stale commands that accumulated before the reload.
@@ -1331,7 +1332,7 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
 
     // Refresh the displayed text at most 4× per second so numbers are readable.
     if now >= dev.overlay_next_refresh || dev.overlay_lines.is_empty() {
-        let perf_g = state.perf.lock().unwrap();
+        let perf_g = state.perf.lock();
         let fps    = perf_g.fps();
         let avg_ms = perf_g.avg_frame_time();
         let p99_ms = perf_g.p99_frame_time();
@@ -1392,7 +1393,7 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
 
     // Sparkline is always re-read (it's visual, not text to read).
     let sparkline_data: Vec<velox_perf::PerfFrame> = {
-        let perf_g = state.perf.lock().unwrap();
+        let perf_g = state.perf.lock();
         let budget = perf_g.budget_ms;
         let data: Vec<_> = perf_g.ring.iter().copied().collect();
         drop(perf_g);
@@ -1400,7 +1401,7 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut FrameBuilder) {
         data
     };
     let budget = {
-        let perf_g = state.perf.lock().unwrap();
+        let perf_g = state.perf.lock();
         perf_g.budget_ms
     };
 
@@ -1803,7 +1804,8 @@ pub fn run(mut config: AppConfig) -> bool {
 
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
-        .enable_all()
+        .enable_io()
+        .enable_time()
         .build()
         .expect("Failed to build Tokio runtime");
     let tokio_handle = tokio_rt.handle().clone();
@@ -1895,13 +1897,13 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 // VELOX_PERF_CHECK: apply budget, then spawn a timer that exits after duration.
                 if let Some((duration_secs, budget_ms)) = perf_check {
-                    shared_perf.lock().unwrap().budget_ms = budget_ms;
+                    shared_perf.lock().budget_ms = budget_ms;
                     let perf_arc  = Arc::clone(&shared_perf);
                     let proxy_pc  = ev_proxy.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_secs(duration_secs));
                         // Print perf summary to stdout for CLI to capture.
-                        let p = perf_arc.lock().unwrap();
+                        let p = perf_arc.lock();
                         let violations = p.violations.len();
                         let avg_ms = p.avg_frame_time();
                         let p99_ms = p.p99_frame_time();
@@ -1997,7 +1999,7 @@ pub fn run(mut config: AppConfig) -> bool {
                                                 let url = line.trim().to_string();
                                                 if !url.is_empty() {
                                                     log::info!("velox: deep-link forwarded URL: {}", url);
-                                                    queue.lock().unwrap().push_back(url);
+                                                    queue.lock().push_back(url);
                                                     // Note: no request_redraw here — the frame loop will
                                                     // pick up the URL on the next scheduled frame.
                                                 }
@@ -2200,7 +2202,7 @@ pub fn run(mut config: AppConfig) -> bool {
                             let cx = s.cursor_x;
                             let cy = s.cursor_y;
                             let hit = {
-                                let cache = s.runtime.layout_cache.lock().unwrap();
+                                let cache = s.runtime.layout_cache.lock();
                                 s.js_nodes.iter().any(|(&id, node)| {
                                     node.props.draggable == Some(true)
                                         && cache.get(&id).map_or(false, |&[x, y, w, h]| {
@@ -2296,7 +2298,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 // ── Perf: wall-clock frame time ───────────────────────────
                 let frame_start = Instant::now();
                 let frame_time_ms = {
-                    let perf = s.perf.lock().unwrap();
+                    let perf = s.perf.lock();
                     if let Some(prev) = perf.last_frame_at {
                         (frame_start - prev).as_secs_f64() * 1000.0
                     } else {
@@ -2331,7 +2333,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 // 5a. Pull latest camera frames and build peniko::ImageData.
                 let mut media_changed = false;
                 for stream in s.camera_streams.values_mut() {
-                    if let Some((w, h, data)) = stream.frame_buf.lock().unwrap().take() {
+                    if let Some((w, h, data)) = stream.frame_buf.lock().take() {
                         stream.latest_image = Some(peniko::ImageData {
                             data: peniko::Blob::from(data),
                             format: peniko::ImageFormat::Rgba8,
@@ -2345,7 +2347,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 // 5b. Pull latest video frames and build peniko::ImageData.
                 // Also drain video events into the runtime's video_events queue.
                 for stream in s.video_streams.values_mut() {
-                    if let Some((w, h, data)) = stream.frame_buf.lock().unwrap().take() {
+                    if let Some((w, h, data)) = stream.frame_buf.lock().take() {
                         stream.latest_image = Some(peniko::ImageData {
                             data: peniko::Blob::from(data),
                             format: peniko::ImageFormat::Rgba8,
@@ -2354,9 +2356,9 @@ pub fn run(mut config: AppConfig) -> bool {
                         });
                         media_changed = true;
                     }
-                    let pending: Vec<_> = stream.events.lock().unwrap().drain(..).collect();
+                    let pending: Vec<_> = stream.events.lock().drain(..).collect();
                     if !pending.is_empty() {
-                        let mut ve = s.runtime.video_events.lock().unwrap();
+                        let mut ve = s.runtime.video_events.lock();
                         ve.extend(pending);
                     }
                 }
@@ -2453,7 +2455,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 if !needs_full_render && !s.scene_cache.is_empty() {
                     // Stamp last_frame_at so FPS reflects the visual refresh rate
                     // (~20fps from the overlay timer), not the full-render rate (~4fps).
-                    s.perf.lock().unwrap().last_frame_at = Some(frame_start);
+                    s.perf.lock().last_frame_at = Some(frame_start);
                     if let Err(e) = s.renderer.blit_cached_frame(&s.gpu, &texture) {
                         log::warn!("blit_cached_frame: {e}");
                     } else {
@@ -2599,7 +2601,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     // wgpu GPU memory counters — reads atomics, zero GPU cost.
                     let (gpu_buf_bytes, gpu_tex_bytes, gpu_reserved_bytes,
                          gpu_buf_count, gpu_tex_count) = s.gpu.memory_counters();
-                    let mut perf = s.perf.lock().unwrap();
+                    let mut perf = s.perf.lock();
                     perf.last_frame_at = Some(frame_start);
 
                     // Dev mode: simple node-count leak heuristic.
@@ -2648,7 +2650,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         gpu_texture_count:  gpu_tex_count,
                     });
                 } else {
-                    s.perf.lock().unwrap().last_frame_at = Some(frame_start);
+                    s.perf.lock().last_frame_at = Some(frame_start);
                 }
 
                 if any_cursor_active {

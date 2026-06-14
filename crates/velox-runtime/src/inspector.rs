@@ -22,8 +22,9 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
+use parking_lot::Mutex;
 
 use tokio::sync::mpsc;
 
@@ -141,7 +142,7 @@ impl VeloxInspector {
         let (outbox_tx, outbox_rx) = mpsc::unbounded_channel::<String>();
 
         // Wire the log binding to this session's outbox so console.log → CDP.
-        *cdp_log_tx.lock().unwrap() = Some(outbox_tx.clone());
+        *cdp_log_tx.lock() = Some(outbox_tx.clone());
 
         // Start the WebSocket server on a tokio task.
         let inbox_clone = Arc::clone(&inbox);
@@ -177,7 +178,7 @@ impl VeloxInspector {
     /// Must be called from the V8 thread each frame.
     pub fn pump_messages(&mut self, isolate: &mut v8::OwnedIsolate, context: &v8::Global<v8::Context>) {
         let msgs: Vec<String> = {
-            let mut q = self.inbox.lock().unwrap();
+            let mut q = self.inbox.lock();
             q.drain(..).collect()
         };
         if msgs.is_empty() { return; }
@@ -269,7 +270,7 @@ async fn run_ws_server(
         let read_task = tokio::spawn(async move {
             while let Some(msg) = ws_src.next().await {
                 if let Ok(Message::Text(txt)) = msg {
-                    inbox_clone.lock().unwrap().push_back(txt.to_string());
+                    inbox_clone.lock().push_back(txt.to_string());
                 }
             }
         });

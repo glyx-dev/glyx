@@ -7,6 +7,7 @@ edition = "2021"
 v8             = { workspace = true }
 tokio          = { workspace = true }
 log            = { workspace = true }
+parking_lot    = { workspace = true }
 thiserror      = { workspace = true }
 anyhow         = { workspace = true }
 velox-security = { path = "../velox-security" }
@@ -17,30 +18,40 @@ arboard             = { workspace = true }
 clipboard-win       = { workspace = true }
 notify-rust         = { workspace = true }
 raw-window-handle   = { workspace = true }
-reqwest             = { workspace = true }
+reqwest             = { workspace = true, optional = true }
 base64              = { workspace = true }
-tokio-tungstenite   = { workspace = true }
-futures-util        = { workspace = true }
+tokio-tungstenite   = { workspace = true, optional = true }
+futures-util        = { workspace = true, optional = true }
 mdns-sd             = { workspace = true }
 velox-perf          = { path = "../velox-perf" }
 velox-sysapi        = { path = "../velox-sysapi" }
 battery             = { workspace = true }
 sysinfo             = { workspace = true }
 keepawake           = { workspace = true }
-gilrs               = { workspace = true }
+gilrs               = { workspace = true, optional = true }
 global-hotkey       = { workspace = true }
-rodio               = { workspace = true }
-hidapi              = { workspace = true }
-self_update         = { workspace = true }
-sha2                = { workspace = true }
+rodio               = { workspace = true, optional = true }
+hidapi              = { workspace = true, optional = true }
+self_update         = { workspace = true, optional = true }
+sha2                = { workspace = true, optional = true }
+ed25519-dalek       = { workspace = true, optional = true }
 velox-media         = { path = "../velox-media" }
 serde               = { workspace = true }
-velox-3d            = { path = "../velox-3d" }
-velox-ai            = { path = "../velox-ai" }
+velox-3d            = { path = "../velox-3d", optional = true }
+velox-ai            = { path = "../velox-ai", optional = true }
 
 [features]
-default = ["v8"]
+default = ["v8", "full"]
 v8 = []       # V8 backend (current only backend; rusty_v8 dep is always required for now)
 dev = []      # dev overlay, hot-reload, CDP inspector
+full     = ["audio", "gamepad", "canvas3d", "ai", "hid", "updater", "fetch", "websocket"]
+fetch     = ["dep:reqwest"]
+websocket = ["dep:tokio-tungstenite", "dep:futures-util"]
+audio    = ["dep:rodio"]
+gamepad  = ["dep:gilrs"]
+canvas3d = ["dep:velox-3d"]
+ai       = ["dep:velox-ai"]
+hid      = ["dep:hidapi"]
+updater  = ["dep:self_update", "dep:sha2", "dep:ed25519-dalek"]
 # jsc = []    # future: JavaScriptCore (iOS/macOS)
 # quickjs = [] # future: QuickJS (embedded/WASM)

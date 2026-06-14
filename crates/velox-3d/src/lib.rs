@@ -303,7 +303,10 @@ impl Canvas3DTarget {
             mip_level_count: 1, sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format:    wgpu::TextureFormat::Depth32Float,
-            usage:     wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // TRANSIENT: depth stays in tile memory on iGPU (Apple Silicon,
+            // Intel iGPU, etc.) — never written to main memory.  Requires StoreOp::Discard.
+            usage:     wgpu::TextureUsages::RENDER_ATTACHMENT
+                     | wgpu::TextureUsages::TRANSIENT,
             view_formats: &[],
         });
         let depth_view = depth_tex.create_view(&Default::default());
@@ -634,7 +637,8 @@ impl Renderer3D {
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &target.depth_view,
-                    depth_ops:   Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    // Discard: pairs with TRANSIENT_ATTACHMENT — depth never written to main memory.
+                    depth_ops:   Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
                     stencil_ops: None,
                 }),
                 ..Default::default()

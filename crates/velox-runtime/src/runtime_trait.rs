@@ -80,7 +80,7 @@ pub trait JsRuntime {
 
     fn layout_cache(&self) -> LayoutCache;
     fn events(&self) -> EventQueue;
-    fn perf_state(&self) -> Arc<std::sync::Mutex<velox_perf::PerfState>>;
-    fn deeplink_url_queue(&self) -> Arc<std::sync::Mutex<VecDeque<String>>>;
+    fn perf_state(&self) -> Arc<parking_lot::Mutex<velox_perf::PerfState>>;
+    fn deeplink_url_queue(&self) -> Arc<parking_lot::Mutex<VecDeque<String>>>;
     fn db_pools(&self) -> DbPools;
 }

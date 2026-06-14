@@ -241,7 +241,7 @@ pub fn init_v8() {
         // --no-expose-wasm:
         //   Disable WebAssembly (unused; saves the Wasm engine's own structures).
         v8::V8::set_flags_from_string(
-            "--lite-mode --optimize-for-size --no-expose-wasm"
+            "--lite-mode --optimize-for-size --no-expose-wasm --expose-gc"
         );
         // Source-map position translation in stack traces is handled via the
         // ScriptOrigin source_map_url set on each eval() call (runtime.rs).

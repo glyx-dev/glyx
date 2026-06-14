@@ -293,13 +293,13 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                                     let (w, h) = (rgba.width(), rgba.height());
                                     let data = rgba.into_raw();
                                     // Keep a permanent copy for CaptureCamera (still photo).
-                                    *raw_clone.lock().unwrap() = Some((w, h, data.clone()));
+                                    *raw_clone.lock() = Some((w, h, data.clone()));
                                     // Forward to recording thread if active (try_send = non-blocking).
-                                    if let Some(tx) = rec_tx_clone.lock().unwrap().as_ref() {
+                                    if let Some(tx) = rec_tx_clone.lock().as_ref() {
                                         let _ = tx.try_send((w, h, data.clone()));
                                     }
                                     // Render loop uses take() to detect new frames.
-                                    *buf_clone.lock().unwrap() = Some((w, h, data));
+                                    *buf_clone.lock() = Some((w, h, data));
                                     // Wake the winit event loop to paint the new frame.
                                     redraw();
                                 }
@@ -329,7 +329,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
             SceneCommand::CaptureCamera { handle_id, tx } => {
                 let result = if let Some(stream) = state.camera_streams.get(&handle_id) {
                     // Read last_raw_frame — never taken by render loop, always available.
-                    match stream.last_raw_frame.lock().unwrap().clone() {
+                    match stream.last_raw_frame.lock().clone() {
                         Some((w, h, data)) => {
                             let path = format!("{}/velox_photo_{}.png",
                                 std::env::temp_dir().display(), handle_id);
@@ -351,7 +351,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     // 8 slots: capture thread can pipeline frames while calibration runs.
                     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(u32, u32, Vec<u8>)>(8);
                     let (done_tx, done_rx)   = std::sync::mpsc::channel::<Result<String, String>>();
-                    *stream.record_frame_tx.lock().unwrap() = Some(frame_tx);
+                    *stream.record_frame_tx.lock() = Some(frame_tx);
                     stream.record_done_rx = Some(done_rx);
 
                     std::thread::spawn(move || {
@@ -476,7 +476,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
             SceneCommand::StopCameraRecord { handle_id, tx } => {
                 if let Some(stream) = state.camera_streams.get_mut(&handle_id) {
                     // Drop the sender — signals recording thread to stop.
-                    *stream.record_frame_tx.lock().unwrap() = None;
+                    *stream.record_frame_tx.lock() = None;
 
                     if let Some(done_rx) = stream.record_done_rx.take() {
                         // Wait off the main thread so we don't stall rendering.
@@ -520,7 +520,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                             let msg = format!(
                                 r#"{{"type":"error","id":{handle_id},"message":"VeloxMediaNotAvailable"}}"#
                             );
-                            ev_clone.lock().unwrap().push_back(msg);
+                            ev_clone.lock().push_back(msg);
                             return;
                         }
                     };
@@ -532,7 +532,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                                 r#"{{"type":"error","id":{handle_id},"message":{}}}"#,
                                 serde_json::to_string(&e).unwrap_or_else(|_| format!("\"{e}\""))
                             );
-                            ev_clone.lock().unwrap().push_back(msg);
+                            ev_clone.lock().push_back(msg);
                             return;
                         }
                     };
@@ -543,7 +543,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     let meta_msg = format!(
                         r#"{{"type":"metadata","id":{handle_id},"width":{w},"height":{h},"fps":{fps:.3},"durationSecs":{duration_secs:.3}}}"#
                     );
-                    ev_clone.lock().unwrap().push_back(meta_msg);
+                    ev_clone.lock().push_back(meta_msg);
 
                     let mut rgba_buf = vec![0u8; rgba_size];
 
@@ -571,7 +571,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
 
                         match media.decoder_next_frame(&dec, &mut rgba_buf) {
                             Ok(Some(pts)) => {
-                                *buf_clone.lock().unwrap() = Some((w, h, rgba_buf.clone()));
+                                *buf_clone.lock() = Some((w, h, rgba_buf.clone()));
 
                                 let ws = wall_start.get_or_insert_with(|| {
                                     pts_start = pts;
@@ -590,13 +590,13 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                                     let msg = format!(
                                         r#"{{"type":"timeupdate","id":{handle_id},"currentTime":{pts:.3}}}"#
                                     );
-                                    ev_clone.lock().unwrap().push_back(msg);
+                                    ev_clone.lock().push_back(msg);
                                     last_timeupdate = std::time::Instant::now();
                                 }
                             }
                             Ok(None) => {
                                 let msg = format!(r#"{{"type":"ended","id":{handle_id}}}"#);
-                                ev_clone.lock().unwrap().push_back(msg);
+                                ev_clone.lock().push_back(msg);
                                 break;
                             }
                             Err(_) => break,
@@ -641,7 +641,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
 
             SceneCommand::SetVideoVolume { handle_id, volume } => {
                 if let Some(stream) = state.video_streams.get(&handle_id) {
-                    *stream.video_volume.lock().unwrap() = volume.clamp(0.0, 2.0);
+                    *stream.video_volume.lock() = volume.clamp(0.0, 2.0);
                 }
             }
 
@@ -880,7 +880,7 @@ fn spawn_video_audio(
             let should_pause = pause_flag.load(std::sync::atomic::Ordering::Relaxed);
             if should_pause && !audio_paused { sink.pause(); audio_paused = true; }
             if !should_pause && audio_paused  { sink.play();  audio_paused = false; }
-            let vol = *volume.lock().unwrap();
+            let vol = *volume.lock();
             if (sink.volume() - vol).abs() > 0.01 { sink.set_volume(vol); }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }

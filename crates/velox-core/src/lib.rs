@@ -1702,8 +1702,12 @@ pub fn run(mut config: AppConfig) -> bool {
         Err(e) => log::warn!("velox: .env parse error: {e}"),
     }
 
-    let (caps, _plugins) = load_velox_config(&mut config.window);
-    velox_security::init(caps);
+    // Init security from config only if not already done (e.g. via AppConfig::from_config()).
+    // This fallback ensures security is initialised even when AppConfig is built manually.
+    if !velox_security::is_initialized() {
+        let (caps, _plugins) = load_velox_config(&mut config.window);
+        velox_security::init(caps);
+    }
 
     // ── Deep link: check launch args for a URL matching the configured scheme ──
     //

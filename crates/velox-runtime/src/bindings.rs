@@ -536,30 +536,31 @@ pub fn register_all(
 
     // ── Evaluate JS plugins and register their exported functions ─────────────
     //
-    // Each plugin is bundled as an IIFE that sets `globalThis.<global_name>` to
-    // its exports object.  We eval the IIFE then walk own properties and store
-    // any Function values in `state.js_backend_commands` keyed by
-    // `"<prefix>.<fn>"` (or `"<fn>"` for unnamed plugins).
+    // All plugins are concatenated and compiled in a single V8 pass (one parse
+    // + one compile instead of N).  Each IIFE sets `globalThis.<global_name>`.
+    // We then walk each plugin's own properties to collect Function exports.
+    if !js_plugins.is_empty() {
+        // Build one combined source: "iife1;\niife2;\n..."
+        let combined: String = js_plugins.iter()
+            .map(|p| p.bundled_js.as_str())
+            .collect::<Vec<_>>()
+            .join(";\n");
+        if let Some(code_str) = v8::String::new(scope, &combined) {
+            let mut try_catch = v8::TryCatch::new(scope);
+            if let Some(script) = v8::Script::compile(&mut try_catch, code_str, None) {
+                script.run(&mut try_catch);
+            }
+            if try_catch.has_caught() {
+                let msg = try_catch.exception()
+                    .and_then(|e| e.to_string(&mut try_catch))
+                    .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                    .unwrap_or_else(|| "unknown error".into());
+                log::error!("[plugins] eval error: {msg}");
+            }
+            drop(try_catch);
+        }
+    }
     for plugin in js_plugins.iter() {
-        // Eval the bundled IIFE.
-        let code_str = match v8::String::new(scope, &plugin.bundled_js) {
-            Some(s) => s,
-            None => { log::warn!("[plugins] could not create V8 string for plugin"); continue; }
-        };
-        let mut try_catch = v8::TryCatch::new(scope);
-        let script = v8::Script::compile(&mut try_catch, code_str, None);
-        if let Some(s) = script {
-            s.run(&mut try_catch);
-        }
-        if try_catch.has_caught() {
-            let msg = try_catch.exception()
-                .and_then(|e| e.to_string(&mut try_catch))
-                .map(|s| s.to_rust_string_lossy(&mut try_catch))
-                .unwrap_or_else(|| "unknown error".into());
-            log::error!("[plugins] eval error for plugin {:?}: {msg}", plugin.prefix);
-            continue;
-        }
-        drop(try_catch);
 
         // Read exports from globalThis.<global_name>.
         let gname = match v8::String::new(scope, &plugin.global_name) {
@@ -3636,16 +3637,13 @@ fn audio_pause_callback(
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-    if let Some(id_str) = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)) {
-        if let Ok(id) = id_str.parse::<u32>() {
-            if let Some(sink) = state.audio_sinks.lock().unwrap().get(&id) {
-                sink.pause();
-            }
-            if let Some(tracker) = state.audio_trackers.lock().unwrap().get_mut(&id) {
-                tracker.offset_secs = tracker.current_time();
-                tracker.started_at  = None;
-            }
-        }
+    let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    if let Some(sink) = state.audio_sinks.lock().unwrap().get(&id) {
+        sink.pause();
+    }
+    if let Some(tracker) = state.audio_trackers.lock().unwrap().get_mut(&id) {
+        tracker.offset_secs = tracker.current_time();
+        tracker.started_at  = None;
     }
 }
 
@@ -3658,15 +3656,12 @@ fn audio_resume_callback(
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-    if let Some(id_str) = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)) {
-        if let Ok(id) = id_str.parse::<u32>() {
-            if let Some(sink) = state.audio_sinks.lock().unwrap().get(&id) {
-                sink.play();
-            }
-            if let Some(tracker) = state.audio_trackers.lock().unwrap().get_mut(&id) {
-                tracker.started_at = Some(std::time::Instant::now());
-            }
-        }
+    let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    if let Some(sink) = state.audio_sinks.lock().unwrap().get(&id) {
+        sink.play();
+    }
+    if let Some(tracker) = state.audio_trackers.lock().unwrap().get_mut(&id) {
+        tracker.started_at = Some(std::time::Instant::now());
     }
 }
 
@@ -3681,14 +3676,11 @@ fn audio_stop_callback(
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-    if let Some(id_str) = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)) {
-        if let Ok(id) = id_str.parse::<u32>() {
-            if let Some(sink) = state.audio_sinks.lock().unwrap().remove(&id) {
-                sink.stop();
-            }
-            state.audio_trackers.lock().unwrap().remove(&id);
-        }
+    let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    if let Some(sink) = state.audio_sinks.lock().unwrap().remove(&id) {
+        sink.stop();
     }
+    state.audio_trackers.lock().unwrap().remove(&id);
 }
 
 /// `__velox_audio_setVolume(handle, volume)` → void (sync)
@@ -3700,16 +3692,10 @@ fn audio_set_volume_callback(
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-    let id_val = args.get(0);
-    let vol_val = args.get(1);
-    let id_str = id_val.to_string(scope).map(|s| s.to_rust_string_lossy(scope));
-    let vol = vol_val.number_value(scope).unwrap_or(1.0) as f32;
-    if let Some(id_str) = id_str {
-        if let Ok(id) = id_str.parse::<u32>() {
-            if let Some(sink) = state.audio_sinks.lock().unwrap().get(&id) {
-                sink.set_volume(vol.clamp(0.0, 2.0));
-            }
-        }
+    let id  = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let vol = args.get(1).number_value(scope).unwrap_or(1.0) as f32;
+    if let Some(sink) = state.audio_sinks.lock().unwrap().get(&id) {
+        sink.set_volume(vol.clamp(0.0, 2.0));
     }
 }
 
@@ -3722,11 +3708,8 @@ fn audio_get_volume_callback(
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-    let vol = if let Some(id_str) = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)) {
-        if let Ok(id) = id_str.parse::<u32>() {
-            state.audio_sinks.lock().unwrap().get(&id).map(|s| s.volume()).unwrap_or(1.0)
-        } else { 1.0 }
-    } else { 1.0 };
+    let id  = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let vol = state.audio_sinks.lock().unwrap().get(&id).map(|s| s.volume()).unwrap_or(1.0);
     rv.set(v8::Number::new(scope, vol as f64).into());
 }
 
@@ -3789,11 +3772,8 @@ fn audio_get_time_callback(
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-    let t = if let Some(id_str) = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)) {
-        if let Ok(id) = id_str.parse::<u32>() {
-            state.audio_trackers.lock().unwrap().get(&id).map(|t| t.current_time()).unwrap_or(0.0)
-        } else { 0.0 }
-    } else { 0.0 };
+    let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let t  = state.audio_trackers.lock().unwrap().get(&id).map(|t| t.current_time()).unwrap_or(0.0);
     rv.set(v8::Number::new(scope, t).into());
 }
 
@@ -3809,10 +3789,8 @@ fn audio_duration_callback(
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-    let id_str = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
-    let path = if let Ok(id) = id_str.parse::<u32>() {
-        state.audio_trackers.lock().unwrap().get(&id).map(|t| t.path.clone())
-    } else { None };
+    let id   = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let path = state.audio_trackers.lock().unwrap().get(&id).map(|t| t.path.clone());
     let Some(path) = path else {
         rv.set(reject_promise_with_error(scope, "unknown audio handle").into());
         return;
@@ -3843,12 +3821,12 @@ fn audio_seek_callback(
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-    let id_str = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
-    let secs   = args.get(1).number_value(scope).unwrap_or(0.0).max(0.0);
-    let Ok(id) = id_str.parse::<u32>() else {
+    let id   = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let secs = args.get(1).number_value(scope).unwrap_or(0.0).max(0.0);
+    if id == 0 {
         rv.set(reject_promise_with_error(scope, "invalid audio handle").into());
         return;
-    };
+    }
     let path = state.audio_trackers.lock().unwrap().get(&id).map(|t| t.path.clone());
     let Some(path) = path else {
         rv.set(reject_promise_with_error(scope, "unknown audio handle").into());

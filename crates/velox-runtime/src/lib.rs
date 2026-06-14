@@ -243,10 +243,9 @@ pub fn init_v8() {
         v8::V8::set_flags_from_string(
             "--lite-mode --optimize-for-size --no-expose-wasm"
         );
-        // In dev builds: translate source-map positions in V8 stack traces so
-        // frames show original .jsx/.tsx file + line instead of bundle offsets.
-        #[cfg(feature = "dev")]
-        v8::V8::set_flags_from_string("--enable_source_maps");
+        // Source-map position translation in stack traces is handled via the
+        // ScriptOrigin source_map_url set on each eval() call (runtime.rs).
+        // The --enable_source_maps V8 flag was removed in V8 9.x.
 
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);

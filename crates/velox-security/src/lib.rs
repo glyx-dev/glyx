@@ -208,6 +208,11 @@ pub fn init(caps: Capabilities) {
     }
 }
 
+/// Returns `true` if `init()` has already been called for this process.
+pub fn is_initialized() -> bool {
+    CAPS.get().is_some()
+}
+
 /// Returns the active capability set for this process.
 ///
 /// If `init()` has not been called, returns a zero-permission default so

@@ -2628,7 +2628,11 @@ pub fn run(mut config: AppConfig) -> bool {
             ShellEvent::Occluded { window_handle, occluded: true } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
                     s.renderer.trim_resources();
-                    log::debug!("Window {window_handle} occluded — GPU buffer pool released.");
+                    // Also drop CPU-side decoded image pixels. They'll be re-decoded
+                    // from disk on restore (fast; atlas re-upload is the slow part,
+                    // and that cost is paid anyway after trim_resources clears GPU buffers).
+                    s.images_by_path.clear();
+                    log::debug!("Window {window_handle} occluded — GPU buffer pool + image CPU cache released.");
                 }
             }
 

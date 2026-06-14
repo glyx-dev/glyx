@@ -13,6 +13,8 @@
 
 mod skia;
 pub use skia::{TinySkiaFrame, TinySkiaRenderer};
+mod femtovg_backend;
+pub use femtovg_backend::{FemtoVgFrame, FemtoVgRenderer};
 
 use std::path::PathBuf;
 use thiserror::Error;
@@ -469,6 +471,8 @@ pub enum BackendKind {
     Vello { use_cpu: bool },
     /// tiny-skia pure-CPU rasterizer — no GPU compute, ~8 MB RAM.
     TinySkia,
+    /// femtovg GPU tessellation — lighter than Vello, ~120–150 MB RAM.
+    FemtoVg,
 }
 
 // ── AnyFrame ──────────────────────────────────────────────────────────────────
@@ -477,6 +481,7 @@ pub enum BackendKind {
 pub enum AnyFrame {
     Vello(FrameBuilder),
     TinySkia(TinySkiaFrame),
+    FemtoVg(FemtoVgFrame),
 }
 
 impl AnyFrame {
@@ -488,11 +493,13 @@ impl AnyFrame {
         matches!(self, AnyFrame::Vello(_))
     }
 
+
     pub fn fill_rounded_rect(&mut self, x: f64, y: f64, w: f64, h: f64,
                               radius: f64, color: Color) {
         match self {
             AnyFrame::Vello(f)    => f.fill_rounded_rect(x, y, w, h, radius, color),
             AnyFrame::TinySkia(f) => f.fill_rounded_rect(x, y, w, h, radius, color),
+            AnyFrame::FemtoVg(f)  => f.fill_rounded_rect(x, y, w, h, radius, color),
         }
     }
 
@@ -501,6 +508,7 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.fill_rounded_rect_with_brush(x, y, w, h, radius, brush),
             AnyFrame::TinySkia(f) => f.fill_rounded_rect_with_brush(x, y, w, h, radius, brush),
+            AnyFrame::FemtoVg(f)  => f.fill_rounded_rect_with_brush(x, y, w, h, radius, brush),
         }
     }
 
@@ -508,6 +516,7 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.fill_rect(x, y, w, h, color),
             AnyFrame::TinySkia(f) => f.fill_rect(x, y, w, h, color),
+            AnyFrame::FemtoVg(f)  => f.fill_rect(x, y, w, h, color),
         }
     }
 
@@ -516,6 +525,7 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.stroke_rounded_rect(x, y, w, h, radius, stroke_width, color),
             AnyFrame::TinySkia(f) => f.stroke_rounded_rect(x, y, w, h, radius, stroke_width, color),
+            AnyFrame::FemtoVg(f)  => f.stroke_rounded_rect(x, y, w, h, radius, stroke_width, color),
         }
     }
 
@@ -523,6 +533,7 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.draw_text(layout, x, y, color),
             AnyFrame::TinySkia(f) => f.draw_text(layout, x, y, color),
+            AnyFrame::FemtoVg(f)  => f.draw_text(layout, x, y, color),
         }
     }
 
@@ -530,6 +541,7 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.draw_image(image, x, y, w, h),
             AnyFrame::TinySkia(f) => f.draw_image(image, x, y, w, h),
+            AnyFrame::FemtoVg(f)  => f.draw_image(image, x, y, w, h),
         }
     }
 
@@ -537,6 +549,7 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.draw_image_with_transform(image, transform),
             AnyFrame::TinySkia(f) => f.draw_image_with_transform(image, transform),
+            AnyFrame::FemtoVg(f)  => f.draw_image_with_transform(image, transform),
         }
     }
 
@@ -545,7 +558,7 @@ impl AnyFrame {
     pub fn scene_mut(&mut self) -> &mut Scene {
         match self {
             AnyFrame::Vello(f) => f.scene_mut(),
-            AnyFrame::TinySkia(_) => panic!("scene_mut called on non-Vello backend"),
+            _ => panic!("scene_mut called on non-Vello backend"),
         }
     }
 
@@ -554,7 +567,7 @@ impl AnyFrame {
     pub fn replace_scene(&mut self, new: Scene) -> Scene {
         match self {
             AnyFrame::Vello(f) => f.replace_scene(new),
-            AnyFrame::TinySkia(_) => panic!("replace_scene called on non-Vello backend"),
+            _ => panic!("replace_scene called on non-Vello backend"),
         }
     }
 
@@ -563,7 +576,7 @@ impl AnyFrame {
     pub fn append_scene(&mut self, other: &Scene, transform: Option<Affine>) {
         match self {
             AnyFrame::Vello(f) => f.append_scene(other, transform),
-            AnyFrame::TinySkia(_) => panic!("append_scene called on non-Vello backend"),
+            _ => panic!("append_scene called on non-Vello backend"),
         }
     }
 
@@ -571,6 +584,7 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.push_layer(x, y, w, h),
             AnyFrame::TinySkia(f) => f.push_layer(x, y, w, h),
+            AnyFrame::FemtoVg(f)  => f.push_layer(x, y, w, h),
         }
     }
 
@@ -578,6 +592,7 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.push_rounded_layer(x, y, w, h, radius),
             AnyFrame::TinySkia(f) => f.push_rounded_layer(x, y, w, h, radius),
+            AnyFrame::FemtoVg(f)  => f.push_rounded_layer(x, y, w, h, radius),
         }
     }
 
@@ -585,6 +600,7 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.push_layer_with_alpha(x, y, w, h, alpha),
             AnyFrame::TinySkia(f) => f.push_layer_with_alpha(x, y, w, h, alpha),
+            AnyFrame::FemtoVg(f)  => f.push_layer_with_alpha(x, y, w, h, alpha),
         }
     }
 
@@ -592,6 +608,7 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.pop_layer(),
             AnyFrame::TinySkia(f) => f.pop_layer(),
+            AnyFrame::FemtoVg(f)  => f.pop_layer(),
         }
     }
 
@@ -599,6 +616,7 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.fill_circle(cx, cy, r, color),
             AnyFrame::TinySkia(f) => f.fill_circle(cx, cy, r, color),
+            AnyFrame::FemtoVg(f)  => f.fill_circle(cx, cy, r, color),
         }
     }
 
@@ -606,6 +624,7 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.stroke_circle(cx, cy, r, width, color),
             AnyFrame::TinySkia(f) => f.stroke_circle(cx, cy, r, width, color),
+            AnyFrame::FemtoVg(f)  => f.stroke_circle(cx, cy, r, width, color),
         }
     }
 
@@ -613,6 +632,7 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.stroke_line(x0, y0, x1, y1, width, color),
             AnyFrame::TinySkia(f) => f.stroke_line(x0, y0, x1, y1, width, color),
+            AnyFrame::FemtoVg(f)  => f.stroke_line(x0, y0, x1, y1, width, color),
         }
     }
 }
@@ -623,6 +643,7 @@ impl AnyFrame {
 pub enum AnyRenderer {
     Vello(VeloxRenderer),
     TinySkia(TinySkiaRenderer),
+    FemtoVg(FemtoVgRenderer),
 }
 
 impl AnyRenderer {
@@ -633,6 +654,8 @@ impl AnyRenderer {
                 VeloxRenderer::new(gpu, use_cpu).map(AnyRenderer::Vello),
             BackendKind::TinySkia =>
                 TinySkiaRenderer::new(gpu).map(AnyRenderer::TinySkia),
+            BackendKind::FemtoVg =>
+                FemtoVgRenderer::new(gpu).map(AnyRenderer::FemtoVg),
         }
     }
 
@@ -641,6 +664,7 @@ impl AnyRenderer {
         match self {
             AnyRenderer::Vello(r)    => r.background_color = color,
             AnyRenderer::TinySkia(r) => r.background_color = color,
+            AnyRenderer::FemtoVg(r)  => r.background_color = color,
         }
     }
 
@@ -648,6 +672,7 @@ impl AnyRenderer {
         match self {
             AnyRenderer::Vello(r)    => AnyFrame::Vello(r.begin_frame()),
             AnyRenderer::TinySkia(r) => AnyFrame::TinySkia(r.begin_frame()),
+            AnyRenderer::FemtoVg(r)  => AnyFrame::FemtoVg(r.begin_frame()),
         }
     }
 
@@ -660,6 +685,7 @@ impl AnyRenderer {
         match (self, frame) {
             (AnyRenderer::Vello(r),    AnyFrame::Vello(f))    => r.render_frame(gpu, texture, f),
             (AnyRenderer::TinySkia(r), AnyFrame::TinySkia(f)) => r.render_frame(gpu, texture, f),
+            (AnyRenderer::FemtoVg(r),  AnyFrame::FemtoVg(f))  => r.render_frame(gpu, texture, f),
             _ => unreachable!("AnyRenderer/AnyFrame variant mismatch"),
         }
     }
@@ -672,6 +698,7 @@ impl AnyRenderer {
         match self {
             AnyRenderer::Vello(r)    => r.blit_cached_frame(gpu, texture),
             AnyRenderer::TinySkia(r) => r.blit_cached_frame(gpu, texture),
+            AnyRenderer::FemtoVg(r)  => r.blit_cached_frame(gpu, texture),
         }
     }
 
@@ -679,6 +706,7 @@ impl AnyRenderer {
         match self {
             AnyRenderer::Vello(r)    => r.trim_resources(),
             AnyRenderer::TinySkia(r) => r.trim_resources(),
+            AnyRenderer::FemtoVg(r)  => r.trim_resources(),
         }
     }
 
@@ -686,6 +714,7 @@ impl AnyRenderer {
         match self {
             AnyRenderer::Vello(r)    => r.try_save_pipeline_cache(),
             AnyRenderer::TinySkia(r) => r.try_save_pipeline_cache(),
+            AnyRenderer::FemtoVg(r)  => r.try_save_pipeline_cache(),
         }
     }
 }

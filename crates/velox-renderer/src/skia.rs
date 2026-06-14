@@ -7,12 +7,17 @@
 //! ~8 MB for a 1920×1080 Pixmap + upload texture, vs Vello's ~130 MB GPU buffer pool.
 //! No shader compilation, no GPU compute — starts instantly.
 //!
+//! ## Glyph cache
+//! Each unique (font, size, glyph_id) alpha mask is rasterized via swash once
+//! and cached in `TinySkiaShared::glyph_cache`.  On subsequent frames the
+//! cached alpha bytes are colorized and blitted directly — no swash re-work.
+//!
 //! ## Limitations (experiment branch)
 //! - `supports_caching()` returns `false` — Vello scene-fragment caching is disabled.
 //! - `push_layer_with_alpha` clips correctly but does **not** apply the opacity value.
 //!   A full implementation would composite into an offscreen Pixmap.
-//! - Gradient brushes are silently skipped (unsupported in this experiment).
 
+use std::collections::HashMap;
 use vello::{kurbo::Affine, peniko};
 use velox_gpu::GpuContext;
 use crate::RendererError;
@@ -29,6 +34,42 @@ fn solid_paint(color: peniko::Color) -> tiny_skia::Paint<'static> {
     p.set_color(to_sk(color));
     p.anti_alias = true;
     p
+}
+
+// ── Gradient helper ───────────────────────────────────────────────────────────
+
+/// Convert a `peniko::Gradient` to a tiny-skia `Shader<'static>`.
+fn gradient_shader(grad: &peniko::Gradient) -> Option<tiny_skia::Shader<'static>> {
+    use peniko::GradientKind;
+    use tiny_skia::{GradientStop, LinearGradient, RadialGradient, SpreadMode, Transform};
+
+    let stops: Vec<GradientStop> = grad.stops.iter().map(|s| {
+        let c: peniko::Color = s.color.to_alpha_color::<peniko::color::Srgb>();
+        let q = c.to_rgba8();
+        GradientStop::new(s.offset, tiny_skia::Color::from_rgba8(q.r, q.g, q.b, q.a))
+    }).collect();
+    if stops.is_empty() { return None; }
+
+    match &grad.kind {
+        GradientKind::Linear(pos) =>
+            LinearGradient::new(
+                tiny_skia::Point::from_xy(pos.start.x as f32, pos.start.y as f32),
+                tiny_skia::Point::from_xy(pos.end.x   as f32, pos.end.y   as f32),
+                stops,
+                SpreadMode::Pad,
+                Transform::identity(),
+            ),
+        GradientKind::Radial(pos) =>
+            RadialGradient::new(
+                tiny_skia::Point::from_xy(pos.start_center.x as f32, pos.start_center.y as f32),
+                tiny_skia::Point::from_xy(pos.end_center.x   as f32, pos.end_center.y   as f32),
+                pos.end_radius,
+                stops,
+                SpreadMode::Pad,
+                Transform::identity(),
+            ),
+        _ => None,
+    }
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
@@ -57,6 +98,36 @@ fn rrect_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny_skia::
     pb.finish()
 }
 
+// ── Glyph cache ───────────────────────────────────────────────────────────────
+
+/// Cache key for a rasterized glyph alpha mask.
+/// Color is NOT in the key — the raw alpha coverage is stored and colorized
+/// cheaply at draw time, so one cache entry serves all text colors.
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct GlyphKey {
+    data_ptr:   usize,  // stable pointer to font blob bytes
+    font_index: u32,
+    glyph_id:   u16,
+    size_class: u16,    // (font_size * 4.0) as u16 — quarter-pixel precision
+}
+
+struct CachedAlphaGlyph {
+    /// Raw swash alpha coverage — one byte per pixel.
+    alpha:  Vec<u8>,
+    width:  u32,
+    height: u32,
+    left:   i32,   // placement.left
+    top:    i32,   // placement.top
+}
+
+// ── TinySkiaShared ────────────────────────────────────────────────────────────
+
+/// State that persists across frames (moved in/out of TinySkiaFrame).
+struct TinySkiaShared {
+    scale_ctx:   swash::scale::ScaleContext,
+    glyph_cache: HashMap<GlyphKey, CachedAlphaGlyph>,
+}
+
 // ── TinySkiaFrame ─────────────────────────────────────────────────────────────
 
 /// One frame accumulated in a CPU `Pixmap`.
@@ -64,15 +135,16 @@ pub struct TinySkiaFrame {
     pub(crate) pixmap: tiny_skia::Pixmap,
     /// Mask stack — saved/restored across push_layer / pop_layer.
     clip_stack:   Vec<Option<tiny_skia::Mask>>,
-    /// Active clip mask (`None` = no clip).  Split field from `pixmap` so
-    /// the borrow checker allows simultaneous immutable + mutable access.
+    /// Active clip mask (`None` = no clip).
     current_mask: Option<tiny_skia::Mask>,
-    /// Swash glyph rasterizer — cached to reuse outline and hinting state.
-    scale_ctx:    swash::scale::ScaleContext,
+    /// Persistent state moved from TinySkiaRenderer for the frame duration.
+    shared:       TinySkiaShared,
 }
 
 impl TinySkiaFrame {
-    pub(crate) fn new(width: u32, height: u32, bg: peniko::Color) -> Option<Self> {
+    fn new(width: u32, height: u32, bg: peniko::Color, shared: TinySkiaShared)
+        -> Option<Self>
+    {
         let mut pixmap = tiny_skia::Pixmap::new(width, height)?;
         let q = bg.to_rgba8();
         pixmap.fill(tiny_skia::Color::from_rgba8(q.r, q.g, q.b, q.a));
@@ -80,7 +152,7 @@ impl TinySkiaFrame {
             pixmap,
             clip_stack:   Vec::new(),
             current_mask: None,
-            scale_ctx:    swash::scale::ScaleContext::new(),
+            shared,
         })
     }
 
@@ -98,10 +170,23 @@ impl TinySkiaFrame {
 
     pub fn fill_rounded_rect_with_brush(&mut self, x: f64, y: f64, w: f64, h: f64,
                                          radius: f64, brush: &peniko::Brush) {
-        if let peniko::Brush::Solid(c) = brush {
-            self.fill_rounded_rect(x, y, w, h, radius, *c);
-        }
-        // Gradient brushes: unsupported in this experiment.
+        let Some(path) = rrect_path(x as f32, y as f32, w as f32, h as f32, radius as f32)
+            else { return };
+        let paint: tiny_skia::Paint<'static> = match brush {
+            peniko::Brush::Solid(c) => solid_paint(*c),
+            peniko::Brush::Gradient(g) => match gradient_shader(g) {
+                Some(shader) => tiny_skia::Paint {
+                    shader,
+                    anti_alias: true,
+                    ..Default::default()
+                },
+                None => return,
+            },
+            _ => return,
+        };
+        let mask = self.current_mask.as_ref();
+        self.pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding,
+                              tiny_skia::Transform::identity(), mask);
     }
 
     pub fn fill_rect(&mut self, x: f64, y: f64, w: f64, h: f64, color: peniko::Color) {
@@ -162,6 +247,10 @@ impl TinySkiaFrame {
     // ── Text ──────────────────────────────────────────────────────────────────
 
     /// Rasterize a Parley text layout at `(x, y)` using swash glyph outlines.
+    ///
+    /// Alpha masks are cached in `shared.glyph_cache` (color-independent).
+    /// On a cache hit the mask is colorized in ~O(pixels) arithmetic and blitted
+    /// directly — no swash rasterization at all.
     pub fn draw_text(&mut self, layout: &velox_text::TextLayout, x: f64, y: f64,
                      color: peniko::Color) {
         use swash::{FontRef, scale::{Render, Source}, zeno::Format};
@@ -178,11 +267,18 @@ impl TinySkiaFrame {
                 let baseline = gr.baseline() as f64;
                 let run_off  = gr.offset()   as f64;
 
-                let font_data = font.data.data();
-                let font_idx  = font.index as usize;
-                let Some(font_ref) = FontRef::from_index(font_data, font_idx) else { continue };
+                let font_data  = font.data.data();
+                let font_index = font.index;
+                let data_ptr   = font_data.as_ptr() as usize;
+                let size_class = (size * 4.0) as u16;
 
-                let mut scaler = self.scale_ctx.builder(font_ref)
+                let Some(font_ref) = FontRef::from_index(font_data, font_index as usize)
+                    else { continue };
+
+                // `scaler` borrows self.shared.scale_ctx — separate from
+                // self.pixmap and self.shared.glyph_cache via field splitting.
+                let mut scaler = self.shared.scale_ctx
+                    .builder(font_ref)
                     .size(size)
                     .hint(true)
                     .build();
@@ -190,31 +286,61 @@ impl TinySkiaFrame {
                 // In Parley 0.10, g.x / g.y are shaping *adjustments* from the
                 // current pen, NOT cumulative positions.  Advance pen by g.advance.
                 let mut pen_x = run_off;
+
                 for g in gr.glyphs() {
                     let glyph_id: swash::GlyphId = g.id as u16;
-                    let Some(image) = Render::new(&[Source::Outline])
-                        .format(Format::Alpha)
-                        .render(&mut scaler, glyph_id)
-                    else {
-                        pen_x += g.advance as f64;
-                        continue;
+                    let bx = (x + pen_x + g.x as f64) as i32;
+                    let by = (y + baseline + g.y as f64) as i32;
+                    pen_x += g.advance as f64;
+
+                    let key = GlyphKey {
+                        data_ptr, font_index, glyph_id, size_class,
                     };
 
-                    let pw = image.placement.width;
-                    let ph = image.placement.height;
-                    if pw == 0 || ph == 0 {
-                        pen_x += g.advance as f64;
+                    // Check cache.  The cache stores the raw alpha mask — no
+                    // color in the key, colorized cheaply at draw time.
+                    let mask = self.current_mask.as_ref();
+                    if let Some(cached) = self.shared.glyph_cache.get(&key) {
+                        let draw_x = bx + cached.left;
+                        let draw_y = by - cached.top;
+                        // Colorize cached alpha into premultiplied RGBA.
+                        let mut rgba = Vec::with_capacity(
+                            (cached.width * cached.height * 4) as usize
+                        );
+                        for &alpha in &cached.alpha {
+                            let a = alpha as u32;
+                            rgba.push((cr as u32 * a / 255) as u8);
+                            rgba.push((cg as u32 * a / 255) as u8);
+                            rgba.push((cb as u32 * a / 255) as u8);
+                            rgba.push(alpha);
+                        }
+                        if let Some(glyph_pm) = tiny_skia::PixmapRef::from_bytes(
+                            &rgba, cached.width, cached.height,
+                        ) {
+                            self.pixmap.draw_pixmap(
+                                draw_x, draw_y, glyph_pm,
+                                &tiny_skia::PixmapPaint::default(),
+                                tiny_skia::Transform::identity(),
+                                mask,
+                            );
+                        }
                         continue;
                     }
 
-                    // Glyph draw position:
-                    //   pen_x + g.x (shaping adjustment) + bearing from swash placement
-                    let bx = (x + pen_x + g.x as f64) as i32 + image.placement.left;
-                    let by = (y + baseline + g.y as f64) as i32 - image.placement.top;
+                    // Cache miss — rasterize via swash.
+                    let Some(image) = Render::new(&[Source::Outline])
+                        .format(Format::Alpha)
+                        .render(&mut scaler, glyph_id)
+                    else { continue };
 
-                    pen_x += g.advance as f64;
+                    let pw = image.placement.width;
+                    let ph = image.placement.height;
+                    if pw == 0 || ph == 0 { continue; }
 
-                    // Alpha mask → premultiplied RGBA for tiny-skia.
+                    let draw_x = bx + image.placement.left;
+                    let draw_y = by - image.placement.top;
+
+                    // Colorize alpha → premultiplied RGBA.
                     let mut rgba = Vec::with_capacity((pw * ph * 4) as usize);
                     for &alpha in &image.data {
                         let a = alpha as u32;
@@ -225,15 +351,24 @@ impl TinySkiaFrame {
                     }
 
                     if let Some(glyph_pm) = tiny_skia::PixmapRef::from_bytes(&rgba, pw, ph) {
-                        let mask = self.current_mask.as_ref();
                         self.pixmap.draw_pixmap(
-                            bx, by, glyph_pm,
+                            draw_x, draw_y, glyph_pm,
                             &tiny_skia::PixmapPaint::default(),
                             tiny_skia::Transform::identity(),
                             mask,
                         );
                     }
+
+                    // Store raw alpha in cache (color-independent).
+                    self.shared.glyph_cache.insert(key, CachedAlphaGlyph {
+                        alpha:  image.data.to_vec(),
+                        width:  pw,
+                        height: ph,
+                        left:   image.placement.left,
+                        top:    image.placement.top,
+                    });
                 }
+                // `scaler` dropped here — releases &mut self.shared.scale_ctx.
             }
         }
     }
@@ -299,8 +434,6 @@ impl TinySkiaFrame {
     fn blit_scaled(&mut self, src: &[u8], iw: u32, ih: u32,
                    x: f64, y: f64, w: f64, h: f64) {
         let Some(pm) = tiny_skia::PixmapRef::from_bytes(src, iw, ih) else { return };
-        // local_transform maps CANVAS coords → PATTERN coords.
-        // Canvas (x, y) → pattern (0, 0);  canvas (x+w, y+h) → pattern (iw, ih).
         let sx = iw as f32 / w as f32;
         let sy = ih as f32 / h as f32;
         let tx = -(x as f32) * sx;
@@ -326,14 +459,12 @@ impl TinySkiaFrame {
         let saved = self.current_mask.take();
         let new_mask = match saved.as_ref() {
             Some(parent) => {
-                // Intersect the parent mask with the new path.
                 let mut m = parent.clone();
                 m.intersect_path(path, tiny_skia::FillRule::Winding, true,
                                  tiny_skia::Transform::identity());
                 Some(m)
             }
             None => {
-                // No parent clip yet — create a mask for this path only.
                 let w = self.pixmap.width();
                 let h = self.pixmap.height();
                 tiny_skia::Mask::new(w, h).map(|mut m| {
@@ -379,6 +510,8 @@ pub struct TinySkiaRenderer {
     width:          u32,
     height:         u32,
     pub background_color: peniko::Color,
+    /// Swash context + glyph cache — moved into TinySkiaFrame during render.
+    shared:         Option<TinySkiaShared>,
 }
 
 impl TinySkiaRenderer {
@@ -393,6 +526,10 @@ impl TinySkiaRenderer {
             upload_view:    view,
             blit, width: w, height: h,
             background_color: crate::colors::BACKGROUND,
+            shared: Some(TinySkiaShared {
+                scale_ctx:   swash::scale::ScaleContext::new(),
+                glyph_cache: HashMap::new(),
+            }),
         })
     }
 
@@ -414,8 +551,9 @@ impl TinySkiaRenderer {
         (tex, view)
     }
 
-    pub fn begin_frame(&self) -> TinySkiaFrame {
-        TinySkiaFrame::new(self.width, self.height, self.background_color)
+    pub fn begin_frame(&mut self) -> TinySkiaFrame {
+        let shared = self.shared.take().expect("skia: frame already in progress");
+        TinySkiaFrame::new(self.width, self.height, self.background_color, shared)
             .expect("Pixmap creation failed — zero-sized window?")
     }
 
@@ -436,6 +574,14 @@ impl TinySkiaRenderer {
             self.upload_view    = view;
             self.blit = wgpu::util::TextureBlitter::new(&gpu.device, gpu.surface_format());
         }
+
+        // Reclaim the persistent cache + scaler from the frame.
+        let mut shared = frame.shared;
+        // On resize, drop cached glyphs (hinting pixels may differ).
+        if self.width != w || self.height != h {
+            shared.glyph_cache.clear();
+        }
+        self.shared = Some(shared);
 
         // Upload CPU pixmap to GPU.
         gpu.queue.write_texture(
@@ -470,9 +616,12 @@ impl TinySkiaRenderer {
         Ok(())
     }
 
-    /// No GPU resources to release — no-op.
-    pub fn trim_resources(&mut self) {}
+    /// Drop cached glyph alpha masks to free CPU memory under pressure.
+    pub fn trim_resources(&mut self) {
+        if let Some(shared) = self.shared.as_mut() {
+            shared.glyph_cache.clear();
+        }
+    }
 
-    /// No pipeline cache — no-op.
     pub fn try_save_pipeline_cache(&self) {}
 }

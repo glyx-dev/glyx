@@ -1874,10 +1874,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     RenderMode::Cpu    => BackendKind::Vello { use_cpu: true  },
                     RenderMode::Gpu    => BackendKind::Vello { use_cpu: force_cpu },
                     RenderMode::TinySkia => BackendKind::TinySkia,
-                    RenderMode::Femtovg  => {
-                        log::warn!("RenderMode::Femtovg not yet implemented; falling back to Gpu");
-                        BackendKind::Vello { use_cpu: false }
-                    }
+                    RenderMode::Femtovg  => BackendKind::FemtoVg,
                 };
                 let mut renderer = AnyRenderer::new(&gpu_ctx, backend_kind)
                     .expect("Failed to initialise renderer");

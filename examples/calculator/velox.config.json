@@ -12,7 +12,7 @@
     "startupMode": "windowed",
     "background":  "#1e1e2e",
     "decorations": false,
-    "renderMode":  "gpu"
+    "renderMode":  "skia"
   },
   "capabilities": {
     "fs": { "read": ["**"], "write": ["**"] },

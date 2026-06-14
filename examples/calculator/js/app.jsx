@@ -249,10 +249,10 @@ function App() {
         ) : (
           <View style={{ flexGrow: 1, gap: 4 }} width="90%">
             <View style={{ flexDirection: 'row', gap: 4 }} width="100%" height={btnH}>
-              <Btn label="C" color={C.red} />
+              <Btn label="C" color={C.red} disabled={state.disp === '0' && !state.op && !state.expr} />
               <Btn label="⌫" color={C.overlay} />
               <Btn label="%" color={C.overlay} />
-              <Btn label="÷" color={C.mauve} disabled={state.disp === '0'} />
+              <Btn label="÷" color={C.mauve} />
             </View>
             <View style={{ flexDirection: 'row', gap: 4 }} width="100%" height={btnH}>
               <Btn label="7" />

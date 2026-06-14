@@ -7543,7 +7543,8 @@ No matching component was found for:
                   children: [
                     /* @__PURE__ */ jsx_runtime.jsx(Btn, {
                       label: "C",
-                      color: C.red
+                      color: C.red,
+                      disabled: state.disp === "0" && !state.op && !state.expr
                     }),
                     /* @__PURE__ */ jsx_runtime.jsx(Btn, {
                       label: "⌫",
@@ -7555,8 +7556,7 @@ No matching component was found for:
                     }),
                     /* @__PURE__ */ jsx_runtime.jsx(Btn, {
                       label: "÷",
-                      color: C.mauve,
-                      disabled: state.disp === "0"
+                      color: C.mauve
                     })
                   ]
                 }),

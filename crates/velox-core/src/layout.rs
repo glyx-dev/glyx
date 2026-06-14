@@ -197,6 +197,11 @@ pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::
                         style.grid_template_rows = tracks;
                     }
                 }
+                // CSS Grid default: items fill their grid area. Only apply when
+                // the user hasn't set an explicit `justify_items` prop.
+                if props.justify_items.is_none() {
+                    style.justify_items = Some(AlignItems::Stretch);
+                }
             }
             // Child grid placement — set on any View (only takes effect inside a grid parent).
             if let Some(s) = props.grid_column.as_deref() {

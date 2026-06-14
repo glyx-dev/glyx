@@ -7155,13 +7155,15 @@ No matching component was found for:
     red: "#f38ba8",
     yellow: "#f9e2af",
     mauve: "#cba6f7",
-    teal: "#94e2d5"
+    teal: "#94e2d5",
+    onLight: "#1e1e2e"
   };
+  var LIGHT_BG = new Set([C.accent, C.green, C.red, C.yellow, C.mauve, C.teal]);
   function calc(state, key) {
     if (key === "C") {
       return { disp: "0", prev: null, op: null, wait: false, expr: "" };
     }
-    if (key === "⌫") {
+    if (key === "←") {
       const d = state.disp;
       const next = d.length > 1 ? d.slice(0, -1) : "0";
       return { ...state, disp: next, lastResult: undefined };
@@ -7228,9 +7230,12 @@ No matching component was found for:
         return next;
       });
     }, []);
+    const pad = 8;
     const titleH = 32;
     const btnH = gridMode ? (winH - 200) / 7 : (winH - 156) / 5;
     const dispH = 60;
+    const gridW = winW - 2 * pad;
+    const gridBtnW = Math.floor((gridW - 3 * 4) / 4);
     const btnStyle = (color) => ({
       backgroundColor: color,
       borderRadius: 8,
@@ -7238,22 +7243,28 @@ No matching component was found for:
       justifyContent: "center",
       boxShadow: "0 2 4 #00000044"
     });
-    const Btn = ({ label, color = C.surfaceAlt, span = 1, disabled = false, gridColumn, gridRow }) => /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-      disabled,
-      onPress: () => press(label),
-      flex: gridMode ? undefined : span,
-      gridColumn,
-      gridRow,
-      height: btnH,
-      style: { ...btnStyle(color), opacity: disabled ? 0 : 1 },
-      children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
-        fontSize: 20,
-        height: 28,
-        style: { color: C.text, textAlign: "center" },
-        children: label
-      })
-    });
-    const pad = 8;
+    const Btn = ({ label, color = C.surfaceAlt, span = 1, disabled = false, gridColumn, gridRow }) => {
+      const isLongLabel = label.length > 1;
+      const fontSize = isLongLabel ? 14 : 20;
+      const textHeight = isLongLabel ? 20 : 28;
+      const labelColor = LIGHT_BG.has(color) ? C.onLight : C.text;
+      return /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
+        disabled,
+        onPress: () => press(label),
+        flex: gridMode ? undefined : span,
+        width: gridMode ? gridBtnW : undefined,
+        gridColumn,
+        gridRow,
+        height: btnH,
+        style: { ...btnStyle(color), opacity: disabled ? 0 : 1 },
+        children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
+          fontSize,
+          height: textHeight,
+          style: { color: labelColor, textAlign: "center" },
+          children: label
+        })
+      });
+    };
     return /* @__PURE__ */ jsx_runtime.jsxs(View, {
       style: {
         position: "relative",
@@ -7308,7 +7319,7 @@ No matching component was found for:
                       children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
                         fontSize: 10,
                         height: 12,
-                        style: { color: "#fff" },
+                        style: { color: C.onLight },
                         children: "H"
                       })
                     }),
@@ -7320,7 +7331,7 @@ No matching component was found for:
                       children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
                         fontSize: 10,
                         height: 12,
-                        style: { color: "#fff" },
+                        style: { color: C.onLight },
                         children: gridMode ? "Std" : "Sci"
                       })
                     }),
@@ -7332,7 +7343,7 @@ No matching component was found for:
                       children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
                         fontSize: 10,
                         height: 12,
-                        style: { color: "#fff" },
+                        style: { color: C.onLight },
                         children: "×"
                       })
                     })
@@ -7376,8 +7387,8 @@ No matching component was found for:
               display: "grid",
               gridTemplateColumns: "1fr 1fr 1fr 1fr",
               gridTemplateRows: "repeat(7, 1fr)",
-              width: "90%",
-              style: { gap: 0, flexGrow: 1 },
+              width: gridW,
+              style: { gap: 4, flexGrow: 1, boxSizing: "border-box" },
               children: [
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
                   label: "sin",
@@ -7431,10 +7442,11 @@ No matching component was found for:
                   label: "C",
                   gridColumn: "1",
                   gridRow: "3",
-                  color: C.red
+                  color: C.red,
+                  disabled: state.disp === "0" && !state.op && !state.expr
                 }),
                 /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-                  label: "⌫",
+                  label: "←",
                   gridColumn: "2",
                   gridRow: "3",
                   color: C.overlay
@@ -7547,7 +7559,7 @@ No matching component was found for:
                       disabled: state.disp === "0" && !state.op && !state.expr
                     }),
                     /* @__PURE__ */ jsx_runtime.jsx(Btn, {
-                      label: "⌫",
+                      label: "←",
                       color: C.overlay
                     }),
                     /* @__PURE__ */ jsx_runtime.jsx(Btn, {
@@ -7644,25 +7656,40 @@ No matching component was found for:
               position: "absolute",
               top: titleH + 8,
               right: pad,
-              width: 180,
-              height: 260,
+              width: 200,
+              height: 280,
               zIndex: 10,
               style: {
                 backgroundColor: C.surface,
-                borderRadius: 8,
+                borderRadius: 10,
                 borderWidth: 1,
                 borderColor: C.overlay,
                 overflow: "hidden"
               },
               children: [
-                /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                  fontSize: 10,
-                  height: 20,
-                  style: { color: C.subtle, padding: 4 },
-                  children: "History"
+                /* @__PURE__ */ jsx_runtime.jsxs(View, {
+                  style: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingLeft: 10, paddingRight: 10 },
+                  height: 30,
+                  width: 200,
+                  children: [
+                    /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                      fontSize: 11,
+                      height: 14,
+                      style: { color: C.subtle },
+                      children: "History"
+                    }),
+                    /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                      fontSize: 10,
+                      height: 14,
+                      style: { color: C.dim },
+                      children: history.length + " entries"
+                    })
+                  ]
                 }),
                 history.length === 0 ? /* @__PURE__ */ jsx_runtime.jsx(View, {
-                  style: { flex: 1, justifyContent: "center", alignItems: "center" },
+                  style: { justifyContent: "center", alignItems: "center" },
+                  height: 250,
+                  width: 200,
                   children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
                     fontSize: 11,
                     height: 16,
@@ -7670,22 +7697,52 @@ No matching component was found for:
                     children: "No history yet"
                   })
                 }) : /* @__PURE__ */ jsx_runtime.jsx(ScrollView, {
-                  width: 178,
-                  showScrollbar: true,
-                  scrollbarWidth: 6,
-                  scrollbarColor: "#8c8caa99",
-                  contentHeight: history.length * 24,
-                  height: 236,
-                  children: history.map((entry, i) => /* @__PURE__ */ jsx_runtime.jsx(Text, {
-                    fontSize: 11,
-                    height: 24,
-                    style: {
-                      color: C.text,
-                      paddingLeft: 4,
-                      paddingRight: 16
-                    },
-                    children: entry
-                  }, i))
+                  width: 200,
+                  height: 250,
+                  contentHeight: history.length * 36 + 6,
+                  showScrollbar: history.length * 36 + 6 > 250,
+                  scrollbarWidth: 3,
+                  scrollbarColor: C.overlay,
+                  children: /* @__PURE__ */ jsx_runtime.jsx(View, {
+                    width: 200,
+                    height: history.length * 36 + 6,
+                    style: { justifyContent: "flex-start", gap: 6, paddingTop: 6, paddingBottom: 6, boxSizing: "border-box" },
+                    children: history.map((entry, i) => {
+                      const eqIdx = entry.lastIndexOf(" = ");
+                      const expr = eqIdx >= 0 ? entry.slice(0, eqIdx) : entry;
+                      const result = eqIdx >= 0 ? entry.slice(eqIdx + 3) : entry;
+                      return /* @__PURE__ */ jsx_runtime.jsxs(View, {
+                        width: 184,
+                        height: 30,
+                        style: {
+                          flexDirection: "row",
+                          alignItems: "center",
+                          backgroundColor: C.surfaceAlt,
+                          borderRadius: 8,
+                          paddingLeft: 10,
+                          paddingRight: 10,
+                          boxSizing: "border-box",
+                          overflow: "hidden"
+                        },
+                        children: [
+                          /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                            fontSize: 11,
+                            height: 15,
+                            width: 100,
+                            style: { color: C.dim },
+                            children: expr
+                          }),
+                          /* @__PURE__ */ jsx_runtime.jsx(Text, {
+                            fontSize: 12,
+                            height: 15,
+                            width: 64,
+                            style: { color: C.accent, textAlign: "right" },
+                            children: "= " + result
+                          })
+                        ]
+                      }, i);
+                    })
+                  })
                 })
               ]
             })

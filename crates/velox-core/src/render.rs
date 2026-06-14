@@ -26,6 +26,11 @@ pub(crate) struct RenderCtx<'a> {
     /// Current frame's captured scene fragments (write path).
     /// Populated during render; swapped into `scene_cache` after present.
     pub scene_cache_new: &'a mut std::collections::HashMap<u32, Scene>,
+    /// Cached scene fragments for `RepaintBoundary` subtrees (read path).
+    /// Replayed verbatim when none of the boundary's descendants are dirty.
+    pub boundary_cache: &'a mut std::collections::HashMap<u32, Scene>,
+    /// Write path for `boundary_cache` — swapped after present.
+    pub boundary_cache_new: &'a mut std::collections::HashMap<u32, Scene>,
 }
 
 fn apply_opacity(c: peniko::Color, opacity: f32) -> peniko::Color {
@@ -506,6 +511,40 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                     }
                 }
             }
+        }
+
+        NodeType::RepaintBoundary => {
+            // ── RepaintBoundary fast path ────────────────────────────────────
+            // The dirty marking system ensures that when any descendant of this
+            // node changes, the boundary node itself is also placed in
+            // dirty_subtrees.  So if `id` is absent from dirty_subtrees (and
+            // dirty_subtrees is non-empty = selective render mode), the entire
+            // subtree is guaranteed clean: replay the cached fragment and skip
+            // all traversal.
+            if !ctx.dirty_subtrees.is_empty() && !ctx.dirty_subtrees.contains(&id) {
+                if let Some(cached) = ctx.boundary_cache.remove(&id) {
+                    ctx.frame.append_scene(&cached, None);
+                    ctx.boundary_cache_new.insert(id, cached);
+                    return;
+                }
+                // No cache yet (first frame) — fall through to full render.
+            }
+
+            // Dirty or first render: capture the subtree into a sub-Scene,
+            // append it to the main scene, and store for next-frame replay.
+            let parent_scene = ctx.frame.replace_scene(Scene::new());
+
+            let mut children: Vec<u32> = node.children.to_vec();
+            children.sort_by_key(|&cid| {
+                ctx.nodes.get(&cid).and_then(|n| n.props.z_index).unwrap_or(0)
+            });
+            for child_id in children {
+                render_subtree(child_id, scroll_y, child_opacity, ctx);
+            }
+
+            let sub = ctx.frame.replace_scene(parent_scene);
+            ctx.frame.append_scene(&sub, None);
+            ctx.boundary_cache_new.insert(id, sub);
         }
     }
 

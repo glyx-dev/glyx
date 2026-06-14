@@ -210,7 +210,6 @@ fn cmd_create_js(name: &str, dest: &Path, velox_home: &Path, template: &str) -> 
     let design_path  = relpath(dest, &velox_home.join("js/packages/@velox/design"));
     let config_path  = relpath(dest, &velox_home.join("js/packages/@velox/config"));
 
-    write_file(dest.join("js/polyfills.js"), POLYFILLS_JS)?;
     write_file(dest.join("js/app.jsx"), &app_jsx_for_template(name, template))?;
     write_file(dest.join("velox.config.ts"), &velox_config_ts_template(name))?;
     write_file(dest.join("package.json"), &format!(
@@ -229,7 +228,7 @@ fn cmd_create_js(name: &str, dest: &Path, velox_home: &Path, template: &str) -> 
   }}
 }}
 "#))?;
-    write_file(dest.join(".gitignore"), "/node_modules\n/js/app.js\n/target/velox/velox.config.resolved.json\n")?;
+    write_file(dest.join(".gitignore"), "/node_modules\n/js/dist/\n/target/velox/velox.config.resolved.json\n")?;
     Ok(())
 }
 
@@ -262,7 +261,6 @@ velox-shell = {{ path = "{shell_path}" }}
 env_logger  = "0.11"
 "#))?;
     write_file(dest.join("src/main.rs"), "#![cfg_attr(all(target_os = \"windows\", not(debug_assertions)), windows_subsystem = \"windows\")]\n\nfn main() {\n    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(\"info\"))\n        .format_timestamp(None)\n        .format_module_path(false)\n        .init();\n    velox_core::run(velox_core::AppConfig::from_config());\n}\n")?;
-    write_file(dest.join("js/polyfills.js"), POLYFILLS_JS)?;
     write_file(dest.join("js/app.jsx"), &app_jsx_for_template(name, template))?;
     write_file(dest.join("velox.config.ts"), &velox_config_ts_template(name))?;
     write_file(dest.join("package.json"), &format!(
@@ -281,7 +279,7 @@ env_logger  = "0.11"
   }}
 }}
 "#))?;
-    write_file(dest.join(".gitignore"), "/target\n/node_modules\n/js/app.js\n/target/velox/velox.config.resolved.json\n")?;
+    write_file(dest.join(".gitignore"), "/target\n/node_modules\n/js/dist/\n/target/velox/velox.config.resolved.json\n")?;
     Ok(())
 }
 
@@ -295,8 +293,7 @@ fn app_jsx_for_template(name: &str, template: &str) -> String {
 }
 
 fn app_jsx_blank(name: &str) -> String {
-    format!(r#"import './polyfills.js';
-import React, {{ useState }} from 'react';
+    format!(r#"import React, {{ useState }} from 'react';
 import {{ View, Text, Pressable, render, useWindowSize }} from '@velox/react';
 
 // Velox logo — four squares, mirroring the velox.dev favicon.
@@ -345,8 +342,7 @@ render(<App />);
 }
 
 fn app_jsx_notes(name: &str) -> String {
-    format!(r#"import './polyfills.js';
-import React, {{ useState }} from 'react';
+    format!(r#"import React, {{ useState }} from 'react';
 import {{ View, Text, Pressable, ScrollView, render, useWindowSize }} from '@velox/react';
 import {{ ThemeProvider, useTheme, Button, Card, Label, Heading }} from '@velox/design';
 
@@ -433,8 +429,7 @@ render(
 }
 
 fn app_jsx_dashboard(name: &str) -> String {
-    format!(r#"import './polyfills.js';
-import React, {{ useState }} from 'react';
+    format!(r#"import React, {{ useState }} from 'react';
 import {{ View, Text, Pressable, render, useWindowSize }} from '@velox/react';
 import {{ ThemeProvider, useTheme, Card, Label, Heading, Divider, Badge }} from '@velox/design';
 
@@ -521,8 +516,7 @@ render(
 }
 
 fn app_jsx_settings(name: &str) -> String {
-    format!(r#"import './polyfills.js';
-import React, {{ useState }} from 'react';
+    format!(r#"import React, {{ useState }} from 'react';
 import {{ View, Text, Pressable, Switch, render, useWindowSize }} from '@velox/react';
 import {{ ThemeProvider, useTheme, Card, Label, Heading, Divider, Button }} from '@velox/design';
 
@@ -628,7 +622,7 @@ export default defineConfig({{
   }},
   dev: {{
     entry: 'js/app.jsx',
-    output: 'js/app.js',
+    output: 'js/dist/app.js',
     watch: ['js'],
   }},
 }});

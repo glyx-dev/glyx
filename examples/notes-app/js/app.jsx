@@ -15,7 +15,6 @@
 //   edit   → NoteEditScreen   — create / edit a note, save / delete / copy / export
 //   search → NoteSearchScreen — semantic search via keyword-vector cosine similarity
 
-import './polyfills.js';
 import React, { useState, useEffect, useContext, createContext, useCallback, useMemo } from 'react';
 import {
   View, Text, Pressable, TextInput, ScrollView, render, useWindowSize, useMediaQuery,

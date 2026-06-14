@@ -1,4 +1,3 @@
-import './polyfills.js';
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, Pressable, ScrollView, render, useWindowSize,

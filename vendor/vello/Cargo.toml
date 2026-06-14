@@ -1,0 +1,38 @@
+[package]
+name = "vello"
+version = "0.9.0"
+description = "A GPU compute-centric 2D renderer."
+categories = ["rendering", "graphics"]
+keywords = ["2d", "vector-graphics"]
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/linebender/vello"
+autolib = false
+
+[lib]
+name = "vello"
+path = "src/lib.rs"
+
+[features]
+default = ["wgpu", "wgpu_default"]
+bump_estimate = ["vello_encoding/bump_estimate"]
+wgpu = ["dep:wgpu", "dep:vello_shaders", "dep:futures-intrusive"]
+wgpu_default = ["wgpu", "wgpu/default"]
+debug_layers = []
+wgpu-profiler = ["dep:wgpu-profiler"]
+hot_reload = ["vello_shaders/compile"]
+
+[dependencies]
+vello_encoding = "0.9.0"
+vello_shaders = { version = "0.9.0", optional = true }
+bytemuck = { version = "1.25.0", features = ["derive"] }
+skrifa = { version = "0.42.1", features = ["std", "autohint_shaping"], default-features = false }
+peniko = { version = "0.6.1", default-features = true }
+wgpu = { version = "29.0.3", features = ["std", "wgsl"], default-features = false, optional = true }
+log = "0.4.29"
+static_assertions = "1.1.0"
+futures-intrusive = { version = "0.5.0", optional = true }
+wgpu-profiler = { version = "0.27.0", optional = true }
+thiserror = { version = "2.0.18", default-features = false }
+png = "0.18.1"

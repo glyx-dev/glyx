@@ -27,7 +27,8 @@ pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::
     };
 
     match node_type {
-        NodeType::View => {
+        // RepaintBoundary is a transparent container — same flex/grid layout as View.
+        NodeType::View | NodeType::RepaintBoundary => {
             let display = match props.display.as_deref() {
                 Some("grid") => Display::Grid,
                 Some("none") => Display::None,
@@ -270,7 +271,7 @@ pub(crate) fn rebuild_layout_from_scene(
                     };
                     layout.add_text_node(style, ctx, Some(format!("js-{}", id))).ok()?
                 }
-                NodeType::View | NodeType::Image | NodeType::Canvas | NodeType::Canvas3D | NodeType::Camera | NodeType::Video => {
+                NodeType::View | NodeType::Image | NodeType::Canvas | NodeType::Canvas3D | NodeType::Camera | NodeType::Video | NodeType::RepaintBoundary => {
                     layout.add_node(style, Some(format!("js-{}", id))).ok()?
                 }
             }

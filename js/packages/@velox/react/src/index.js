@@ -1,4 +1,6 @@
 // @velox/react — React renderer for the Velox runtime.
+// Polyfills must be installed before react/react-reconciler initialise.
+import './polyfills.js';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Reconciler from 'react-reconciler';
@@ -232,6 +234,24 @@ export function render(element) {
 
 export const View = ({ children, style, ...props }) =>
   React.createElement('view', { style, ...props }, children);
+
+/**
+ * RepaintBoundary — explicit render-layer hint.
+ *
+ * Wraps a subtree that changes infrequently (sidebars, navbars, complex static
+ * cards, list items).  When none of the boundary's descendants are dirty in a
+ * given frame, Velox replays the cached Vello scene fragment directly —
+ * skipping all child traversal and draw-call construction.
+ *
+ * No visual difference — purely a performance hint.  Safe to add/remove.
+ *
+ * Example:
+ *   <RepaintBoundary>
+ *     <Sidebar />
+ *   </RepaintBoundary>
+ */
+export const RepaintBoundary = ({ children, style, ...props }) =>
+  React.createElement('repaintBoundary', { style, ...props }, children);
 
 export const Text = ({ children, style, showCursor, ...props }) =>
   React.createElement('text', { text: children, style, showCursor, ...props });

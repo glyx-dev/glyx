@@ -101,12 +101,9 @@ pub struct VeloxRenderer {
 }
 
 impl VeloxRenderer {
-    pub fn new(gpu: &GpuContext) -> Result<Self, RendererError> {
-        let use_cpu = std::env::var("VELOX_CPU_RENDER")
-            .map(|v| v.trim() == "1")
-            .unwrap_or(false);
+    pub fn new(gpu: &GpuContext, use_cpu: bool) -> Result<Self, RendererError> {
         if use_cpu {
-            log::warn!("velox-renderer: CPU fallback active (VELOX_CPU_RENDER=1).");
+            log::warn!("velox-renderer: CPU rendering active.");
         }
 
         // ── Pipeline cache ────────────────────────────────────────────────
@@ -178,6 +175,14 @@ impl VeloxRenderer {
     ///
     /// Call once after the first successful frame render.  Subsequent launches
     /// will load this file and skip shader recompilation.
+    /// Release all pooled Vello GPU compute buffers (~100–170 MB on iGPU).
+    ///
+    /// Call this when the window is minimised or occluded.  Buffers are
+    /// reallocated lazily on the next rendered frame.
+    pub fn trim_resources(&mut self) {
+        self.renderer.trim_resources();
+    }
+
     pub fn try_save_pipeline_cache(&self) {
         let Some(ref cache) = self.pipeline_cache else { return };
         let Some(data)      = cache.get_data()     else { return };

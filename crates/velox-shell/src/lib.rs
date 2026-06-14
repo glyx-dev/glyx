@@ -81,6 +81,9 @@ pub enum ShellEvent {
     CursorMoved { window_handle: u32, x: f64, y: f64 },
     /// Vertical scroll (positive = scroll down).
     Scroll { window_handle: u32, delta_y: f32 },
+    /// Window became occluded (hidden/minimised) or visible again.
+    /// `occluded = true` means the window is no longer visible on screen.
+    Occluded { window_handle: u32, occluded: bool },
 }
 
 // ── Shell config ─────────────────────────────────────────────────────────────
@@ -98,6 +101,17 @@ pub enum StartupMode {
     Maximized,
     /// Borderless fullscreen — covers the taskbar.
     Fullscreen,
+}
+
+/// Selects the rendering backend for the Vello scene.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    /// GPU compute via wgpu (default). Best quality and performance.
+    #[default]
+    Gpu,
+    /// Vello's built-in CPU execution path (Cranelift JIT).
+    /// Runs on any machine; slower but no discrete GPU required.
+    Cpu,
 }
 
 pub struct ShellConfig {
@@ -121,6 +135,9 @@ pub struct ShellConfig {
     /// Eliminates the blank-white-window flash during JS startup.
     /// Defaults to the Velox dark background `[0x14, 0x14, 0x1A, 0xFF]`.
     pub background_color: [u8; 4],
+    /// Rendering backend.  Defaults to `RenderMode::Gpu`.
+    /// Controlled by `renderMode` in `velox.config.json` or `VELOX_CPU_RENDER=1`.
+    pub render_mode: RenderMode,
 }
 
 impl Default for ShellConfig {
@@ -134,6 +151,7 @@ impl Default for ShellConfig {
             decorations:  true,
             icon_rgba:    None,
             background_color: [0x14, 0x14, 0x1A, 0xFF],
+            render_mode:  RenderMode::Gpu,
         }
     }
 }
@@ -447,6 +465,10 @@ impl ApplicationHandler<VeloxUserEvent> for ShellApp {
                 if let Some(w) = self.window_arcs.get(&handle) {
                     w.request_redraw();
                 }
+            }
+
+            WindowEvent::Occluded(occluded) => {
+                (self.handler)(ShellEvent::Occluded { window_handle: handle, occluded });
             }
 
             _ => {}

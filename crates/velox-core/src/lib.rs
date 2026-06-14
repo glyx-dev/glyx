@@ -143,6 +143,11 @@ struct WindowCfgJson {
     /// Format: `"#rrggbb"` or `"#rrggbbaa"`. Defaults to Velox dark background.
     /// Set this to your app's root background color to eliminate the white flash.
     background:   Option<String>,
+    /// Rendering backend: `"gpu"` (default) | `"cpu"`.
+    /// `"cpu"` uses Vello's built-in Cranelift CPU path — runs without a discrete GPU.
+    /// Can also be forced via the `VELOX_CPU_RENDER=1` environment variable.
+    #[serde(rename = "renderMode")]
+    render_mode:  Option<String>,
 }
 
 /// Read the project config as a JSON string.
@@ -261,6 +266,13 @@ fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabilities, Vec<J
                 StartupMode::Windowed
             }
         };
+
+        if let Some(rm) = w.render_mode.as_deref() {
+            cfg.render_mode = match rm {
+                "cpu" => RenderMode::Cpu,
+                _     => RenderMode::Gpu,
+            };
+        }
     }
 
     // Load icon PNG → RGBA bytes for winit window icon.
@@ -466,6 +478,7 @@ fn load_velox_config(cfg: &mut WindowConfig) -> (Capabilities, Vec<JsPlugin>) {
 
 pub use velox_shell::ShellConfig as WindowConfig;
 pub use velox_shell::StartupMode;
+pub use velox_shell::RenderMode;
 
 /// Read `dev.output` from velox.config.json and return its file contents.
 fn read_output_js() -> Option<String> {
@@ -475,7 +488,7 @@ fn read_output_js() -> Option<String> {
     struct DevSection { output: Option<String> }
 
     let cfg: Cfg = serde_json::from_str(&read_config_json()?).ok()?;
-    let output = cfg.dev?.output?;
+    let output = cfg.dev?.output.unwrap_or_else(|| "js/dist/app.js".to_string());
     match std::fs::read_to_string(&output) {
         Ok(js) => { log::info!("Loaded JS from {}", output); Some(js) }
         Err(e) => { log::warn!("Could not read JS from {}: {}", output, e); None }
@@ -497,7 +510,7 @@ fn build_dev_mode_config() -> Option<DevModeConfig> {
     let cfg: Cfg = serde_json::from_str(&src).ok()?;
     let dev = cfg.dev?;
     let entry  = dev.entry?;
-    let output = dev.output?;
+    let output = dev.output.unwrap_or_else(|| "js/dist/app.js".to_string());
     let watch  = dev.watch.unwrap_or_else(|| vec!["js".into()]);
 
     Some(DevModeConfig {
@@ -591,7 +604,7 @@ impl AppConfig {
     /// Load configuration from `velox.config.json` in the current directory.
     ///
     /// JS source is read from the path specified in `velox.config.json`'s `dev.output`
-    /// field (typically `js/app.js`). This is the zero-boilerplate entry point:
+    /// field (defaults to `js/dist/app.js`). This is the zero-boilerplate entry point:
     /// ```no_run
     /// fn main() {
     ///     velox_core::run(velox_core::AppConfig::from_config());
@@ -877,6 +890,12 @@ struct PerWindowState {
     /// Accumulates newly captured scene fragments during the current frame.
     /// Swapped with `scene_cache` after `texture.present()` and then cleared.
     scene_cache_new: std::collections::HashMap<u32, Scene>,
+    /// Cached Vello scene fragments for `RepaintBoundary` subtrees (read path).
+    /// When none of a boundary's descendants are dirty, its entire fragment is
+    /// replayed directly — skipping traversal of the whole subtree.
+    boundary_scene_cache:     std::collections::HashMap<u32, Scene>,
+    /// Write path for `boundary_scene_cache` — swapped after present.
+    boundary_scene_cache_new: std::collections::HashMap<u32, Scene>,
     /// Set to `true` after the first successful frame render.
     /// Used to call `renderer.try_save_pipeline_cache()` exactly once,
     /// ensuring compiled shader bytecode is persisted for future runs.
@@ -1786,8 +1805,11 @@ pub fn run(mut config: AppConfig) -> bool {
     let mut windows: std::collections::HashMap<u32, PerWindowState> =
         std::collections::HashMap::new();
 
-    // Save background color before `window` (ShellConfig) is moved into run().
+    // Save background color and render mode before `window` (ShellConfig) is moved into run().
     let window_bg = window.background_color;
+    // Honor both config renderMode and legacy VELOX_CPU_RENDER=1 env var.
+    let use_cpu_render = window.render_mode == RenderMode::Cpu
+        || std::env::var("VELOX_CPU_RENDER").map(|v| v.trim() == "1").unwrap_or(false);
 
     let restart = velox_shell::run(window, move |event| {
         match event {
@@ -1795,7 +1817,7 @@ pub fn run(mut config: AppConfig) -> bool {
             ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy } => {
                 let gpu_ctx = pollster::block_on(GpuContext::new(window.clone()))
                     .expect("Failed to initialise GPU");
-                let mut renderer = VeloxRenderer::new(&gpu_ctx)
+                let mut renderer = VeloxRenderer::new(&gpu_ctx, use_cpu_render)
                     .expect("Failed to initialise Vello renderer");
                 // Apply window background color so the GPU clear matches the
                 // app theme from frame zero — no blank white flash on startup.
@@ -2030,9 +2052,11 @@ pub fn run(mut config: AppConfig) -> bool {
                     descendant_cascade_nodes: std::collections::HashSet::new(),
                     dirty_subtrees:           std::collections::HashSet::new(),
                     prev_resolved:   std::collections::HashMap::new(),
-                    scene_cache:     std::collections::HashMap::new(),
-                    scene_cache_new:       std::collections::HashMap::new(),
-                    pipeline_cache_saved:  false,
+                    scene_cache:              std::collections::HashMap::new(),
+                    scene_cache_new:          std::collections::HashMap::new(),
+                    boundary_scene_cache:     std::collections::HashMap::new(),
+                    boundary_scene_cache_new: std::collections::HashMap::new(),
+                    pipeline_cache_saved:     false,
                     #[cfg(feature = "dev")]
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
@@ -2416,9 +2440,11 @@ pub fn run(mut config: AppConfig) -> bool {
                         video_streams:     &s.video_streams,
                         cursor_blink_on:   s.cursor_blink_on,
                         any_cursor_active: &mut any_cursor_active,
-                        dirty_subtrees:    &s.dirty_subtrees,
-                        scene_cache:       &mut s.scene_cache,
-                        scene_cache_new:   &mut s.scene_cache_new,
+                        dirty_subtrees:      &s.dirty_subtrees,
+                        scene_cache:         &mut s.scene_cache,
+                        scene_cache_new:     &mut s.scene_cache_new,
+                        boundary_cache:      &mut s.boundary_scene_cache,
+                        boundary_cache_new:  &mut s.boundary_scene_cache_new,
                     };
                     render_subtree(root_id, 0.0, 1.0, &mut render_ctx);
                 }
@@ -2516,6 +2542,9 @@ pub fn run(mut config: AppConfig) -> bool {
                 // removed nodes) is cleared and reused as the write buffer.
                 std::mem::swap(&mut s.scene_cache, &mut s.scene_cache_new);
                 s.scene_cache_new.clear();
+                // Same rotation for RepaintBoundary fragment cache.
+                std::mem::swap(&mut s.boundary_scene_cache, &mut s.boundary_scene_cache_new);
+                s.boundary_scene_cache_new.clear();
 
                 let gpu_time_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -2592,6 +2621,19 @@ pub fn run(mut config: AppConfig) -> bool {
             }
 
             // ── Close ─────────────────────────────────────────────────────
+            // ── Window occluded (minimised / hidden) ──────────────────────
+            // Release the ~100–170 MB Vello GPU buffer pool while the window
+            // is not visible.  Buffers are reallocated lazily on first redraw
+            // after restore (µs cost; compiled shaders stay cached in driver).
+            ShellEvent::Occluded { window_handle, occluded: true } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
+                    s.renderer.trim_resources();
+                    log::debug!("Window {window_handle} occluded — GPU buffer pool released.");
+                }
+            }
+
+            ShellEvent::Occluded { .. } => {} // un-occlude: nothing to do, buffers reallocate lazily
+
             ShellEvent::CloseRequested { window_handle } => {
                 log::info!("Window {} closed.", window_handle);
                 // Close SQLite pools gracefully before dropping the window state.

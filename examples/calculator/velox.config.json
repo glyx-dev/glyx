@@ -19,7 +19,7 @@
   },
   "dev": {
     "entry":  "js/app.jsx",
-    "output": "js/app.js",
+    "output": "js/dist/app.js",
     "watch":  ["js"]
   }
 }

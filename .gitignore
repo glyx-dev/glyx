@@ -15,6 +15,6 @@ Thumbs.db
 *.db
 *.db-shm
 *.db-wal
-# The generated bundle (examples/hello-world/js/app.js) is intentionally
-# committed so `cargo build` works on a fresh checkout without requiring
-# a prior `bun build` run.
+# Compiled JS bundles in example apps are intentionally committed so
+# `cargo build` works on a fresh checkout without requiring `bun build`.
+# User-created projects exclude their dist/ via their own .gitignore.

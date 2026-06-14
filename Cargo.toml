@@ -119,3 +119,6 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"      # remove debug symbols from binary (~50% size reduction)
 panic = "abort"        # no unwinding machinery; smaller binary, lower working set
+
+[patch.crates-io]
+vello = { path = "vendor/vello" }

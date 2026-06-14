@@ -167,6 +167,10 @@ pub enum NodeType {
     Canvas3D,
     Camera,
     Video,
+    /// Explicit render-layer boundary.  When the subtree rooted here has no
+    /// dirty nodes, the cached Vello scene fragment is replayed directly —
+    /// skipping all child traversal and draw-call construction for this frame.
+    RepaintBoundary,
 }
 
 /// A length value that can be either absolute (px) or relative (%).
@@ -913,13 +917,14 @@ fn parse_node_type(scope: &mut v8::HandleScope, value: v8::Local<v8::Value>) -> 
         .unwrap_or_default()
         .to_lowercase();
     match s.as_str() {
-        "text"     => NodeType::Text,
-        "image"    => NodeType::Image,
-        "canvas"   => NodeType::Canvas,
-        "canvas3d" => NodeType::Canvas3D,
-        "camera"   => NodeType::Camera,
-        "video"    => NodeType::Video,
-        _          => NodeType::View,
+        "text"            => NodeType::Text,
+        "image"           => NodeType::Image,
+        "canvas"          => NodeType::Canvas,
+        "canvas3d"        => NodeType::Canvas3D,
+        "camera"          => NodeType::Camera,
+        "video"           => NodeType::Video,
+        "repaintboundary" => NodeType::RepaintBoundary,
+        _                 => NodeType::View,
     }
 }
 

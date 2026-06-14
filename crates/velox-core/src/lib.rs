@@ -2489,6 +2489,8 @@ pub fn run(mut config: AppConfig) -> bool {
                         scene_cache_new:     &mut s.scene_cache_new,
                         boundary_cache:      &mut s.boundary_scene_cache,
                         boundary_cache_new:  &mut s.boundary_scene_cache_new,
+                        win_w: s.gpu.width()  as f64,
+                        win_h: s.gpu.height() as f64,
                     };
                     render_subtree(root_id, 0.0, 1.0, &mut render_ctx);
                 }

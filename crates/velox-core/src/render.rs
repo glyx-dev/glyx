@@ -10,6 +10,9 @@ pub(crate) struct RenderCtx<'a> {
     pub canvas_cmds: &'a std::collections::HashMap<u32, Vec<CanvasCmd>>,
     /// Accumulated (canvas3d_id, x, y, w, h) for post-Vello 3D overlay rendering.
     pub canvas3d_overlays: &'a mut Vec<(u32, f32, f32, f32, f32)>,
+    /// Window dimensions in physical pixels — used for viewport culling.
+    pub win_w: f64,
+    pub win_h: f64,
     /// Live camera streams — read-only; latest_image drawn directly via Vello.
     pub camera_streams: &'a std::collections::HashMap<u32, CameraStream>,
     /// Video playback streams — read-only; latest_image drawn directly via Vello.
@@ -164,6 +167,37 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     let rh = rl.height as f64;
 
     let child_opacity = opacity * node.props.opacity.unwrap_or(1.0);
+
+    // ── Viewport culling ──────────────────────────────────────────────────────
+    // Skip nodes entirely outside the window — analogous to Chromium's tile
+    // rasterization: only content inside the visible area generates GPU draw calls.
+    //
+    // `ry` already incorporates all accumulated scroll_y from outer ScrollViews,
+    // so this correctly culls items scrolled above or below the visible area.
+    //
+    // Nodes with a CSS transform are exempt: translate/rotate can move an
+    // off-screen layout box back into the visible area.
+    //
+    // Leaf nodes: preserve their scene-cache entry so a scroll-in is free
+    // (replays the cached fragment rather than re-rendering).
+    // Container nodes: the whole subtree is skipped — children are bounded by
+    // their parent in normal flow (Velox has no absolute positioning), so all
+    // descendants are also off-screen.  Their cache entries are dropped and
+    // repopulated lazily on scroll-in (the "tile rasterize on demand" path).
+    let has_transform = node.props.transform.is_some();
+    let off_screen = !has_transform
+        && (ry + rh <= 0.0 || ry >= ctx.win_h || rx + rw <= 0.0 || rx >= ctx.win_w);
+
+    if off_screen {
+        if node.children.is_empty() {
+            // Leaf: keep cache entry alive across frames.
+            if let Some(cached) = ctx.scene_cache.remove(&id) {
+                ctx.scene_cache_new.insert(id, cached);
+            }
+        }
+        // Container: drop subtree — children repopulate cache on scroll-in.
+        return;
+    }
 
     // ── O4b: scene capture (leaf nodes only) ─────────────────────────────
     // Capture a Scene fragment only for LEAF nodes (no children).

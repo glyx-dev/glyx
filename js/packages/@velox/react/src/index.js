@@ -253,8 +253,14 @@ export const View = ({ children, style, ...props }) =>
 export const RepaintBoundary = ({ children, style, ...props }) =>
   React.createElement('repaintBoundary', { style, ...props }, children);
 
-export const Text = ({ children, style, showCursor, ...props }) =>
-  React.createElement('text', { text: children, style, showCursor, ...props });
+export function Text({ children, style, showCursor, ...props }) {
+  // Flatten mixed children (strings + expressions) to a single string,
+  // matching browser behaviour where <Text>= {val}</Text> just works.
+  const text = Array.isArray(children)
+    ? children.map(c => (c == null ? '' : String(c))).join('')
+    : (children == null ? '' : String(children));
+  return React.createElement('text', { text, style, showCursor, ...props });
+}
 
 export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', style, ...props }) {
   const imageId = React.useMemo(() => {

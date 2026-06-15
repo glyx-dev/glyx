@@ -197,8 +197,10 @@ pub struct NodeProps {
     pub height: Option<LengthValue>,
 
     // ── Text ────────────────────────────────────────────────────────────────
-    pub text:      Option<String>,
-    pub font_size: Option<f32>,
+    pub text:            Option<String>,
+    pub font_size:       Option<f32>,
+    /// Maximum number of visible lines before clipping (like CSS `overflow: hidden` + height cap).
+    pub number_of_lines: Option<u32>,
     /// Text / foreground colour as RGBA [r, g, b, a] 0–255.
     pub color:     Option<[u8; 4]>,
 
@@ -1124,7 +1126,8 @@ fn parse_props(
     props.flex_basis  = get_length_prop(scope, obj, "flexBasis");
     props.flex_wrap   = get_str_prop(scope, obj, "flexWrap");
 
-    props.text           = get_str_prop(scope, obj, "text");
+    props.text             = get_str_prop(scope, obj, "text");
+    props.number_of_lines  = get_num_prop(scope, obj, "numberOfLines").map(|n| n as u32);
     props.flex_direction  = get_str_prop(scope, obj, "flexDirection");
     props.justify_content = get_str_prop(scope, obj, "justifyContent");
     props.align_items     = get_str_prop(scope, obj, "alignItems");

@@ -45,17 +45,19 @@ pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::
                 justify_content: match props.justify_content.as_deref() {
                     Some("flex-start")    => Some(JustifyContent::FlexStart),
                     Some("flex-end")      => Some(JustifyContent::FlexEnd),
+                    Some("center")        => Some(JustifyContent::Center),
                     Some("space-between") => Some(JustifyContent::SpaceBetween),
                     Some("space-around")  => Some(JustifyContent::SpaceAround),
                     Some("space-evenly")  => Some(JustifyContent::SpaceEvenly),
-                    _                     => Some(JustifyContent::Center),
+                    _                     => Some(JustifyContent::FlexStart),  // CSS default
                 },
                 align_items: match props.align_items.as_deref() {
                     Some("flex-start") => Some(AlignItems::FlexStart),
                     Some("flex-end")   => Some(AlignItems::FlexEnd),
+                    Some("center")     => Some(AlignItems::Center),
                     Some("stretch")    => Some(AlignItems::Stretch),
                     Some("baseline")   => Some(AlignItems::Baseline),
-                    _                  => Some(AlignItems::Center),
+                    _                  => Some(AlignItems::Stretch),  // CSS default
                 },
                 ..Default::default()
             };
@@ -218,6 +220,35 @@ pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::
             if let Some(w) = props.width  { style.size.width  = to_dim(w); }
             if let Some(h) = props.height { style.size.height = to_dim(h); }
 
+            // ── Flex participation (Text/Image as flex items) ─────────────
+            // Allows `flex: 1` and `flexShrink` on Text nodes in row/column
+            // containers, matching CSS where inline content participates in flex.
+            if let Some(f) = props.flex        { style.flex_grow   = f; }
+            if let Some(g) = props.flex_grow   { style.flex_grow   = g; }
+            if let Some(s) = props.flex_shrink { style.flex_shrink = s; }
+            if let Some(b) = props.flex_basis  { style.flex_basis  = to_dim(b); }
+            if let Some(s) = props.align_self.as_deref() {
+                style.align_self = match s {
+                    "flex-start" => Some(AlignSelf::FlexStart),
+                    "flex-end"   => Some(AlignSelf::FlexEnd),
+                    "center"     => Some(AlignSelf::Center),
+                    "stretch"    => Some(AlignSelf::Stretch),
+                    _            => None,
+                };
+            }
+
+            // ── Margin ────────────────────────────────────────────────────
+            // Text/Image/etc. default to zero margin — `margin: auto` on a leaf
+            // node absorbs flex space and breaks parent `alignItems: center`.
+            let m = props.margin;
+            let zero = LengthPercentageAuto::length(0.0);
+            style.margin = Rect {
+                left:   props.margin_left.or(m).map_or(zero, to_lpa),
+                right:  props.margin_right.or(m).map_or(zero, to_lpa),
+                top:    props.margin_top.or(m).map_or(zero, to_lpa),
+                bottom: props.margin_bottom.or(m).map_or(zero, to_lpa),
+            };
+
             // ── Position (absolute/relative) ──────────────────────────────
             style.position = match props.position.as_deref() {
                 Some("absolute") => Position::Absolute,
@@ -270,9 +301,15 @@ pub(crate) fn rebuild_layout_from_scene(
         } else {
             match node_type {
                 NodeType::Text => {
+                    let font_size = props.font_size.unwrap_or(16.0);
+                    // ~1.4× font-size is a reliable approximation of Parley's
+                    // line height for the default font (matches browser 1.2–1.5 range).
+                    let max_height = props.number_of_lines
+                        .map(|n| n as f32 * font_size * 1.4);
                     let ctx = TextMeasureCtx {
-                        text:      props.text.clone().unwrap_or_default(),
-                        font_size: props.font_size.unwrap_or(16.0),
+                        text: props.text.clone().unwrap_or_default(),
+                        font_size,
+                        max_height,
                     };
                     layout.add_text_node(style, ctx, Some(format!("js-{}", id))).ok()?
                 }
@@ -306,7 +343,7 @@ pub(crate) fn layout_props_changed(new: &NodeProps, old: &NodeProps) -> bool {
     new.padding_right != old.padding_right || new.padding_top != old.padding_top ||
     new.padding_bottom != old.padding_bottom ||
     new.gap != old.gap ||
-    new.text != old.text || new.font_size != old.font_size ||
+    new.text != old.text || new.font_size != old.font_size || new.number_of_lines != old.number_of_lines ||
     new.margin != old.margin || new.margin_left != old.margin_left ||
     new.margin_right != old.margin_right || new.margin_top != old.margin_top ||
     new.margin_bottom != old.margin_bottom ||
@@ -376,6 +413,7 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
         });
 
         let (tw, th) = text_sys.measure(&ctx.text, ctx.font_size, max_w);
+        let th = if let Some(max_h) = ctx.max_height { th.min(max_h) } else { th };
 
         Size {
             width:  known_dims.width.unwrap_or(tw),

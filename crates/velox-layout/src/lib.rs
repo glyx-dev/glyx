@@ -59,8 +59,11 @@ pub struct NodeMeta {
 /// natural (width, height) of the shaped text.
 #[derive(Debug, Clone)]
 pub struct TextMeasureCtx {
-    pub text:      String,
-    pub font_size: f32,
+    pub text:       String,
+    pub font_size:  f32,
+    /// Pre-computed height cap from `numberOfLines × estimated_line_height`.
+    /// `None` = no cap (text wraps freely).
+    pub max_height: Option<f32>,
 }
 
 // ── LayoutTree ────────────────────────────────────────────────────────────────

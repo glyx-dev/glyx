@@ -199,11 +199,59 @@ impl GpuContext {
     pub fn width(&self)  -> u32 { self.config.width  }
     pub fn height(&self) -> u32 { self.config.height }
 
-    /// Returns `true` when the adapter is a CPU/software rasterizer.
+    /// Classify the adapter into a capability tier for `RenderMode::Auto`.
     ///
-    /// Used by velox-core to resolve `RenderMode::Auto` without requiring
-    /// a direct `wgpu` dependency in velox-core.
-    pub fn is_software_adapter(&self) -> bool {
-        self.adapter.get_info().device_type == wgpu::DeviceType::Cpu
+    /// Uses `wgpu::DeviceType` rather than VRAM (not exposed by wgpu stable API).
+    /// This maps directly to the expected memory cost of each renderer:
+    ///
+    /// - `None`          → TinySkia  (~97 MB RSS, no GPU allocation at all)
+    /// - `Integrated`    → TinySkia  (~97 MB RSS, avoids iGPU buffer pool cost)
+    /// - `DiscreteIntel` → FemtoVG   (~103–153 MB RSS, OpenGL triangle path)
+    /// - `Discrete`      → Vello     (~285–328 MB RSS, full GPU compute)
+    pub fn gpu_tier(&self) -> GpuTier {
+        let info = self.adapter.get_info();
+        match info.device_type {
+            wgpu::DeviceType::Cpu                                     => GpuTier::None,
+            wgpu::DeviceType::VirtualGpu | wgpu::DeviceType::Other    => GpuTier::Integrated,
+            wgpu::DeviceType::IntegratedGpu                           => GpuTier::Integrated,
+            wgpu::DeviceType::DiscreteGpu => {
+                // Intel PCI vendor ID 0x8086 — covers Arc (Alchemist/Battlemage).
+                // Lighter VRAM budget than NVIDIA/AMD flagships; FemtoVG fits better.
+                if info.vendor == 0x8086 {
+                    GpuTier::DiscreteIntel
+                } else {
+                    GpuTier::Discrete
+                }
+            }
+        }
     }
+
+    /// Returns the adapter name for logging. Avoids exposing wgpu types outside this crate.
+    pub fn adapter_name(&self) -> String {
+        format!(
+            "{} ({:?})",
+            self.adapter.get_info().name,
+            self.adapter.get_info().device_type,
+        )
+    }
+}
+
+/// GPU capability tier for renderer auto-selection.
+///
+/// Derived from `wgpu::AdapterInfo` at startup by [`GpuContext::gpu_tier`].
+/// The tier drives `RenderMode::Auto` without velox-core needing a direct
+/// `wgpu` dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuTier {
+    /// CPU-side software rasterizer (WARP on Windows, llvmpipe on Linux) or no display.
+    /// TinySkia is the only viable renderer.
+    None,
+    /// Integrated or virtual GPU. GPU buffer pools consume real system RAM — avoid them.
+    /// TinySkia uses zero GPU memory.
+    Integrated,
+    /// Intel Arc discrete GPU. Capable but lighter VRAM budget than NVIDIA/AMD.
+    /// FemtoVG (OpenGL tessellation) is the best balance of quality and footprint.
+    DiscreteIntel,
+    /// NVIDIA or AMD discrete GPU. Full Vello GPU-compute path justified.
+    Discrete,
 }

@@ -60,7 +60,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 use smallvec::SmallVec;
-use velox_gpu::GpuContext;
+use velox_gpu::{GpuContext, GpuTier};
 use velox_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
 use velox_renderer::{colors, peniko, AnyRenderer, AnyFrame, BackendKind, Scene};
 use velox_runtime::{
@@ -1860,19 +1860,38 @@ pub fn run(mut config: AppConfig) -> bool {
             ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy } => {
                 let gpu_ctx = pollster::block_on(GpuContext::new(window.clone()))
                     .expect("Failed to initialise GPU");
-                // Resolve RenderMode → BackendKind.  Auto picks based on the GPU adapter type.
+                // Resolve RenderMode → BackendKind.
+                // VELOX_CPU_RENDER=1 forces the cheapest CPU path (TinySkia) for
+                // CI, headless testing, or machines without a supported GPU.
                 let force_cpu = std::env::var("VELOX_CPU_RENDER")
                     .map(|v| v.trim() == "1").unwrap_or(false);
                 let backend_kind = match render_mode_config {
                     RenderMode::Auto => {
-                        if force_cpu || gpu_ctx.is_software_adapter() {
-                            BackendKind::Vello { use_cpu: true }
-                        } else {
-                            BackendKind::Vello { use_cpu: false }
-                        }
+                        // Three-tier heuristic driven by adapter device type:
+                        //   No/software GPU  → TinySkia  (~97 MB)
+                        //   iGPU / virtual   → TinySkia  (~97 MB)
+                        //   Intel Arc dGPU   → FemtoVG   (~103–153 MB)
+                        //   NVIDIA/AMD dGPU  → Vello     (~285–328 MB)
+                        let tier = if force_cpu { GpuTier::None } else { gpu_ctx.gpu_tier() };
+                        let kind = match tier {
+                            GpuTier::None | GpuTier::Integrated => BackendKind::TinySkia,
+                            GpuTier::DiscreteIntel              => BackendKind::FemtoVg,
+                            GpuTier::Discrete                   => BackendKind::Vello { use_cpu: false },
+                        };
+                        log::info!(
+                            "[velox] renderMode=auto → {} ({})",
+                            match &kind {
+                                BackendKind::TinySkia                 => "skia",
+                                BackendKind::FemtoVg                  => "femtovg",
+                                BackendKind::Vello { use_cpu: false } => "vello",
+                                BackendKind::Vello { use_cpu: true  } => "vello/cpu",
+                            },
+                            gpu_ctx.adapter_name(),
+                        );
+                        kind
                     }
-                    RenderMode::Cpu    => BackendKind::Vello { use_cpu: true  },
-                    RenderMode::Gpu    => BackendKind::Vello { use_cpu: force_cpu },
+                    RenderMode::Cpu      => BackendKind::Vello { use_cpu: true },
+                    RenderMode::Gpu      => BackendKind::Vello { use_cpu: force_cpu },
                     RenderMode::TinySkia => BackendKind::TinySkia,
                     RenderMode::Femtovg  => BackendKind::FemtoVg,
                 };

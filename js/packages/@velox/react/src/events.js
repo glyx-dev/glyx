@@ -422,18 +422,28 @@ export function dispatchEvents() {
         const topmostId = findTopmostSolid(ev.x, ev.y);
 
         if (topmostId !== null) {
-          // Route to Pressable handler if the topmost node is pressable.
-          const ph = pressableRegistry.get(topmostId);
-          if (ph && !isDisabled(topmostId)) {
-            const layout = __velox_getLayout(topmostId);
-            ph.onPress?.({
-              x: ev.x, y: ev.y,
-              locationX: layout ? ev.x - layout.x : 0,
-              locationY: layout ? ev.y - layout.y : 0,
-            });
+          // Walk up the parent chain to find the nearest pressable ancestor
+          // (self-inclusive).  findTopmostSolid returns the deepest leaf node,
+          // but clicking anywhere inside a Pressable's subtree should fire its
+          // onPress — exactly like DOM event bubbling.
+          let pressableTarget = topmostId;
+          while (pressableTarget !== undefined && !pressableRegistry.has(pressableTarget)) {
+            pressableTarget = parentMap.get(pressableTarget);
+          }
+          if (pressableTarget !== undefined) {
+            const ph = pressableRegistry.get(pressableTarget);
+            if (ph && !isDisabled(pressableTarget)) {
+              const layout = __velox_getLayout(pressableTarget);
+              ph.onPress?.({
+                x: ev.x, y: ev.y,
+                locationX: layout ? ev.x - layout.x : 0,
+                locationY: layout ? ev.y - layout.y : 0,
+              });
+            }
           }
 
           // Route to TextInput handler if the topmost node is an input.
+          // Inputs are leaf nodes with no children, so no walk-up needed.
           const ih = inputRegistry.get(topmostId);
           if (ih && !isDisabled(topmostId)) {
             setFocus(topmostId);
@@ -554,8 +564,12 @@ export function dispatchEvents() {
   // treated as hover-opaque (no effect fires on them).
   if (cursorMovedThisFrame) {
     const topSolid = findTopmostSolid(cursorX, cursorY);
-    const newHoveredId = (topSolid !== null && !isDisabled(topSolid) && pressableRegistry.has(topSolid))
-      ? topSolid : null;
+    // Walk up to find the nearest pressable ancestor (same bubbling logic as click).
+    let hoverId = topSolid;
+    while (hoverId !== undefined && !pressableRegistry.has(hoverId)) {
+      hoverId = parentMap.get(hoverId);
+    }
+    const newHoveredId = (hoverId !== undefined && !isDisabled(hoverId)) ? hoverId : null;
 
     if (newHoveredId !== hoveredPressableId) {
       if (hoveredPressableId !== null) {

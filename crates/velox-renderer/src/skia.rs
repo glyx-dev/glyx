@@ -76,6 +76,8 @@ fn gradient_shader(grad: &peniko::Gradient) -> Option<tiny_skia::Shader<'static>
 
 /// Bézier rounded-rectangle path.  Falls back to an axis-aligned rect when radius ≤ 0.
 fn rrect_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny_skia::Path> {
+    // Guard degenerate dimensions — tiny-skia warns and discards empty/line paths.
+    if w <= 0.0 || h <= 0.0 { return None; }
     let r = radius.min(w * 0.5).min(h * 0.5);
     if r <= 0.0 {
         let rect = tiny_skia::Rect::from_xywh(x, y, w, h)?;
@@ -509,6 +511,11 @@ pub struct TinySkiaRenderer {
     blit:           wgpu::util::TextureBlitter,
     width:          u32,
     height:         u32,
+    /// Actual dimensions of `upload_texture`.  May differ from `width/height`
+    /// when `notify_resize` updated the renderer dims but `render_frame` hasn't
+    /// had a chance to recreate the texture yet.
+    upload_w:       u32,
+    upload_h:       u32,
     pub background_color: peniko::Color,
     /// Swash context + glyph cache — moved into TinySkiaFrame during render.
     shared:         Option<TinySkiaShared>,
@@ -524,7 +531,7 @@ impl TinySkiaRenderer {
         Ok(Self {
             upload_texture: texture,
             upload_view:    view,
-            blit, width: w, height: h,
+            blit, width: w, height: h, upload_w: w, upload_h: h,
             background_color: crate::colors::BACKGROUND,
             shared: Some(TinySkiaShared {
                 scale_ctx:   swash::scale::ScaleContext::new(),
@@ -563,12 +570,16 @@ impl TinySkiaRenderer {
         texture: &wgpu::SurfaceTexture,
         frame:   TinySkiaFrame,
     ) -> Result<(), RendererError> {
-        let w = gpu.width().max(1);
-        let h = gpu.height().max(1);
+        // Use the pixmap's actual dimensions as the source of truth.
+        // `notify_resize` may have updated self.width/height ahead of this call,
+        // so comparing against gpu.width() alone is not sufficient.
+        let w = frame.pixmap.width();
+        let h = frame.pixmap.height();
 
-        if self.width != w || self.height != h {
-            self.width  = w;
-            self.height = h;
+        // Recreate upload texture whenever its size no longer matches the pixmap.
+        if self.upload_w != w || self.upload_h != h {
+            self.upload_w = w;
+            self.upload_h = h;
             let (tex, view) = Self::make_upload(gpu, w, h);
             self.upload_texture = tex;
             self.upload_view    = view;
@@ -614,6 +625,16 @@ impl TinySkiaRenderer {
         self.blit.copy(&gpu.device, &mut enc, &self.upload_view, &surface_view);
         gpu.queue.submit([enc.finish()]);
         Ok(())
+    }
+
+    /// Sync stored dimensions to the current GPU surface size.
+    ///
+    /// Must be called before `begin_frame()` whenever the window has been resized.
+    /// `begin_frame` creates the Pixmap at `self.width × self.height`; if those
+    /// are stale, the pixmap / wgpu upload dims diverge and wgpu panics.
+    pub fn notify_resize(&mut self, w: u32, h: u32) {
+        self.width  = w;
+        self.height = h;
     }
 
     /// Drop cached glyph alpha masks to free CPU memory under pressure.

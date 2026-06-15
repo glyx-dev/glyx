@@ -512,6 +512,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 let stop_clone  = Arc::clone(&stop_flag);
                 let pause_clone = Arc::clone(&pause_flag);
                 let ev_clone    = Arc::clone(&events);
+                let redraw      = Arc::clone(&state.request_redraw);
 
                 std::thread::spawn(move || {
                     let media = match velox_media::get_media() {
@@ -572,6 +573,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         match media.decoder_next_frame(&dec, &mut rgba_buf) {
                             Ok(Some(pts)) => {
                                 *buf_clone.lock() = Some((w, h, rgba_buf.clone()));
+                                (redraw)(); // wake the event loop so this frame is painted immediately
 
                                 let ws = wall_start.get_or_insert_with(|| {
                                     pts_start = pts;

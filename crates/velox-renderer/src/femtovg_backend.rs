@@ -484,6 +484,16 @@ impl FemtoVgRenderer {
         Err(RendererError::Render("femtovg: no cached frame".into()))
     }
 
+    /// Sync stored dimensions to the current GPU surface size.
+    ///
+    /// Must be called before `begin_frame()` whenever the window has been resized.
+    /// `begin_frame` calls `canvas.set_size(self.width, self.height)` — if those
+    /// are stale, the canvas clips to old bounds and glyphs outside render as red.
+    pub fn notify_resize(&mut self, w: u32, h: u32) {
+        self.width  = w;
+        self.height = h;
+    }
+
     /// Free all cached glyph GPU textures to release VRAM under memory pressure.
     pub fn trim_resources(&mut self) {
         if let Some(inner) = self.inner.as_mut() {

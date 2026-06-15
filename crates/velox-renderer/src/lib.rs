@@ -180,6 +180,10 @@ impl VeloxRenderer {
     ///
     /// Call once after the first successful frame render.  Subsequent launches
     /// will load this file and skip shader recompilation.
+    /// Vello derives dimensions from the GpuContext in `render_frame` — no stored
+    /// w/h to sync.  Present only to satisfy the `AnyRenderer::notify_resize` API.
+    pub fn notify_resize(&mut self, _w: u32, _h: u32) {}
+
     /// Release all pooled Vello GPU compute buffers (~100–170 MB on iGPU).
     ///
     /// Call this when the window is minimised or occluded.  Buffers are
@@ -665,6 +669,20 @@ impl AnyRenderer {
             AnyRenderer::Vello(r)    => r.background_color = color,
             AnyRenderer::TinySkia(r) => r.background_color = color,
             AnyRenderer::FemtoVg(r)  => r.background_color = color,
+        }
+    }
+
+    /// Sync stored dimensions to the current GPU surface size before `begin_frame`.
+    ///
+    /// Call this immediately before `begin_frame()` whenever the window may have
+    /// been resized since the last frame.  TinySkia and FemtoVG create their
+    /// per-frame buffer/canvas at the stored size — if stale, dimensions diverge
+    /// and wgpu panics (TinySkia) or text clips to old bounds and renders red (FemtoVG).
+    pub fn notify_resize(&mut self, w: u32, h: u32) {
+        match self {
+            AnyRenderer::Vello(r)    => r.notify_resize(w, h),
+            AnyRenderer::TinySkia(r) => r.notify_resize(w, h),
+            AnyRenderer::FemtoVg(r)  => r.notify_resize(w, h),
         }
     }
 

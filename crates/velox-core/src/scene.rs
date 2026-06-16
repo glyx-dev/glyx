@@ -207,6 +207,13 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 state.canvas3d_scenes.remove(&id);
                 if let Some(r3d) = &mut state.renderer_3d {
                     r3d.remove_canvas(id);
+                    // When the last Canvas3D node leaves the tree, drop the
+                    // Renderer3D entirely so its compiled wgpu pipelines and
+                    // geometry buffers are freed (~5–10 MB of GPU resources).
+                    // It will be lazily re-created on the next Canvas3D visit.
+                    if state.canvas3d_scenes.is_empty() {
+                        state.renderer_3d = None;
+                    }
                 }
                 state.js_nodes.remove(&id);
                 // Clean up all per-node state for the removed node.

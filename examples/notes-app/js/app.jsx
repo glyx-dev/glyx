@@ -351,7 +351,7 @@ function NoteListScreen() {
   const svContentH = displayed.length * 110 + 20;
   const heroH = isWide ? 124 : 188;
   const actionsH = 76;
-  const svH = Math.max(110, contentH - 40 - heroH - 40 - actionsH - 18 - 16);
+  const svH = Math.max(110, contentH - heroH - 174);
 
   return (
     <View
@@ -667,7 +667,7 @@ function NoteEditScreen() {
   const inner = contentW - 32;
   const sideW = isWide ? 260 : inner;
   const editorW = isWide ? inner - sideW - 16 : inner;
-  const bodyH = isWide ? Math.max(220, contentH - 180) : Math.max(120, contentH - 320);
+  const bodyH = isWide ? Math.max(220, contentH - 260) : Math.max(120, contentH - 486);
   const titleWords = countWords(title);
   const bodyWords = countWords(body);
   const statusTone = status.toLowerCase().includes('error') ? C.red : C.green;
@@ -871,7 +871,7 @@ function NoteSearchScreen() {
   const inner = contentW - 32;
   const sideW = isWide ? 250 : inner;
   const resultsW = isWide ? inner - sideW - 16 : inner;
-  const svH = isWide ? contentH - 150 : contentH - 250;
+  const svH = isWide ? contentH - 260 : contentH - 496;
   const svContentH = results.length * 94 + 16;
 
   return (

@@ -1159,17 +1159,25 @@ fn cmd_package(target: Option<&str>, installer: bool) -> Result<()> {
     Ok(())
 }
 
-fn resolve_packaged_binary(project_name: &str, rust_target: &str, cross_target: bool) -> Result<PathBuf> {
-    let rel = if cross_target {
-        PathBuf::from(format!("target/{rust_target}/release/{}", binary_name(project_name)))
-    } else {
-        PathBuf::from(format!("target/release/{}", binary_name(project_name)))
-    };
-    let mut candidates = vec![std::env::current_dir()?.join(&rel)];
-    if let Some(ws_root) = find_workspace_root()? {
-        let ws_candidate = ws_root.join(&rel);
-        if !candidates.iter().any(|p| p == &ws_candidate) {
-            candidates.push(ws_candidate);
+fn resolve_packaged_binary(project_name: &str, rust_target: &str, _cross_target: bool) -> Result<PathBuf> {
+    let bin = binary_name(project_name);
+    // Always check both the native path (host build without --target) and the
+    // cross-target path (explicit --target triple). `velox build` without a
+    // --target flag writes to target/release/, so `velox package windows` must
+    // find it there even though the OS argument implies a cross-target path.
+    let rels = [
+        PathBuf::from(format!("target/release/{bin}")),
+        PathBuf::from(format!("target/{rust_target}/release/{bin}")),
+    ];
+    let cwd = std::env::current_dir()?;
+    let ws_root = find_workspace_root()?;
+    let mut candidates = vec![];
+    for rel in &rels {
+        let p = cwd.join(rel);
+        if !candidates.contains(&p) { candidates.push(p); }
+        if let Some(ref root) = ws_root {
+            let p = root.join(rel);
+            if !candidates.contains(&p) { candidates.push(p); }
         }
     }
     for candidate in &candidates {
@@ -1247,7 +1255,7 @@ fn package_windows(name: &str, bin: &Path) -> Result<()> {
         );
         let reg_path = app_dir.join("register-scheme.reg");
         std::fs::write(&reg_path, reg_content)?;
-        println!("  Deep-link scheme '{scheme}://' → register-scheme.reg (run once to activate)");
+        println!("  Deep-link scheme '{scheme}://' → auto-registered on first launch (register-scheme.reg included as fallback)");
     }
 
     let zip_path = format!("target/velox/dist/{name}-{}-windows.zip", win_meta.version);
@@ -1509,6 +1517,7 @@ fn extract_zip_strip_top(zip_path: &Path, dest: &Path) -> Result<()> {
 fn generate_nsi_script(name: &str, app_dir: &Path, out_dir: &Path) -> String {
     let meta      = read_app_metadata();
     let exe_name  = binary_name(name);
+    let scheme    = read_deeplink_scheme();
     let publisher = if meta.publisher.is_empty() { name.to_string() } else { meta.publisher.clone() };
     let desc      = if meta.description.is_empty() { name.to_string() } else { meta.description.clone() };
 
@@ -1546,6 +1555,25 @@ fn generate_nsi_script(name: &str, app_dir: &Path, out_dir: &Path) -> String {
     };
 
     let setup_exe = out_dir.join(format!("{name}-{}-Setup.exe", meta.version));
+
+    // Deep-link scheme registry blocks (empty strings when no scheme configured)
+    let (scheme_install, scheme_uninstall) = match &scheme {
+        Some(s) => {
+            let install = format!(
+                "  ; Deep-link URL scheme: {s}://\n\
+                   WriteRegStr HKCU \"Software\\Classes\\{s}\" \"\" \"URL:{s} Protocol\"\n\
+                   WriteRegStr HKCU \"Software\\Classes\\{s}\" \"URL Protocol\" \"\"\n\
+                   WriteRegStr HKCU \"Software\\Classes\\{s}\\shell\\open\\command\" \"\" '\"$INSTDIR\\{exe}\" \"%1\"'\n",
+                s = s, exe = exe_name
+            );
+            let uninstall = format!(
+                "  DeleteRegKey HKCU \"Software\\Classes\\{s}\"\n",
+                s = s
+            );
+            (install, uninstall)
+        }
+        None => (String::new(), String::new()),
+    };
 
     format!(
 r#"!include "MUI2.nsh"
@@ -1595,7 +1623,7 @@ Section "MainSection" SEC01
   CreateDirectory "$SMPROGRAMS\{name}"
   CreateShortcut "$SMPROGRAMS\{name}\{name}.lnk" "$INSTDIR\{exe}"{shortcut_icon_arg}
   CreateShortcut "$DESKTOP\{name}.lnk"           "$INSTDIR\{exe}"{shortcut_icon_arg}
-SectionEnd
+{scheme_install}SectionEnd
 
 Section "Uninstall"
   RMDir /r "$INSTDIR"
@@ -1604,7 +1632,7 @@ Section "Uninstall"
   Delete "$DESKTOP\{name}.lnk"
   DeleteRegKey HKCU "Software\{name}"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\{name}"
-SectionEnd
+{scheme_uninstall}SectionEnd
 "#,
         name              = name,
         output            = setup_exe.display(),
@@ -1617,6 +1645,8 @@ SectionEnd
         publisher         = publisher,
         desc              = desc,
         shortcut_icon_arg = shortcut_icon_arg,
+        scheme_install    = scheme_install,
+        scheme_uninstall  = scheme_uninstall,
     )
 }
 
@@ -2380,7 +2410,7 @@ fn bun_build(entry: &str, output: &str) -> Result<()> {
         .arg(entry)
         .args(["--outfile", output, "--target", "browser", "--format", "iife",
                "--define", "process.env.NODE_ENV='production'",
-               "--source-map", "inline"])
+               "--source-map=inline"])
         .status()
         .context("Failed to run `bun`; is Bun installed? https://bun.sh")?;
     if !status.success() { bail!("bun build failed"); }

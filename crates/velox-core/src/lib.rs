@@ -1577,6 +1577,52 @@ fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFrame) {
 
 // ── Window controller builder ─────────────────────────────────────────────────
 
+/// Register `scheme://` as a URL handler in the Windows registry under HKCU.
+/// Uses the built-in `reg.exe` tool — no extra dependencies, no admin rights.
+/// Called once at startup; idempotent (safe to call on every launch).
+#[cfg(target_os = "windows")]
+fn register_deeplink_scheme_windows(scheme: &str) {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(_) => return,
+    };
+    // Normalise forward slashes to backslashes (Windows registry convention).
+    let exe = exe.replace('/', "\\");
+
+    // The command value: "C:\path\to\app.exe" "%1"
+    let cmd_value = format!("\"{}\" \"%1\"", exe);
+
+    let entries = [
+        (
+            format!("HKCU\\Software\\Classes\\{scheme}"),
+            None,  // default value
+            format!("URL:{scheme} Protocol"),
+        ),
+        (
+            format!("HKCU\\Software\\Classes\\{scheme}"),
+            Some("URL Protocol"),
+            String::new(),
+        ),
+        (
+            format!("HKCU\\Software\\Classes\\{scheme}\\shell\\open\\command"),
+            None,
+            cmd_value,
+        ),
+    ];
+
+    for (key, value_name, data) in &entries {
+        let mut args = vec!["add", key, "/f", "/d", data];
+        if let Some(vn) = value_name {
+            args.extend_from_slice(&["/v", vn]);
+        } else {
+            args.push("/ve");  // default (unnamed) value
+        }
+        let _ = std::process::Command::new("reg").args(&args).output();
+    }
+
+    log::debug!("velox: registered deep-link scheme {}:// → {}", scheme, exe);
+}
+
 fn build_window_controller(
     window: Arc<winit::window::Window>,
     create_window_fn: Option<Arc<dyn Fn(u32, String, u32, u32) + Send + Sync>>,
@@ -1739,6 +1785,11 @@ pub fn run(mut config: AppConfig) -> bool {
                 unsafe { std::env::set_var("VELOX_LAUNCH_URL", url); }
                 log::info!("velox: deep-link launch URL: {}", url);
             }
+
+            // Auto-register the URL scheme on Windows so the app handles deeplinks
+            // without requiring a manual .reg import.  We write to HKCU (no admin needed).
+            #[cfg(target_os = "windows")]
+            register_deeplink_scheme_windows(&dl.scheme);
 
             if dl.single_instance {
                 let app_name = std::env::current_exe()

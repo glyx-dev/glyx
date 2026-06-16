@@ -6030,15 +6030,21 @@ No matching component was found for:
           }
           const topmostId = findTopmostSolid(ev.x, ev.y);
           if (topmostId !== null) {
-            const ph = pressableRegistry.get(topmostId);
-            if (ph && !isDisabled(topmostId)) {
-              const layout = __velox_getLayout(topmostId);
-              ph.onPress?.({
-                x: ev.x,
-                y: ev.y,
-                locationX: layout ? ev.x - layout.x : 0,
-                locationY: layout ? ev.y - layout.y : 0
-              });
+            let pressableTarget = topmostId;
+            while (pressableTarget !== undefined && !pressableRegistry.has(pressableTarget)) {
+              pressableTarget = parentMap.get(pressableTarget);
+            }
+            if (pressableTarget !== undefined) {
+              const ph = pressableRegistry.get(pressableTarget);
+              if (ph && !isDisabled(pressableTarget)) {
+                const layout = __velox_getLayout(pressableTarget);
+                ph.onPress?.({
+                  x: ev.x,
+                  y: ev.y,
+                  locationX: layout ? ev.x - layout.x : 0,
+                  locationY: layout ? ev.y - layout.y : 0
+                });
+              }
             }
             const ih = inputRegistry.get(topmostId);
             if (ih && !isDisabled(topmostId)) {
@@ -6139,7 +6145,11 @@ No matching component was found for:
     }
     if (cursorMovedThisFrame) {
       const topSolid = findTopmostSolid(cursorX, cursorY);
-      const newHoveredId = topSolid !== null && !isDisabled(topSolid) && pressableRegistry.has(topSolid) ? topSolid : null;
+      let hoverId = topSolid;
+      while (hoverId !== undefined && !pressableRegistry.has(hoverId)) {
+        hoverId = parentMap.get(hoverId);
+      }
+      const newHoveredId = hoverId !== undefined && !isDisabled(hoverId) ? hoverId : null;
       if (newHoveredId !== hoveredPressableId) {
         if (hoveredPressableId !== null) {
           pressableRegistry.get(hoveredPressableId)?.onHoverOut?.();
@@ -6559,7 +6569,10 @@ No matching component was found for:
     VeloxReconciler.updateContainer(element, rootContainer, null, null);
   }
   var View = ({ children, style, ...props }) => import_react.default.createElement("view", { style, ...props }, children);
-  var Text = ({ children, style, showCursor, ...props }) => import_react.default.createElement("text", { text: children, style, showCursor, ...props });
+  function Text({ children, style, showCursor, ...props }) {
+    const text = Array.isArray(children) ? children.map((c) => c == null ? "" : String(c)).join("") : children == null ? "" : String(children);
+    return import_react.default.createElement("text", { text, style, showCursor, ...props });
+  }
   function Image({ src, width = 120, height = 120, resizeMode = "stretch", style, ...props }) {
     const imageId = import_react.default.useMemo(() => {
       if (!src)
@@ -12697,7 +12710,7 @@ No matching component was found for:
     const svContentH = displayed.length * 110 + 20;
     const heroH = isWide ? 124 : 188;
     const actionsH = 76;
-    const svH = Math.max(110, contentH - 40 - heroH - 40 - actionsH - 18 - 16);
+    const svH = Math.max(110, contentH - heroH - 174);
     return /* @__PURE__ */ jsx_runtime.jsxs(View, {
       style: {
         backgroundColor: C2.surface,
@@ -13033,7 +13046,7 @@ ${body}`;
     const inner = contentW - 32;
     const sideW = isWide ? 260 : inner;
     const editorW = isWide ? inner - sideW - 16 : inner;
-    const bodyH = isWide ? Math.max(220, contentH - 180) : Math.max(120, contentH - 320);
+    const bodyH = isWide ? Math.max(220, contentH - 260) : Math.max(120, contentH - 486);
     const titleWords = countWords(title);
     const bodyWords = countWords(body);
     const statusTone = status.toLowerCase().includes("error") ? C2.red : C2.green;
@@ -13286,7 +13299,7 @@ ${body}`;
     const inner = contentW - 32;
     const sideW = isWide ? 250 : inner;
     const resultsW = isWide ? inner - sideW - 16 : inner;
-    const svH = isWide ? contentH - 150 : contentH - 250;
+    const svH = isWide ? contentH - 260 : contentH - 496;
     const svContentH = results.length * 94 + 16;
     return /* @__PURE__ */ jsx_runtime.jsx(View, {
       style: {

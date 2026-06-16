@@ -308,7 +308,11 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             };
 
             if is_clip {
-                ctx.frame.push_layer(rx, ry, rw, rh);
+                if radius > 0.0 {
+                    ctx.frame.push_rounded_layer(rx, ry, rw, rh, radius);
+                } else {
+                    ctx.frame.push_layer(rx, ry, rw, rh);
+                }
             }
 
             // Sort children by z_index (stable — preserves document order for ties).

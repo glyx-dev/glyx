@@ -6504,7 +6504,10 @@ No matching component was found for:
     VeloxReconciler.updateContainer(element, rootContainer, null, null);
   }
   var View = ({ children, style, ...props }) => import_react.default.createElement("view", { style, ...props }, children);
-  var Text = ({ children, style, showCursor, ...props }) => import_react.default.createElement("text", { text: children, style, showCursor, ...props });
+  function Text({ children, style, showCursor, ...props }) {
+    const text = Array.isArray(children) ? children.map((c) => c == null ? "" : String(c)).join("") : children == null ? "" : String(children);
+    return import_react.default.createElement("text", { text, style, showCursor, ...props });
+  }
   var veloxWindow = {
     setFullscreen: (full) => typeof __velox_setFullscreen !== "undefined" && __velox_setFullscreen(full),
     setMaximized: (max) => typeof __velox_setMaximized !== "undefined" && __velox_setMaximized(max),

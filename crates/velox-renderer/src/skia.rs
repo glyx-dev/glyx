@@ -128,6 +128,8 @@ struct CachedAlphaGlyph {
 struct TinySkiaShared {
     scale_ctx:   swash::scale::ScaleContext,
     glyph_cache: HashMap<GlyphKey, CachedAlphaGlyph>,
+    /// Reusable pixel buffer — avoids a fresh 8 MB allocation every frame.
+    pixmap:      Option<tiny_skia::Pixmap>,
 }
 
 // ── TinySkiaFrame ─────────────────────────────────────────────────────────────
@@ -144,10 +146,14 @@ pub struct TinySkiaFrame {
 }
 
 impl TinySkiaFrame {
-    fn new(width: u32, height: u32, bg: peniko::Color, shared: TinySkiaShared)
+    fn new(width: u32, height: u32, bg: peniko::Color, mut shared: TinySkiaShared)
         -> Option<Self>
     {
-        let mut pixmap = tiny_skia::Pixmap::new(width, height)?;
+        // Reuse the pooled pixmap if it's the right size; allocate otherwise.
+        let mut pixmap = match shared.pixmap.take() {
+            Some(p) if p.width() == width && p.height() == height => p,
+            _ => tiny_skia::Pixmap::new(width, height)?,
+        };
         let q = bg.to_rgba8();
         pixmap.fill(tiny_skia::Color::from_rgba8(q.r, q.g, q.b, q.a));
         Some(Self {
@@ -536,6 +542,7 @@ impl TinySkiaRenderer {
             shared: Some(TinySkiaShared {
                 scale_ctx:   swash::scale::ScaleContext::new(),
                 glyph_cache: HashMap::new(),
+                pixmap:      None,
             }),
         })
     }
@@ -570,11 +577,14 @@ impl TinySkiaRenderer {
         texture: &wgpu::SurfaceTexture,
         frame:   TinySkiaFrame,
     ) -> Result<(), RendererError> {
+        // Destructure frame so we can move pixmap independently of shared.
+        let TinySkiaFrame { pixmap, mut shared, .. } = frame;
+
         // Use the pixmap's actual dimensions as the source of truth.
         // `notify_resize` may have updated self.width/height ahead of this call,
         // so comparing against gpu.width() alone is not sufficient.
-        let w = frame.pixmap.width();
-        let h = frame.pixmap.height();
+        let w = pixmap.width();
+        let h = pixmap.height();
 
         // Recreate upload texture whenever its size no longer matches the pixmap.
         if self.upload_w != w || self.upload_h != h {
@@ -586,18 +596,10 @@ impl TinySkiaRenderer {
             self.blit = wgpu::util::TextureBlitter::new(&gpu.device, gpu.surface_format());
         }
 
-        // Reclaim the persistent cache + scaler from the frame.
-        let mut shared = frame.shared;
-        // On resize, drop cached glyphs (hinting pixels may differ).
-        if self.width != w || self.height != h {
-            shared.glyph_cache.clear();
-        }
-        self.shared = Some(shared);
-
         // Upload CPU pixmap to GPU.
         gpu.queue.write_texture(
             self.upload_texture.as_image_copy(),
-            frame.pixmap.data(),
+            pixmap.data(),
             wgpu::TexelCopyBufferLayout {
                 offset:         0,
                 bytes_per_row:  Some(w * 4),
@@ -611,6 +613,14 @@ impl TinySkiaRenderer {
             &wgpu::CommandEncoderDescriptor { label: Some("skia-blit") });
         self.blit.copy(&gpu.device, &mut enc, &self.upload_view, &surface_view);
         gpu.queue.submit([enc.finish()]);
+
+        // Return pixmap to pool (same size → reuse the allocation next frame).
+        // On resize the old pixmap is dropped and the pool stays empty until
+        // the next call to TinySkiaFrame::new allocates a fresh one.
+        if self.width == w && self.height == h {
+            shared.pixmap = Some(pixmap);
+        }
+        self.shared = Some(shared);
         Ok(())
     }
 

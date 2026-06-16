@@ -6534,7 +6534,10 @@ No matching component was found for:
     VeloxReconciler.updateContainer(element, rootContainer, null, null);
   }
   var View = ({ children, style, ...props }) => import_react.default.createElement("view", { style, ...props }, children);
-  var Text = ({ children, style, showCursor, ...props }) => import_react.default.createElement("text", { text: children, style, showCursor, ...props });
+  function Text({ children, style, showCursor, ...props }) {
+    const text = Array.isArray(children) ? children.map((c) => c == null ? "" : String(c)).join("") : children == null ? "" : String(children);
+    return import_react.default.createElement("text", { text, style, showCursor, ...props });
+  }
   function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn, onHoverOut, disabled, style, ...props }) {
     const nodeIdRef = import_react.useRef(null);
     const handlersRef = import_react.useRef(null);

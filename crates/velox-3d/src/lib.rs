@@ -280,6 +280,10 @@ struct Canvas3DTarget {
     depth_view: wgpu::TextureView,
     width:  u32,
     height: u32,
+    /// Cached overlay bind group — created once per resize, reused every frame.
+    /// Referencing color_view, overlay_sampler, and overlay_rect_buf (buffer
+    /// handle is stable even though its contents are updated via write_buffer).
+    overlay_bg: Option<wgpu::BindGroup>,
     // Keep textures alive
     _color_tex: wgpu::Texture,
     _depth_tex: wgpu::Texture,
@@ -310,7 +314,7 @@ impl Canvas3DTarget {
             view_formats: &[],
         });
         let depth_view = depth_tex.create_view(&Default::default());
-        Self { color_view, depth_view, width: w, height: h, _color_tex: color_tex, _depth_tex: depth_tex }
+        Self { color_view, depth_view, width: w, height: h, overlay_bg: None, _color_tex: color_tex, _depth_tex: depth_tex }
     }
 }
 
@@ -561,11 +565,23 @@ impl Renderer3D {
         let tw = (w as u32).max(1);
         let th = (h as u32).max(1);
 
-        // Resize target if needed.
+        // Resize target if needed, then (re-)build the overlay bind group once.
         let needs_resize = self.targets.get(&canvas_id)
             .map(|t| t.width != tw || t.height != th).unwrap_or(true);
         if needs_resize {
             self.targets.insert(canvas_id, Canvas3DTarget::new(device, tw, th));
+            // Build the overlay bind group now that color_view is finalised.
+            // We do it here (not in Canvas3DTarget::new) so we have access to
+            // overlay_bgl, overlay_sampler, and overlay_rect_buf.
+            let target = self.targets.get_mut(&canvas_id).unwrap();
+            target.overlay_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label:  Some("ov-bg"), layout: &self.overlay_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&target.color_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.overlay_sampler) },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.overlay_rect_buf.as_entire_binding() },
+                ],
+            }));
         }
 
         // Camera.
@@ -610,16 +626,8 @@ impl Renderer3D {
         }));
 
         let target = self.targets.get(&canvas_id).unwrap();
-
-        // Overlay bind group references this canvas's color view.
-        let ov_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label:  Some("ov-bg"), layout: &self.overlay_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&target.color_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.overlay_sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: self.overlay_rect_buf.as_entire_binding() },
-            ],
-        });
+        // Reuse the cached overlay bind group (created once per resize above).
+        let ov_bg = target.overlay_bg.as_ref().unwrap();
 
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("3d-enc") });
 
@@ -666,7 +674,7 @@ impl Renderer3D {
                 depth_stencil_attachment: None, ..Default::default()
             });
             pass.set_pipeline(&self.overlay_pipeline);
-            pass.set_bind_group(0, &ov_bg, &[]);
+            pass.set_bind_group(0, ov_bg, &[]);
             pass.draw(0..4, 0..1);
         }
 

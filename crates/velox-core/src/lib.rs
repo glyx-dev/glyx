@@ -49,6 +49,10 @@
 //! `CachedLabel` holds a shaped result keyed by (text, font_size, max_width,
 //! color).  Cache misses call Parley once; cache hits return instantly.
 
+use mimalloc::MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 #[cfg(feature = "dev")]
 use notify::{RecursiveMode, Watcher};
 use std::path::PathBuf;
@@ -871,11 +875,16 @@ struct PerWindowState {
     /// Process RSS bytes — written by a background tokio task every 2 s.
     /// Reading is always lock-free (Relaxed load) so it never stalls the frame loop.
     rss_bytes: Arc<std::sync::atomic::AtomicU64>,
+    /// Frame counter — used to schedule periodic V8 GC hints.
+    /// Incremented every rendered frame; wraps naturally at u32::MAX.
+    gc_frame_counter: u32,
     /// Draw commands for Canvas nodes, keyed by node ID.
     /// Updated each frame when JS calls `__velox_canvas_update`.
     canvas_cmds: std::collections::HashMap<u32, Vec<CanvasCmd>>,
     /// Scene descriptions for Canvas3D nodes, keyed by node ID.
     canvas3d_scenes: std::collections::HashMap<u32, velox_3d::Scene3D>,
+    /// Canvas3D nodes whose scene changed this frame (cleared after render).
+    canvas3d_dirty: std::collections::HashSet<u32>,
     /// 3D renderer — lazy-initialised on first Canvas3D encounter.
     renderer_3d: Option<velox_3d::Renderer3D>,
     /// Live camera streams keyed by velox handle ID.
@@ -1286,6 +1295,7 @@ fn handle_dev_build_events(state: &mut PerWindowState) {
                 state.runtime.layout_cache.lock().clear();
                 state.canvas_cmds.clear();
                 state.canvas3d_scenes.clear();
+                state.canvas3d_dirty.clear();
                 // Discard any stale commands that accumulated before the reload.
                 let _ = state.runtime.drain_scene_commands();
                 match state.runtime.eval(&js) {
@@ -2170,8 +2180,10 @@ pub fn run(mut config: AppConfig) -> bool {
                         });
                         rss_atomic
                     },
+                    gc_frame_counter: 0,
                     canvas_cmds:     std::collections::HashMap::new(),
                     canvas3d_scenes: std::collections::HashMap::new(),
+                    canvas3d_dirty:  std::collections::HashSet::new(),
                     renderer_3d:     None,
                     camera_streams:  std::collections::HashMap::new(),
                     video_streams:   std::collections::HashMap::new(),
@@ -2536,11 +2548,20 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 // ── Fast path: blit cached frame ──────────────────────────────
                 // Neither the scene nor the overlay text changed.  Re-blit the
-                // previous rendered frame — skips all 35 Vello compute passes.
-                // Guard: scene_cache non-empty proves at least one full render
-                // has completed, so self.target holds a valid frame.
+                // previous rendered frame — skips all Vello compute passes and
+                // TinySkia CPU rasterization + write_texture upload.
+                //
+                // Guard: `pipeline_cache_saved` is set after the first successful
+                // render_frame(), so the upload texture / Vello target always
+                // holds a valid image when we enter this path.
+                // `!scene_cache.is_empty()` covers the Vello-specific case where
+                // pipeline_cache_saved is unavailable (shouldn't happen, but safe).
+                //
+                // Without this fix, TinySkia (supports_caching=false) never
+                // populates scene_cache, so the old guard was always false and
+                // TinySkia ran a full 60fps re-rasterize even on static screens.
                 #[cfg(feature = "dev")]
-                if !needs_full_render && !s.scene_cache.is_empty() {
+                if !needs_full_render && (s.pipeline_cache_saved || !s.scene_cache.is_empty()) {
                     // Stamp last_frame_at so FPS reflects the visual refresh rate
                     // (~20fps from the overlay timer), not the full-render rate (~4fps).
                     s.perf.lock().last_frame_at = Some(frame_start);
@@ -2636,20 +2657,32 @@ pub fn run(mut config: AppConfig) -> bool {
                                 s.gpu.surface_format(),
                             ));
                         }
-                        if let Some(scene) = s.canvas3d_scenes.get(id) {
-                            let scene = scene.clone();
-                            let r3d = s.renderer_3d.as_mut().unwrap();
-                            // Pre-warm any GLTF paths encountered in this scene.
-                            for mesh in &scene.meshes {
-                                if let velox_3d::Geometry3D::Gltf { path } = &mesh.geometry {
+                        if s.canvas3d_dirty.contains(id) {
+                            // Scene changed this frame: full re-render.
+                            if let Some(scene) = s.canvas3d_scenes.get(id) {
+                                let gltf_paths: Vec<&str> = scene.meshes.iter()
+                                    .filter_map(|m| match &m.geometry {
+                                        velox_3d::Geometry3D::Gltf { path } => Some(path.as_str()),
+                                        _ => None,
+                                    })
+                                    .collect();
+                                let r3d = s.renderer_3d.as_mut().unwrap();
+                                for path in gltf_paths {
                                     if let Err(e) = r3d.load_gltf(&s.gpu.device, path) {
                                         log::warn!("GLTF load error '{}': {}", path, e);
                                     }
                                 }
+                                r3d.render(&s.gpu.device, &s.gpu.queue,
+                                           *id, scene, *x, *y, *w, *h,
+                                           &surface_view, sw, sh);
                             }
-                            r3d.render(&s.gpu.device, &s.gpu.queue,
-                                       *id, &scene, *x, *y, *w, *h,
-                                       &surface_view, sw, sh);
+                            s.canvas3d_dirty.remove(id);
+                        } else if s.canvas3d_scenes.contains_key(id) {
+                            // Scene unchanged: blit cached texture, skip the 3D pipeline.
+                            let r3d = s.renderer_3d.as_mut().unwrap();
+                            r3d.blit_only(&s.gpu.device, &s.gpu.queue,
+                                          *id, *x, *y, *w, *h,
+                                          &surface_view, sw, sh);
                         }
                     }
                 }
@@ -2661,6 +2694,16 @@ pub fn run(mut config: AppConfig) -> bool {
                 // buffer accumulates every frame (especially on DX12/iGPU where
                 // GPU memory = system RAM), causing unbounded RSS growth.
                 s.gpu.poll();
+
+                // Periodic V8 major GC — every ~5 s at 60 fps.
+                // Animation loops (Canvas3D at 30 fps, Canvas2D at 60 fps) promote
+                // short-lived React objects into V8's old generation faster than
+                // automatic minor GC can drain them, causing ~46 KB/s RSS growth.
+                // `gc_hint()` forces a full collection that reclaims them (<2 ms).
+                s.gc_frame_counter = s.gc_frame_counter.wrapping_add(1);
+                if s.gc_frame_counter % 180 == 0 {
+                    s.runtime.gc_hint();
+                }
 
                 // Persist compiled shader bytecode once so subsequent launches
                 // skip Vulkan shader recompilation.  Runs exactly once per

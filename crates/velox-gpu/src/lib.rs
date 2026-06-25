@@ -49,6 +49,13 @@ impl GpuContext {
         for &backends in sets {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends,
+                // Strip the D3D12/Vulkan validation layer by default — it loads a
+                // separate debug DLL and adds ~20 MB of untracked native memory in
+                // debug builds.  Set WGPU_VALIDATION=1 to re-enable when hunting
+                // GPU bugs (render artifacts, validation errors).
+                flags: wgpu::InstanceFlags::from_build_config()
+                    .difference(wgpu::InstanceFlags::VALIDATION)
+                    .with_env(),
                 ..wgpu::InstanceDescriptor::new_without_display_handle()
             });
             // Surface borrows Arc<Window> — 'static is satisfied because Arc

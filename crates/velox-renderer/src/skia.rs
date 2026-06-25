@@ -18,9 +18,10 @@
 //!   A full implementation would composite into an offscreen Pixmap.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use vello::{kurbo::Affine, peniko};
 use velox_gpu::GpuContext;
-use crate::RendererError;
+use crate::{CachedBlit, RendererError};
 
 // ── Color helpers ─────────────────────────────────────────────────────────────
 
@@ -508,13 +509,56 @@ impl TinySkiaFrame {
     }
 }
 
+// ── Persistent staging buffers ────────────────────────────────────────────────
+
+/// Two persistently-mapped `MAP_WRITE | COPY_SRC` GPU buffers for zero-allocation
+/// pixmap upload.  While the GPU copies one buffer to the upload texture the CPU
+/// writes into the other.  `map_async` re-maps each buffer after the GPU is done,
+/// bounding staging memory to exactly `2 × w × h × 4` bytes regardless of frame
+/// rate — eliminating the per-frame allocation that `queue.write_texture()` causes
+/// through wgpu's internal StagingPool.
+struct StagingPair {
+    bufs:  [wgpu::Buffer; 2],
+    /// `true` when the corresponding buffer is mapped and ready for CPU writes.
+    ready: [Arc<Mutex<bool>>; 2],
+    /// Index of the slot to write into next frame (0 or 1).
+    idx:   usize,
+    /// Row stride in the staging buffer, aligned to COPY_BYTES_PER_ROW_ALIGNMENT.
+    /// May be > `width * 4` when width is not a multiple of 64.
+    bytes_per_row: u32,
+}
+
+impl StagingPair {
+    fn new(device: &wgpu::Device, w: u32, h: u32) -> Self {
+        // copy_buffer_to_texture requires bytes_per_row to be a multiple of
+        // COPY_BYTES_PER_ROW_ALIGNMENT (256).  Round up to the next multiple.
+        let raw   = w * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let bpr   = (raw + align - 1) & !(align - 1);
+        let size  = bpr as u64 * h as u64;
+        let make  = |label: &'static str| device.create_buffer(&wgpu::BufferDescriptor {
+            label:              Some(label),
+            size,
+            usage:              wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: true,
+        });
+        Self {
+            bufs:          [make("skia-staging-0"), make("skia-staging-1")],
+            ready:         [Arc::new(Mutex::new(true)), Arc::new(Mutex::new(true))],
+            idx:           0,
+            bytes_per_row: bpr,
+        }
+    }
+}
+
 // ── TinySkiaRenderer ──────────────────────────────────────────────────────────
 
 /// Manages CPU→GPU upload for the tiny-skia backend.
 pub struct TinySkiaRenderer {
     upload_texture: wgpu::Texture,
     upload_view:    wgpu::TextureView,
-    blit:           wgpu::util::TextureBlitter,
+    blit:           CachedBlit,
+    staging:        StagingPair,
     width:          u32,
     height:         u32,
     /// Actual dimensions of `upload_texture`.  May differ from `width/height`
@@ -533,11 +577,14 @@ impl TinySkiaRenderer {
         let w = gpu.width().max(1);
         let h = gpu.height().max(1);
         let (texture, view) = Self::make_upload(gpu, w, h);
-        let blit = wgpu::util::TextureBlitter::new(&gpu.device, gpu.surface_format());
+        let mut blit = CachedBlit::new(&gpu.device, gpu.surface_format());
+        blit.set_source(&gpu.device, &view);
+        let staging = StagingPair::new(&gpu.device, w, h);
         Ok(Self {
             upload_texture: texture,
             upload_view:    view,
-            blit, width: w, height: h, upload_w: w, upload_h: h,
+            blit, staging,
+            width: w, height: h, upload_w: w, upload_h: h,
             background_color: crate::colors::BACKGROUND,
             shared: Some(TinySkiaShared {
                 scale_ctx:   swash::scale::ScaleContext::new(),
@@ -586,33 +633,89 @@ impl TinySkiaRenderer {
         let w = pixmap.width();
         let h = pixmap.height();
 
-        // Recreate upload texture whenever its size no longer matches the pixmap.
+        // Recreate upload texture AND staging buffers on resize.
         if self.upload_w != w || self.upload_h != h {
             self.upload_w = w;
             self.upload_h = h;
             let (tex, view) = Self::make_upload(gpu, w, h);
             self.upload_texture = tex;
             self.upload_view    = view;
-            self.blit = wgpu::util::TextureBlitter::new(&gpu.device, gpu.surface_format());
+            // Refresh cached bind group for the new texture view — pipeline is reused.
+            self.blit.set_source(&gpu.device, &self.upload_view);
+            // New staging buffers sized for the new resolution.
+            // Old buffers are dropped here; wgpu schedules their GPU-side destruction
+            // after any pending commands referencing them complete.
+            self.staging = StagingPair::new(&gpu.device, w, h);
         }
 
-        // Upload CPU pixmap to GPU.
-        gpu.queue.write_texture(
-            self.upload_texture.as_image_copy(),
-            pixmap.data(),
-            wgpu::TexelCopyBufferLayout {
-                offset:         0,
-                bytes_per_row:  Some(w * 4),
-                rows_per_image: None,
-            },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        );
+        // Non-blocking poll: process completed GPU work and fire any pending
+        // map_async callbacks so staging slots are available for CPU writes.
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
 
+        // --- Persistent staging upload (replaces queue.write_texture) ----------
+        // With double-buffering and a GPU frame latency of 2, each staging slot
+        // is recycled before we return to it, so the Wait branch is never taken
+        // under normal conditions.
+        let idx = self.staging.idx;
+        if !*self.staging.ready[idx].lock().unwrap() {
+            // Rare: GPU is running more than 2 frames behind — block until done.
+            log::warn!("skia: staging slot {} not ready, blocking on GPU", idx);
+            let _ = gpu.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        }
+
+        // Write CPU pixels into the currently-mapped staging buffer.
+        // If bytes_per_row > w*4 (alignment padding), copy row-by-row so padding
+        // bytes stay in the correct positions expected by copy_buffer_to_texture.
+        let bpr     = self.staging.bytes_per_row as usize;
+        let row_src = w as usize * 4;
+        {
+            let mut view = self.staging.bufs[idx].slice(..).get_mapped_range_mut();
+            let src = pixmap.data();
+            if bpr == row_src {
+                // Tightly-packed rows — single copy.
+                view.copy_from_slice(src);
+            } else {
+                // Width not a multiple of 64 px: write each row separately,
+                // leaving the alignment-padding bytes between rows untouched.
+                for row in 0..h as usize {
+                    let s = row * row_src;
+                    let d = row * bpr;
+                    view.slice(d..d + row_src)
+                        .copy_from_slice(&src[s..s + row_src]);
+                }
+            }
+        }
+        *self.staging.ready[idx].lock().unwrap() = false;
+        self.staging.bufs[idx].unmap();
+
+        // One command buffer: copy staging → upload texture, then blit to surface.
         let surface_view = texture.texture.create_view(&Default::default());
         let mut enc = gpu.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("skia-blit") });
-        self.blit.copy(&gpu.device, &mut enc, &self.upload_view, &surface_view);
+        enc.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.staging.bufs[idx],
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset:         0,
+                    bytes_per_row:  Some(self.staging.bytes_per_row),
+                    rows_per_image: None,
+                },
+            },
+            self.upload_texture.as_image_copy(),
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.blit.copy(&mut enc, &surface_view);
         gpu.queue.submit([enc.finish()]);
+
+        // Schedule async re-map AFTER submit.  The callback fires on the next
+        // poll() once the GPU has finished the copy, which takes at most one
+        // frame — well within the two-frame latency window of double-buffering.
+        let ready_clone = Arc::clone(&self.staging.ready[idx]);
+        self.staging.bufs[idx].slice(..).map_async(wgpu::MapMode::Write, move |r| {
+            if r.is_ok() { *ready_clone.lock().unwrap() = true; }
+        });
+        self.staging.idx ^= 1;
+        // -----------------------------------------------------------------------
 
         // Return pixmap to pool (same size → reuse the allocation next frame).
         // On resize the old pixmap is dropped and the pool stays empty until
@@ -632,7 +735,7 @@ impl TinySkiaRenderer {
         let surface_view = texture.texture.create_view(&Default::default());
         let mut enc = gpu.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("skia-blit-cached") });
-        self.blit.copy(&gpu.device, &mut enc, &self.upload_view, &surface_view);
+        self.blit.copy(&mut enc, &surface_view);
         gpu.queue.submit([enc.finish()]);
         Ok(())
     }

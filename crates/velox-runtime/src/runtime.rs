@@ -480,6 +480,18 @@ impl V8Runtime {
         scope.perform_microtask_checkpoint();
     }
 
+    /// Trigger a V8 major GC to reclaim old-generation objects.
+    ///
+    /// Call periodically (e.g. every 5 seconds) during high-frequency animation
+    /// loops.  React re-renders at 30–60 fps promote short-lived objects into V8's
+    /// old generation faster than the automatic minor-GC can drain them, causing
+    /// the V8 heap to grow ~46 KB/s.  `low_memory_notification()` forces a full
+    /// collection that reclaims them.  The call typically takes <2 ms for the
+    /// heap sizes Velox uses and is invisible to the user.
+    pub fn gc_hint(&mut self) {
+        self.isolate.low_memory_notification();
+    }
+
     /// Close all open SQLite pools — called by velox-core when the window is closing.
     ///
     /// Clearing the map drops the `SqlitePool` values, which triggers SQLx's

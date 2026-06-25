@@ -21,7 +21,7 @@ use femtovg::{Canvas, Color as FvgColor, ImageFlags, Paint, Path, PixelFormat,
               renderer::WGPURenderer};
 use vello::{kurbo::Affine, peniko};
 use velox_gpu::GpuContext;
-use crate::RendererError;
+use crate::{CachedBlit, RendererError};
 
 const ATLAS_W:   u32 = 2048;
 const ATLAS_H:   u32 = 2048;
@@ -522,7 +522,7 @@ pub struct FemtoVgRenderer {
     inner:       Option<FemtoVgInner>,
     cache_tex:   wgpu::Texture,
     cache_view:  wgpu::TextureView,
-    blit:        wgpu::util::TextureBlitter,
+    blit:        CachedBlit,
 }
 
 impl FemtoVgRenderer {
@@ -539,9 +539,10 @@ impl FemtoVgRenderer {
             .map_err(|e| RendererError::Init(format!("femtovg atlas: {e:?}")))?;
 
         let surface_fmt = gpu.surface_format();
-        let blit        = wgpu::util::TextureBlitter::new(&gpu.device, surface_fmt);
         let (cache_tex, cache_view) =
             Self::make_cache(&gpu.device, gpu.width().max(1), gpu.height().max(1), surface_fmt);
+        let mut blit = CachedBlit::new(&gpu.device, surface_fmt);
+        blit.set_source(&gpu.device, &cache_view);
 
         Ok(Self {
             width:  gpu.width().max(1),
@@ -596,6 +597,7 @@ impl FemtoVgRenderer {
             self.width  = w; self.height = h;
             let (t, v) = Self::make_cache(&gpu.device, w, h, self.surface_fmt);
             self.cache_tex = t; self.cache_view = v;
+            self.blit.set_source(&gpu.device, &self.cache_view);
             frame.inner.clear_glyph_cache();
         }
 
@@ -615,7 +617,7 @@ impl FemtoVgRenderer {
         let surface_view = texture.texture.create_view(&Default::default());
         let mut enc = gpu.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("femtovg-blit") });
-        self.blit.copy(&gpu.device, &mut enc, &self.cache_view, &surface_view);
+        self.blit.copy(&mut enc, &surface_view);
         gpu.queue.submit([enc.finish()]);
 
         self.inner = Some(frame.inner);
@@ -629,7 +631,7 @@ impl FemtoVgRenderer {
         let surface_view = texture.texture.create_view(&Default::default());
         let mut enc = gpu.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("femtovg-blit-cached") });
-        self.blit.copy(&gpu.device, &mut enc, &self.cache_view, &surface_view);
+        self.blit.copy(&mut enc, &surface_view);
         gpu.queue.submit([enc.finish()]);
         Ok(())
     }

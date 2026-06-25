@@ -5,7 +5,7 @@
     "height":      520,
     "startupMode": "windowed",
     "background":  "#0f0f14",
-    "renderMode":  "gpu"
+    "renderMode":  "skia"
   },
   "capabilities": {},
   "dev": {

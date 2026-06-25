@@ -258,6 +258,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
             SceneCommand::Canvas3DUpdate { id, scene } => {
                 state.canvas3d_scenes.insert(id, scene);
                 state.dirty_nodes.insert(id);
+                state.canvas3d_dirty.insert(id);
                 // 3D scenes don't affect layout — they blit on top of Vello.
             }
             SceneCommand::OpenCamera { handle_id, device_index } => {

@@ -14825,6 +14825,53 @@ Ranking: cosine similarity across stored note vectors.`
       height: 40
     });
   }
+  function Canvas3DDemo() {
+    const c3dRef = import_react7.default.useRef(null);
+    const [angle3d, setAngle3d] = import_react7.useState(0);
+    import_react7.useEffect(() => {
+      const id = setInterval(() => setAngle3d((a) => a + 0.02), 33);
+      return () => clearInterval(id);
+    }, []);
+    return /* @__PURE__ */ jsx_runtime.jsx(Canvas3D, {
+      ref: c3dRef,
+      width: 300,
+      height: 220,
+      style: { borderRadius: 8, borderWidth: 1, borderColor: C.border, backgroundColor: "#0f1120" },
+      children: /* @__PURE__ */ jsx_runtime.jsxs(Scene, {
+        canvasRef: c3dRef,
+        background: [0.06, 0.067, 0.125, 1],
+        children: [
+          /* @__PURE__ */ jsx_runtime.jsx(PerspectiveCamera, {
+            position: [0, 1.2, 3.5],
+            target: [0, 0, 0],
+            fov: 55,
+            near: 0.1,
+            far: 100
+          }),
+          /* @__PURE__ */ jsx_runtime.jsx(AmbientLight, {
+            color: [1, 1, 1],
+            intensity: 0.25
+          }),
+          /* @__PURE__ */ jsx_runtime.jsx(DirectionalLight, {
+            direction: [-0.5, -1, -0.8],
+            color: [1, 0.94, 0.82],
+            intensity: 1
+          }),
+          /* @__PURE__ */ jsx_runtime.jsx(Mesh, {
+            geometry: "box",
+            rotation: [0, angle3d, 0],
+            color: [0.39, 0.55, 1, 1]
+          }),
+          /* @__PURE__ */ jsx_runtime.jsx(Mesh, {
+            geometry: "plane",
+            position: [0, -0.5, 0],
+            scale: [4, 1, 4],
+            color: [0.157, 0.176, 0.275, 1]
+          })
+        ]
+      })
+    });
+  }
   function CanvasDemoScreen() {
     const { width: winW } = useWindowSize();
     const inner = winW - PAD * 2;
@@ -14873,12 +14920,6 @@ Ranking: cosine similarity across stored note vectors.`
       loop();
       return () => clearTimeout(raf);
     }, []);
-    const c3dRef = import_react7.default.useRef(null);
-    const [angle3d, setAngle3d] = import_react7.useState(0);
-    import_react7.useEffect(() => {
-      const id = setInterval(() => setAngle3d((a) => a + 0.02), 33);
-      return () => clearInterval(id);
-    }, []);
     return /* @__PURE__ */ jsx_runtime.jsxs(ScrollView, {
       width: inner,
       height: 600,
@@ -14916,45 +14957,7 @@ Ranking: cosine similarity across stored note vectors.`
           style: { color: C.dim },
           children: "3D Canvas — declarative @velox/three (R3F-style)"
         }),
-        /* @__PURE__ */ jsx_runtime.jsx(Canvas3D, {
-          ref: c3dRef,
-          width: 300,
-          height: 220,
-          style: { borderRadius: 8, borderWidth: 1, borderColor: C.border, backgroundColor: "#0f1120" },
-          children: /* @__PURE__ */ jsx_runtime.jsxs(Scene, {
-            canvasRef: c3dRef,
-            background: [0.06, 0.067, 0.125, 1],
-            children: [
-              /* @__PURE__ */ jsx_runtime.jsx(PerspectiveCamera, {
-                position: [0, 1.2, 3.5],
-                target: [0, 0, 0],
-                fov: 55,
-                near: 0.1,
-                far: 100
-              }),
-              /* @__PURE__ */ jsx_runtime.jsx(AmbientLight, {
-                color: [1, 1, 1],
-                intensity: 0.25
-              }),
-              /* @__PURE__ */ jsx_runtime.jsx(DirectionalLight, {
-                direction: [-0.5, -1, -0.8],
-                color: [1, 0.94, 0.82],
-                intensity: 1
-              }),
-              /* @__PURE__ */ jsx_runtime.jsx(Mesh, {
-                geometry: "box",
-                rotation: [0, angle3d, 0],
-                color: [0.39, 0.55, 1, 1]
-              }),
-              /* @__PURE__ */ jsx_runtime.jsx(Mesh, {
-                geometry: "plane",
-                position: [0, -0.5, 0],
-                scale: [4, 1, 4],
-                color: [0.157, 0.176, 0.275, 1]
-              })
-            ]
-          })
-        })
+        /* @__PURE__ */ jsx_runtime.jsx(Canvas3DDemo, {})
       ]
     });
   }

@@ -10,7 +10,8 @@
     "width":       1100,
     "height":      780,
     "startupMode": "windowed",
-    "background":  "#171923"
+    "background":  "#171923",
+    "renderMode":  "skia"
   },
   "capabilities": {
     "fs":             { "read": ["**"], "write": ["**"] },

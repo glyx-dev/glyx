@@ -681,6 +681,46 @@ impl Renderer3D {
         queue.submit([enc.finish()]);
     }
 
+    /// Blit the previously-rendered 3D frame onto `surface_view` without
+    /// re-running the 3D pipeline or updating any uniform buffers.
+    /// Call on frames where the scene has not changed since the last `render()`.
+    pub fn blit_only(
+        &mut self,
+        device: &wgpu::Device,
+        queue:  &wgpu::Queue,
+        canvas_id: u32,
+        x: f32, y: f32, w: f32, h: f32,
+        surface_view: &wgpu::TextureView,
+        surface_w: f32,
+        surface_h: f32,
+    ) {
+        let Some(target) = self.targets.get(&canvas_id) else { return };
+        let Some(ov_bg)  = target.overlay_bg.as_ref()  else { return };
+
+        // Only the overlay rect may have changed (e.g. layout shift); everything
+        // else (geometry, camera, lights) is unchanged from last render().
+        queue.write_buffer(&self.overlay_rect_buf, 0, bytemuck::bytes_of(&OverlayRect {
+            x, y, w, h, sw: surface_w, sh: surface_h, _p0: 0., _p1: 0.,
+        }));
+
+        let mut enc = device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("3d-blit-only") });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("3d-blit-only-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: surface_view, resolve_target: None, depth_slice: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None, ..Default::default()
+            });
+            pass.set_pipeline(&self.overlay_pipeline);
+            pass.set_bind_group(0, ov_bg, &[]);
+            pass.draw(0..4, 0..1);
+        }
+        queue.submit([enc.finish()]);
+    }
+
     fn geom_for(&self, g: &Geometry3D) -> &Geometry {
         match g {
             Geometry3D::Box    {}     => &self.box_geom,

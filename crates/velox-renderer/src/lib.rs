@@ -11,6 +11,8 @@
 //! Scene out of the renderer; render_frame() moves it back via assignment.
 //! Zero extra allocation — Scene's internal Vec buffers survive the move.
 
+mod blit;
+pub(crate) use blit::CachedBlit;
 mod skia;
 pub use skia::{TinySkiaFrame, TinySkiaRenderer};
 mod femtovg_backend;

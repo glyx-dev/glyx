@@ -1896,11 +1896,41 @@ function TextInputTestBox({ width }) {
 
 // ── Screen: Canvas Demo ───────────────────────────────────────────────────────
 
+// Isolated 3D canvas — angle3d state lives HERE so only this subtree
+// re-renders at 30 fps.  The parent CanvasDemoScreen (Text, BackBtn, 2D
+// canvas) is completely unaffected by the 3D animation loop.
+function Canvas3DDemo() {
+  const c3dRef = React.useRef(null);
+  const [angle3d, setAngle3d] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setAngle3d((a) => a + 0.02), 33);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <Canvas3D
+      ref={c3dRef}
+      width={300}
+      height={220}
+      style={{ borderRadius: 8, borderWidth: 1, borderColor: C.border, backgroundColor: '#0f1120' }}
+    >
+      <Scene canvasRef={c3dRef} background={[0.06, 0.067, 0.125, 1.0]}>
+        <PerspectiveCamera position={[0, 1.2, 3.5]} target={[0, 0, 0]} fov={55} near={0.1} far={100} />
+        <AmbientLight color={[1.0, 1.0, 1.0]} intensity={0.25} />
+        <DirectionalLight direction={[-0.5, -1, -0.8]} color={[1.0, 0.94, 0.82]} intensity={1.0} />
+        <Mesh geometry="box"   rotation={[0, angle3d, 0]}       color={[0.39, 0.55, 1.0, 1.0]} />
+        <Mesh geometry="plane" position={[0, -0.5, 0]} scale={[4, 1, 4]} color={[0.157, 0.176, 0.275, 1.0]} />
+      </Scene>
+    </Canvas3D>
+  );
+}
+
 function CanvasDemoScreen() {
   const { width: winW } = useWindowSize();
   const inner = winW - PAD * 2;
 
-  // 2D canvas ref — we draw into it on every animation frame.
+  // 2D canvas — imperative, never triggers React re-renders.
   const canvasRef = React.useRef(null);
   const angleRef  = React.useRef(0);
 
@@ -1961,15 +1991,6 @@ function CanvasDemoScreen() {
     return () => clearTimeout(raf);
   }, []);
 
-  // 3D canvas — declarative via @velox/three
-  const c3dRef = React.useRef(null);
-  const [angle3d, setAngle3d] = useState(0);
-
-  useEffect(() => {
-    const id = setInterval(() => setAngle3d((a) => a + 0.02), 33);
-    return () => clearInterval(id);
-  }, []);
-
   return (
     <ScrollView width={inner} height={600} style={{ gap: 20 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
@@ -1988,24 +2009,12 @@ function CanvasDemoScreen() {
         style={{ borderRadius: 8, borderWidth: 1, borderColor: C.border }}
       />
 
-      {/* 3D Canvas — declarative @velox/three */}
+      {/* 3D Canvas — isolated component so its 30 fps state updates don't
+          re-render the 2D canvas, header, or Text nodes above. */}
       <Text fontSize={13} width={inner} height={18} style={{ color: C.dim }}>
         3D Canvas — declarative @velox/three (R3F-style)
       </Text>
-      <Canvas3D
-        ref={c3dRef}
-        width={300}
-        height={220}
-        style={{ borderRadius: 8, borderWidth: 1, borderColor: C.border, backgroundColor: '#0f1120' }}
-      >
-        <Scene canvasRef={c3dRef} background={[0.06, 0.067, 0.125, 1.0]}>
-          <PerspectiveCamera position={[0, 1.2, 3.5]} target={[0, 0, 0]} fov={55} near={0.1} far={100} />
-          <AmbientLight color={[1.0, 1.0, 1.0]} intensity={0.25} />
-          <DirectionalLight direction={[-0.5, -1, -0.8]} color={[1.0, 0.94, 0.82]} intensity={1.0} />
-          <Mesh geometry="box"   rotation={[0, angle3d, 0]}       color={[0.39, 0.55, 1.0, 1.0]} />
-          <Mesh geometry="plane" position={[0, -0.5, 0]} scale={[4, 1, 4]} color={[0.157, 0.176, 0.275, 1.0]} />
-        </Scene>
-      </Canvas3D>
+      <Canvas3DDemo />
     </ScrollView>
   );
 }

@@ -84,6 +84,9 @@ pub enum ShellEvent {
     /// Window became occluded (hidden/minimised) or visible again.
     /// `occluded = true` means the window is no longer visible on screen.
     Occluded { window_handle: u32, occluded: bool },
+    /// Window gained or lost OS focus.
+    /// `focused = false` is a good time to release allocator memory.
+    FocusChanged { window_handle: u32, focused: bool },
 }
 
 // ── Shell config ─────────────────────────────────────────────────────────────
@@ -478,6 +481,10 @@ impl ApplicationHandler<VeloxUserEvent> for ShellApp {
 
             WindowEvent::Occluded(occluded) => {
                 (self.handler)(ShellEvent::Occluded { window_handle: handle, occluded });
+            }
+
+            WindowEvent::Focused(focused) => {
+                (self.handler)(ShellEvent::FocusChanged { window_handle: handle, focused });
             }
 
             _ => {}

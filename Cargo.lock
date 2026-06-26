@@ -7806,6 +7806,7 @@ dependencies = [
  "image",
  "kurbo 0.11.3",
  "log",
+ "lru 0.12.5",
  "parley",
  "peniko",
  "swash",

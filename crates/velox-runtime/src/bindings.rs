@@ -761,10 +761,11 @@ pub fn register_all(
     register!("__velox_audio_seek",      audio_seek_callback);
 
     // ── App lifecycle ────────────────────────────────────────────────────────
-    register!("__velox_quit",         quit_callback);
-    register!("__velox_window_close", quit_callback);  // alias: close the window / app
-    register!("__velox_restart",      restart_callback);
-    register!("__velox_platform",     platform_callback);
+    register!("__velox_quit",            quit_callback);
+    register!("__velox_window_close",    quit_callback);  // alias: close the window / app
+    register!("__velox_restart",         restart_callback);
+    register!("__velox_platform",        platform_callback);
+    register!("__velox_collect_memory",  collect_memory_callback);
 
     // ── Deep links ───────────────────────────────────────────────────────────
     register!("__velox_deeplink_getInitialUrl", deeplink_get_initial_url_callback);
@@ -4129,6 +4130,18 @@ fn quit_callback(
             (quit_fn)();
         }
     }
+}
+
+/// `__velox_collect_memory()` — sync, immediately runs V8 GC + mimalloc segment decommit.
+/// The framework calls this automatically on focus loss; developers can call it manually
+/// at natural pause points (level transitions, loading screens, menu opens).
+fn collect_memory_callback(
+    _scope: &mut v8::HandleScope,
+    _args:  v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    extern "C" { fn mi_collect(force: bool); }
+    unsafe { mi_collect(true); }
 }
 
 /// `__velox_restart()` — sync, requests app restart (quit + re-launch).

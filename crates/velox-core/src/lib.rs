@@ -2703,6 +2703,14 @@ pub fn run(mut config: AppConfig) -> bool {
                 s.gc_frame_counter = s.gc_frame_counter.wrapping_add(1);
                 if s.gc_frame_counter % 180 == 0 {
                     s.runtime.gc_hint();
+                    // After V8 reclaims its heap, force mimalloc to immediately
+                    // decommit any segments that are now completely free rather
+                    // than waiting for its background purge timer (which can
+                    // take 20+ minutes to trigger a large segment decommit).
+                    // mi_collect(force=true) is a no-op if nothing is free,
+                    // so it is safe to call unconditionally here.
+                    extern "C" { fn mi_collect(force: bool); }
+                    unsafe { mi_collect(true); }
                 }
 
                 // Persist compiled shader bytecode once so subsequent launches
@@ -2818,6 +2826,24 @@ pub fn run(mut config: AppConfig) -> bool {
             }
 
             ShellEvent::Occluded { .. } => {} // un-occlude: nothing to do, buffers reallocate lazily
+
+            ShellEvent::FocusChanged { focused: false, .. } => {
+                // Window lost focus — user switched to another app.
+                // Run V8 GC + renderer pool trim + mimalloc segment decommit
+                // immediately while no frame is in flight. This is the primary
+                // intelligent trigger for memory recovery; no developer action
+                // required. The renderer pools (Vello GPU buffers, skia/femtovg
+                // glyph caches) rebuild lazily over the next few frames on return.
+                for s in windows.values_mut() {
+                    s.runtime.gc_hint();
+                    s.renderer.trim_resources();
+                }
+                extern "C" { fn mi_collect(force: bool); }
+                unsafe { mi_collect(true); }
+                log::debug!("Focus lost — GC + renderer trim + mi_collect triggered.");
+            }
+
+            ShellEvent::FocusChanged { .. } => {} // gained focus: nothing to do
 
             ShellEvent::CloseRequested { window_handle } => {
                 log::info!("Window {} closed.", window_handle);

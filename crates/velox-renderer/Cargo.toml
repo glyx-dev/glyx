@@ -17,3 +17,4 @@ tiny-skia  = { workspace = true }
 swash      = { workspace = true }
 femtovg    = { workspace = true }
 image      = { workspace = true }
+lru        = { workspace = true }

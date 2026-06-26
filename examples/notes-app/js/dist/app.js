@@ -6969,7 +6969,8 @@ No matching component was found for:
     getWindowSize: () => typeof __velox_getWindowSize !== "undefined" ? __velox_getWindowSize() : { width: 0, height: 0 },
     getScreenSize: () => typeof __velox_getScreenSize !== "undefined" ? __velox_getScreenSize() : { width: 0, height: 0 },
     setAlwaysOnTop: (on) => typeof __velox_setAlwaysOnTop !== "undefined" && __velox_setAlwaysOnTop(on),
-    setTitle: (title) => typeof __velox_setTitle !== "undefined" && __velox_setTitle(title)
+    setTitle: (title) => typeof __velox_setTitle !== "undefined" && __velox_setTitle(title),
+    collectMemory: () => typeof __velox_collect_memory !== "undefined" && __velox_collect_memory()
   };
   var _noBinding = (name) => Promise.reject(new Error(`${name}: binding not available`));
   var fs = {
@@ -8262,7 +8263,8 @@ No matching component was found for:
       this.lineWidth = 1;
     }
     clear() {
-      this._cmds = [{ type: "clear" }];
+      this._cmds.length = 0;
+      this._cmds.push({ type: "clear" });
     }
     fillRect(x, y, w, h) {
       this._cmds.push({ type: "fillRect", x, y, w, h, color: _parseColor(this.fillStyle) });
@@ -8283,14 +8285,16 @@ No matching component was found for:
       this._cmds.push({ type: "fillText", text: String(text), x, y, fontSize, color: _parseColor(this.fillStyle) });
     }
     flush() {
-      if (typeof __velox_canvas_update === "undefined")
+      if (typeof __velox_canvas_update === "undefined") {
+        this._cmds.length = 0;
         return;
+      }
       try {
         __velox_canvas_update(this._id, JSON.stringify(this._cmds));
       } catch (e) {
         __velox_log("[canvas] flush error: " + e);
       }
-      this._cmds = [];
+      this._cmds.length = 0;
     }
   }
   var Canvas = import_react.default.forwardRef(function Canvas2({ style, ...props }, ref) {

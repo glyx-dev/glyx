@@ -17,7 +17,6 @@
 //! - `push_layer_with_alpha` clips correctly but does **not** apply the opacity value.
 //!   A full implementation would composite into an offscreen Pixmap.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use vello::{kurbo::Affine, peniko};
 use velox_gpu::GpuContext;
@@ -128,7 +127,11 @@ struct CachedAlphaGlyph {
 /// State that persists across frames (moved in/out of TinySkiaFrame).
 struct TinySkiaShared {
     scale_ctx:   swash::scale::ScaleContext,
-    glyph_cache: HashMap<GlyphKey, CachedAlphaGlyph>,
+    /// Bounded LRU of rasterized glyph alpha masks. Capped so apps that render
+    /// many distinct (glyph, size) combinations (animated font sizes, large CJK
+    /// or emoji sets) can't grow CPU memory without limit. UIs with a small set
+    /// of text sizes never hit the cap.
+    glyph_cache: lru::LruCache<GlyphKey, CachedAlphaGlyph>,
     /// Reusable pixel buffer — avoids a fresh 8 MB allocation every frame.
     pixmap:      Option<tiny_skia::Pixmap>,
 }
@@ -369,7 +372,7 @@ impl TinySkiaFrame {
                     }
 
                     // Store raw alpha in cache (color-independent).
-                    self.shared.glyph_cache.insert(key, CachedAlphaGlyph {
+                    self.shared.glyph_cache.put(key, CachedAlphaGlyph {
                         alpha:  image.data.to_vec(),
                         width:  pw,
                         height: ph,
@@ -588,7 +591,9 @@ impl TinySkiaRenderer {
             background_color: crate::colors::BACKGROUND,
             shared: Some(TinySkiaShared {
                 scale_ctx:   swash::scale::ScaleContext::new(),
-                glyph_cache: HashMap::new(),
+                // 2048 entries ≈ ~1 MB for typical UI text; ample headroom for
+                // several font sizes' worth of Latin glyphs without thrashing.
+                glyph_cache: lru::LruCache::new(std::num::NonZeroUsize::new(2048).unwrap()),
                 pixmap:      None,
             }),
         })

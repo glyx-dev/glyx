@@ -124,10 +124,11 @@ let __velox_nextWindowId = 1;
 globalThis.__velox_window_create = function() { return stubPromise(String(__velox_nextWindowId++)); };
 globalThis.__velox_ipc_send = function() {};
 globalThis.__velox_ipc_poll = function() { return '[]'; };
-globalThis.__velox_quit          = function() {};
-globalThis.__velox_window_close  = function() {};
-globalThis.__velox_restart       = function() {};
-globalThis.__velox_platform      = function() { return ''; };
+globalThis.__velox_quit             = function() {};
+globalThis.__velox_window_close     = function() {};
+globalThis.__velox_restart          = function() {};
+globalThis.__velox_platform         = function() { return ''; };
+globalThis.__velox_collect_memory   = function() {};
 
 // Deep link bindings
 globalThis.__velox_deeplink_getInitialUrl = function() { return ''; };

@@ -205,6 +205,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 // Also clean up canvas data for this node.
                 state.canvas_cmds.remove(&id);
                 state.canvas3d_scenes.remove(&id);
+                state.canvas3d_dirty.remove(&id);
                 if let Some(r3d) = &mut state.renderer_3d {
                     r3d.remove_canvas(id);
                     // When the last Canvas3D node leaves the tree, drop the

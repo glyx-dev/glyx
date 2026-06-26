@@ -923,6 +923,10 @@ export const veloxWindow = {
   getScreenSize:   ()      => typeof __velox_getScreenSize   !== 'undefined' ? __velox_getScreenSize()   : { width: 0, height: 0 },
   setAlwaysOnTop:  (on)    => typeof __velox_setAlwaysOnTop  !== 'undefined' && __velox_setAlwaysOnTop(on),
   setTitle:        (title) => typeof __velox_setTitle        !== 'undefined' && __velox_setTitle(title),
+  /** Immediately run V8 GC + mimalloc segment decommit. The framework does
+   *  this automatically on focus loss; call manually at level transitions or
+   *  loading screens for faster memory recovery. */
+  collectMemory:   ()      => typeof __velox_collect_memory  !== 'undefined' && __velox_collect_memory(),
 };
 
 // ── File system API ───────────────────────────────────────────────────────────
@@ -3180,7 +3184,7 @@ class VeloxCanvasContext {
     this.lineWidth   = 1;
   }
 
-  clear() { this._cmds = [{ type: 'clear' }]; }
+  clear() { this._cmds.length = 0; this._cmds.push({ type: 'clear' }); }
 
   fillRect(x, y, w, h) {
     this._cmds.push({ type: 'fillRect', x, y, w, h, color: _parseColor(this.fillStyle) });
@@ -3203,13 +3207,16 @@ class VeloxCanvasContext {
 
   /** Send accumulated draw commands to the native layer. */
   flush() {
-    if (typeof __velox_canvas_update === 'undefined') return;
+    // Always clear the command buffer, even when the binding is unavailable
+    // (snapshot/test builds) — otherwise _cmds grows unbounded across frames.
+    if (typeof __velox_canvas_update === 'undefined') { this._cmds.length = 0; return; }
     try {
       __velox_canvas_update(this._id, JSON.stringify(this._cmds));
     } catch (e) {
       __velox_log('[canvas] flush error: ' + e);
     }
-    this._cmds = [];
+    // Reuse the existing array instead of allocating a new one each frame.
+    this._cmds.length = 0;
   }
 }
 

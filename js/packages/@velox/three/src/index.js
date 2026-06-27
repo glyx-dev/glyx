@@ -185,6 +185,39 @@ export function DirectionalLight({
   return null;
 }
 
+/**
+ * Point (omnidirectional) light. Up to 8 dynamic lights per scene.
+ * @param {{ position?: [x,y,z], color?: [r,g,b], intensity?: number,
+ *           range?: number }} props  range 0 = no distance falloff
+ */
+export function PointLight({
+  position  = [0, 2, 0],
+  color     = [1, 1, 1],
+  intensity = 1.0,
+  range     = 0,
+}) {
+  useRegister('light', { type: 'point', position, color, intensity, range });
+  return null;
+}
+
+/**
+ * Spot (cone) light. `innerDeg`/`outerDeg` are cone half-angles in degrees.
+ * @param {{ position?: [x,y,z], direction?: [x,y,z], color?: [r,g,b],
+ *           intensity?: number, range?: number, innerDeg?: number, outerDeg?: number }} props
+ */
+export function SpotLight({
+  position  = [0, 3, 0],
+  direction = [0, -1, 0],
+  color     = [1, 1, 1],
+  intensity = 1.0,
+  range     = 0,
+  innerDeg  = 15,
+  outerDeg  = 25,
+}) {
+  useRegister('light', { type: 'spot', position, direction, color, intensity, range, innerDeg, outerDeg });
+  return null;
+}
+
 // ── Geometry helpers ───────────────────────────────────────────────────────────
 
 const IDENTITY_MAT = [

@@ -48,7 +48,22 @@ fn default_far()  -> f32      { 1000.0 }
 pub enum Light3D {
     Ambient     { color: [f32; 3], intensity: f32 },
     Directional { direction: [f32; 3], color: [f32; 3], intensity: f32 },
+    /// Omnidirectional light at a point. `range` = 0 means no distance falloff.
+    Point {
+        position: [f32; 3], color: [f32; 3], intensity: f32,
+        #[serde(default)] range: f32,
+    },
+    /// Cone light. `inner_deg`/`outer_deg` are the half-angles (degrees) of the
+    /// full-bright inner cone and the falloff outer cone.
+    Spot {
+        position: [f32; 3], direction: [f32; 3], color: [f32; 3], intensity: f32,
+        #[serde(default)] range: f32,
+        #[serde(rename = "innerDeg", default = "default_inner")] inner_deg: f32,
+        #[serde(rename = "outerDeg", default = "default_outer")] outer_deg: f32,
+    },
 }
+fn default_inner() -> f32 { 15.0 }
+fn default_outer() -> f32 { 25.0 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,20 +112,26 @@ struct MaterialBlock {
 }
 const MAT_STRIDE: u64 = 256;
 
+const MAX_LIGHTS: usize = 8;
+
+/// One GPU light (std140-friendly, 64 B). `pos_kind.w` selects the type:
+/// 0 = directional, 1 = point, 2 = spot.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct DirLightUniform {
-    direction: [f32; 3],
-    intensity: f32,
-    color:     [f32; 3],
-    _pad:      f32,
+struct GpuLight {
+    pos_kind:    [f32; 4],  // xyz position, w kind
+    dir_int:     [f32; 4],  // xyz direction, w intensity
+    color_range: [f32; 4],  // xyz color, w range (0 = infinite)
+    cone:        [f32; 4],  // x inner-cos, y outer-cos, zw pad
 }
 
+/// Scene lighting block: ambient + a bounded array of dynamic lights.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct AmbientUniform {
-    color:     [f32; 3],
-    intensity: f32,
+struct LightsUniform {
+    ambient: [f32; 4],            // xyz color, w intensity
+    count:   [u32; 4],            // x = active light count
+    lights:  [GpuLight; MAX_LIGHTS],
 }
 
 #[repr(C)]
@@ -136,18 +157,28 @@ struct ModelBlock {
     normal_mat: mat4x4<f32>,
 }
 struct Material  { color: vec4<f32> }
-struct DirLight  { direction: vec3<f32>, intensity: f32, color: vec3<f32>, _pad: f32 }
-struct AmbLight  { color: vec3<f32>, intensity: f32 }
+struct GpuLight {
+    pos_kind:    vec4<f32>,
+    dir_int:     vec4<f32>,
+    color_range: vec4<f32>,
+    cone:        vec4<f32>,
+}
+struct Lights {
+    ambient: vec4<f32>,
+    count:   vec4<u32>,
+    lights:  array<GpuLight, 8>,
+}
 
 @group(0) @binding(0) var<uniform> cam:  Camera;
 @group(1) @binding(0) var<uniform> mblk: ModelBlock;
 @group(1) @binding(1) var<uniform> mat:  Material;
-@group(2) @binding(0) var<uniform> dirl: DirLight;
-@group(2) @binding(1) var<uniform> ambl: AmbLight;
+@group(2) @binding(0) var<uniform> L:    Lights;
+@group(3) @binding(0) var base_tex:  texture_2d<f32>;
+@group(3) @binding(1) var base_samp: sampler;
 
-struct VIn  { @location(0) pos: vec3<f32>, @location(1) nor: vec3<f32> };
+struct VIn  { @location(0) pos: vec3<f32>, @location(1) nor: vec3<f32>, @location(2) uv: vec2<f32> };
 struct VOut { @builtin(position) clip: vec4<f32>,
-              @location(0) wpos: vec3<f32>, @location(1) wnor: vec3<f32> };
+              @location(0) wpos: vec3<f32>, @location(1) wnor: vec3<f32>, @location(2) uv: vec2<f32> };
 
 @vertex fn vs(vin: VIn) -> VOut {
     let wp4 = mblk.model * vec4<f32>(vin.pos, 1.0);
@@ -155,20 +186,53 @@ struct VOut { @builtin(position) clip: vec4<f32>,
     out.clip = cam.view_proj * wp4;
     out.wpos = wp4.xyz;
     out.wnor = normalize((mblk.normal_mat * vec4<f32>(vin.nor, 0.0)).xyz);
+    out.uv   = vin.uv;
     return out;
 }
 
 @fragment fn fs(v: VOut) -> @location(0) vec4<f32> {
-    let N    = normalize(v.wnor);
-    let L    = normalize(-dirl.direction);
-    let diff = max(dot(N, L), 0.0);
-    let V    = normalize(cam.eye_pos - v.wpos);
-    let R    = reflect(-L, N);
-    let spec = pow(max(dot(V, R), 0.0), 32.0) * 0.25;
-    let base = mat.color.rgb;
-    let amb  = ambl.color * ambl.intensity;
-    let lit  = dirl.color * dirl.intensity * (diff + spec);
-    return vec4<f32>((amb + lit) * base, mat.color.a);
+    let N = normalize(v.wnor);
+    let V = normalize(cam.eye_pos - v.wpos);
+
+    var lit = vec3<f32>(0.0, 0.0, 0.0);
+    for (var i: u32 = 0u; i < 8u; i = i + 1u) {
+        if (i >= L.count.x) { break; }
+        let lt   = L.lights[i];
+        let kind = lt.pos_kind.w;
+        var Ldir  = vec3<f32>(0.0, 1.0, 0.0);
+        var atten = 1.0;
+        if (kind < 0.5) {
+            // Directional.
+            Ldir = normalize(-lt.dir_int.xyz);
+        } else {
+            // Point or spot — direction toward the light + distance falloff.
+            let to_light = lt.pos_kind.xyz - v.wpos;
+            let dist     = length(to_light);
+            Ldir = to_light / max(dist, 0.0001);
+            let range = lt.color_range.w;
+            if (range > 0.0) {
+                let a = clamp(1.0 - dist / range, 0.0, 1.0);
+                atten = a * a;
+            }
+            if (kind > 1.5) {
+                // Spot cone falloff (inner→outer cosine).
+                let cd = dot(-Ldir, normalize(lt.dir_int.xyz));
+                let t  = clamp((cd - lt.cone.y) / max(lt.cone.x - lt.cone.y, 0.0001), 0.0, 1.0);
+                atten = atten * t;
+            }
+        }
+        let diff = max(dot(N, Ldir), 0.0);
+        let R    = reflect(-Ldir, N);
+        let spec = pow(max(dot(V, R), 0.0), 32.0) * 0.25;
+        lit = lit + lt.color_range.xyz * lt.dir_int.w * (diff + spec) * atten;
+    }
+
+    // Base color = texture × material color. Untextured meshes bind a 1×1 white
+    // texture, so the sample is (1,1,1,1) and the result is just `mat.color`.
+    let tex  = textureSample(base_tex, base_samp, v.uv);
+    let base = tex.rgb * mat.color.rgb;
+    let amb  = L.ambient.xyz * L.ambient.w;
+    return vec4<f32>((amb + lit) * base, tex.a * mat.color.a);
 }
 "#;
 
@@ -203,7 +267,18 @@ struct Geometry {
     idx_count: u32,
 }
 
-fn upload_geometry(device: &wgpu::Device, verts: &[f32], indices: &[u16]) -> Geometry {
+/// One drawable piece of a model: geometry + optional base-color texture bind
+/// group (group 3). `tex_bg = None` means "use the renderer's shared 1×1 white
+/// texture" — keeps untextured primitives from each allocating a duplicate.
+struct Primitive {
+    geom:   Geometry,
+    tex_bg: Option<wgpu::BindGroup>,
+}
+
+/// Vertex = position(3) + normal(3) + uv(2) = 8 floats.
+const VERT_FLOATS: usize = 8;
+
+fn upload_geometry(device: &wgpu::Device, verts: &[f32], indices: &[u32]) -> Geometry {
     use wgpu::util::DeviceExt;
     let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("geom-verts"), usage: wgpu::BufferUsages::VERTEX,
@@ -216,9 +291,33 @@ fn upload_geometry(device: &wgpu::Device, verts: &[f32], indices: &[u16]) -> Geo
     Geometry { vbuf, ibuf, idx_count: indices.len() as u32 }
 }
 
-fn gen_box() -> (Vec<f32>, Vec<u16>) {
+/// Upload `rgba` (w×h, 4 bytes/px) to a new TEXTURE_BINDING texture and return
+/// its view. Used for the 1×1 white default and GLTF base-color textures.
+fn make_rgba_texture(device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, rgba: &[u8]) -> wgpu::TextureView {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mesh-tex"),
+        size:  wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1, sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format:    wgpu::TextureFormat::Rgba8Unorm,
+        usage:     wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &tex, mip_level: 0,
+            origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+        },
+        rgba,
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    tex.create_view(&Default::default())
+}
+
+fn gen_box() -> (Vec<f32>, Vec<u32>) {
     let mut v: Vec<f32> = Vec::new();
-    let mut idx: Vec<u16> = Vec::new();
+    let mut idx: Vec<u32> = Vec::new();
     // [normal, 4 corners] per face
     // Corners ordered CCW when viewed from outside (so (v1-v0)×(v2-v0) points outward).
     let faces: &[([f32; 3], [[f32; 3]; 4])] = &[
@@ -229,17 +328,23 @@ fn gen_box() -> (Vec<f32>, Vec<u16>) {
         ([ 0.0, 0.0, 1.0], [[-0.5,-0.5, 0.5],[ 0.5,-0.5, 0.5],[ 0.5, 0.5, 0.5],[-0.5, 0.5, 0.5]]),
         ([ 0.0, 0.0,-1.0], [[-0.5,-0.5,-0.5],[-0.5, 0.5,-0.5],[ 0.5, 0.5,-0.5],[ 0.5,-0.5,-0.5]]),
     ];
+    // Per-quad UVs for the 4 corners.
+    let uv: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
     for (n, corners) in faces {
-        let base = (v.len() / 6) as u16;
-        for c in corners { v.extend_from_slice(c); v.extend_from_slice(n); }
+        let base = (v.len() / VERT_FLOATS) as u32;
+        for (k, c) in corners.iter().enumerate() {
+            v.extend_from_slice(c);
+            v.extend_from_slice(n);
+            v.extend_from_slice(&uv[k]);
+        }
         idx.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
     }
     (v, idx)
 }
 
-fn gen_sphere(stacks: u32, slices: u32) -> (Vec<f32>, Vec<u16>) {
+fn gen_sphere(stacks: u32, slices: u32) -> (Vec<f32>, Vec<u32>) {
     let mut v: Vec<f32> = Vec::new();
-    let mut idx: Vec<u16> = Vec::new();
+    let mut idx: Vec<u32> = Vec::new();
     use std::f32::consts::PI;
     for i in 0..=stacks {
         let phi = PI * i as f32 / stacks as f32;
@@ -248,27 +353,29 @@ fn gen_sphere(stacks: u32, slices: u32) -> (Vec<f32>, Vec<u16>) {
             let theta = 2.0 * PI * j as f32 / slices as f32;
             let (st, ct) = (theta.sin(), theta.cos());
             let (x, y, z) = (sp * ct, cp, sp * st);
-            v.extend_from_slice(&[x * 0.5, y * 0.5, z * 0.5, x, y, z]);
+            let u = j as f32 / slices as f32;
+            let vv = i as f32 / stacks as f32;
+            v.extend_from_slice(&[x * 0.5, y * 0.5, z * 0.5, x, y, z, u, vv]);
         }
     }
     for i in 0..stacks {
         for j in 0..slices {
-            let a = (i * (slices + 1) + j)       as u16;
-            let b = (i * (slices + 1) + j + 1)   as u16;
-            let c = ((i+1)*(slices+1) + j)        as u16;
-            let d = ((i+1)*(slices+1) + j + 1)    as u16;
+            let a = i * (slices + 1) + j;
+            let b = i * (slices + 1) + j + 1;
+            let c = (i+1)*(slices+1) + j;
+            let d = (i+1)*(slices+1) + j + 1;
             idx.extend_from_slice(&[a, c, b, b, c, d]);
         }
     }
     (v, idx)
 }
 
-fn gen_plane() -> (Vec<f32>, Vec<u16>) {
+fn gen_plane() -> (Vec<f32>, Vec<u32>) {
     let v: Vec<f32> = vec![
-        -0.5, 0.0,  0.5,  0.0, 1.0, 0.0,
-         0.5, 0.0,  0.5,  0.0, 1.0, 0.0,
-         0.5, 0.0, -0.5,  0.0, 1.0, 0.0,
-        -0.5, 0.0, -0.5,  0.0, 1.0, 0.0,
+        -0.5, 0.0,  0.5,  0.0, 1.0, 0.0,  0.0, 1.0,
+         0.5, 0.0,  0.5,  0.0, 1.0, 0.0,  1.0, 1.0,
+         0.5, 0.0, -0.5,  0.0, 1.0, 0.0,  1.0, 0.0,
+        -0.5, 0.0, -0.5,  0.0, 1.0, 0.0,  0.0, 0.0,
     ];
     (v, vec![0, 1, 2, 0, 2, 3])
 }
@@ -325,23 +432,32 @@ pub struct Renderer3D {
     camera_bgl:   wgpu::BindGroupLayout,
     per_obj_bgl:  wgpu::BindGroupLayout,
     lighting_bgl: wgpu::BindGroupLayout,
+    tex_bgl:      wgpu::BindGroupLayout,
     overlay_bgl:  wgpu::BindGroupLayout,
 
     camera_buf:      wgpu::Buffer,
     mesh_buf:        wgpu::Buffer,
     mat_buf:         wgpu::Buffer,
-    dir_buf:         wgpu::Buffer,
-    amb_buf:         wgpu::Buffer,
+    lights_buf:      wgpu::Buffer,
     overlay_rect_buf: wgpu::Buffer,
 
     camera_bg:    wgpu::BindGroup,
     lighting_bg:  wgpu::BindGroup,
     per_obj_bgs:  Vec<wgpu::BindGroup>,
 
+    /// Shared base-color sampler for mesh textures.
+    mesh_sampler: wgpu::Sampler,
+    /// Group-3 bind group backed by a 1×1 white texture; used by every
+    /// untextured primitive so the shader's `texture × color` works uniformly.
+    white_tex_bg: wgpu::BindGroup,
+
     box_geom:    Geometry,
     sphere_geom: Geometry,
     plane_geom:  Geometry,
-    gltf_cache:  HashMap<String, Geometry>,
+    /// Loaded GLTF models, keyed by path. Each model is its full set of
+    /// primitives (all meshes × all primitives). Freed when the renderer is
+    /// dropped (last Canvas3D node removed) or via `unload_gltf`.
+    gltf_cache:  HashMap<String, Vec<Primitive>>,
 
     targets:  HashMap<u32, Canvas3DTarget>,
 
@@ -350,8 +466,7 @@ pub struct Renderer3D {
 }
 
 impl Renderer3D {
-    pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
-        use wgpu::util::DeviceExt;
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, surface_format: wgpu::TextureFormat) -> Self {
 
         let sm3d = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label:  Some("3d"),
@@ -376,10 +491,30 @@ impl Renderer3D {
         let lighting_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("light-bgl"),
             entries: &[
-                bgl_entry(0, wgpu::ShaderStages::FRAGMENT, std::mem::size_of::<DirLightUniform>() as u64),
-                bgl_entry(1, wgpu::ShaderStages::FRAGMENT, std::mem::size_of::<AmbientUniform>()  as u64),
+                bgl_entry(0, wgpu::ShaderStages::FRAGMENT, std::mem::size_of::<LightsUniform>() as u64),
             ],
         });
+        // Group-3: base-color texture + sampler (shared by mesh + overlay shapes).
+        let tex_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("tex-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type:    wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled:   false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
         let overlay_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ov-bgl"),
             entries: &[
@@ -401,9 +536,10 @@ impl Renderer3D {
             ],
         });
 
-        let vbl_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+        // pos(3) + normal(3) + uv(2), stride = 32 bytes.
+        let vbl_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
         let vbl = wgpu::VertexBufferLayout {
-            array_stride: 24,
+            array_stride: (VERT_FLOATS * 4) as u64,
             step_mode:    wgpu::VertexStepMode::Vertex,
             attributes:   &vbl_attrs,
         };
@@ -411,7 +547,7 @@ impl Renderer3D {
         let pipeline_3d = {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("3d-pl"),
-                bind_group_layouts: &[Some(&camera_bgl), Some(&per_obj_bgl), Some(&lighting_bgl)],
+                bind_group_layouts: &[Some(&camera_bgl), Some(&per_obj_bgl), Some(&lighting_bgl), Some(&tex_bgl)],
                 ..Default::default()
             });
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -480,8 +616,7 @@ impl Renderer3D {
         let camera_buf     = ubuf(device, "cam",      std::mem::size_of::<CameraUniform>()  as u64);
         let mesh_buf       = ubuf(device, "mesh",     MAX_MESHES as u64 * MESH_STRIDE);
         let mat_buf        = ubuf(device, "mat",      MAX_MESHES as u64 * MAT_STRIDE);
-        let dir_buf        = ubuf(device, "dir",      std::mem::size_of::<DirLightUniform>() as u64);
-        let amb_buf        = ubuf(device, "amb",      std::mem::size_of::<AmbientUniform>()  as u64);
+        let lights_buf     = ubuf(device, "lights",   std::mem::size_of::<LightsUniform>() as u64);
         let overlay_rect_buf = ubuf(device, "ov-rect", std::mem::size_of::<OverlayRect>() as u64);
 
         let camera_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -491,8 +626,7 @@ impl Renderer3D {
         let lighting_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("light-bg"), layout: &lighting_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: dir_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: amb_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: lights_buf.as_entire_binding() },
             ],
         });
 
@@ -533,11 +667,33 @@ impl Renderer3D {
             ..Default::default()
         });
 
+        // Mesh texture sampler: linear + repeat (typical for UV-mapped models).
+        let mesh_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label:        Some("mesh-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter:   wgpu::FilterMode::Linear,
+            min_filter:   wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // 1×1 white texture + its group-3 bind group, shared by all untextured
+        // primitives (created once; never reallocated).
+        let white_view = make_rgba_texture(device, queue, 1, 1, &[255, 255, 255, 255]);
+        let white_tex_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("white-tex-bg"), layout: &tex_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&white_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&mesh_sampler) },
+            ],
+        });
+
         Self {
             pipeline_3d,
-            camera_bgl, per_obj_bgl, lighting_bgl, overlay_bgl,
-            camera_buf, mesh_buf, mat_buf, dir_buf, amb_buf, overlay_rect_buf,
+            camera_bgl, per_obj_bgl, lighting_bgl, tex_bgl, overlay_bgl,
+            camera_buf, mesh_buf, mat_buf, lights_buf, overlay_rect_buf,
             camera_bg, lighting_bg, per_obj_bgs,
+            mesh_sampler, white_tex_bg,
             box_geom:    upload_geometry(device, &bv, &bi),
             sphere_geom: upload_geometry(device, &sv, &si),
             plane_geom:  upload_geometry(device, &pv, &pi),
@@ -595,17 +751,63 @@ impl Renderer3D {
             _pad:      0.0,
         }));
 
-        // Lighting.
-        let mut dir_u = DirLightUniform { direction: [0.0,-1.0,0.0], intensity: 0.8, color: [1.0,1.0,1.0], _pad: 0.0 };
-        let mut amb_u = AmbientUniform  { color: [1.0,1.0,1.0], intensity: 0.15 };
+        // Lighting — pack ambient + up to MAX_LIGHTS dynamic lights.
+        let mut lu = LightsUniform {
+            ambient: [0.0, 0.0, 0.0, 0.0],
+            count:   [0, 0, 0, 0],
+            lights:  [GpuLight::zeroed(); MAX_LIGHTS],
+        };
+        let mut have_ambient = false;
+        let mut n_lights = 0usize;
         for l in &scene.lights {
             match l {
-                Light3D::Ambient     { color, intensity }            => { amb_u.color = *color; amb_u.intensity = *intensity; }
-                Light3D::Directional { direction, color, intensity } => { dir_u.direction = *direction; dir_u.color = *color; dir_u.intensity = *intensity; }
+                Light3D::Ambient { color, intensity } => {
+                    lu.ambient = [color[0], color[1], color[2], *intensity];
+                    have_ambient = true;
+                }
+                Light3D::Directional { direction, color, intensity } if n_lights < MAX_LIGHTS => {
+                    lu.lights[n_lights] = GpuLight {
+                        pos_kind:    [0.0, 0.0, 0.0, 0.0],
+                        dir_int:     [direction[0], direction[1], direction[2], *intensity],
+                        color_range: [color[0], color[1], color[2], 0.0],
+                        cone:        [0.0; 4],
+                    };
+                    n_lights += 1;
+                }
+                Light3D::Point { position, color, intensity, range } if n_lights < MAX_LIGHTS => {
+                    lu.lights[n_lights] = GpuLight {
+                        pos_kind:    [position[0], position[1], position[2], 1.0],
+                        dir_int:     [0.0, 0.0, 0.0, *intensity],
+                        color_range: [color[0], color[1], color[2], *range],
+                        cone:        [0.0; 4],
+                    };
+                    n_lights += 1;
+                }
+                Light3D::Spot { position, direction, color, intensity, range, inner_deg, outer_deg } if n_lights < MAX_LIGHTS => {
+                    lu.lights[n_lights] = GpuLight {
+                        pos_kind:    [position[0], position[1], position[2], 2.0],
+                        dir_int:     [direction[0], direction[1], direction[2], *intensity],
+                        color_range: [color[0], color[1], color[2], *range],
+                        cone:        [inner_deg.to_radians().cos(), outer_deg.to_radians().cos(), 0.0, 0.0],
+                    };
+                    n_lights += 1;
+                }
+                _ => {} // ambient already handled; extras beyond MAX_LIGHTS ignored
             }
         }
-        queue.write_buffer(&self.dir_buf, 0, bytemuck::bytes_of(&dir_u));
-        queue.write_buffer(&self.amb_buf, 0, bytemuck::bytes_of(&amb_u));
+        // Sensible defaults so a scene is never pitch black.
+        if !have_ambient { lu.ambient = [1.0, 1.0, 1.0, 0.15]; }
+        if n_lights == 0 {
+            lu.lights[0] = GpuLight {
+                pos_kind:    [0.0, 0.0, 0.0, 0.0],
+                dir_int:     [0.0, -1.0, 0.0, 0.8],
+                color_range: [1.0, 1.0, 1.0, 0.0],
+                cone:        [0.0; 4],
+            };
+            n_lights = 1;
+        }
+        lu.count = [n_lights as u32, 0, 0, 0];
+        queue.write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&lu));
 
         // Per-mesh uniforms.
         let n = scene.meshes.len().min(MAX_MESHES);
@@ -656,10 +858,38 @@ impl Renderer3D {
             pass.set_bind_group(2, &self.lighting_bg, &[]);
             for (i, mesh) in scene.meshes.iter().take(n).enumerate() {
                 pass.set_bind_group(1, &self.per_obj_bgs[i], &[]);
-                let geom = self.geom_for(&mesh.geometry);
-                pass.set_vertex_buffer(0, geom.vbuf.slice(..));
-                pass.set_index_buffer(geom.ibuf.slice(..), wgpu::IndexFormat::Uint16);
-                pass.draw_indexed(0..geom.idx_count, 0, 0..1);
+                match &mesh.geometry {
+                    Geometry3D::Gltf { path } => {
+                        if let Some(prims) = self.gltf_cache.get(path) {
+                            // A model is all its primitives — each with its own
+                            // geometry + (optional) base-color texture.
+                            for prim in prims {
+                                let tex = prim.tex_bg.as_ref().unwrap_or(&self.white_tex_bg);
+                                pass.set_bind_group(3, tex, &[]);
+                                pass.set_vertex_buffer(0, prim.geom.vbuf.slice(..));
+                                pass.set_index_buffer(prim.geom.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                                pass.draw_indexed(0..prim.geom.idx_count, 0, 0..1);
+                            }
+                        } else {
+                            // Not loaded yet — draw a white box placeholder.
+                            pass.set_bind_group(3, &self.white_tex_bg, &[]);
+                            pass.set_vertex_buffer(0, self.box_geom.vbuf.slice(..));
+                            pass.set_index_buffer(self.box_geom.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.draw_indexed(0..self.box_geom.idx_count, 0, 0..1);
+                        }
+                    }
+                    other => {
+                        let geom = match other {
+                            Geometry3D::Sphere {} => &self.sphere_geom,
+                            Geometry3D::Plane  {} => &self.plane_geom,
+                            _                     => &self.box_geom,
+                        };
+                        pass.set_bind_group(3, &self.white_tex_bg, &[]);
+                        pass.set_vertex_buffer(0, geom.vbuf.slice(..));
+                        pass.set_index_buffer(geom.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..geom.idx_count, 0, 0..1);
+                    }
+                }
             }
         }
 
@@ -721,38 +951,118 @@ impl Renderer3D {
         queue.submit([enc.finish()]);
     }
 
-    fn geom_for(&self, g: &Geometry3D) -> &Geometry {
-        match g {
-            Geometry3D::Box    {}     => &self.box_geom,
-            Geometry3D::Sphere {}     => &self.sphere_geom,
-            Geometry3D::Plane  {}     => &self.plane_geom,
-            Geometry3D::Gltf { path } => self.gltf_cache.get(path).unwrap_or(&self.box_geom),
-        }
-    }
-
-    /// Load a GLTF/GLB file and cache its first mesh's geometry.
-    pub fn load_gltf(&mut self, device: &wgpu::Device, path: &str) -> Result<(), String> {
+    /// Load a GLTF/GLB file: every mesh × every primitive, with position/normal/
+    /// UV vertex data and base-color textures. Cached by `path`; a no-op if
+    /// already loaded. Memory is bounded by the set of distinct models loaded and
+    /// is released when the renderer is dropped (last Canvas3D node removed) or
+    /// via [`unload_gltf`](Self::unload_gltf).
+    pub fn load_gltf(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, path: &str) -> Result<(), String> {
         if self.gltf_cache.contains_key(path) { return Ok(()); }
-        let (doc, buffers, _) = gltf::import(path).map_err(|e| e.to_string())?;
-        let mesh = doc.meshes().next().ok_or("no mesh")?;
-        let prim = mesh.primitives().next().ok_or("no primitive")?;
-        let reader = prim.reader(|b| Some(&buffers[b.index()]));
-        let pos: Vec<[f32; 3]>  = reader.read_positions().ok_or("no positions")?.collect();
-        let nor: Vec<[f32; 3]>  = reader.read_normals().map(|r| r.collect()).unwrap_or_default();
-        let mut verts: Vec<f32> = Vec::with_capacity(pos.len() * 6);
-        for (i, p) in pos.iter().enumerate() {
-            verts.extend_from_slice(p);
-            verts.extend_from_slice(nor.get(i).unwrap_or(&[0.0, 1.0, 0.0]));
+        let (doc, buffers, images) = gltf::import(path).map_err(|e| e.to_string())?;
+
+        // Per-model texture cache: image source index → uploaded view. Ensures a
+        // texture shared by several primitives is uploaded to the GPU only once.
+        let mut tex_views: HashMap<usize, wgpu::TextureView> = HashMap::new();
+        let mut prims_out: Vec<Primitive> = Vec::new();
+        for mesh in doc.meshes() {
+            for prim in mesh.primitives() {
+                let reader = prim.reader(|b| Some(&buffers[b.index()]));
+                let Some(pos_iter) = reader.read_positions() else { continue };
+                let pos: Vec<[f32; 3]> = pos_iter.collect();
+                if pos.is_empty() { continue; }
+                let nor: Vec<[f32; 3]> = reader.read_normals().map(|r| r.collect()).unwrap_or_default();
+                let uvs: Vec<[f32; 2]> = reader.read_tex_coords(0)
+                    .map(|r| r.into_f32().collect())
+                    .unwrap_or_default();
+
+                let mut verts: Vec<f32> = Vec::with_capacity(pos.len() * VERT_FLOATS);
+                for (i, p) in pos.iter().enumerate() {
+                    verts.extend_from_slice(p);
+                    verts.extend_from_slice(nor.get(i).unwrap_or(&[0.0, 1.0, 0.0]));
+                    verts.extend_from_slice(uvs.get(i).unwrap_or(&[0.0, 0.0]));
+                }
+                let indices: Vec<u32> = match reader.read_indices() {
+                    Some(r) => r.into_u32().collect(),
+                    None    => (0..pos.len() as u32).collect(),
+                };
+                let geom = upload_geometry(device, &verts, &indices);
+
+                // Base-color texture (if the material declares one and we can
+                // decode it). Untextured primitives fall back to the shared white.
+                let tex_bg = self.load_base_color_bg(device, queue, &prim, &images, &mut tex_views);
+                prims_out.push(Primitive { geom, tex_bg });
+            }
         }
-        let indices: Vec<u16> = match reader.read_indices() {
-            Some(r) => r.into_u32().map(|i| i as u16).collect(),
-            None    => (0..pos.len() as u16).collect(),
-        };
-        self.gltf_cache.insert(path.to_string(), upload_geometry(device, &verts, &indices));
+
+        if prims_out.is_empty() { return Err("gltf: no drawable primitives".into()); }
+        self.gltf_cache.insert(path.to_string(), prims_out);
         Ok(())
     }
 
+    /// Build a group-3 bind group for a primitive's base-color texture, or
+    /// `None` if it has no texture / the format is unsupported (→ shared white).
+    fn load_base_color_bg(
+        &self,
+        device:    &wgpu::Device,
+        queue:     &wgpu::Queue,
+        prim:      &gltf::Primitive,
+        images:    &[gltf::image::Data],
+        tex_views: &mut HashMap<usize, wgpu::TextureView>,
+    ) -> Option<wgpu::BindGroup> {
+        let info = prim.material().pbr_metallic_roughness().base_color_texture()?;
+        let idx  = info.texture().source().index();
+        // Upload the image once per model; reuse the view for later primitives.
+        if !tex_views.contains_key(&idx) {
+            let img  = images.get(idx)?;
+            let rgba = gltf_image_to_rgba8(img)?;
+            tex_views.insert(idx, make_rgba_texture(device, queue, img.width, img.height, &rgba));
+        }
+        let view = tex_views.get(&idx)?;
+        // The bind group holds an internal ref to the texture, so it stays alive
+        // after `tex_views` (and its views) are dropped at end of load.
+        Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("gltf-tex-bg"), layout: &self.tex_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.mesh_sampler) },
+            ],
+        }))
+    }
+
+    /// Drop a loaded GLTF model, freeing its geometry + textures. Useful for
+    /// games that stream assets between levels.
+    pub fn unload_gltf(&mut self, path: &str) {
+        self.gltf_cache.remove(path);
+    }
+
     pub fn remove_canvas(&mut self, id: u32) { self.targets.remove(&id); }
+}
+
+/// Convert a decoded GLTF image to tightly-packed RGBA8. Returns `None` for
+/// formats we don't handle (caller falls back to the white texture).
+fn gltf_image_to_rgba8(img: &gltf::image::Data) -> Option<Vec<u8>> {
+    use gltf::image::Format;
+    let px = &img.pixels;
+    let n  = (img.width * img.height) as usize;
+    Some(match img.format {
+        Format::R8G8B8A8 => px.clone(),
+        Format::R8G8B8 => {
+            let mut out = Vec::with_capacity(n * 4);
+            for c in px.chunks_exact(3) { out.extend_from_slice(&[c[0], c[1], c[2], 255]); }
+            out
+        }
+        Format::R8 => {
+            let mut out = Vec::with_capacity(n * 4);
+            for &g in px.iter() { out.extend_from_slice(&[g, g, g, 255]); }
+            out
+        }
+        Format::R8G8 => {
+            let mut out = Vec::with_capacity(n * 4);
+            for c in px.chunks_exact(2) { out.extend_from_slice(&[c[0], c[0], c[0], c[1]]); }
+            out
+        }
+        _ => return None, // 16-bit / float formats unsupported → white fallback
+    })
 }
 
 // ── wgpu helpers ──────────────────────────────────────────────────────────────

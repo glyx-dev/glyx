@@ -2684,6 +2684,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         if s.renderer_3d.is_none() {
                             s.renderer_3d = Some(velox_3d::Renderer3D::new(
                                 &s.gpu.device,
+                                &s.gpu.queue,
                                 s.gpu.surface_format(),
                             ));
                         }
@@ -2698,7 +2699,7 @@ pub fn run(mut config: AppConfig) -> bool {
                                     .collect();
                                 let r3d = s.renderer_3d.as_mut().unwrap();
                                 for path in gltf_paths {
-                                    if let Err(e) = r3d.load_gltf(&s.gpu.device, path) {
+                                    if let Err(e) = r3d.load_gltf(&s.gpu.device, &s.gpu.queue, path) {
                                         log::warn!("GLTF load error '{}': {}", path, e);
                                     }
                                 }

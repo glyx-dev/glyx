@@ -8253,38 +8253,178 @@ No matching component was found for:
     }
     return [255, 255, 255, 255];
   }
+  var _OP_CLEAR = 0;
+  var _OP_FILLRECT = 1;
+  var _OP_STROKERECT = 2;
+  var _OP_FILLCIRCLE = 3;
+  var _OP_STROKECIRCLE = 4;
+  var _OP_STROKELINE = 5;
+  var _OP_FILLTEXT = 6;
+  function _packColor(c) {
+    const col = _parseColor(c);
+    return (col[0] & 255 | (col[1] & 255) << 8 | (col[2] & 255) << 16 | (col[3] & 255) << 24) >>> 0;
+  }
+  var _canvasBin;
+  function _canvasBinaryEnv() {
+    if (_canvasBin !== undefined)
+      return _canvasBin;
+    const ok = typeof __velox_canvas_protocol !== "undefined" && __velox_canvas_protocol === "binary" && typeof __velox_canvas_cmdbuf_f32 !== "undefined" && typeof __velox_canvas_cmdbuf_u32 !== "undefined" && typeof __velox_canvas_strbuf !== "undefined" && typeof __velox_canvas_flush !== "undefined";
+    _canvasBin = ok ? {
+      f32: __velox_canvas_cmdbuf_f32,
+      u32: __velox_canvas_cmdbuf_u32,
+      str: __velox_canvas_strbuf,
+      cap: __velox_canvas_cmdbuf_f32.length,
+      strCap: __velox_canvas_strbuf.length,
+      enc: typeof TextEncoder !== "undefined" ? new TextEncoder : null
+    } : false;
+    return _canvasBin;
+  }
 
   class VeloxCanvasContext {
     constructor(nativeId) {
       this._id = nativeId;
+      this._bin = _canvasBinaryEnv();
       this._cmds = [];
+      this._fc = 0;
+      this._sc = 0;
+      this._firstChunk = true;
       this.fillStyle = [255, 255, 255, 255];
       this.strokeStyle = [255, 255, 255, 255];
       this.lineWidth = 1;
     }
+    _ensure(slots) {
+      if (this._fc + slots > this._bin.cap)
+        this._flushChunk();
+    }
+    _flushChunk() {
+      const b = this._bin;
+      try {
+        __velox_canvas_flush(this._id, b.f32, this._fc, b.str, this._sc, !this._firstChunk);
+      } catch (e) {
+        __velox_log("[canvas] flush error: " + e);
+      }
+      this._firstChunk = false;
+      this._fc = 0;
+      this._sc = 0;
+    }
     clear() {
-      this._cmds.length = 0;
-      this._cmds.push({ type: "clear" });
+      if (!this._bin) {
+        this._cmds.length = 0;
+        this._cmds.push({ type: "clear" });
+        return;
+      }
+      this._fc = 0;
+      this._sc = 0;
+      this._firstChunk = true;
+      this._bin.f32[0] = _OP_CLEAR;
+      this._fc = 1;
     }
     fillRect(x, y, w, h) {
-      this._cmds.push({ type: "fillRect", x, y, w, h, color: _parseColor(this.fillStyle) });
+      if (!this._bin) {
+        this._cmds.push({ type: "fillRect", x, y, w, h, color: _parseColor(this.fillStyle) });
+        return;
+      }
+      this._ensure(6);
+      const f = this._bin.f32, p = this._fc;
+      f[p] = _OP_FILLRECT;
+      f[p + 1] = x;
+      f[p + 2] = y;
+      f[p + 3] = w;
+      f[p + 4] = h;
+      this._bin.u32[p + 5] = _packColor(this.fillStyle);
+      this._fc = p + 6;
     }
     strokeRect(x, y, w, h) {
-      this._cmds.push({ type: "strokeRect", x, y, w, h, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+      if (!this._bin) {
+        this._cmds.push({ type: "strokeRect", x, y, w, h, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+        return;
+      }
+      this._ensure(7);
+      const f = this._bin.f32, p = this._fc;
+      f[p] = _OP_STROKERECT;
+      f[p + 1] = x;
+      f[p + 2] = y;
+      f[p + 3] = w;
+      f[p + 4] = h;
+      this._bin.u32[p + 5] = _packColor(this.strokeStyle);
+      f[p + 6] = this.lineWidth;
+      this._fc = p + 7;
     }
     fillCircle(cx, cy, r) {
-      this._cmds.push({ type: "fillCircle", cx, cy, r, color: _parseColor(this.fillStyle) });
+      if (!this._bin) {
+        this._cmds.push({ type: "fillCircle", cx, cy, r, color: _parseColor(this.fillStyle) });
+        return;
+      }
+      this._ensure(5);
+      const f = this._bin.f32, p = this._fc;
+      f[p] = _OP_FILLCIRCLE;
+      f[p + 1] = cx;
+      f[p + 2] = cy;
+      f[p + 3] = r;
+      this._bin.u32[p + 4] = _packColor(this.fillStyle);
+      this._fc = p + 5;
     }
     strokeCircle(cx, cy, r) {
-      this._cmds.push({ type: "strokeCircle", cx, cy, r, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+      if (!this._bin) {
+        this._cmds.push({ type: "strokeCircle", cx, cy, r, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+        return;
+      }
+      this._ensure(6);
+      const f = this._bin.f32, p = this._fc;
+      f[p] = _OP_STROKECIRCLE;
+      f[p + 1] = cx;
+      f[p + 2] = cy;
+      f[p + 3] = r;
+      this._bin.u32[p + 4] = _packColor(this.strokeStyle);
+      f[p + 5] = this.lineWidth;
+      this._fc = p + 6;
     }
     strokeLine(x0, y0, x1, y1) {
-      this._cmds.push({ type: "strokeLine", x0, y0, x1, y1, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+      if (!this._bin) {
+        this._cmds.push({ type: "strokeLine", x0, y0, x1, y1, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+        return;
+      }
+      this._ensure(7);
+      const f = this._bin.f32, p = this._fc;
+      f[p] = _OP_STROKELINE;
+      f[p + 1] = x0;
+      f[p + 2] = y0;
+      f[p + 3] = x1;
+      f[p + 4] = y1;
+      this._bin.u32[p + 5] = _packColor(this.strokeStyle);
+      f[p + 6] = this.lineWidth;
+      this._fc = p + 7;
     }
     fillText(text, x, y, fontSize = 16) {
-      this._cmds.push({ type: "fillText", text: String(text), x, y, fontSize, color: _parseColor(this.fillStyle) });
+      if (!this._bin) {
+        this._cmds.push({ type: "fillText", text: String(text), x, y, fontSize, color: _parseColor(this.fillStyle) });
+        return;
+      }
+      const b = this._bin, s = String(text);
+      if (this._fc + 7 > b.cap || this._sc + s.length * 4 > b.strCap)
+        this._flushChunk();
+      const off = this._sc;
+      let len = 0;
+      if (b.enc) {
+        len = b.enc.encodeInto(s, b.str.subarray(this._sc)).written | 0;
+      }
+      this._sc += len;
+      const f = b.f32, p = this._fc;
+      f[p] = _OP_FILLTEXT;
+      f[p + 1] = x;
+      f[p + 2] = y;
+      f[p + 3] = fontSize;
+      b.u32[p + 4] = _packColor(this.fillStyle);
+      f[p + 5] = off;
+      f[p + 6] = len;
+      this._fc = p + 7;
     }
     flush() {
+      if (this._bin) {
+        this._flushChunk();
+        this._firstChunk = true;
+        return;
+      }
       if (typeof __velox_canvas_update === "undefined") {
         this._cmds.length = 0;
         return;

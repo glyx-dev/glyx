@@ -149,6 +149,12 @@ pub struct ShellConfig {
     /// Optional explicit V8 heap cap in MB.  `None` = auto-calculated from bundle size.
     /// Controlled by `maxJsHeapMb` in `velox.config.json`.
     pub max_js_heap_mb: Option<u32>,
+    /// Canvas2D transport: `"binary"` (default) or `"json"`. Controlled by
+    /// `canvas.protocol` in `velox.config.json`.
+    pub canvas_protocol: String,
+    /// Canvas2D binary command-buffer size in KiB. Controlled by
+    /// `canvas.bufferKB`; `None` = default (256).
+    pub canvas_buffer_kb: Option<u32>,
 }
 
 impl Default for ShellConfig {
@@ -164,6 +170,8 @@ impl Default for ShellConfig {
             background_color: [0x14, 0x14, 0x1A, 0xFF],
             render_mode:  RenderMode::Gpu,
             max_js_heap_mb: None,
+            canvas_protocol: "binary".into(),
+            canvas_buffer_kb: None,
         }
     }
 }

@@ -118,6 +118,14 @@ struct BufferProperties {
     name: &'static str,
 }
 
+/// Max pooled buffers retained per (size-class, usage, label) bucket.
+/// Bounds total pool memory under continuous animation: any returned buffer
+/// beyond this is dropped (freed) instead of cached. The common pipeline needs
+/// only 1–2 live buffers per class per frame, so this preserves reuse while
+/// preventing the pool from ratcheting to hundreds of MB (important on
+/// integrated GPUs where buffer memory is system RAM).
+const MAX_POOL_BUFS_PER_CLASS: usize = 4;
+
 #[derive(Default)]
 struct ResourcePool {
     bufs: HashMap<BufferProperties, Vec<Buffer>>,
@@ -764,7 +772,12 @@ impl WgpuEngine {
                     usages: gpu_buf.usage(),
                     name: buf.label,
                 };
-                self.pool.bufs.entry(props).or_default().push(gpu_buf);
+                // Cap each bucket so the pool can't grow without bound during
+                // continuous animation. Excess buffers are dropped (freed) here.
+                let bucket = self.pool.bufs.entry(props).or_default();
+                if bucket.len() < MAX_POOL_BUFS_PER_CLASS {
+                    bucket.push(gpu_buf);
+                }
             }
         }
         for id in free_images {

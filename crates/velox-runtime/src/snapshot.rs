@@ -165,6 +165,8 @@ globalThis.__velox_audio_seek      = function() { return stubPromise('null'); };
 
 // Canvas 2D / 3D bindings
 globalThis.__velox_canvas_update      = function() {};
+globalThis.__velox_canvas_flush       = function() {};
+globalThis.__velox_canvas_protocol    = 'json';
 globalThis.__velox_canvas3d_update    = function() {};
 globalThis.__velox_canvas3d_load_gltf = function() {};
 

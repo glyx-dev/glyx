@@ -127,6 +127,21 @@ struct VeloxConfigFile {
     /// exported async functions are registered as backend commands.
     #[serde(default)]
     plugins:      Vec<PluginConfigJson>,
+    /// Canvas2D transport settings (binary command buffer vs JSON).
+    canvas:       Option<CanvasCfgJson>,
+}
+
+/// Canvas2D transport settings from `velox.config.json`.
+#[derive(serde::Deserialize, Default)]
+struct CanvasCfgJson {
+    /// `"binary"` (default) uses a shared command buffer; `"json"` forces the
+    /// legacy JSON path. Unknown values fall back to `"binary"`.
+    protocol: Option<String>,
+    /// Command-buffer size in KiB (advanced). Default 256. Clamped to [16, 4096].
+    /// Larger = fewer flush round-trips for very high draw-call frames; the
+    /// buffer is allocated once at startup so the cost is a flat reservation.
+    #[serde(rename = "bufferKB")]
+    buffer_kb: Option<u32>,
 }
 
 /// Window settings from `velox.config.json`.
@@ -290,6 +305,15 @@ fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabilities, Vec<J
         if let Some(mb) = w.max_js_heap_mb {
             cfg.max_js_heap_mb = Some(mb.clamp(16, 512));
         }
+    }
+
+    // Canvas2D transport (top-level `canvas` section).
+    if let Some(c) = file.as_ref().and_then(|f| f.canvas.as_ref()) {
+        cfg.canvas_protocol = match c.protocol.as_deref() {
+            Some("json") => "json".into(),
+            _            => "binary".into(), // default + unknown → binary
+        };
+        cfg.canvas_buffer_kb = c.buffer_kb.map(|kb| kb.clamp(16, 4096));
     }
 
     // Load icon PNG → RGBA bytes for winit window icon.
@@ -1904,6 +1928,9 @@ pub fn run(mut config: AppConfig) -> bool {
     let window_bg = window.background_color;
     // Capture configured mode; Auto is resolved after GPU adapter is known.
     let render_mode_config = window.render_mode;
+    // Canvas2D transport config — applied to each runtime after construction.
+    let canvas_protocol  = window.canvas_protocol.clone();
+    let canvas_buffer_kb = window.canvas_buffer_kb.unwrap_or(256) as usize;
     // Compute V8 heap cap: explicit config wins; otherwise auto-calculate from bundle size.
     let heap_cap_mb: usize = match window.max_js_heap_mb {
         Some(mb) => mb as usize,
@@ -2065,6 +2092,9 @@ pub fn run(mut config: AppConfig) -> bool {
                         heap_cap_mb,
                     )
                 };
+
+                // Set up the Canvas2D binary command buffer (or mark json mode).
+                rt.init_canvas_buffers(&canvas_protocol, canvas_buffer_kb);
 
                 rt.register_extensions(&*extensions_arc);
 

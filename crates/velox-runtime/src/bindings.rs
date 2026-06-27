@@ -414,6 +414,107 @@ pub enum CanvasCmd {
     FillText   { text: String, x: f32, y: f32, #[serde(rename = "fontSize")] font_size: f32, color: [u8; 4] },
 }
 
+// ── Canvas 2D binary protocol ──────────────────────────────────────────────────
+//
+// JS writes a stream of draw commands directly into a shared backing store
+// (no JSON.stringify / serde parse). Each command is `[opcode, ...f32 args]`;
+// colors occupy one slot read as 4 raw RGBA bytes; `fillText` references a
+// parallel UTF-8 string region by (offset, len). See `decode_canvas_binary`.
+mod canvas_op {
+    pub const CLEAR:         u32 = 0;
+    pub const FILL_RECT:     u32 = 1;
+    pub const STROKE_RECT:   u32 = 2;
+    pub const FILL_CIRCLE:   u32 = 3;
+    pub const STROKE_CIRCLE: u32 = 4;
+    pub const STROKE_LINE:   u32 = 5;
+    pub const FILL_TEXT:     u32 = 6;
+}
+
+/// Decode the binary command stream into `Vec<CanvasCmd>`.
+///
+/// `cmd_bytes` is the f32 command region (little-endian, as written by JS's
+/// Float32Array/Uint32Array views); `float_count` is how many f32 slots are
+/// live this flush; `str_bytes` is the UTF-8 string region for `fillText`.
+///
+/// Fully bounds-checked — the buffer is JS-controlled, so a malformed or
+/// truncated stream must never panic: any out-of-range read stops decoding.
+fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_bytes: &[u8]) -> Vec<CanvasCmd> {
+    let slots = (cmd_bytes.len() / 4).min(float_count);
+    let f32_at = |i: usize| -> f32 {
+        let b = i * 4;
+        f32::from_le_bytes([cmd_bytes[b], cmd_bytes[b + 1], cmd_bytes[b + 2], cmd_bytes[b + 3]])
+    };
+    // A color slot holds packed RGBA; JS writes it via a Uint32Array alias as a
+    // little-endian u32, so the bytes land in memory as [r, g, b, a] directly.
+    let color_at = |i: usize| -> [u8; 4] {
+        let b = i * 4;
+        [cmd_bytes[b], cmd_bytes[b + 1], cmd_bytes[b + 2], cmd_bytes[b + 3]]
+    };
+
+    let mut cmds = Vec::new();
+    let mut i = 0usize;
+    while i < slots {
+        let op = f32_at(i) as u32;
+        i += 1;
+        // `need` = additional arg slots required after the opcode.
+        let need = match op {
+            canvas_op::CLEAR                         => 0,
+            canvas_op::FILL_CIRCLE                   => 4,
+            canvas_op::FILL_RECT | canvas_op::STROKE_CIRCLE => 5,
+            canvas_op::STROKE_RECT | canvas_op::STROKE_LINE | canvas_op::FILL_TEXT => 6,
+            _ => break, // unknown opcode → corrupt/truncated stream
+        };
+        if i + need > slots { break; }
+        match op {
+            canvas_op::CLEAR => cmds.push(CanvasCmd::Clear),
+            canvas_op::FILL_RECT => {
+                cmds.push(CanvasCmd::FillRect {
+                    x: f32_at(i), y: f32_at(i + 1), w: f32_at(i + 2), h: f32_at(i + 3),
+                    color: color_at(i + 4),
+                });
+            }
+            canvas_op::STROKE_RECT => {
+                cmds.push(CanvasCmd::StrokeRect {
+                    x: f32_at(i), y: f32_at(i + 1), w: f32_at(i + 2), h: f32_at(i + 3),
+                    color: color_at(i + 4), line_width: f32_at(i + 5),
+                });
+            }
+            canvas_op::FILL_CIRCLE => {
+                cmds.push(CanvasCmd::FillCircle {
+                    cx: f32_at(i), cy: f32_at(i + 1), r: f32_at(i + 2), color: color_at(i + 3),
+                });
+            }
+            canvas_op::STROKE_CIRCLE => {
+                cmds.push(CanvasCmd::StrokeCircle {
+                    cx: f32_at(i), cy: f32_at(i + 1), r: f32_at(i + 2),
+                    color: color_at(i + 3), line_width: f32_at(i + 4),
+                });
+            }
+            canvas_op::STROKE_LINE => {
+                cmds.push(CanvasCmd::StrokeLine {
+                    x0: f32_at(i), y0: f32_at(i + 1), x1: f32_at(i + 2), y1: f32_at(i + 3),
+                    color: color_at(i + 4), line_width: f32_at(i + 5),
+                });
+            }
+            canvas_op::FILL_TEXT => {
+                let off = f32_at(i + 4) as usize;
+                let len = f32_at(i + 5) as usize;
+                let text = str_bytes.get(off..off + len)
+                    .and_then(|b| std::str::from_utf8(b).ok())
+                    .unwrap_or("")
+                    .to_string();
+                cmds.push(CanvasCmd::FillText {
+                    text, x: f32_at(i), y: f32_at(i + 1), font_size: f32_at(i + 2),
+                    color: color_at(i + 3),
+                });
+            }
+            _ => break,
+        }
+        i += need;
+    }
+    cmds
+}
+
 /// Thin wrapper around `tokio::sync::oneshot::Sender<T>` that implements `Debug`.
 /// Needed because `SceneCommand` derives `Debug` but oneshot::Sender does not.
 pub struct OneshotSender<T>(pub tokio::sync::oneshot::Sender<T>);
@@ -431,7 +532,9 @@ pub enum SceneCommand {
     UpdateNode    { id: u32, props: NodeProps },
     RemoveNode    { id: u32 },
     SetRoot       { id: u32 },
-    CanvasUpdate  { id: u32, cmds: Vec<CanvasCmd> },
+    /// `append=false` replaces the canvas's command list (normal flush);
+    /// `append=true` extends it (overflow continuation chunk in binary mode).
+    CanvasUpdate  { id: u32, cmds: Vec<CanvasCmd>, append: bool },
     #[cfg(feature = "canvas3d")]
     Canvas3DUpdate { id: u32, scene: velox_3d::Scene3D },
     /// Open a camera device and start the capture loop in velox-core.
@@ -773,6 +876,7 @@ pub fn register_all(
 
     // ── Canvas 2D / 3D ───────────────────────────────────────────────────────
     register!("__velox_canvas_update",   canvas_update_callback);
+    register!("__velox_canvas_flush",    canvas_flush_callback);
     #[cfg(feature = "canvas3d")]
     register!("__velox_canvas3d_update", canvas3d_update_callback);
     #[cfg(feature = "canvas3d")]
@@ -4239,7 +4343,62 @@ fn canvas_update_callback(
         Ok(c)  => c,
         Err(e) => { log::warn!("canvas_update parse error: {e}"); return; }
     };
-    state.scene.lock().push_back(SceneCommand::CanvasUpdate { id, cmds });
+    state.scene.lock().push_back(SceneCommand::CanvasUpdate { id, cmds, append: false });
+}
+
+/// `__velox_canvas_flush(id, f32buf, floatCount, u8buf, strLen, append)` — sync.
+///
+/// Binary fast path: decodes the command stream straight out of the shared
+/// backing store (no JSON.stringify, no V8→Rust string copy, no serde parse).
+/// The typed-array views are passed by reference each call (no per-flush
+/// allocation). Falls back via the JSON `__velox_canvas_update` binding when
+/// the binary protocol isn't active.
+fn canvas_flush_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let id          = args.get(0).number_value(scope).unwrap_or_default() as u32;
+    let float_count = args.get(2).number_value(scope).unwrap_or_default() as usize;
+    let str_len     = args.get(4).number_value(scope).unwrap_or_default() as usize;
+    let append      = args.get(5).boolean_value(scope);
+
+    // Extract (data ptr, byte length) for a typed-array view over the shared
+    // backing store. The store is an external (non-moving) backing store kept
+    // alive by the globals, so the pointer is stable for this synchronous read.
+    fn view_ptr_len(scope: &mut v8::HandleScope, v: v8::Local<v8::Value>) -> Option<(*const u8, usize)> {
+        let view = v8::Local::<v8::ArrayBufferView>::try_from(v).ok()?;
+        let buf  = view.buffer(scope)?;
+        let raw  = buf.get_backing_store().data();
+        if raw.is_null() { return None; }
+        let ptr  = unsafe { (raw as *const u8).add(view.byte_offset()) };
+        Some((ptr, view.byte_length()))
+    }
+
+    let Some((cmd_ptr, cmd_len)) = view_ptr_len(scope, args.get(1)) else {
+        log::warn!("canvas_flush: command buffer unavailable");
+        return;
+    };
+    let (str_ptr, str_cap) = view_ptr_len(scope, args.get(3)).unwrap_or((std::ptr::null(), 0));
+
+    // SAFETY: single-threaded V8; slices are read (and fully copied into owned
+    // CanvasCmds by decode) before returning to JS, which cannot mutate or
+    // reallocate the buffer in the meantime.
+    let cmds = unsafe {
+        let cmd_bytes = std::slice::from_raw_parts(cmd_ptr, cmd_len);
+        let str_avail = str_len.min(str_cap);
+        let str_bytes: &[u8] = if str_ptr.is_null() || str_avail == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(str_ptr, str_avail)
+        };
+        decode_canvas_binary(cmd_bytes, float_count, str_bytes)
+    };
+    state.scene.lock().push_back(SceneCommand::CanvasUpdate { id, cmds, append });
 }
 
 /// `__velox_canvas3d_update(id, sceneJson)` — sync.

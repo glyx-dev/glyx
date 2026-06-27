@@ -251,8 +251,13 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 layout_changed   = true;
                 structure_changed = true;
             }
-            SceneCommand::CanvasUpdate { id, cmds } => {
-                state.canvas_cmds.insert(id, cmds);
+            SceneCommand::CanvasUpdate { id, cmds, append } => {
+                if append {
+                    // Overflow continuation: extend the existing command list.
+                    state.canvas_cmds.entry(id).or_default().extend(cmds);
+                } else {
+                    state.canvas_cmds.insert(id, cmds);
+                }
                 state.dirty_nodes.insert(id);
                 // Canvas draw commands don't affect layout.
             }

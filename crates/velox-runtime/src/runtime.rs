@@ -351,6 +351,74 @@ impl V8Runtime {
         result
     }
 
+    // ── Canvas2D binary protocol ────────────────────────────────────────────────
+
+    /// Set up the Canvas2D binary command buffer and expose typed-array globals.
+    ///
+    /// Called once per window after construction. Allocates one Rust-owned
+    /// backing store (external backing stores are NOT moved by V8 GC, so the
+    /// pointer is stable) and exposes three views over it as globals:
+    ///   * `__velox_canvas_cmdbuf_f32` — Float32Array (geometry args)
+    ///   * `__velox_canvas_cmdbuf_u32` — Uint32Array  (packed RGBA, aliases f32)
+    ///   * `__velox_canvas_strbuf`     — Uint8Array   (UTF-8 text for fillText)
+    /// plus `__velox_canvas_protocol` = `"binary"` | `"json"`.
+    ///
+    /// JS feature-detects these globals; if `protocol != "binary"` or buffer
+    /// setup fails, only `__velox_canvas_protocol = "json"` is set and JS uses
+    /// the JSON `__velox_canvas_update` path.
+    pub fn init_canvas_buffers(&mut self, protocol: &str, buffer_kb: usize) {
+        let scope  = &mut v8::HandleScope::new(&mut self.isolate);
+        let ctx    = v8::Local::new(scope, &self.context);
+        let scope  = &mut v8::ContextScope::new(scope, ctx);
+        let global = ctx.global(scope);
+
+        // Helper: set globalThis[key] = "value" (string).
+        fn set_str(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>, key: &str, val: &str) {
+            if let (Some(k), Some(v)) = (v8::String::new(scope, key), v8::String::new(scope, val)) {
+                global.set(scope, k.into(), v.into());
+            }
+        }
+        // Helper: set globalThis[key] = value (any V8 value).
+        fn set_val(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>, key: &str, val: v8::Local<v8::Value>) {
+            if let Some(k) = v8::String::new(scope, key) {
+                global.set(scope, k.into(), val);
+            }
+        }
+
+        if protocol != "binary" {
+            set_str(scope, global, "__velox_canvas_protocol", "json");
+            log::info!("canvas: JSON protocol (configured)");
+            return;
+        }
+
+        // Command region (whole f32 slots) + string region (~quarter, min 16 KiB).
+        let cmd_bytes = (buffer_kb.max(16) * 1024) & !3;
+        let str_bytes = (cmd_bytes / 4).max(16 * 1024);
+        let total     = cmd_bytes + str_bytes;
+        let f32_len   = cmd_bytes / 4;
+
+        let store = vec![0u8; total].into_boxed_slice();
+        let bs    = v8::ArrayBuffer::new_backing_store_from_boxed_slice(store).make_shared();
+        let ab    = v8::ArrayBuffer::with_backing_store(scope, &bs);
+
+        let (Some(f32v), Some(u32v), Some(u8v)) = (
+            v8::Float32Array::new(scope, ab, 0, f32_len),
+            v8::Uint32Array::new(scope, ab, 0, f32_len),
+            v8::Uint8Array::new(scope, ab, cmd_bytes, str_bytes),
+        ) else {
+            set_str(scope, global, "__velox_canvas_protocol", "json");
+            log::warn!("canvas: typed-array setup failed → JSON fallback");
+            return;
+        };
+
+        set_val(scope, global, "__velox_canvas_cmdbuf_f32", f32v.into());
+        set_val(scope, global, "__velox_canvas_cmdbuf_u32", u32v.into());
+        set_val(scope, global, "__velox_canvas_strbuf",     u8v.into());
+        set_str(scope, global, "__velox_canvas_protocol",   "binary");
+        log::info!("canvas: binary protocol ready ({} KiB cmd + {} KiB str)",
+                   cmd_bytes / 1024, str_bytes / 1024);
+    }
+
     // ── Async tick ────────────────────────────────────────────────────────────
 
     /// Drain the completion queue and resolve any pending JS Promises.

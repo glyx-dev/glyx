@@ -8260,6 +8260,8 @@ No matching component was found for:
   var _OP_STROKECIRCLE = 4;
   var _OP_STROKELINE = 5;
   var _OP_FILLTEXT = 6;
+  var _OP_FILLPATH = 7;
+  var _OP_STROKEPATH = 8;
   function _packColor(c) {
     const col = _parseColor(c);
     return (col[0] & 255 | (col[1] & 255) << 8 | (col[2] & 255) << 16 | (col[3] & 255) << 24) >>> 0;
@@ -8288,6 +8290,8 @@ No matching component was found for:
       this._fc = 0;
       this._sc = 0;
       this._firstChunk = true;
+      this._path = [];
+      this._pathClosed = false;
       this.fillStyle = [255, 255, 255, 255];
       this.strokeStyle = [255, 255, 255, 255];
       this.lineWidth = 1;
@@ -8418,6 +8422,105 @@ No matching component was found for:
       f[p + 5] = off;
       f[p + 6] = len;
       this._fc = p + 7;
+    }
+    beginPath() {
+      this._path.length = 0;
+      this._pathClosed = false;
+    }
+    moveTo(x, y) {
+      this._path.push(x, y);
+    }
+    lineTo(x, y) {
+      this._path.push(x, y);
+    }
+    closePath() {
+      this._pathClosed = true;
+    }
+    arc(cx, cy, r, a0, a1, ccw = false) {
+      let start = a0, end = a1;
+      if (ccw && end > start)
+        end -= Math.PI * 2;
+      if (!ccw && end < start)
+        end += Math.PI * 2;
+      const sweep = Math.abs(end - start);
+      const segs = Math.max(6, Math.ceil(sweep / (Math.PI / 16)));
+      for (let i = 0;i <= segs; i++) {
+        const t = start + (end - start) * (i / segs);
+        this._path.push(cx + Math.cos(t) * r, cy + Math.sin(t) * r);
+      }
+    }
+    quadraticCurveTo(cpx, cpy, x, y) {
+      const n = this._path.length;
+      const x0 = n >= 2 ? this._path[n - 2] : cpx;
+      const y0 = n >= 2 ? this._path[n - 1] : cpy;
+      const segs = 16;
+      for (let i = 1;i <= segs; i++) {
+        const t = i / segs, mt = 1 - t;
+        this._path.push(mt * mt * x0 + 2 * mt * t * cpx + t * t * x, mt * mt * y0 + 2 * mt * t * cpy + t * t * y);
+      }
+    }
+    bezierCurveTo(c1x, c1y, c2x, c2y, x, y) {
+      const n = this._path.length;
+      const x0 = n >= 2 ? this._path[n - 2] : c1x;
+      const y0 = n >= 2 ? this._path[n - 1] : c1y;
+      const segs = 20;
+      for (let i = 1;i <= segs; i++) {
+        const t = i / segs, mt = 1 - t;
+        const a = mt * mt * mt, b = 3 * mt * mt * t, c = 3 * mt * t * t, d = t * t * t;
+        this._path.push(a * x0 + b * c1x + c * c2x + d * x, a * y0 + b * c1y + c * c2y + d * y);
+      }
+    }
+    fill() {
+      if (this._path.length < 6)
+        return;
+      if (this._bin) {
+        const count = this._path.length >> 1;
+        const slots = 3 + this._path.length;
+        if (slots > this._bin.cap)
+          return;
+        if (this._fc + slots > this._bin.cap)
+          this._flushChunk();
+        const f = this._bin.f32, p = this._fc;
+        f[p] = _OP_FILLPATH;
+        f[p + 1] = count;
+        this._bin.u32[p + 2] = _packColor(this.fillStyle);
+        const o = p + 3;
+        for (let k = 0;k < this._path.length; k++)
+          f[o + k] = this._path[k];
+        this._fc = o + this._path.length;
+      } else {
+        this._cmds.push({ type: "fillPath", points: this._path.slice(), color: _parseColor(this.fillStyle) });
+      }
+    }
+    stroke() {
+      if (this._path.length < 4)
+        return;
+      if (this._bin) {
+        const count = this._path.length >> 1;
+        const slots = 5 + this._path.length;
+        if (slots > this._bin.cap)
+          return;
+        if (this._fc + slots > this._bin.cap)
+          this._flushChunk();
+        const f = this._bin.f32, p = this._fc;
+        f[p] = _OP_STROKEPATH;
+        f[p + 1] = count;
+        this._bin.u32[p + 2] = _packColor(this.strokeStyle);
+        f[p + 3] = this.lineWidth;
+        f[p + 4] = this._pathClosed ? 1 : 0;
+        const o = p + 5;
+        for (let k = 0;k < this._path.length; k++)
+          f[o + k] = this._path[k];
+        this._fc = o + this._path.length;
+      } else {
+        this._cmds.push({
+          type: "strokePath",
+          points: this._path.slice(),
+          color: _parseColor(this.strokeStyle),
+          lineWidth: this.lineWidth,
+          closed: this._pathClosed
+        });
+      }
     }
     flush() {
       if (this._bin) {
@@ -8790,6 +8893,27 @@ No matching component was found for:
     useRegister("light", { type: "directional", direction, color, intensity });
     return null;
   }
+  function PointLight({
+    position = [0, 2, 0],
+    color = [1, 1, 1],
+    intensity = 1,
+    range = 0
+  }) {
+    useRegister("light", { type: "point", position, color, intensity, range });
+    return null;
+  }
+  function SpotLight({
+    position = [0, 3, 0],
+    direction = [0, -1, 0],
+    color = [1, 1, 1],
+    intensity = 1,
+    range = 0,
+    innerDeg = 15,
+    outerDeg = 25
+  }) {
+    useRegister("light", { type: "spot", position, direction, color, intensity, range, innerDeg, outerDeg });
+    return null;
+  }
   var IDENTITY_MAT = [
     1,
     0,
@@ -8856,6 +8980,30 @@ No matching component was found for:
     const finalTransform = transform ?? buildTransform(position, rotation, scale);
     useRegister("mesh", {
       geometry: { type: geometry.toLowerCase() },
+      transform: finalTransform,
+      color
+    });
+    return null;
+  }
+  function Model({
+    src,
+    color = [1, 1, 1, 1],
+    position,
+    rotation,
+    scale,
+    transform
+  }) {
+    const ctx = import_react6.useContext(SceneCtx);
+    if (!ctx)
+      throw new Error("@velox/three: <Model> must be a descendant of <Scene>");
+    import_react6.useEffect(() => {
+      const ctx3d = ctx.canvasRef?.current;
+      if (ctx3d && src)
+        ctx3d.loadGltf(src);
+    }, [src, ctx]);
+    const finalTransform = transform ?? buildTransform(position, rotation, scale);
+    useRegister("mesh", {
+      geometry: { type: "gltf", path: src },
       transform: finalTransform,
       color
     });
@@ -14969,6 +15117,7 @@ Ranking: cosine similarity across stored note vectors.`
       height: 40
     });
   }
+  var DEMO_GLB = null;
   function Canvas3DDemo() {
     const c3dRef = import_react7.default.useRef(null);
     const [angle3d, setAngle3d] = import_react7.useState(0);
@@ -14976,6 +15125,8 @@ Ranking: cosine similarity across stored note vectors.`
       const id = setInterval(() => setAngle3d((a) => a + 0.02), 33);
       return () => clearInterval(id);
     }, []);
+    const px = Math.cos(angle3d) * 1.8;
+    const pz = Math.sin(angle3d) * 1.8;
     return /* @__PURE__ */ jsx_runtime.jsx(Canvas3D, {
       ref: c3dRef,
       width: 300,
@@ -14986,7 +15137,7 @@ Ranking: cosine similarity across stored note vectors.`
         background: [0.06, 0.067, 0.125, 1],
         children: [
           /* @__PURE__ */ jsx_runtime.jsx(PerspectiveCamera, {
-            position: [0, 1.2, 3.5],
+            position: [0, 1.4, 4],
             target: [0, 0, 0],
             fov: 55,
             near: 0.1,
@@ -14994,23 +15145,51 @@ Ranking: cosine similarity across stored note vectors.`
           }),
           /* @__PURE__ */ jsx_runtime.jsx(AmbientLight, {
             color: [1, 1, 1],
-            intensity: 0.25
+            intensity: 0.18
           }),
           /* @__PURE__ */ jsx_runtime.jsx(DirectionalLight, {
             direction: [-0.5, -1, -0.8],
-            color: [1, 0.94, 0.82],
-            intensity: 1
+            color: [0.7, 0.7, 0.85],
+            intensity: 0.5
+          }),
+          /* @__PURE__ */ jsx_runtime.jsx(PointLight, {
+            position: [px, 1, pz],
+            color: [1, 0.6, 0.3],
+            intensity: 2.2,
+            range: 6
+          }),
+          /* @__PURE__ */ jsx_runtime.jsx(SpotLight, {
+            position: [0, 3, 0],
+            direction: [0, -1, 0],
+            color: [0.4, 0.7, 1],
+            intensity: 2.5,
+            range: 8,
+            innerDeg: 18,
+            outerDeg: 30
           }),
           /* @__PURE__ */ jsx_runtime.jsx(Mesh, {
             geometry: "box",
+            position: [-0.9, 0, 0],
             rotation: [0, angle3d, 0],
             color: [0.39, 0.55, 1, 1]
+          }),
+          /* @__PURE__ */ jsx_runtime.jsx(Mesh, {
+            geometry: "sphere",
+            position: [0.9, 0, 0],
+            scale: 0.7,
+            color: [0.9, 0.9, 0.95, 1]
           }),
           /* @__PURE__ */ jsx_runtime.jsx(Mesh, {
             geometry: "plane",
             position: [0, -0.5, 0],
             scale: [4, 1, 4],
             color: [0.157, 0.176, 0.275, 1]
+          }),
+          DEMO_GLB && /* @__PURE__ */ jsx_runtime.jsx(Model, {
+            src: DEMO_GLB,
+            position: [0, 0, 0],
+            scale: 1,
+            rotation: [0, angle3d, 0]
           })
         ]
       })
@@ -15055,8 +15234,29 @@ Ranking: cosine similarity across stored note vectors.`
           ctx.strokeStyle = [200, 200, 255, 120];
           ctx.lineWidth = 1;
           ctx.strokeCircle(150, 100, 70);
+          ctx.beginPath();
+          ctx.moveTo(0, 200);
+          for (let x = 0;x <= 300; x += 10) {
+            ctx.lineTo(x, 172 + Math.sin(x * 0.045 + t * 2) * 12);
+          }
+          ctx.lineTo(300, 200);
+          ctx.closePath();
+          ctx.fillStyle = [80, 160, 255, 90];
+          ctx.fill();
+          ctx.beginPath();
+          ctx.moveTo(40, 40);
+          ctx.arc(40, 40, 26, -Math.PI / 2, -Math.PI / 2 + (1.4 + Math.sin(t) * 0.9));
+          ctx.closePath();
+          ctx.fillStyle = [255, 180, 80, 220];
+          ctx.fill();
+          ctx.beginPath();
+          ctx.moveTo(215, 38);
+          ctx.bezierCurveTo(248, 10 + Math.sin(t) * 12, 270, 66, 296, 34);
+          ctx.strokeStyle = [160, 240, 200, 230];
+          ctx.lineWidth = 2;
+          ctx.stroke();
           ctx.fillStyle = [220, 230, 255, 255];
-          ctx.fillText("Canvas 2D", 6, 6, 13);
+          ctx.fillText("Canvas 2D + paths", 6, 6, 13);
           ctx.flush();
         }
         raf = setTimeout(loop, 16);

@@ -100,6 +100,20 @@ fn rrect_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny_skia::
     pb.finish()
 }
 
+/// Build a polyline/polygon path from a flat `[x0,y0,…]` list. `None` if < 2 pts.
+fn poly_path(pts: &[f32], close: bool) -> Option<tiny_skia::Path> {
+    if pts.len() < 4 { return None; }
+    let mut pb = tiny_skia::PathBuilder::new();
+    pb.move_to(pts[0], pts[1]);
+    let mut i = 2;
+    while i + 1 < pts.len() {
+        pb.line_to(pts[i], pts[i + 1]);
+        i += 2;
+    }
+    if close { pb.close(); }
+    pb.finish()
+}
+
 // ── Glyph cache ───────────────────────────────────────────────────────────────
 
 /// Cache key for a rasterized glyph alpha mask.
@@ -249,6 +263,28 @@ impl TinySkiaFrame {
         let stroke = tiny_skia::Stroke {
             width:    width as f32,
             line_cap: tiny_skia::LineCap::Round,
+            ..Default::default()
+        };
+        let mask = self.current_mask.as_ref();
+        self.pixmap.stroke_path(&path, &paint, &stroke,
+                                tiny_skia::Transform::identity(), mask);
+    }
+
+    pub fn fill_path(&mut self, pts: &[f32], color: peniko::Color) {
+        let Some(path) = poly_path(pts, true) else { return };
+        let paint = solid_paint(color);
+        let mask  = self.current_mask.as_ref();
+        self.pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding,
+                              tiny_skia::Transform::identity(), mask);
+    }
+
+    pub fn stroke_path(&mut self, pts: &[f32], width: f64, closed: bool, color: peniko::Color) {
+        let Some(path) = poly_path(pts, closed) else { return };
+        let paint  = solid_paint(color);
+        let stroke = tiny_skia::Stroke {
+            width: width as f32,
+            line_cap:  tiny_skia::LineCap::Round,
+            line_join: tiny_skia::LineJoin::Round,
             ..Default::default()
         };
         let mask = self.current_mask.as_ref();

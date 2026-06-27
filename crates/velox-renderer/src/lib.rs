@@ -465,6 +465,32 @@ impl FrameBuilder {
         let stroke = Stroke::new(width);
         self.scene.stroke(&stroke, Affine::IDENTITY, &Brush::Solid(color), None, &line);
     }
+
+    /// Fill a polygon from a flat `[x0,y0,x1,y1,…]` point list (auto-closed).
+    pub fn fill_path(&mut self, pts: &[f32], color: Color) {
+        let Some(path) = bez_path(pts, true) else { return };
+        self.scene.fill(vello::peniko::Fill::NonZero, Affine::IDENTITY, &Brush::Solid(color), None, &path);
+    }
+
+    /// Stroke a polyline from a flat point list; `closed` joins last→first.
+    pub fn stroke_path(&mut self, pts: &[f32], width: f64, closed: bool, color: Color) {
+        let Some(path) = bez_path(pts, closed) else { return };
+        self.scene.stroke(&Stroke::new(width), Affine::IDENTITY, &Brush::Solid(color), None, &path);
+    }
+}
+
+/// Build a kurbo `BezPath` from a flat `[x,y,…]` list. `None` if < 2 points.
+fn bez_path(pts: &[f32], close: bool) -> Option<vello::kurbo::BezPath> {
+    if pts.len() < 4 { return None; }
+    let mut p = vello::kurbo::BezPath::new();
+    p.move_to((pts[0] as f64, pts[1] as f64));
+    let mut i = 2;
+    while i + 1 < pts.len() {
+        p.line_to((pts[i] as f64, pts[i + 1] as f64));
+        i += 2;
+    }
+    if close { p.close_path(); }
+    Some(p)
 }
 
 // ── BackendKind ───────────────────────────────────────────────────────────────
@@ -639,6 +665,24 @@ impl AnyFrame {
             AnyFrame::Vello(f)    => f.stroke_line(x0, y0, x1, y1, width, color),
             AnyFrame::TinySkia(f) => f.stroke_line(x0, y0, x1, y1, width, color),
             AnyFrame::FemtoVg(f)  => f.stroke_line(x0, y0, x1, y1, width, color),
+        }
+    }
+
+    /// Fill a polygon from a flat `[x0,y0,…]` point list (auto-closed).
+    pub fn fill_path(&mut self, pts: &[f32], color: Color) {
+        match self {
+            AnyFrame::Vello(f)    => f.fill_path(pts, color),
+            AnyFrame::TinySkia(f) => f.fill_path(pts, color),
+            AnyFrame::FemtoVg(f)  => f.fill_path(pts, color),
+        }
+    }
+
+    /// Stroke a polyline from a flat point list; `closed` joins last→first.
+    pub fn stroke_path(&mut self, pts: &[f32], width: f64, closed: bool, color: Color) {
+        match self {
+            AnyFrame::Vello(f)    => f.stroke_path(pts, width, closed, color),
+            AnyFrame::TinySkia(f) => f.stroke_path(pts, width, closed, color),
+            AnyFrame::FemtoVg(f)  => f.stroke_path(pts, width, closed, color),
         }
     }
 }

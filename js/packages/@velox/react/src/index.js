@@ -3189,7 +3189,8 @@ function _parseColor(c) {
 // json protocol for that unusual pattern).
 // Opcodes — must match `canvas_op` in velox-runtime/src/bindings.rs.
 const _OP_CLEAR = 0, _OP_FILLRECT = 1, _OP_STROKERECT = 2, _OP_FILLCIRCLE = 3,
-      _OP_STROKECIRCLE = 4, _OP_STROKELINE = 5, _OP_FILLTEXT = 6;
+      _OP_STROKECIRCLE = 4, _OP_STROKELINE = 5, _OP_FILLTEXT = 6,
+      _OP_FILLPATH = 7, _OP_STROKEPATH = 8;
 
 // Pack a color into one little-endian u32 whose bytes are [r, g, b, a].
 function _packColor(c) {
@@ -3230,6 +3231,8 @@ class VeloxCanvasContext {
     this._fc    = 0;         // binary: f32 command cursor
     this._sc    = 0;         // binary: string byte cursor
     this._firstChunk = true; // binary: first flush of a frame replaces, rest append
+    this._path   = [];       // current path: flat [x0,y0,x1,y1,…]
+    this._pathClosed = false;
     this.fillStyle   = [255, 255, 255, 255];
     this.strokeStyle = [255, 255, 255, 255];
     this.lineWidth   = 1;
@@ -3315,6 +3318,93 @@ class VeloxCanvasContext {
     f[p] = _OP_FILLTEXT; f[p+1] = x; f[p+2] = y; f[p+3] = fontSize;
     b.u32[p+4] = _packColor(this.fillStyle); f[p+5] = off; f[p+6] = len;
     this._fc = p + 7;
+  }
+
+  // ── Path API (canvas-like) ────────────────────────────────────────────────
+  // Curves are tessellated to line segments in JS; the native side only deals
+  // with polylines/polygons. Single subpath per begin→fill/stroke.
+
+  beginPath() { this._path.length = 0; this._pathClosed = false; }
+  moveTo(x, y) { this._path.push(x, y); }
+  lineTo(x, y) { this._path.push(x, y); }
+  closePath() { this._pathClosed = true; }
+
+  /** Arc from `a0`→`a1` radians (set `ccw` for counter-clockwise). */
+  arc(cx, cy, r, a0, a1, ccw = false) {
+    let start = a0, end = a1;
+    if (ccw && end > start) end -= Math.PI * 2;
+    if (!ccw && end < start) end += Math.PI * 2;
+    const sweep = Math.abs(end - start);
+    const segs  = Math.max(6, Math.ceil(sweep / (Math.PI / 16)));
+    for (let i = 0; i <= segs; i++) {
+      const t = start + (end - start) * (i / segs);
+      this._path.push(cx + Math.cos(t) * r, cy + Math.sin(t) * r);
+    }
+  }
+
+  quadraticCurveTo(cpx, cpy, x, y) {
+    const n = this._path.length;
+    const x0 = n >= 2 ? this._path[n - 2] : cpx;
+    const y0 = n >= 2 ? this._path[n - 1] : cpy;
+    const segs = 16;
+    for (let i = 1; i <= segs; i++) {
+      const t = i / segs, mt = 1 - t;
+      this._path.push(mt * mt * x0 + 2 * mt * t * cpx + t * t * x,
+                      mt * mt * y0 + 2 * mt * t * cpy + t * t * y);
+    }
+  }
+
+  bezierCurveTo(c1x, c1y, c2x, c2y, x, y) {
+    const n = this._path.length;
+    const x0 = n >= 2 ? this._path[n - 2] : c1x;
+    const y0 = n >= 2 ? this._path[n - 1] : c1y;
+    const segs = 20;
+    for (let i = 1; i <= segs; i++) {
+      const t = i / segs, mt = 1 - t;
+      const a = mt * mt * mt, b = 3 * mt * mt * t, c = 3 * mt * t * t, d = t * t * t;
+      this._path.push(a * x0 + b * c1x + c * c2x + d * x,
+                      a * y0 + b * c1y + c * c2y + d * y);
+    }
+  }
+
+  /** Fill the current path as a polygon (auto-closed). */
+  fill() {
+    if (this._path.length < 6) return; // need ≥3 points
+    if (this._bin) {
+      const count = this._path.length >> 1;
+      const slots = 3 + this._path.length; // op + count + color + points
+      if (slots > this._bin.cap) return;   // path larger than buffer — skip
+      if (this._fc + slots > this._bin.cap) this._flushChunk();
+      const f = this._bin.f32, p = this._fc;
+      f[p] = _OP_FILLPATH; f[p + 1] = count;
+      this._bin.u32[p + 2] = _packColor(this.fillStyle);
+      const o = p + 3;
+      for (let k = 0; k < this._path.length; k++) f[o + k] = this._path[k];
+      this._fc = o + this._path.length;
+    } else {
+      this._cmds.push({ type: 'fillPath', points: this._path.slice(), color: _parseColor(this.fillStyle) });
+    }
+  }
+
+  /** Stroke the current path as a polyline (closed if `closePath()` was called). */
+  stroke() {
+    if (this._path.length < 4) return;
+    if (this._bin) {
+      const count = this._path.length >> 1;
+      const slots = 5 + this._path.length; // op + count + color + lineW + closed + points
+      if (slots > this._bin.cap) return;
+      if (this._fc + slots > this._bin.cap) this._flushChunk();
+      const f = this._bin.f32, p = this._fc;
+      f[p] = _OP_STROKEPATH; f[p + 1] = count;
+      this._bin.u32[p + 2] = _packColor(this.strokeStyle);
+      f[p + 3] = this.lineWidth; f[p + 4] = this._pathClosed ? 1 : 0;
+      const o = p + 5;
+      for (let k = 0; k < this._path.length; k++) f[o + k] = this._path[k];
+      this._fc = o + this._path.length;
+    } else {
+      this._cmds.push({ type: 'strokePath', points: this._path.slice(),
+                        color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth, closed: this._pathClosed });
+    }
   }
 
   /** Send accumulated draw commands to the native layer. */

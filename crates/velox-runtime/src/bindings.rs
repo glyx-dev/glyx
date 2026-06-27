@@ -412,6 +412,10 @@ pub enum CanvasCmd {
     StrokeCircle { cx: f32, cy: f32, r: f32, color: [u8; 4], #[serde(rename = "lineWidth")] line_width: f32 },
     StrokeLine { x0: f32, y0: f32, x1: f32, y1: f32, color: [u8; 4], #[serde(rename = "lineWidth")] line_width: f32 },
     FillText   { text: String, x: f32, y: f32, #[serde(rename = "fontSize")] font_size: f32, color: [u8; 4] },
+    /// Filled polygon from a flat `[x0,y0,x1,y1,…]` point list (auto-closed).
+    FillPath   { points: Vec<f32>, color: [u8; 4] },
+    /// Stroked polyline from a flat point list; `closed` joins last→first.
+    StrokePath { points: Vec<f32>, color: [u8; 4], #[serde(rename = "lineWidth")] line_width: f32, #[serde(default)] closed: bool },
 }
 
 // ── Canvas 2D binary protocol ──────────────────────────────────────────────────
@@ -428,6 +432,8 @@ mod canvas_op {
     pub const STROKE_CIRCLE: u32 = 4;
     pub const STROKE_LINE:   u32 = 5;
     pub const FILL_TEXT:     u32 = 6;
+    pub const FILL_PATH:     u32 = 7;  // [op, pointCount, color, x0,y0,…]
+    pub const STROKE_PATH:   u32 = 8;  // [op, pointCount, color, lineW, closed, x0,y0,…]
 }
 
 /// Decode the binary command stream into `Vec<CanvasCmd>`.
@@ -451,52 +457,59 @@ fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_bytes: &[u8]) 
         [cmd_bytes[b], cmd_bytes[b + 1], cmd_bytes[b + 2], cmd_bytes[b + 3]]
     };
 
+    // Read `n` point floats starting at slot `start`, guarding the bound.
+    let read_points = |start: usize, n: usize| -> Vec<f32> {
+        (0..n).map(|k| f32_at(start + k)).collect()
+    };
+
     let mut cmds = Vec::new();
     let mut i = 0usize;
     while i < slots {
         let op = f32_at(i) as u32;
         i += 1;
-        // `need` = additional arg slots required after the opcode.
-        let need = match op {
-            canvas_op::CLEAR                         => 0,
-            canvas_op::FILL_CIRCLE                   => 4,
-            canvas_op::FILL_RECT | canvas_op::STROKE_CIRCLE => 5,
-            canvas_op::STROKE_RECT | canvas_op::STROKE_LINE | canvas_op::FILL_TEXT => 6,
-            _ => break, // unknown opcode → corrupt/truncated stream
-        };
-        if i + need > slots { break; }
         match op {
             canvas_op::CLEAR => cmds.push(CanvasCmd::Clear),
             canvas_op::FILL_RECT => {
+                if i + 5 > slots { break; }
                 cmds.push(CanvasCmd::FillRect {
                     x: f32_at(i), y: f32_at(i + 1), w: f32_at(i + 2), h: f32_at(i + 3),
                     color: color_at(i + 4),
                 });
+                i += 5;
             }
             canvas_op::STROKE_RECT => {
+                if i + 6 > slots { break; }
                 cmds.push(CanvasCmd::StrokeRect {
                     x: f32_at(i), y: f32_at(i + 1), w: f32_at(i + 2), h: f32_at(i + 3),
                     color: color_at(i + 4), line_width: f32_at(i + 5),
                 });
+                i += 6;
             }
             canvas_op::FILL_CIRCLE => {
+                if i + 4 > slots { break; }
                 cmds.push(CanvasCmd::FillCircle {
                     cx: f32_at(i), cy: f32_at(i + 1), r: f32_at(i + 2), color: color_at(i + 3),
                 });
+                i += 4;
             }
             canvas_op::STROKE_CIRCLE => {
+                if i + 5 > slots { break; }
                 cmds.push(CanvasCmd::StrokeCircle {
                     cx: f32_at(i), cy: f32_at(i + 1), r: f32_at(i + 2),
                     color: color_at(i + 3), line_width: f32_at(i + 4),
                 });
+                i += 5;
             }
             canvas_op::STROKE_LINE => {
+                if i + 6 > slots { break; }
                 cmds.push(CanvasCmd::StrokeLine {
                     x0: f32_at(i), y0: f32_at(i + 1), x1: f32_at(i + 2), y1: f32_at(i + 3),
                     color: color_at(i + 4), line_width: f32_at(i + 5),
                 });
+                i += 6;
             }
             canvas_op::FILL_TEXT => {
+                if i + 6 > slots { break; }
                 let off = f32_at(i + 4) as usize;
                 let len = f32_at(i + 5) as usize;
                 let text = str_bytes.get(off..off + len)
@@ -507,10 +520,36 @@ fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_bytes: &[u8]) 
                     text, x: f32_at(i), y: f32_at(i + 1), font_size: f32_at(i + 2),
                     color: color_at(i + 3),
                 });
+                i += 6;
             }
-            _ => break,
+            canvas_op::FILL_PATH => {
+                // [count, color, x0,y0,…]
+                if i + 2 > slots { break; }
+                let count = f32_at(i) as usize;
+                let color = color_at(i + 1);
+                let start = i + 2;
+                let npts  = count * 2;
+                if start + npts > slots { break; }
+                cmds.push(CanvasCmd::FillPath { points: read_points(start, npts), color });
+                i = start + npts;
+            }
+            canvas_op::STROKE_PATH => {
+                // [count, color, lineW, closed, x0,y0,…]
+                if i + 4 > slots { break; }
+                let count  = f32_at(i) as usize;
+                let color  = color_at(i + 1);
+                let lw     = f32_at(i + 2);
+                let closed = f32_at(i + 3) != 0.0;
+                let start  = i + 4;
+                let npts   = count * 2;
+                if start + npts > slots { break; }
+                cmds.push(CanvasCmd::StrokePath {
+                    points: read_points(start, npts), color, line_width: lw, closed,
+                });
+                i = start + npts;
+            }
+            _ => break, // unknown opcode → corrupt/truncated stream
         }
-        i += need;
     }
     cmds
 }

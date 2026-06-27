@@ -639,7 +639,23 @@ fn draw_canvas_cmd(frame: &mut AnyFrame, cmd: &CanvasCmd, ox: f64, oy: f64) {
             // Full Parley shaping requires a mutable TextSystem not available here.
             frame.fill_rect(ox + *x as f64, oy + *y as f64, *font_size as f64 * text.len() as f64 * 0.6, *font_size as f64 * 1.2, rgba_to_vello(*color));
         }
+        FillPath { points, color } => {
+            let pts = offset_points(points, ox, oy);
+            frame.fill_path(&pts, rgba_to_vello(*color));
+        }
+        StrokePath { points, color, line_width, closed } => {
+            let pts = offset_points(points, ox, oy);
+            frame.stroke_path(&pts, *line_width as f64, *closed, rgba_to_vello(*color));
+        }
     }
+}
+
+/// Translate a flat `[x0,y0,…]` point list by the canvas node's screen origin.
+fn offset_points(points: &[f32], ox: f64, oy: f64) -> Vec<f32> {
+    let (ox, oy) = (ox as f32, oy as f32);
+    points.iter().enumerate()
+        .map(|(i, &v)| if i % 2 == 0 { v + ox } else { v + oy })
+        .collect()
 }
 
 /// Compute the scrollbar thumb rectangle for a node.

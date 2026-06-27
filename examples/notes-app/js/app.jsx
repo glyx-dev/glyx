@@ -29,7 +29,7 @@ import {
 import { Router, Route, useNavigate, useRoute } from '@velox/router';
 import { createKeychain, createTypedKeychain } from '@velox/keychain';
 import { initStore, createStore } from '@velox/store';
-import { Scene, PerspectiveCamera, AmbientLight, DirectionalLight, Mesh } from '@velox/three';
+import { Scene, PerspectiveCamera, AmbientLight, DirectionalLight, PointLight, SpotLight, Mesh, Model } from '@velox/three';
 import { createDrizzle } from '@velox/drizzle';
 import { sqliteTable, integer, text, real } from 'drizzle-orm/sqlite-core';
 import { desc, eq, gt } from 'drizzle-orm';
@@ -1899,6 +1899,13 @@ function TextInputTestBox({ width }) {
 // Isolated 3D canvas — angle3d state lives HERE so only this subtree
 // re-renders at 30 fps.  The parent CanvasDemoScreen (Text, BackBtn, 2D
 // canvas) is completely unaffected by the 3D animation loop.
+// Exercises the upgraded 3D pipeline: multiple dynamic lights (ambient +
+// directional + an orbiting point light + a spot light from above), a sphere
+// (new UV vertex format), and an optional textured GLTF model. Set
+// VELOX_DEMO_GLB to an absolute .glb/.gltf path to smoke-test the textured
+// model path; otherwise the primitives alone validate the shader + light loop.
+const DEMO_GLB = null; // e.g. 'C:/path/to/model.glb'
+
 function Canvas3DDemo() {
   const c3dRef = React.useRef(null);
   const [angle3d, setAngle3d] = useState(0);
@@ -1908,6 +1915,10 @@ function Canvas3DDemo() {
     return () => clearInterval(id);
   }, []);
 
+  // Orbiting point light position.
+  const px = Math.cos(angle3d) * 1.8;
+  const pz = Math.sin(angle3d) * 1.8;
+
   return (
     <Canvas3D
       ref={c3dRef}
@@ -1916,11 +1927,18 @@ function Canvas3DDemo() {
       style={{ borderRadius: 8, borderWidth: 1, borderColor: C.border, backgroundColor: '#0f1120' }}
     >
       <Scene canvasRef={c3dRef} background={[0.06, 0.067, 0.125, 1.0]}>
-        <PerspectiveCamera position={[0, 1.2, 3.5]} target={[0, 0, 0]} fov={55} near={0.1} far={100} />
-        <AmbientLight color={[1.0, 1.0, 1.0]} intensity={0.25} />
-        <DirectionalLight direction={[-0.5, -1, -0.8]} color={[1.0, 0.94, 0.82]} intensity={1.0} />
-        <Mesh geometry="box"   rotation={[0, angle3d, 0]}       color={[0.39, 0.55, 1.0, 1.0]} />
-        <Mesh geometry="plane" position={[0, -0.5, 0]} scale={[4, 1, 4]} color={[0.157, 0.176, 0.275, 1.0]} />
+        <PerspectiveCamera position={[0, 1.4, 4.0]} target={[0, 0, 0]} fov={55} near={0.1} far={100} />
+        <AmbientLight color={[1.0, 1.0, 1.0]} intensity={0.18} />
+        <DirectionalLight direction={[-0.5, -1, -0.8]} color={[0.7, 0.7, 0.85]} intensity={0.5} />
+        {/* Orbiting point light — warm, with distance falloff. */}
+        <PointLight position={[px, 1.0, pz]} color={[1.0, 0.6, 0.3]} intensity={2.2} range={6} />
+        {/* Spot light from above pointing down — cool cone. */}
+        <SpotLight position={[0, 3.0, 0]} direction={[0, -1, 0]} color={[0.4, 0.7, 1.0]}
+                   intensity={2.5} range={8} innerDeg={18} outerDeg={30} />
+        <Mesh geometry="box"    position={[-0.9, 0, 0]} rotation={[0, angle3d, 0]} color={[0.39, 0.55, 1.0, 1.0]} />
+        <Mesh geometry="sphere" position={[ 0.9, 0, 0]} scale={0.7}                color={[0.9, 0.9, 0.95, 1.0]} />
+        <Mesh geometry="plane"  position={[0, -0.5, 0]} scale={[4, 1, 4]}          color={[0.157, 0.176, 0.275, 1.0]} />
+        {DEMO_GLB && <Model src={DEMO_GLB} position={[0, 0, 0]} scale={1} rotation={[0, angle3d, 0]} />}
       </Scene>
     </Canvas3D>
   );
@@ -1979,9 +1997,36 @@ function CanvasDemoScreen() {
         ctx.lineWidth   = 1;
         ctx.strokeCircle(150, 100, 70);
 
+        // ── Path API: filled area wave along the bottom ──
+        ctx.beginPath();
+        ctx.moveTo(0, 200);
+        for (let x = 0; x <= 300; x += 10) {
+          ctx.lineTo(x, 172 + Math.sin(x * 0.045 + t * 2) * 12);
+        }
+        ctx.lineTo(300, 200);
+        ctx.closePath();
+        ctx.fillStyle = [80, 160, 255, 90];
+        ctx.fill();
+
+        // Path API: animated pie wedge via arc()
+        ctx.beginPath();
+        ctx.moveTo(40, 40);
+        ctx.arc(40, 40, 26, -Math.PI / 2, -Math.PI / 2 + (1.4 + Math.sin(t) * 0.9));
+        ctx.closePath();
+        ctx.fillStyle = [255, 180, 80, 220];
+        ctx.fill();
+
+        // Path API: smooth bezier stroke
+        ctx.beginPath();
+        ctx.moveTo(215, 38);
+        ctx.bezierCurveTo(248, 10 + Math.sin(t) * 12, 270, 66, 296, 34);
+        ctx.strokeStyle = [160, 240, 200, 230];
+        ctx.lineWidth   = 2;
+        ctx.stroke();
+
         // Label
         ctx.fillStyle   = [220, 230, 255, 255];
-        ctx.fillText('Canvas 2D', 6, 6, 13);
+        ctx.fillText('Canvas 2D + paths', 6, 6, 13);
 
         ctx.flush();
       }

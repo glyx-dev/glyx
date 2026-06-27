@@ -34,6 +34,20 @@ fn to_fvg(c: peniko::Color) -> FvgColor {
     FvgColor::rgba(q.r, q.g, q.b, q.a)
 }
 
+/// Build a polyline/polygon `Path` from a flat `[x0,y0,…]` list. `None` if < 2 pts.
+fn fvg_poly(pts: &[f32], close: bool) -> Option<Path> {
+    if pts.len() < 4 { return None; }
+    let mut p = Path::new();
+    p.move_to(pts[0], pts[1]);
+    let mut i = 2;
+    while i + 1 < pts.len() {
+        p.line_to(pts[i], pts[i + 1]);
+        i += 2;
+    }
+    if close { p.close(); }
+    Some(p)
+}
+
 fn stop_color(dc: peniko::color::DynamicColor) -> peniko::Color {
     dc.to_alpha_color::<peniko::color::Srgb>()
 }
@@ -264,6 +278,20 @@ impl FemtoVgFrame {
         let mut paint = Paint::color(to_fvg(color));
         paint.set_line_width(width as f32);
         paint.set_line_cap(femtovg::LineCap::Round);
+        self.inner.canvas.stroke_path(&mut p, &paint);
+    }
+
+    pub fn fill_path(&mut self, pts: &[f32], color: peniko::Color) {
+        let Some(mut p) = fvg_poly(pts, true) else { return };
+        self.inner.canvas.fill_path(&mut p, &Paint::color(to_fvg(color)));
+    }
+
+    pub fn stroke_path(&mut self, pts: &[f32], width: f64, closed: bool, color: peniko::Color) {
+        let Some(mut p) = fvg_poly(pts, closed) else { return };
+        let mut paint = Paint::color(to_fvg(color));
+        paint.set_line_width(width as f32);
+        paint.set_line_cap(femtovg::LineCap::Round);
+        paint.set_line_join(femtovg::LineJoin::Round);
         self.inner.canvas.stroke_path(&mut p, &paint);
     }
 

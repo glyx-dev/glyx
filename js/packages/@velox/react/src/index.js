@@ -1459,29 +1459,100 @@ export const notification = {
  *                     headers: Record<string,string>,
  *                     text: () => Promise<string>, json: () => Promise<any> }>}
  */
+// Case-insensitive, spec-compatible Headers (the runtime has no platform one).
+class VeloxHeaders {
+  constructor(init) {
+    this._m = new Map();
+    if (!init) return;
+    if (init instanceof VeloxHeaders) { init.forEach((v, k) => this.set(k, v)); }
+    else if (Array.isArray(init))     { for (const [k, v] of init) this.append(k, v); }
+    else if (typeof init.forEach === 'function') { init.forEach((v, k) => this.set(k, v)); }
+    else { for (const k of Object.keys(init)) this.set(k, init[k]); }
+  }
+  set(k, v)     { this._m.set(String(k).toLowerCase(), String(v)); }
+  append(k, v)  { const lk = String(k).toLowerCase(); this._m.set(lk, this._m.has(lk) ? `${this._m.get(lk)}, ${v}` : String(v)); }
+  get(k)        { const v = this._m.get(String(k).toLowerCase()); return v == null ? null : v; }
+  has(k)        { return this._m.has(String(k).toLowerCase()); }
+  delete(k)     { this._m.delete(String(k).toLowerCase()); }
+  forEach(cb, t){ this._m.forEach((v, k) => cb.call(t, v, k, this)); }
+  keys()        { return this._m.keys(); }
+  values()      { return this._m.values(); }
+  entries()     { return this._m.entries(); }
+  [Symbol.iterator]() { return this._m.entries(); }
+  toObject()    { const o = {}; this._m.forEach((v, k) => { o[k] = v; }); return o; }
+}
+export { VeloxHeaders as Headers };
+
+// Build a Response-like object from the native fetch result. `clone()` re-derives
+// a fresh, independently-consumable body from the same captured data.
+function _makeResponse(data, url) {
+  const headers  = new VeloxHeaders(data.headers || {});
+  const bodyText = data.body ?? '';
+  let used = false;
+  const consume = () => { if (used) throw new TypeError('Body has already been consumed.'); used = true; };
+  const toBytes = () => {
+    if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(bodyText);
+    const u8 = new Uint8Array(bodyText.length);
+    for (let i = 0; i < bodyText.length; i++) u8[i] = bodyText.charCodeAt(i) & 0xff;
+    return u8;
+  };
+  return {
+    url: data.url || url, status: data.status, ok: data.ok, statusText: data.statusText,
+    headers, redirected: false, type: 'basic',
+    get bodyUsed() { return used; },
+    text:        () => { consume(); return Promise.resolve(bodyText); },
+    json:        () => { consume(); return Promise.resolve(JSON.parse(bodyText)); },
+    arrayBuffer: () => { consume(); return Promise.resolve(toBytes().buffer); },
+    blob:        () => {
+      consume();
+      const u8 = toBytes();
+      return Promise.resolve({
+        size: u8.length, type: headers.get('content-type') || '',
+        arrayBuffer: () => Promise.resolve(u8.buffer),
+        text:        () => Promise.resolve(bodyText),
+      });
+    },
+    clone: () => _makeResponse(data, url),
+  };
+}
+
 export async function fetch(url, options = {}) {
   if (typeof __velox_fetch === 'undefined') {
     throw new Error('fetch: __velox_fetch binding is not available');
   }
-  const raw  = await __velox_fetch(url, JSON.stringify(options));
-  const data = JSON.parse(raw);
-  return {
-    status:     data.status,
-    ok:         data.ok,
-    statusText: data.statusText,
-    headers:    data.headers ?? {},
-    text:       () => Promise.resolve(data.body),
-    json:       () => Promise.resolve(JSON.parse(data.body)),
-  };
+  // Normalize request init to what the native binding expects (string body +
+  // plain header object), while accepting the spec shapes libraries use.
+  const init = { ...options };
+  const hdrs = new VeloxHeaders(init.headers);
+  if (init.body != null && typeof init.body !== 'string' && !init.multipart) {
+    const b = init.body;
+    const isBinary = b instanceof ArrayBuffer || ArrayBuffer.isView(b);
+    if (!isBinary && typeof b === 'object') {
+      // Convenience: plain object body → JSON.
+      init.body = JSON.stringify(b);
+      if (!hdrs.has('content-type')) hdrs.set('Content-Type', 'application/json');
+    } else if (!isBinary) {
+      init.body = String(b);
+    }
+    // (Binary request bodies aren't supported over the text channel — use the
+    //  `multipart` option with base64 parts for file uploads.)
+  }
+  init.headers = hdrs.toObject();
+
+  const raw = await __velox_fetch(url, JSON.stringify(init));
+  return _makeResponse(JSON.parse(raw), url);
 }
 
-// Expose `fetch` as a global (the embedded V8 runtime has no platform fetch, so
-// this is purely additive — nothing standard is shadowed). Lets web-oriented
-// libraries (Supabase, Stripe, etc.) work unmodified, and matches web/Node 18+.
-// Still available as a named import for explicit/tree-shaken usage.
-if (typeof globalThis.fetch === 'undefined') {
-  globalThis.fetch = fetch;
-}
+// Expose `fetch` + `Headers` as globals (the embedded V8 runtime has no platform
+// equivalents, so this is purely additive — nothing standard is shadowed). Lets
+// web-oriented libraries (Supabase, Stripe, …) work unmodified; both remain
+// importable from @velox/react.
+//
+// NOTE: response bodies cross the bridge as UTF-8 text, so `arrayBuffer()`/`blob()`
+// are correct for text/JSON but lossy for true binary downloads (images). Fetch
+// binary via a dedicated download/fs API instead.
+if (typeof globalThis.fetch === 'undefined')   globalThis.fetch = fetch;
+if (typeof globalThis.Headers === 'undefined') globalThis.Headers = VeloxHeaders;
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 //

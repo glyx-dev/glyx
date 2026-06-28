@@ -3087,6 +3087,7 @@ function _SelectOption({ label, selected, onSelect }) {
     onHoverOut: () => setHover(false),
     height: 40,
     style: {
+      alignSelf: 'stretch',   // fill the full popup width so hover spans the row
       flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
       paddingLeft: 12, paddingRight: 12,
       backgroundColor: selected ? '#2e3555' : (hover ? '#2a3048' : 'transparent'),

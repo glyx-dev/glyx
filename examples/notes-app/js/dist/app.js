@@ -8211,6 +8211,7 @@ No matching component was found for:
       onHoverOut: () => setHover(false),
       height: 40,
       style: {
+        alignSelf: "stretch",
         flexDirection: "row",
         alignItems: "center",
         justifyContent: "space-between",

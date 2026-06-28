@@ -5945,14 +5945,6 @@ No matching component was found for:
   function addKeyListener(fn) {
     keyListeners.push(fn);
   }
-  function addGlobalClickListener(fn) {
-    globalClickListeners.push(fn);
-  }
-  function removeGlobalClickListener(fn) {
-    const idx = globalClickListeners.indexOf(fn);
-    if (idx >= 0)
-      globalClickListeners.splice(idx, 1);
-  }
   function setFocus(nodeId) {
     if (focusedNodeId !== nodeId) {
       if (focusedNodeId !== null) {
@@ -6571,7 +6563,69 @@ No matching component was found for:
     });
   };
   function render(element) {
-    VeloxReconciler.updateContainer(element, rootContainer, null, null);
+    VeloxReconciler.updateContainer(import_react.default.createElement(View, {
+      style: { position: "relative", flexDirection: "column", flexGrow: 1, alignSelf: "stretch" }
+    }, element, import_react.default.createElement(PopoverHost)), rootContainer, null, null);
+  }
+  var _popoverNextId = 0;
+  var _popoverStore = {
+    current: null,
+    listeners: new Set,
+    open(p) {
+      const id = ++_popoverNextId;
+      this.current = { id, ...p };
+      this._emit();
+      return id;
+    },
+    close(id) {
+      if (!this.current)
+        return;
+      if (id != null && this.current.id !== id)
+        return;
+      const cb = this.current.onClose;
+      this.current = null;
+      this._emit();
+      if (cb)
+        cb();
+    },
+    _emit() {
+      for (const l of this.listeners)
+        l();
+    }
+  };
+  function openPopover(opts) {
+    return _popoverStore.open(opts);
+  }
+  function closePopover(id) {
+    _popoverStore.close(id);
+  }
+  function PopoverHost() {
+    const [, force] = import_react.useState(0);
+    const { width: winW, height: winH } = useWindowSize();
+    import_react.useEffect(() => {
+      const l = () => force((n) => n + 1 | 0);
+      _popoverStore.listeners.add(l);
+      return () => {
+        _popoverStore.listeners.delete(l);
+      };
+    }, []);
+    const p = _popoverStore.current;
+    if (!p)
+      return null;
+    const PAD = 4;
+    const cw = p.width || 240;
+    const ch = p.contentH || 200;
+    const belowY = p.y + p.h + PAD;
+    const flipUp = belowY + ch > winH && p.y - ch - PAD >= 0;
+    const top = flipUp ? Math.max(4, p.y - ch - PAD) : belowY;
+    const left = Math.max(4, Math.min(p.x, winW - cw - 4));
+    return import_react.default.createElement(Pressable, {
+      onPress: () => _popoverStore.close(p.id),
+      style: { position: "absolute", left: 0, top: 0, width: winW, height: winH, zIndex: 9000 }
+    }, import_react.default.createElement(Pressable, {
+      onPress: () => {},
+      style: { position: "absolute", left, top, width: cw, zIndex: 9001 }
+    }, p.render(p.id)));
   }
   var View = ({ children, style, ...props }) => import_react.default.createElement("view", { style, ...props }, children);
   function Text({ children, style, showCursor, ...props }) {
@@ -7157,21 +7211,142 @@ No matching component was found for:
       return __velox_notification_send(title, body);
     }
   };
+
+  class VeloxHeaders {
+    constructor(init) {
+      this._m = new Map;
+      if (!init)
+        return;
+      if (init instanceof VeloxHeaders) {
+        init.forEach((v, k) => this.set(k, v));
+      } else if (Array.isArray(init)) {
+        for (const [k, v] of init)
+          this.append(k, v);
+      } else if (typeof init.forEach === "function") {
+        init.forEach((v, k) => this.set(k, v));
+      } else {
+        for (const k of Object.keys(init))
+          this.set(k, init[k]);
+      }
+    }
+    set(k, v) {
+      this._m.set(String(k).toLowerCase(), String(v));
+    }
+    append(k, v) {
+      const lk = String(k).toLowerCase();
+      this._m.set(lk, this._m.has(lk) ? `${this._m.get(lk)}, ${v}` : String(v));
+    }
+    get(k) {
+      const v = this._m.get(String(k).toLowerCase());
+      return v == null ? null : v;
+    }
+    has(k) {
+      return this._m.has(String(k).toLowerCase());
+    }
+    delete(k) {
+      this._m.delete(String(k).toLowerCase());
+    }
+    forEach(cb, t) {
+      this._m.forEach((v, k) => cb.call(t, v, k, this));
+    }
+    keys() {
+      return this._m.keys();
+    }
+    values() {
+      return this._m.values();
+    }
+    entries() {
+      return this._m.entries();
+    }
+    [Symbol.iterator]() {
+      return this._m.entries();
+    }
+    toObject() {
+      const o = {};
+      this._m.forEach((v, k) => {
+        o[k] = v;
+      });
+      return o;
+    }
+  }
+  function _makeResponse(data, url) {
+    const headers = new VeloxHeaders(data.headers || {});
+    const bodyText = data.body ?? "";
+    let used = false;
+    const consume = () => {
+      if (used)
+        throw new TypeError("Body has already been consumed.");
+      used = true;
+    };
+    const toBytes = () => {
+      if (typeof TextEncoder !== "undefined")
+        return new TextEncoder().encode(bodyText);
+      const u8 = new Uint8Array(bodyText.length);
+      for (let i = 0;i < bodyText.length; i++)
+        u8[i] = bodyText.charCodeAt(i) & 255;
+      return u8;
+    };
+    return {
+      url: data.url || url,
+      status: data.status,
+      ok: data.ok,
+      statusText: data.statusText,
+      headers,
+      redirected: false,
+      type: "basic",
+      get bodyUsed() {
+        return used;
+      },
+      text: () => {
+        consume();
+        return Promise.resolve(bodyText);
+      },
+      json: () => {
+        consume();
+        return Promise.resolve(JSON.parse(bodyText));
+      },
+      arrayBuffer: () => {
+        consume();
+        return Promise.resolve(toBytes().buffer);
+      },
+      blob: () => {
+        consume();
+        const u8 = toBytes();
+        return Promise.resolve({
+          size: u8.length,
+          type: headers.get("content-type") || "",
+          arrayBuffer: () => Promise.resolve(u8.buffer),
+          text: () => Promise.resolve(bodyText)
+        });
+      },
+      clone: () => _makeResponse(data, url)
+    };
+  }
   async function fetch(url, options = {}) {
     if (typeof __velox_fetch === "undefined") {
       throw new Error("fetch: __velox_fetch binding is not available");
     }
-    const raw = await __velox_fetch(url, JSON.stringify(options));
-    const data = JSON.parse(raw);
-    return {
-      status: data.status,
-      ok: data.ok,
-      statusText: data.statusText,
-      headers: data.headers ?? {},
-      text: () => Promise.resolve(data.body),
-      json: () => Promise.resolve(JSON.parse(data.body))
-    };
+    const init = { ...options };
+    const hdrs = new VeloxHeaders(init.headers);
+    if (init.body != null && typeof init.body !== "string" && !init.multipart) {
+      const b = init.body;
+      const isBinary = b instanceof ArrayBuffer || ArrayBuffer.isView(b);
+      if (!isBinary && typeof b === "object") {
+        init.body = JSON.stringify(b);
+        if (!hdrs.has("content-type"))
+          hdrs.set("Content-Type", "application/json");
+      } else if (!isBinary) {
+        init.body = String(b);
+      }
+    }
+    init.headers = hdrs.toObject();
+    const raw = await __velox_fetch(url, JSON.stringify(init));
+    return _makeResponse(JSON.parse(raw), url);
   }
+  if (typeof globalThis.fetch === "undefined")
+    globalThis.fetch = fetch;
+  if (typeof globalThis.Headers === "undefined")
+    globalThis.Headers = VeloxHeaders;
   function _pollWebSockets() {
     for (const [id, handlers] of _wsOpenSockets) {
       let raw;
@@ -7627,13 +7802,16 @@ No matching component was found for:
     return import_react.default.createElement(Pressable, {
       onPress: handlePress,
       style: {
-        padding: 8,
+        paddingVertical: 8,
+        paddingHorizontal: 14,
         backgroundColor: disabled ? "#1f2333" : "#262b3f",
         borderWidth: 1,
         borderColor: disabled ? "#3c4464" : "#7aa2f7",
         borderRadius: 6,
+        flexDirection: "row",
         justifyContent: "center",
         alignItems: "center",
+        flexShrink: 0,
         ...style
       },
       ...rest
@@ -7946,9 +8124,12 @@ No matching component was found for:
     const THUMB = 20;
     const TRACK = 4;
     const accent = disabled ? "#555" : "#7aa2f7";
+    const styleW = style && typeof style.width === "number" ? style.width : null;
+    const [measuredW, setMeasuredW] = import_react.useState(styleW ?? widthProp);
+    const effW = measuredW > 0 ? measuredW : styleW ?? widthProp;
     const pct = max === min ? 0 : Math.max(0, Math.min(1, (Math.min(max, Math.max(min, value)) - min) / (max - min)));
-    const fillW = Math.max(0, Math.round(pct * (widthProp - THUMB)));
-    const rightW = Math.max(0, widthProp - THUMB - fillW);
+    const fillW = Math.max(0, Math.round(pct * (effW - THUMB)));
+    const rightW = Math.max(0, effW - THUMB - fillW);
     const trackNodeId = import_react.useRef(null);
     const minRef = import_react.useRef(min);
     minRef.current = min;
@@ -7974,6 +8155,14 @@ No matching component was found for:
         v = Math.round(v / s) * s;
       onChangeRef.current(v);
     }, []);
+    const measureWidth = import_react.useCallback(() => {
+      const id = trackNodeId.current;
+      if (id == null || typeof __velox_getLayout === "undefined")
+        return;
+      const l = __velox_getLayout(id);
+      if (l && l.width > 0)
+        setMeasuredW((prev) => Math.abs(l.width - prev) > 0.5 ? l.width : prev);
+    }, []);
     const onTrackMount = import_react.useCallback((id) => {
       trackNodeId.current = id;
       registerDraggable(id, {
@@ -7984,19 +8173,52 @@ No matching component was found for:
           updateFromX(x);
         }
       });
+      registerPressable(id, {
+        onPress({ x }) {
+          updateFromX(x);
+        },
+        onPressIn() {},
+        onPressOut() {},
+        onHoverIn() {},
+        onHoverOut() {}
+      });
+      setTimeout(measureWidth, 0);
     }, []);
     import_react.useEffect(() => {
+      measureWidth();
+    });
+    import_react.useEffect(() => {
       return () => {
-        if (trackNodeId.current !== null)
+        if (trackNodeId.current !== null) {
           unregisterDraggable(trackNodeId.current);
+          unregisterPressable(trackNodeId.current);
+        }
       };
     }, []);
     return import_react.default.createElement(View, {
       _veloxOnMount: onTrackMount,
       width: widthProp,
+      pressable: true,
       style: { flexDirection: "row", alignItems: "center", ...style },
       ...rest
     }, import_react.default.createElement(View, { width: fillW, height: TRACK, style: { backgroundColor: accent } }), import_react.default.createElement(View, { width: THUMB, height: THUMB, style: { borderRadius: THUMB / 2, backgroundColor: accent } }), import_react.default.createElement(View, { width: rightW, height: TRACK, style: { backgroundColor: "#3c4464" } }));
+  }
+  function _SelectOption({ label, selected, onSelect }) {
+    const [hover, setHover] = import_react.useState(false);
+    return import_react.default.createElement(Pressable, {
+      onPress: onSelect,
+      onHoverIn: () => setHover(true),
+      onHoverOut: () => setHover(false),
+      height: 40,
+      style: {
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        paddingLeft: 12,
+        paddingRight: 12,
+        backgroundColor: selected ? "#2e3555" : hover ? "#2a3048" : "transparent"
+      }
+    }, import_react.default.createElement(Text, { height: 18, style: { color: selected ? "#7aa2f7" : "#cdd6f4", fontSize: 14 } }, label), selected ? import_react.default.createElement(Text, { width: 14, height: 16, style: { color: "#7aa2f7", fontSize: 13 } }, "✓") : null);
   }
   function Select({
     value,
@@ -8010,36 +8232,63 @@ No matching component was found for:
     const [open, setOpen] = import_react.default.useState(false);
     const selected = options.find((o) => o.value === value);
     const containerNodeId = import_react.useRef(null);
+    const popoverId = import_react.useRef(null);
     const onContainerMount = import_react.useCallback((id) => {
       containerNodeId.current = id;
     }, []);
-    import_react.useEffect(() => {
-      if (!open)
-        return;
-      const onGlobalClick = ({ x, y }) => {
-        const layout = typeof __velox_getLayout !== "undefined" ? __velox_getLayout(containerNodeId.current) : null;
-        if (!layout) {
-          setOpen(false);
-          return;
-        }
-        const inside = x >= layout.x && x < layout.x + layout.width && y >= layout.y && y < layout.y + layout.height;
-        if (!inside)
-          setOpen(false);
-      };
-      addGlobalClickListener(onGlobalClick);
-      return () => removeGlobalClickListener(onGlobalClick);
-    }, [open]);
     const OPTION_H = 40;
-    const dropH = options.length * OPTION_H;
+    const close2 = () => {
+      if (popoverId.current != null) {
+        closePopover(popoverId.current);
+        popoverId.current = null;
+      }
+    };
+    const toggle = () => {
+      if (disabled)
+        return;
+      if (open) {
+        close2();
+        return;
+      }
+      const l = typeof __velox_getLayout !== "undefined" ? __velox_getLayout(containerNodeId.current) : null;
+      if (!l)
+        return;
+      const cw = l.width;
+      const dropH = Math.min(options.length * OPTION_H, 280);
+      setOpen(true);
+      popoverId.current = openPopover({
+        x: l.x,
+        y: l.y,
+        h: l.height,
+        width: cw,
+        contentH: dropH + 2,
+        onClose: () => {
+          popoverId.current = null;
+          setOpen(false);
+        },
+        render: () => import_react.default.createElement(ScrollView, {
+          width: cw,
+          height: dropH,
+          contentHeight: options.length * OPTION_H,
+          style: { backgroundColor: "#1e2235", borderRadius: 8, borderWidth: 1, borderColor: "#3c4464" }
+        }, ...options.map((opt, i) => import_react.default.createElement(_SelectOption, {
+          key: String(i),
+          label: opt.label,
+          selected: opt.value === value,
+          onSelect: () => {
+            onValueChange?.(opt.value);
+            close2();
+          }
+        })))
+      });
+    };
+    import_react.useEffect(() => () => close2(), []);
     return import_react.default.createElement(View, {
       _veloxOnMount: onContainerMount,
-      style,
+      style: { alignSelf: "flex-start", width: 240, ...style },
       ...rest
     }, import_react.default.createElement(Pressable, {
-      onPress: () => {
-        if (!disabled)
-          setOpen((o) => !o);
-      },
+      onPress: toggle,
       style: {
         flexDirection: "row",
         justifyContent: "space-between",
@@ -8053,44 +8302,19 @@ No matching component was found for:
         borderColor: open ? "#7aa2f7" : "#3c4464",
         clip: true
       }
-    }, import_react.default.createElement(View, { style: { flex: 1, clip: true }, height: 20 }, import_react.default.createElement(Text, {
-      style: { color: selected ? "#e7ecff" : "#666", fontSize: 14 }
-    }, selected ? selected.label : placeholder)), import_react.default.createElement(Text, {
+    }, import_react.default.createElement(Text, {
+      height: 20,
+      style: { color: selected ? "#e7ecff" : "#9aa0b6", fontSize: 14 }
+    }, selected ? selected.label : placeholder), import_react.default.createElement(Text, {
       style: { color: "#7aa2f7", fontSize: 11 },
       width: 16,
       height: 16
-    }, open ? "▲" : "▼")), open && import_react.default.createElement(View, {
-      style: {
-        backgroundColor: "#1e2235",
-        borderRadius: 8,
-        marginTop: 4,
-        borderWidth: 1,
-        borderColor: "#3c4464"
-      },
-      height: dropH
-    }, ...options.map((opt, i) => import_react.default.createElement(Pressable, {
-      key: String(i),
-      onPress: () => {
-        onValueChange?.(opt.value);
-        setOpen(false);
-      },
-      style: {
-        paddingLeft: 12,
-        paddingRight: 12,
-        height: OPTION_H,
-        justifyContent: "center",
-        backgroundColor: opt.value === value ? "#2e3555" : "transparent",
-        borderRadius: 6
-      }
-    }, import_react.default.createElement(Text, {
-      style: { color: opt.value === value ? "#7aa2f7" : "#cdd6f4", fontSize: 14 }
-    }, opt.label)))));
+    }, open ? "▲" : "▼")));
   }
-  function DatePicker({ value = null, onValueChange, disabled = false, style, ...rest }) {
-    const today = value ? new Date(value) : new Date;
-    const [open, setOpen] = import_react.default.useState(false);
-    const [viewYear, setViewYear] = import_react.default.useState(today.getFullYear());
-    const [viewMonth, setViewMonth] = import_react.default.useState(today.getMonth());
+  function _Calendar({ value, onSelect }) {
+    const base = value ? new Date(value) : new Date;
+    const [viewYear, setViewYear] = import_react.useState(base.getFullYear());
+    const [viewMonth, setViewMonth] = import_react.useState(base.getMonth());
     const monthNames = [
       "January",
       "February",
@@ -8113,6 +8337,7 @@ No matching component was found for:
       cells.push(null);
     for (let d = 1;d <= daysInMonth; d++)
       cells.push(d);
+    const rows = Array.from({ length: Math.ceil(cells.length / 7) }, (_, r) => cells.slice(r * 7, r * 7 + 7));
     const prevMonth = () => {
       if (viewMonth === 0) {
         setViewMonth(11);
@@ -8127,92 +8352,83 @@ No matching component was found for:
       } else
         setViewMonth((m) => m + 1);
     };
-    const rowCount = Math.ceil(cells.length / 7);
-    const rows = Array.from({ length: rowCount }, (_, r) => cells.slice(r * 7, r * 7 + 7));
-    const CELL_W = 36;
-    const CELL_H = 32;
-    const CAL_W = CELL_W * 7;
-    const containerNodeId = import_react.useRef(null);
-    const onContainerMount = import_react.useCallback((id) => {
-      containerNodeId.current = id;
-    }, []);
-    import_react.useEffect(() => {
-      if (!open)
-        return;
-      const onGlobalClick = ({ x, y }) => {
-        const layout = typeof __velox_getLayout !== "undefined" ? __velox_getLayout(containerNodeId.current) : null;
-        if (!layout) {
-          setOpen(false);
-          return;
-        }
-        const inside = x >= layout.x && x < layout.x + layout.width && y >= layout.y && y < layout.y + layout.height;
-        if (!inside)
-          setOpen(false);
-      };
-      addGlobalClickListener(onGlobalClick);
-      return () => removeGlobalClickListener(onGlobalClick);
-    }, [open]);
-    const CAL_ROWS_H = Math.ceil(cells.length / 7) * CELL_H;
-    const CAL_TOTAL_H = 8 + 32 + 22 + CAL_ROWS_H + 8;
+    const CELL_W = 36, CELL_H = 32, CAL_W = CELL_W * 7;
+    const sel = value ? new Date(value) : null;
     return import_react.default.createElement(View, {
-      _veloxOnMount: onContainerMount,
-      style,
-      ...rest
-    }, open && import_react.default.createElement(View, {
-      width: CAL_W + 16,
-      height: CAL_TOTAL_H,
-      style: {
-        backgroundColor: "#1e2235",
-        borderRadius: 8,
-        marginBottom: 4,
-        padding: 8,
-        borderWidth: 1,
-        borderColor: "#3c4464"
-      }
+      style: { backgroundColor: "#1e2235", borderRadius: 8, padding: 8, borderWidth: 1, borderColor: "#3c4464" }
     }, import_react.default.createElement(View, {
       width: CAL_W,
       height: 28,
       style: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }
-    }, import_react.default.createElement(Pressable, { onPress: prevMonth, width: 24, height: 28, style: { justifyContent: "center", alignItems: "center" } }, import_react.default.createElement(Text, { style: { color: "#7aa2f7", fontSize: 18 }, width: 20, height: 22 }, "‹")), import_react.default.createElement(Text, { style: { color: "#cdd6f4", fontSize: 13 }, width: CAL_W - 56, height: 18 }, `${monthNames[viewMonth]} ${viewYear}`), import_react.default.createElement(Pressable, { onPress: nextMonth, width: 24, height: 28, style: { justifyContent: "center", alignItems: "center" } }, import_react.default.createElement(Text, { style: { color: "#7aa2f7", fontSize: 18 }, width: 20, height: 22 }, "›"))), import_react.default.createElement(View, { width: CAL_W, height: 20, style: { flexDirection: "row", marginBottom: 2 } }, ...dayNames.map((d) => import_react.default.createElement(View, {
-      key: d,
-      width: CELL_W,
-      height: 20,
-      style: { alignItems: "center", justifyContent: "center" }
-    }, import_react.default.createElement(Text, { style: { color: "#555", fontSize: 10 }, width: CELL_W, height: 14 }, d)))), ...rows.map((row, ri) => import_react.default.createElement(View, {
-      key: ri,
+    }, import_react.default.createElement(Pressable, { onPress: prevMonth, width: 28, height: 28, style: { justifyContent: "center", alignItems: "center" } }, import_react.default.createElement(Text, { height: 22, style: { color: "#7aa2f7", fontSize: 18 } }, "‹")), import_react.default.createElement(Text, { height: 18, style: { color: "#cdd6f4", fontSize: 13 } }, `${monthNames[viewMonth]} ${viewYear}`), import_react.default.createElement(Pressable, { onPress: nextMonth, width: 28, height: 28, style: { justifyContent: "center", alignItems: "center" } }, import_react.default.createElement(Text, { height: 22, style: { color: "#7aa2f7", fontSize: 18 } }, "›"))), import_react.default.createElement(View, { width: CAL_W, height: 20, style: { flexDirection: "row", marginBottom: 2 } }, ...dayNames.map((d) => import_react.default.createElement(View, { key: d, width: CELL_W, height: 20, style: { alignItems: "center", justifyContent: "center" } }, import_react.default.createElement(Text, { height: 14, style: { color: "#666", fontSize: 10, textAlign: "center" } }, d)))), ...rows.map((row, ri) => import_react.default.createElement(View, {
+      key: `${viewYear}-${viewMonth}-${ri}`,
       width: CAL_W,
       height: CELL_H,
       style: { flexDirection: "row" }
     }, ...row.map((day, ci) => {
-      if (day === null) {
-        return import_react.default.createElement(View, { key: ci, width: CELL_W, height: CELL_H });
-      }
-      const selDate = value ? new Date(value) : null;
-      const isSelected = selDate && selDate.getDate() === day && selDate.getMonth() === viewMonth && selDate.getFullYear() === viewYear;
+      if (day === null)
+        return import_react.default.createElement(View, { key: `e${ci}`, width: CELL_W, height: CELL_H });
+      const isSel = sel && sel.getDate() === day && sel.getMonth() === viewMonth && sel.getFullYear() === viewYear;
       return import_react.default.createElement(Pressable, {
         key: ci,
-        onPress: () => {
-          onValueChange?.(new Date(viewYear, viewMonth, day));
-          setOpen(false);
-        },
+        onPress: () => onSelect(new Date(viewYear, viewMonth, day)),
         width: CELL_W,
         height: CELL_H,
-        style: {
-          alignItems: "center",
-          justifyContent: "center",
-          borderRadius: 4,
-          backgroundColor: isSelected ? "#7aa2f7" : "transparent"
-        }
-      }, import_react.default.createElement(Text, {
-        style: { color: isSelected ? "#171923" : "#cdd6f4", fontSize: 13 },
-        width: CELL_W,
-        height: 18
-      }, String(day)));
-    })))), import_react.default.createElement(Pressable, {
-      onPress: () => {
-        if (!disabled)
-          setOpen((o) => !o);
-      },
+        style: { alignItems: "center", justifyContent: "center", borderRadius: 4, backgroundColor: isSel ? "#7aa2f7" : "transparent" }
+      }, import_react.default.createElement(Text, { height: 18, style: { color: isSel ? "#171923" : "#cdd6f4", fontSize: 13, textAlign: "center" } }, String(day)));
+    }))));
+  }
+  function DatePicker({ value = null, onValueChange, disabled = false, style, ...rest }) {
+    const [open, setOpen] = import_react.default.useState(false);
+    const containerNodeId = import_react.useRef(null);
+    const popoverId = import_react.useRef(null);
+    const onContainerMount = import_react.useCallback((id) => {
+      containerNodeId.current = id;
+    }, []);
+    const close2 = () => {
+      if (popoverId.current != null) {
+        closePopover(popoverId.current);
+        popoverId.current = null;
+      }
+    };
+    const toggle = () => {
+      if (disabled)
+        return;
+      if (open) {
+        close2();
+        return;
+      }
+      const l = typeof __velox_getLayout !== "undefined" ? __velox_getLayout(containerNodeId.current) : null;
+      if (!l)
+        return;
+      setOpen(true);
+      popoverId.current = openPopover({
+        x: l.x,
+        y: l.y,
+        h: l.height,
+        width: 36 * 7 + 18,
+        contentH: 8 + 28 + 22 + 6 * 32 + 8,
+        onClose: () => {
+          popoverId.current = null;
+          setOpen(false);
+        },
+        render: () => import_react.default.createElement(_Calendar, {
+          value,
+          onSelect: (d) => {
+            onValueChange?.(d);
+            close2();
+          }
+        })
+      });
+    };
+    import_react.useEffect(() => () => close2(), []);
+    const dlabel = value ? `${new Date(value).getFullYear()}-${String(new Date(value).getMonth() + 1).padStart(2, "0")}-${String(new Date(value).getDate()).padStart(2, "0")}` : "Select date…";
+    return import_react.default.createElement(View, {
+      _veloxOnMount: onContainerMount,
+      style: { alignSelf: "flex-start", width: 240, ...style },
+      ...rest
+    }, import_react.default.createElement(Pressable, {
+      onPress: toggle,
       style: {
         flexDirection: "row",
         justifyContent: "space-between",
@@ -8225,13 +8441,7 @@ No matching component was found for:
         borderWidth: 1,
         borderColor: open ? "#7aa2f7" : "#3c4464"
       }
-    }, import_react.default.createElement(Text, {
-      style: { color: value ? "#e7ecff" : "#666", fontSize: 14 }
-    }, value ? `${new Date(value).getFullYear()}-${String(new Date(value).getMonth() + 1).padStart(2, "0")}-${String(new Date(value).getDate()).padStart(2, "0")}` : "Select date…"), import_react.default.createElement(Text, {
-      style: { color: "#7aa2f7", fontSize: 11 },
-      width: 16,
-      height: 16
-    }, open ? "▲" : "▼")));
+    }, import_react.default.createElement(Text, { height: 20, style: { color: value ? "#e7ecff" : "#9aa0b6", fontSize: 14 } }, dlabel), import_react.default.createElement(Text, { width: 16, height: 16, style: { color: "#7aa2f7", fontSize: 11 } }, open ? "▲" : "▼")));
   }
   function _parseColor(c) {
     if (Array.isArray(c))
@@ -12780,18 +12990,21 @@ No matching component was found for:
     const tone = color ?? C2.accent;
     return /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
       onPress: disabled ? undefined : onPress,
-      width: w,
       height: 34,
       style: {
         backgroundColor: disabled ? C2.surface : filled ? C2.overlay : C2.surfaceAlt,
         borderRadius: 6,
         borderWidth: 1,
-        borderColor: disabled ? C2.border : tone
+        borderColor: disabled ? C2.border : tone,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "center",
+        paddingHorizontal: 14,
+        flexShrink: 0,
+        minWidth: w
       },
       children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
         fontSize: 12,
-        width: w - 16,
-        height: 18,
         style: { color: disabled ? C2.dim : tone },
         children: label
       })
@@ -14350,7 +14563,7 @@ Ranking: cosine similarity across stored note vectors.`
                 ],
                 onValueChange: setSelectVal,
                 placeholder: "Pick a theme…",
-                style: { width: inner }
+                style: { width: 300 }
               }),
               selectVal && /* @__PURE__ */ jsx_runtime.jsx(Text, {
                 fontSize: 12,
@@ -14362,7 +14575,7 @@ Ranking: cosine similarity across stored note vectors.`
               /* @__PURE__ */ jsx_runtime.jsx(Select, {
                 disabled: true,
                 placeholder: "Disabled select",
-                style: { width: inner }
+                style: { width: 300 }
               })
             ]
           }),
@@ -14372,7 +14585,7 @@ Ranking: cosine similarity across stored note vectors.`
               /* @__PURE__ */ jsx_runtime.jsx(DatePicker, {
                 value: dateVal,
                 onValueChange: setDateVal,
-                style: { width: inner }
+                style: { width: 300 }
               }),
               dateVal && /* @__PURE__ */ jsx_runtime.jsx(Text, {
                 fontSize: 12,
@@ -17085,10 +17298,9 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
                 onPress: toggleFullscreen,
                 width: 100,
                 height: 30,
-                style: { backgroundColor: fullscreen ? C2.surfaceAlt : C2.surface, borderRadius: 6, borderWidth: 1, borderColor: C2.mauve },
+                style: { backgroundColor: fullscreen ? C2.surfaceAlt : C2.surface, borderRadius: 6, borderWidth: 1, borderColor: C2.mauve, flexDirection: "row", alignItems: "center", justifyContent: "center" },
                 children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
                   fontSize: 12,
-                  width: 84,
                   height: 18,
                   style: { color: fullscreen ? C2.mauve : C2.text },
                   children: fullscreen ? "Exit Full" : "Fullscreen"
@@ -17098,10 +17310,9 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
                 onPress: toggleMaximize,
                 width: 96,
                 height: 30,
-                style: { backgroundColor: maximized ? C2.surfaceAlt : C2.surface, borderRadius: 6, borderWidth: 1, borderColor: C2.green },
+                style: { backgroundColor: maximized ? C2.surfaceAlt : C2.surface, borderRadius: 6, borderWidth: 1, borderColor: C2.green, flexDirection: "row", alignItems: "center", justifyContent: "center" },
                 children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
                   fontSize: 12,
-                  width: 80,
                   height: 18,
                   style: { color: maximized ? C2.green : C2.text },
                   children: maximized ? "Restore" : "Maximize"
@@ -17111,10 +17322,9 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
                 onPress: () => veloxWindow.setMinimized(),
                 width: 84,
                 height: 30,
-                style: { backgroundColor: C2.surface, borderRadius: 6, borderWidth: 1, borderColor: C2.border },
+                style: { backgroundColor: C2.surface, borderRadius: 6, borderWidth: 1, borderColor: C2.border, flexDirection: "row", alignItems: "center", justifyContent: "center" },
                 children: /* @__PURE__ */ jsx_runtime.jsx(Text, {
                   fontSize: 12,
-                  width: 68,
                   height: 18,
                   style: { color: C2.text },
                   children: "Minimize"

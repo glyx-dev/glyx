@@ -73,23 +73,33 @@ pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::
             if let Some(h) = props.height { style.size.height = to_dim(h); }
 
             // ── Margin ────────────────────────────────────────────────────
-            // Uniform margin acts as the baseline; per-side values override.
-            let m = props.margin;
+            // Precedence: per-side > horizontal/vertical shorthand > uniform.
+            // Default is 0 (CSS default). NOTE: do NOT default to `auto` — auto
+            // margins absorb flex free space and override the parent's
+            // justifyContent/alignItems, which silently breaks centering of
+            // child Views (checkbox indicators, switch knobs, etc.).
+            let m  = props.margin;
+            let mh = props.margin_horizontal;
+            let mv = props.margin_vertical;
+            let zero_a = LengthPercentageAuto::length(0.0);
             style.margin = Rect {
-                left:   props.margin_left.or(m).map_or(LengthPercentageAuto::auto(), to_lpa),
-                right:  props.margin_right.or(m).map_or(LengthPercentageAuto::auto(), to_lpa),
-                top:    props.margin_top.or(m).map_or(LengthPercentageAuto::auto(), to_lpa),
-                bottom: props.margin_bottom.or(m).map_or(LengthPercentageAuto::auto(), to_lpa),
+                left:   props.margin_left.or(mh).or(m).map_or(zero_a, to_lpa),
+                right:  props.margin_right.or(mh).or(m).map_or(zero_a, to_lpa),
+                top:    props.margin_top.or(mv).or(m).map_or(zero_a, to_lpa),
+                bottom: props.margin_bottom.or(mv).or(m).map_or(zero_a, to_lpa),
             };
 
             // ── Padding ───────────────────────────────────────────────────
-            // Uniform `padding` acts as baseline; per-side values override.
-            let p = props.padding;
+            // Precedence: per-side > horizontal/vertical shorthand > uniform.
+            let p  = props.padding;
+            let ph = props.padding_horizontal;
+            let pv = props.padding_vertical;
+            let zero_p = LengthPercentage::length(0.0);
             style.padding = Rect {
-                left:   props.padding_left.or(p).map_or(LengthPercentage::length(0.0), to_lp),
-                right:  props.padding_right.or(p).map_or(LengthPercentage::length(0.0), to_lp),
-                top:    props.padding_top.or(p).map_or(LengthPercentage::length(0.0), to_lp),
-                bottom: props.padding_bottom.or(p).map_or(LengthPercentage::length(0.0), to_lp),
+                left:   props.padding_left.or(ph).or(p).map_or(zero_p, to_lp),
+                right:  props.padding_right.or(ph).or(p).map_or(zero_p, to_lp),
+                top:    props.padding_top.or(pv).or(p).map_or(zero_p, to_lp),
+                bottom: props.padding_bottom.or(pv).or(p).map_or(zero_p, to_lp),
             };
 
             // ── Min / max dimensions ──────────────────────────────────────
@@ -240,13 +250,15 @@ pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::
             // ── Margin ────────────────────────────────────────────────────
             // Text/Image/etc. default to zero margin — `margin: auto` on a leaf
             // node absorbs flex space and breaks parent `alignItems: center`.
-            let m = props.margin;
+            let m  = props.margin;
+            let mh = props.margin_horizontal;
+            let mv = props.margin_vertical;
             let zero = LengthPercentageAuto::length(0.0);
             style.margin = Rect {
-                left:   props.margin_left.or(m).map_or(zero, to_lpa),
-                right:  props.margin_right.or(m).map_or(zero, to_lpa),
-                top:    props.margin_top.or(m).map_or(zero, to_lpa),
-                bottom: props.margin_bottom.or(m).map_or(zero, to_lpa),
+                left:   props.margin_left.or(mh).or(m).map_or(zero, to_lpa),
+                right:  props.margin_right.or(mh).or(m).map_or(zero, to_lpa),
+                top:    props.margin_top.or(mv).or(m).map_or(zero, to_lpa),
+                bottom: props.margin_bottom.or(mv).or(m).map_or(zero, to_lpa),
             };
 
             // ── Position (absolute/relative) ──────────────────────────────
@@ -407,10 +419,18 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
             return Size::ZERO;
         };
 
-        let max_w = known_dims.width.unwrap_or(match available.width {
-            AvailableSpace::Definite(w) => w,
-            _                          => f32::MAX,
-        });
+        // CSS-like intrinsic sizing so Text auto-fits without an explicit width:
+        //   Definite   → wrap to that width
+        //   MaxContent → single line (natural width)
+        //   MinContent → longest word (fully wrapped)  [max_width≈0 forces this]
+        let max_w = match known_dims.width {
+            Some(w) => w,
+            None => match available.width {
+                AvailableSpace::Definite(w) => w,
+                AvailableSpace::MaxContent  => f32::MAX,
+                AvailableSpace::MinContent  => 0.0,
+            },
+        };
 
         let (tw, th) = text_sys.measure(&ctx.text, ctx.font_size, max_w);
         let th = if let Some(max_h) = ctx.max_height { th.min(max_h) } else { th };

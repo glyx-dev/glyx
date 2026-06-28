@@ -295,15 +295,20 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             };
 
             let child_scroll_y = {
-                let raw = scroll_y + node.props.scroll_offset_y.unwrap_or(0.0) as f64;
+                // Inherited scroll (from outer ScrollViews) must always pass through;
+                // clamp only THIS node's own scroll offset against its own overflow.
+                // Otherwise a small clip:true box inside a scrolled ancestor would
+                // reset its children to the un-scrolled position (text drifts out of
+                // the box and appears to vanish).
+                let own = node.props.scroll_offset_y.unwrap_or(0.0) as f64;
                 if is_clip && max_child_bottom.is_finite() {
                     let pad   = match node.props.padding { Some(LengthValue::Px(px)) => px as f64, _ => 0.0 };
                     let max_s = (max_child_bottom + pad - (rl.y as f64 + rh)).max(0.0);
-                    raw.min(max_s).max(0.0)
+                    scroll_y + own.min(max_s).max(0.0)
                 } else if is_clip {
-                    raw.max(0.0)
+                    scroll_y + own.max(0.0)
                 } else {
-                    raw
+                    scroll_y + own
                 }
             };
 
@@ -399,8 +404,11 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             let text       = node.props.text.as_deref().unwrap_or("Text");
             let font_size  = node.props.font_size.unwrap_or(16.0);
             let color      = node.props.color.unwrap_or([255, 255, 255, 255]);
-            let max_width  = rw.max(1.0) as f32;
-            let left_align = node.props.text_align.as_deref() == Some("left");
+            // +1px guards against Taffy rounding shaving a sub-pixel off the
+            // measured width and wrapping the last word of an auto-sized Text.
+            let max_width  = (rw as f32).max(1.0) + 1.0;
+            // CSS default is left; center/right are opt-in via `textAlign`.
+            let align = node.props.text_align.as_deref();
             let show_cursor     = node.props.show_cursor.unwrap_or(false);
             let cursor_position = node.props.cursor_position.map(|p| p as usize);
             let selection_start = node.props.selection_start.map(|p| p as usize);
@@ -416,10 +424,10 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
 
             let bw = rw;
             let bh = rh;
-            let tx = if left_align {
-                rx
-            } else {
-                rx + (bw - label.width).max(0.0) / 2.0
+            let tx = match align {
+                Some("center") => rx + (bw - label.width).max(0.0) / 2.0,
+                Some("right")  => rx + (bw - label.width).max(0.0),
+                _              => rx,   // left (CSS default)
             };
             // Vertically center the text's line box within the node box. `draw_text`
             // treats ty as the layout top (glyphs at ty + baseline), so standard

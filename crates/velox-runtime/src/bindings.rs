@@ -291,6 +291,9 @@ pub struct NodeProps {
     // ── Margin (uniform + per-side, px or %) ────────────────────────────────
     /// Uniform margin (applied to all four sides).
     pub margin: Option<LengthValue>,
+    /// Axis shorthands (override uniform; overridden by per-side).
+    pub margin_horizontal: Option<LengthValue>,
+    pub margin_vertical:   Option<LengthValue>,
     /// Per-side margins override the uniform `margin` value.
     pub margin_left:   Option<LengthValue>,
     pub margin_right:  Option<LengthValue>,
@@ -298,6 +301,9 @@ pub struct NodeProps {
     pub margin_bottom: Option<LengthValue>,
 
     // ── Per-side padding (px or %, overrides uniform `padding`) ─────────────
+    /// Axis shorthands (override uniform; overridden by per-side).
+    pub padding_horizontal: Option<LengthValue>,
+    pub padding_vertical:   Option<LengthValue>,
     pub padding_left:   Option<LengthValue>,
     pub padding_right:  Option<LengthValue>,
     pub padding_top:    Option<LengthValue>,
@@ -1316,13 +1322,17 @@ fn parse_props(
     props.video_handle    = get_num_prop(scope, obj, "videoHandle").map(|v| v as u32);
 
     // ── Margin ─────────────────────────────────────────────────────────────
-    props.margin          = get_length_prop(scope, obj, "margin");
-    props.margin_left     = get_length_prop(scope, obj, "marginLeft");
-    props.margin_right    = get_length_prop(scope, obj, "marginRight");
-    props.margin_top      = get_length_prop(scope, obj, "marginTop");
-    props.margin_bottom   = get_length_prop(scope, obj, "marginBottom");
+    props.margin            = get_length_prop(scope, obj, "margin");
+    props.margin_horizontal = get_length_prop(scope, obj, "marginHorizontal");
+    props.margin_vertical   = get_length_prop(scope, obj, "marginVertical");
+    props.margin_left       = get_length_prop(scope, obj, "marginLeft");
+    props.margin_right      = get_length_prop(scope, obj, "marginRight");
+    props.margin_top        = get_length_prop(scope, obj, "marginTop");
+    props.margin_bottom     = get_length_prop(scope, obj, "marginBottom");
 
     // ── Per-side padding ──────────────────────────────────────────────────
+    props.padding_horizontal = get_length_prop(scope, obj, "paddingHorizontal");
+    props.padding_vertical   = get_length_prop(scope, obj, "paddingVertical");
     props.padding_left    = get_length_prop(scope, obj, "paddingLeft");
     props.padding_right   = get_length_prop(scope, obj, "paddingRight");
     props.padding_top     = get_length_prop(scope, obj, "paddingTop");

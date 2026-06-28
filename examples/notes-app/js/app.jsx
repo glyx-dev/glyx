@@ -17,7 +17,7 @@
 
 import React, { useState, useEffect, useContext, createContext, useCallback, useMemo } from 'react';
 import {
-  View, Text, Pressable, TextInput, ScrollView, render, useWindowSize, useMediaQuery,
+  View, Text, Pressable, TextInput, ScrollView, render, useWindowSize, useMediaQuery, measureText,
   db, vectorDb, fs, dialog, clipboard, notification, veloxWindow, fetch, ws, mdns, ipc,
   battery, system, power, storage, input, perf, deeplink, credentials, crash,
   Checkbox, Switch, RadioGroup, Radio, FileInput, audio,
@@ -164,16 +164,21 @@ function Btn({ label, onPress, width: w = 100, color, disabled = false, filled =
   return (
     <Pressable
       onPress={disabled ? undefined : onPress}
-      width={w}
       height={34}
       style={{
         backgroundColor: disabled ? C.surface : (filled ? C.overlay : C.surfaceAlt),
         borderRadius:     6,
         borderWidth:      1,
         borderColor:      disabled ? C.border : tone,
+        flexDirection:   'row',
+        alignItems:      'center',
+        justifyContent:  'center',
+        paddingHorizontal: 14,
+        flexShrink:      0,    // buttons keep their content width in tight rows
+        minWidth:        w,    // grows past this to fit the label (auto-width Text)
       }}
     >
-      <Text fontSize={12} width={w - 16} height={18} style={{ color: disabled ? C.dim : tone }}>
+      <Text fontSize={12} style={{ color: disabled ? C.dim : tone }}>
         {label}
       </Text>
     </Pressable>
@@ -1357,21 +1362,21 @@ function FormDemoScreen() {
             ]}
             onValueChange={setSelectVal}
             placeholder="Pick a theme…"
-            style={{ width: inner }}
+            style={{ width: 300 }}
           />
           {selectVal && (
             <Text fontSize={12} width={inner} height={18} style={{ color: C.teal }}>
               {'Selected: ' + selectVal}
             </Text>
           )}
-          <Select disabled placeholder="Disabled select" style={{ width: inner }} />
+          <Select disabled placeholder="Disabled select" style={{ width: 300 }} />
         </FormSection>
 
         <FormSection title="DATE PICKER">
           <DatePicker
             value={dateVal}
             onValueChange={setDateVal}
-            style={{ width: inner }}
+            style={{ width: 300 }}
           />
           {dateVal && (
             <Text fontSize={12} width={inner} height={18} style={{ color: C.teal }}>
@@ -3277,9 +3282,9 @@ function App() {
               onPress={toggleFullscreen}
               width={100}
               height={30}
-              style={{ backgroundColor: fullscreen ? C.surfaceAlt : C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.mauve }}
+              style={{ backgroundColor: fullscreen ? C.surfaceAlt : C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.mauve, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}
             >
-              <Text fontSize={12} width={84} height={18} style={{ color: fullscreen ? C.mauve : C.text }}>
+              <Text fontSize={12} height={18} style={{ color: fullscreen ? C.mauve : C.text }}>
                 {fullscreen ? 'Exit Full' : 'Fullscreen'}
               </Text>
             </Pressable>
@@ -3287,9 +3292,9 @@ function App() {
               onPress={toggleMaximize}
               width={96}
               height={30}
-              style={{ backgroundColor: maximized ? C.surfaceAlt : C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.green }}
+              style={{ backgroundColor: maximized ? C.surfaceAlt : C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.green, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}
             >
-              <Text fontSize={12} width={80} height={18} style={{ color: maximized ? C.green : C.text }}>
+              <Text fontSize={12} height={18} style={{ color: maximized ? C.green : C.text }}>
                 {maximized ? 'Restore' : 'Maximize'}
               </Text>
             </Pressable>
@@ -3297,9 +3302,9 @@ function App() {
               onPress={() => veloxWindow.setMinimized()}
               width={84}
               height={30}
-              style={{ backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.border }}
+              style={{ backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}
             >
-              <Text fontSize={12} width={68} height={18} style={{ color: C.text }}>
+              <Text fontSize={12} height={18} style={{ color: C.text }}>
                 Minimize
               </Text>
             </Pressable>

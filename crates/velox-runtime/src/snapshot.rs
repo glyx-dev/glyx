@@ -129,6 +129,7 @@ globalThis.__velox_window_close     = function() {};
 globalThis.__velox_restart          = function() {};
 globalThis.__velox_platform         = function() { return ''; };
 globalThis.__velox_collect_memory   = function() {};
+globalThis.__velox_open_external    = function() {};
 
 // Deep link bindings
 globalThis.__velox_deeplink_getInitialUrl = function() { return ''; };

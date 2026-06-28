@@ -410,9 +410,12 @@ export function dispatchEvents() {
       case 'mouseButton': {
         if (!ev.pressed) break; // react only to press-down for now
 
-        // Notify global click listeners first (e.g. to close open dropdowns).
+        const isRight = ev.button === 1; // 0 = left, 1 = right, 2 = middle
+
+        // Notify global click listeners first (e.g. to close open dropdowns /
+        // context menus). `button` lets listeners distinguish right-clicks.
         if (globalClickListeners.length > 0) {
-          const gev = { x: ev.x, y: ev.y };
+          const gev = { x: ev.x, y: ev.y, button: ev.button };
           for (const fn of globalClickListeners) try { fn(gev); } catch {}
         }
 
@@ -434,11 +437,14 @@ export function dispatchEvents() {
             const ph = pressableRegistry.get(pressableTarget);
             if (ph && !isDisabled(pressableTarget)) {
               const layout = __velox_getLayout(pressableTarget);
-              ph.onPress?.({
+              const pev = {
                 x: ev.x, y: ev.y,
                 locationX: layout ? ev.x - layout.x : 0,
                 locationY: layout ? ev.y - layout.y : 0,
-              });
+              };
+              // Right-click → onRightPress (if present); otherwise left → onPress.
+              if (isRight) ph.onRightPress?.(pev);
+              else         ph.onPress?.(pev);
             }
           }
 

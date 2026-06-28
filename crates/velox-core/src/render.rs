@@ -421,11 +421,11 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             } else {
                 rx + (bw - label.width).max(0.0) / 2.0
             };
-            let ty = if bh <= label.text_height + 2.0 {
-                ry
-            } else {
-                ry + (bh - label.ascent).max(0.0) / 2.0
-            };
+            // Vertically center the text's line box within the node box. `draw_text`
+            // treats ty as the layout top (glyphs at ty + baseline), so standard
+            // line-box centering is (bh - text_height)/2. For content-sized boxes
+            // (bh ≈ text_height) this is ~0, leaving text at the top as before.
+            let ty = ry + (bh - label.text_height).max(0.0) / 2.0;
 
             let label_width = label.width;
             // Cursor/selection positioned using font metrics (not the line-box)
@@ -486,7 +486,18 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             ctx.frame.push_layer(rx, ry, rw, rh);
             if let Some(cmds) = ctx.canvas_cmds.get(&id) {
                 for cmd in cmds {
-                    draw_canvas_cmd(ctx.frame, cmd, rx, ry);
+                    // `fillText` needs the TextSystem to shape real glyphs, so it's
+                    // handled here (where ctx is available) rather than in the
+                    // frame-only `draw_canvas_cmd`. Everything else is frame-only.
+                    if let CanvasCmd::FillText { text, x, y, font_size, color } = cmd {
+                        let layout = ctx.text_sys.label(text, *font_size);
+                        ctx.frame.draw_text(
+                            &layout, rx + *x as f64, ry + *y as f64,
+                            apply_opacity(rgba_to_vello(*color), child_opacity),
+                        );
+                    } else {
+                        draw_canvas_cmd(ctx.frame, cmd, rx, ry);
+                    }
                 }
             }
             ctx.frame.pop_layer();

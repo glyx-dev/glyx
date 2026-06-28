@@ -5967,8 +5967,9 @@ No matching component was found for:
         case "mouseButton": {
           if (!ev.pressed)
             break;
+          const isRight = ev.button === 1;
           if (globalClickListeners.length > 0) {
-            const gev = { x: ev.x, y: ev.y };
+            const gev = { x: ev.x, y: ev.y, button: ev.button };
             for (const fn of globalClickListeners)
               try {
                 fn(gev);
@@ -5976,15 +5977,25 @@ No matching component was found for:
           }
           const topmostId = findTopmostSolid(ev.x, ev.y);
           if (topmostId !== null) {
-            const ph = pressableRegistry.get(topmostId);
-            if (ph && !isDisabled(topmostId)) {
-              const layout = __velox_getLayout(topmostId);
-              ph.onPress?.({
-                x: ev.x,
-                y: ev.y,
-                locationX: layout ? ev.x - layout.x : 0,
-                locationY: layout ? ev.y - layout.y : 0
-              });
+            let pressableTarget = topmostId;
+            while (pressableTarget !== undefined && !pressableRegistry.has(pressableTarget)) {
+              pressableTarget = parentMap.get(pressableTarget);
+            }
+            if (pressableTarget !== undefined) {
+              const ph = pressableRegistry.get(pressableTarget);
+              if (ph && !isDisabled(pressableTarget)) {
+                const layout = __velox_getLayout(pressableTarget);
+                const pev = {
+                  x: ev.x,
+                  y: ev.y,
+                  locationX: layout ? ev.x - layout.x : 0,
+                  locationY: layout ? ev.y - layout.y : 0
+                };
+                if (isRight)
+                  ph.onRightPress?.(pev);
+                else
+                  ph.onPress?.(pev);
+              }
             }
             const ih = inputRegistry.get(topmostId);
             if (ih && !isDisabled(topmostId)) {
@@ -6085,7 +6096,11 @@ No matching component was found for:
     }
     if (cursorMovedThisFrame) {
       const topSolid = findTopmostSolid(cursorX, cursorY);
-      const newHoveredId = topSolid !== null && !isDisabled(topSolid) && pressableRegistry.has(topSolid) ? topSolid : null;
+      let hoverId = topSolid;
+      while (hoverId !== undefined && !pressableRegistry.has(hoverId)) {
+        hoverId = parentMap.get(hoverId);
+      }
+      const newHoveredId = hoverId !== undefined && !isDisabled(hoverId) ? hoverId : null;
       if (newHoveredId !== hoveredPressableId) {
         if (hoveredPressableId !== null) {
           pressableRegistry.get(hoveredPressableId)?.onHoverOut?.();
@@ -6517,7 +6532,9 @@ No matching component was found for:
     getWindowSize: () => typeof __velox_getWindowSize !== "undefined" ? __velox_getWindowSize() : { width: 0, height: 0 },
     getScreenSize: () => typeof __velox_getScreenSize !== "undefined" ? __velox_getScreenSize() : { width: 0, height: 0 },
     setAlwaysOnTop: (on) => typeof __velox_setAlwaysOnTop !== "undefined" && __velox_setAlwaysOnTop(on),
-    setTitle: (title) => typeof __velox_setTitle !== "undefined" && __velox_setTitle(title)
+    setTitle: (title) => typeof __velox_setTitle !== "undefined" && __velox_setTitle(title),
+    collectMemory: () => typeof __velox_collect_memory !== "undefined" && __velox_collect_memory(),
+    openExternal: (url) => typeof __velox_open_external !== "undefined" && __velox_open_external(url)
   };
   var _noBinding = (name) => Promise.reject(new Error(`${name}: binding not available`));
   function _pollWebSockets() {
@@ -6891,45 +6908,291 @@ No matching component was found for:
     }
     return [255, 255, 255, 255];
   }
+  var _OP_CLEAR = 0;
+  var _OP_FILLRECT = 1;
+  var _OP_STROKERECT = 2;
+  var _OP_FILLCIRCLE = 3;
+  var _OP_STROKECIRCLE = 4;
+  var _OP_STROKELINE = 5;
+  var _OP_FILLTEXT = 6;
+  var _OP_FILLPATH = 7;
+  var _OP_STROKEPATH = 8;
+  function _packColor(c) {
+    const col = _parseColor(c);
+    return (col[0] & 255 | (col[1] & 255) << 8 | (col[2] & 255) << 16 | (col[3] & 255) << 24) >>> 0;
+  }
+  var _canvasBin;
+  function _canvasBinaryEnv() {
+    if (_canvasBin !== undefined)
+      return _canvasBin;
+    const ok = typeof __velox_canvas_protocol !== "undefined" && __velox_canvas_protocol === "binary" && typeof __velox_canvas_cmdbuf_f32 !== "undefined" && typeof __velox_canvas_cmdbuf_u32 !== "undefined" && typeof __velox_canvas_strbuf !== "undefined" && typeof __velox_canvas_flush !== "undefined";
+    _canvasBin = ok ? {
+      f32: __velox_canvas_cmdbuf_f32,
+      u32: __velox_canvas_cmdbuf_u32,
+      str: __velox_canvas_strbuf,
+      cap: __velox_canvas_cmdbuf_f32.length,
+      strCap: __velox_canvas_strbuf.length,
+      enc: typeof TextEncoder !== "undefined" ? new TextEncoder : null
+    } : false;
+    return _canvasBin;
+  }
 
   class VeloxCanvasContext {
     constructor(nativeId) {
       this._id = nativeId;
+      this._bin = _canvasBinaryEnv();
       this._cmds = [];
+      this._fc = 0;
+      this._sc = 0;
+      this._firstChunk = true;
+      this._path = [];
+      this._pathClosed = false;
       this.fillStyle = [255, 255, 255, 255];
       this.strokeStyle = [255, 255, 255, 255];
       this.lineWidth = 1;
     }
+    _ensure(slots) {
+      if (this._fc + slots > this._bin.cap)
+        this._flushChunk();
+    }
+    _flushChunk() {
+      const b = this._bin;
+      try {
+        __velox_canvas_flush(this._id, b.f32, this._fc, b.str, this._sc, !this._firstChunk);
+      } catch (e) {
+        __velox_log("[canvas] flush error: " + e);
+      }
+      this._firstChunk = false;
+      this._fc = 0;
+      this._sc = 0;
+    }
     clear() {
-      this._cmds = [{ type: "clear" }];
+      if (!this._bin) {
+        this._cmds.length = 0;
+        this._cmds.push({ type: "clear" });
+        return;
+      }
+      this._fc = 0;
+      this._sc = 0;
+      this._firstChunk = true;
+      this._bin.f32[0] = _OP_CLEAR;
+      this._fc = 1;
     }
     fillRect(x, y, w, h) {
-      this._cmds.push({ type: "fillRect", x, y, w, h, color: _parseColor(this.fillStyle) });
+      if (!this._bin) {
+        this._cmds.push({ type: "fillRect", x, y, w, h, color: _parseColor(this.fillStyle) });
+        return;
+      }
+      this._ensure(6);
+      const f = this._bin.f32, p = this._fc;
+      f[p] = _OP_FILLRECT;
+      f[p + 1] = x;
+      f[p + 2] = y;
+      f[p + 3] = w;
+      f[p + 4] = h;
+      this._bin.u32[p + 5] = _packColor(this.fillStyle);
+      this._fc = p + 6;
     }
     strokeRect(x, y, w, h) {
-      this._cmds.push({ type: "strokeRect", x, y, w, h, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+      if (!this._bin) {
+        this._cmds.push({ type: "strokeRect", x, y, w, h, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+        return;
+      }
+      this._ensure(7);
+      const f = this._bin.f32, p = this._fc;
+      f[p] = _OP_STROKERECT;
+      f[p + 1] = x;
+      f[p + 2] = y;
+      f[p + 3] = w;
+      f[p + 4] = h;
+      this._bin.u32[p + 5] = _packColor(this.strokeStyle);
+      f[p + 6] = this.lineWidth;
+      this._fc = p + 7;
     }
     fillCircle(cx, cy, r) {
-      this._cmds.push({ type: "fillCircle", cx, cy, r, color: _parseColor(this.fillStyle) });
+      if (!this._bin) {
+        this._cmds.push({ type: "fillCircle", cx, cy, r, color: _parseColor(this.fillStyle) });
+        return;
+      }
+      this._ensure(5);
+      const f = this._bin.f32, p = this._fc;
+      f[p] = _OP_FILLCIRCLE;
+      f[p + 1] = cx;
+      f[p + 2] = cy;
+      f[p + 3] = r;
+      this._bin.u32[p + 4] = _packColor(this.fillStyle);
+      this._fc = p + 5;
     }
     strokeCircle(cx, cy, r) {
-      this._cmds.push({ type: "strokeCircle", cx, cy, r, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+      if (!this._bin) {
+        this._cmds.push({ type: "strokeCircle", cx, cy, r, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+        return;
+      }
+      this._ensure(6);
+      const f = this._bin.f32, p = this._fc;
+      f[p] = _OP_STROKECIRCLE;
+      f[p + 1] = cx;
+      f[p + 2] = cy;
+      f[p + 3] = r;
+      this._bin.u32[p + 4] = _packColor(this.strokeStyle);
+      f[p + 5] = this.lineWidth;
+      this._fc = p + 6;
     }
     strokeLine(x0, y0, x1, y1) {
-      this._cmds.push({ type: "strokeLine", x0, y0, x1, y1, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+      if (!this._bin) {
+        this._cmds.push({ type: "strokeLine", x0, y0, x1, y1, color: _parseColor(this.strokeStyle), lineWidth: this.lineWidth });
+        return;
+      }
+      this._ensure(7);
+      const f = this._bin.f32, p = this._fc;
+      f[p] = _OP_STROKELINE;
+      f[p + 1] = x0;
+      f[p + 2] = y0;
+      f[p + 3] = x1;
+      f[p + 4] = y1;
+      this._bin.u32[p + 5] = _packColor(this.strokeStyle);
+      f[p + 6] = this.lineWidth;
+      this._fc = p + 7;
     }
     fillText(text, x, y, fontSize = 16) {
-      this._cmds.push({ type: "fillText", text: String(text), x, y, fontSize, color: _parseColor(this.fillStyle) });
+      if (!this._bin) {
+        this._cmds.push({ type: "fillText", text: String(text), x, y, fontSize, color: _parseColor(this.fillStyle) });
+        return;
+      }
+      const b = this._bin, s = String(text);
+      if (this._fc + 7 > b.cap || this._sc + s.length * 4 > b.strCap)
+        this._flushChunk();
+      const off = this._sc;
+      let len = 0;
+      if (b.enc) {
+        len = b.enc.encodeInto(s, b.str.subarray(this._sc)).written | 0;
+      }
+      this._sc += len;
+      const f = b.f32, p = this._fc;
+      f[p] = _OP_FILLTEXT;
+      f[p + 1] = x;
+      f[p + 2] = y;
+      f[p + 3] = fontSize;
+      b.u32[p + 4] = _packColor(this.fillStyle);
+      f[p + 5] = off;
+      f[p + 6] = len;
+      this._fc = p + 7;
+    }
+    beginPath() {
+      this._path.length = 0;
+      this._pathClosed = false;
+    }
+    moveTo(x, y) {
+      this._path.push(x, y);
+    }
+    lineTo(x, y) {
+      this._path.push(x, y);
+    }
+    closePath() {
+      this._pathClosed = true;
+    }
+    arc(cx, cy, r, a0, a1, ccw = false) {
+      let start = a0, end = a1;
+      if (ccw && end > start)
+        end -= Math.PI * 2;
+      if (!ccw && end < start)
+        end += Math.PI * 2;
+      const sweep = Math.abs(end - start);
+      const segs = Math.max(6, Math.ceil(sweep / (Math.PI / 16)));
+      for (let i = 0;i <= segs; i++) {
+        const t = start + (end - start) * (i / segs);
+        this._path.push(cx + Math.cos(t) * r, cy + Math.sin(t) * r);
+      }
+    }
+    quadraticCurveTo(cpx, cpy, x, y) {
+      const n = this._path.length;
+      const x0 = n >= 2 ? this._path[n - 2] : cpx;
+      const y0 = n >= 2 ? this._path[n - 1] : cpy;
+      const segs = 16;
+      for (let i = 1;i <= segs; i++) {
+        const t = i / segs, mt = 1 - t;
+        this._path.push(mt * mt * x0 + 2 * mt * t * cpx + t * t * x, mt * mt * y0 + 2 * mt * t * cpy + t * t * y);
+      }
+    }
+    bezierCurveTo(c1x, c1y, c2x, c2y, x, y) {
+      const n = this._path.length;
+      const x0 = n >= 2 ? this._path[n - 2] : c1x;
+      const y0 = n >= 2 ? this._path[n - 1] : c1y;
+      const segs = 20;
+      for (let i = 1;i <= segs; i++) {
+        const t = i / segs, mt = 1 - t;
+        const a = mt * mt * mt, b = 3 * mt * mt * t, c = 3 * mt * t * t, d = t * t * t;
+        this._path.push(a * x0 + b * c1x + c * c2x + d * x, a * y0 + b * c1y + c * c2y + d * y);
+      }
+    }
+    fill() {
+      if (this._path.length < 6)
+        return;
+      if (this._bin) {
+        const count = this._path.length >> 1;
+        const slots = 3 + this._path.length;
+        if (slots > this._bin.cap)
+          return;
+        if (this._fc + slots > this._bin.cap)
+          this._flushChunk();
+        const f = this._bin.f32, p = this._fc;
+        f[p] = _OP_FILLPATH;
+        f[p + 1] = count;
+        this._bin.u32[p + 2] = _packColor(this.fillStyle);
+        const o = p + 3;
+        for (let k = 0;k < this._path.length; k++)
+          f[o + k] = this._path[k];
+        this._fc = o + this._path.length;
+      } else {
+        this._cmds.push({ type: "fillPath", points: this._path.slice(), color: _parseColor(this.fillStyle) });
+      }
+    }
+    stroke() {
+      if (this._path.length < 4)
+        return;
+      if (this._bin) {
+        const count = this._path.length >> 1;
+        const slots = 5 + this._path.length;
+        if (slots > this._bin.cap)
+          return;
+        if (this._fc + slots > this._bin.cap)
+          this._flushChunk();
+        const f = this._bin.f32, p = this._fc;
+        f[p] = _OP_STROKEPATH;
+        f[p + 1] = count;
+        this._bin.u32[p + 2] = _packColor(this.strokeStyle);
+        f[p + 3] = this.lineWidth;
+        f[p + 4] = this._pathClosed ? 1 : 0;
+        const o = p + 5;
+        for (let k = 0;k < this._path.length; k++)
+          f[o + k] = this._path[k];
+        this._fc = o + this._path.length;
+      } else {
+        this._cmds.push({
+          type: "strokePath",
+          points: this._path.slice(),
+          color: _parseColor(this.strokeStyle),
+          lineWidth: this.lineWidth,
+          closed: this._pathClosed
+        });
+      }
     }
     flush() {
-      if (typeof __velox_canvas_update === "undefined")
+      if (this._bin) {
+        this._flushChunk();
+        this._firstChunk = true;
         return;
+      }
+      if (typeof __velox_canvas_update === "undefined") {
+        this._cmds.length = 0;
+        return;
+      }
       try {
         __velox_canvas_update(this._id, JSON.stringify(this._cmds));
       } catch (e) {
         __velox_log("[canvas] flush error: " + e);
       }
-      this._cmds = [];
+      this._cmds.length = 0;
     }
   }
   var Canvas = import_react.default.forwardRef(function Canvas2({ style, ...props }, ref) {

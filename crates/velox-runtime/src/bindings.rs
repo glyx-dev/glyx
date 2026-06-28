@@ -908,6 +908,7 @@ pub fn register_all(
     register!("__velox_restart",         restart_callback);
     register!("__velox_platform",        platform_callback);
     register!("__velox_collect_memory",  collect_memory_callback);
+    register!("__velox_open_external",   open_external_callback);
 
     // ── Deep links ───────────────────────────────────────────────────────────
     register!("__velox_deeplink_getInitialUrl", deeplink_get_initial_url_callback);
@@ -4285,6 +4286,31 @@ fn collect_memory_callback(
 ) {
     extern "C" { fn mi_collect(force: bool); }
     unsafe { mi_collect(true); }
+}
+
+/// `__velox_open_external(url)` — sync, opens a URL/path in the OS default app
+/// (browser for http/https). Used for OAuth flows, "open in browser" links, etc.
+fn open_external_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let url = args.get(0).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+    // Only allow web/mail/explicit schemes — never arbitrary local commands.
+    let ok = url.starts_with("http://") || url.starts_with("https://")
+        || url.starts_with("mailto:");
+    if !ok { log::warn!("open_external: refused non-web URL"); return; }
+
+    #[cfg(target_os = "windows")]
+    let r = std::process::Command::new("cmd").args(["/C", "start", "", &url]).spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(&url).spawn();
+
+    if let Err(e) = r { log::warn!("open_external failed: {e}"); }
 }
 
 /// `__velox_restart()` — sync, requests app restart (quit + re-launch).

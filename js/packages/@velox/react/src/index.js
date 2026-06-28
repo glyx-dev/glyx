@@ -288,7 +288,7 @@ export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', 
 // always delegate to the latest closure values without needing re-registration
 // on every render.
 
-export function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn, onHoverOut, disabled, style, ...props }) {
+export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, disabled, style, ...props }) {
   const nodeIdRef    = useRef(null);
   const handlersRef  = useRef(null);
   const [pressed, setPressed] = useState(false);
@@ -296,7 +296,8 @@ export function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn,
 
   // Always keep handlersRef up to date with the latest prop values.
   handlersRef.current = {
-    onPress:    (e) => onPress?.(e),
+    onPress:      (e) => onPress?.(e),
+    onRightPress: (e) => onRightPress?.(e),
     onPressIn:  () => { setPressed(true);  onPressIn?.(); },
     onPressOut: () => { setPressed(false); onPressOut?.(); },
     onHoverIn:  () => { setHovered(true);  onHoverIn?.(); },
@@ -308,7 +309,8 @@ export function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn,
     nodeIdRef.current = id;
     // Register stable proxy functions that delegate to handlersRef.
     registerPressable(id, {
-      onPress:    (e) => handlersRef.current.onPress(e),
+      onPress:      (e) => handlersRef.current.onPress(e),
+      onRightPress: (e) => handlersRef.current.onRightPress(e),
       onPressIn:  () => handlersRef.current.onPressIn(),
       onPressOut: () => handlersRef.current.onPressOut(),
       onHoverIn:  () => handlersRef.current.onHoverIn(),
@@ -358,6 +360,31 @@ export function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn,
     { _veloxOnMount: onMount, style: mergedStyle, pressable: true, ...props },
     children
   );
+}
+
+// ── useDraggable ────────────────────────────────────────────────────────────────
+//
+// Low-level drag hook. Returns an `_veloxOnMount` callback to spread onto a View;
+// the View's full area then receives native drag events:
+//   onDragStart({x,y}) · onDragMove({x,y,dx,dy}) · onDragEnd({x,y})
+// Used to build split panes, drag-and-drop, resize handles, etc.
+//
+//   const onMount = useDraggable({ onDragMove: ({dx}) => setW(w => w + dx) });
+//   <View _veloxOnMount={onMount} ... />
+export function useDraggable(handlers) {
+  const idRef = useRef(null);
+  const hRef  = useRef(handlers);
+  hRef.current = handlers;
+  const onMount = useCallback((id) => {
+    idRef.current = id;
+    registerDraggable(id, {
+      onDragStart: (e) => hRef.current.onDragStart?.(e),
+      onDragMove:  (e) => hRef.current.onDragMove?.(e),
+      onDragEnd:   (e) => hRef.current.onDragEnd?.(e),
+    });
+  }, []);
+  useEffect(() => () => { if (idRef.current !== null) unregisterDraggable(idRef.current); }, []);
+  return onMount;
 }
 
 // ── ScrollView ────────────────────────────────────────────────────────────────
@@ -927,6 +954,8 @@ export const veloxWindow = {
    *  this automatically on focus loss; call manually at level transitions or
    *  loading screens for faster memory recovery. */
   collectMemory:   ()      => typeof __velox_collect_memory  !== 'undefined' && __velox_collect_memory(),
+  /** Open an http(s)/mailto URL in the OS default app (browser). */
+  openExternal:    (url)   => typeof __velox_open_external   !== 'undefined' && __velox_open_external(url),
 };
 
 // ── File system API ───────────────────────────────────────────────────────────

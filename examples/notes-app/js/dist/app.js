@@ -6021,8 +6021,9 @@ No matching component was found for:
         case "mouseButton": {
           if (!ev.pressed)
             break;
+          const isRight = ev.button === 1;
           if (globalClickListeners.length > 0) {
-            const gev = { x: ev.x, y: ev.y };
+            const gev = { x: ev.x, y: ev.y, button: ev.button };
             for (const fn of globalClickListeners)
               try {
                 fn(gev);
@@ -6038,12 +6039,16 @@ No matching component was found for:
               const ph = pressableRegistry.get(pressableTarget);
               if (ph && !isDisabled(pressableTarget)) {
                 const layout = __velox_getLayout(pressableTarget);
-                ph.onPress?.({
+                const pev = {
                   x: ev.x,
                   y: ev.y,
                   locationX: layout ? ev.x - layout.x : 0,
                   locationY: layout ? ev.y - layout.y : 0
-                });
+                };
+                if (isRight)
+                  ph.onRightPress?.(pev);
+                else
+                  ph.onPress?.(pev);
               }
             }
             const ih = inputRegistry.get(topmostId);
@@ -6588,13 +6593,14 @@ No matching component was found for:
       ...props
     });
   }
-  function Pressable({ children, onPress, onPressIn, onPressOut, onHoverIn, onHoverOut, disabled, style, ...props }) {
+  function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, disabled, style, ...props }) {
     const nodeIdRef = import_react.useRef(null);
     const handlersRef = import_react.useRef(null);
     const [pressed, setPressed] = import_react.useState(false);
     const [hovered, setHovered] = import_react.useState(false);
     handlersRef.current = {
       onPress: (e) => onPress?.(e),
+      onRightPress: (e) => onRightPress?.(e),
       onPressIn: () => {
         setPressed(true);
         onPressIn?.();
@@ -6616,6 +6622,7 @@ No matching component was found for:
       nodeIdRef.current = id;
       registerPressable(id, {
         onPress: (e) => handlersRef.current.onPress(e),
+        onRightPress: (e) => handlersRef.current.onRightPress(e),
         onPressIn: () => handlersRef.current.onPressIn(),
         onPressOut: () => handlersRef.current.onPressOut(),
         onHoverIn: () => handlersRef.current.onHoverIn(),
@@ -6970,7 +6977,8 @@ No matching component was found for:
     getScreenSize: () => typeof __velox_getScreenSize !== "undefined" ? __velox_getScreenSize() : { width: 0, height: 0 },
     setAlwaysOnTop: (on) => typeof __velox_setAlwaysOnTop !== "undefined" && __velox_setAlwaysOnTop(on),
     setTitle: (title) => typeof __velox_setTitle !== "undefined" && __velox_setTitle(title),
-    collectMemory: () => typeof __velox_collect_memory !== "undefined" && __velox_collect_memory()
+    collectMemory: () => typeof __velox_collect_memory !== "undefined" && __velox_collect_memory(),
+    openExternal: (url) => typeof __velox_open_external !== "undefined" && __velox_open_external(url)
   };
   var _noBinding = (name) => Promise.reject(new Error(`${name}: binding not available`));
   var fs = {

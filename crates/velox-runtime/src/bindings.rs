@@ -657,6 +657,7 @@ pub fn register_all(
         next_window_id,
         perf_state,
         sleep_guards:   std::cell::RefCell::new(HashMap::new()),
+        text_measure:   std::cell::RefCell::new(velox_text::TextSystem::new()),
         next_guard_id:  std::sync::atomic::AtomicU32::new(1),
         #[cfg(feature = "gamepad")]
         gamepad_gilrs:  std::cell::RefCell::new(None),
@@ -788,6 +789,7 @@ pub fn register_all(
     register!("__velox_setRoot",     set_root_callback);
     register!("__velox_pollEvents",  poll_events_callback);
     register!("__velox_getLayout",   get_layout_callback);
+    register!("__velox_measure_text", measure_text_callback);
 
     register!("__velox_getWindowSize", get_window_size_callback);
     register!("__velox_getScreenSize", get_screen_size_callback);
@@ -1012,6 +1014,9 @@ struct AsyncState {
     perf_state:    Arc<Mutex<velox_perf::PerfState>>,
     // ── OS system APIs (single-threaded, RefCell for interior mutability) ───
     sleep_guards:  std::cell::RefCell<HashMap<u32, velox_sysapi::SleepGuard>>,
+    /// Text shaper for `__velox_measure_text` (table column sizing, rich-text
+    /// cursor math). RefCell: single-threaded V8; `measure` needs `&mut`.
+    text_measure:  std::cell::RefCell<velox_text::TextSystem>,
     next_guard_id: std::sync::atomic::AtomicU32,
     #[cfg(feature = "gamepad")]
     gamepad_gilrs: std::cell::RefCell<Option<gilrs::Gilrs>>,
@@ -1568,6 +1573,38 @@ fn get_layout_callback(
     } else {
         rv.set(v8::null(scope).into());
     }
+}
+
+// ── __velox_measure_text ──────────────────────────────────────────────────────
+//
+// Returns `{ width, height }` (logical px) for `text` shaped at `fontSize`,
+// wrapped to `maxWidth` (pass a large value like 1e6 for single-line). Used for
+// table column auto-sizing and rich-text cursor/layout math.
+
+fn measure_text_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let text      = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let font_size = args.get(1).number_value(scope).unwrap_or(14.0) as f32;
+    let mw = args.get(2).number_value(scope).unwrap_or(0.0);
+    let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
+
+    let (w, h) = state.text_measure.borrow_mut().measure(&text, font_size, max_width);
+
+    let obj = v8::Object::new(scope);
+    let wk = v8::String::new(scope, "width").unwrap();
+    let wv = v8::Number::new(scope, w as f64);
+    obj.set(scope, wk.into(), wv.into());
+    let hk = v8::String::new(scope, "height").unwrap();
+    let hv = v8::Number::new(scope, h as f64);
+    obj.set(scope, hk.into(), hv.into());
+    rv.set(obj.into());
 }
 
 // ── Sync binding: __velox_getEnv ──────────────────────────────────────────────

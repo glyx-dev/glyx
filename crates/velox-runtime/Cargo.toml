@@ -25,6 +25,7 @@ futures-util        = { workspace = true, optional = true }
 mdns-sd             = { workspace = true }
 velox-perf          = { path = "../velox-perf" }
 velox-sysapi        = { path = "../velox-sysapi" }
+velox-text          = { path = "../velox-text" }
 battery             = { workspace = true }
 sysinfo             = { workspace = true }
 keepawake           = { workspace = true }

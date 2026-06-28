@@ -60,6 +60,7 @@ globalThis.__velox_removeNode = function() {};
 globalThis.__velox_setRoot = function() {};
 globalThis.__velox_pollEvents = function() { return []; };
 globalThis.__velox_getLayout = function() { return null; };
+globalThis.__velox_measure_text = function() { return { width: 0, height: 0 }; };
 
 // Image binding
 globalThis.__velox_createImage = function() { return __velox_nextImageId++; };

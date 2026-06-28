@@ -958,6 +958,18 @@ export const veloxWindow = {
   openExternal:    (url)   => typeof __velox_open_external   !== 'undefined' && __velox_open_external(url),
 };
 
+/**
+ * Measure shaped text. Returns `{ width, height }` in logical pixels.
+ * `maxWidth` wraps the text; omit (or pass Infinity) for single-line width.
+ * Used for table column auto-sizing, rich-text layout, truncation, etc.
+ */
+export function measureText(text, fontSize = 14, maxWidth = Infinity) {
+  if (typeof __velox_measure_text === 'undefined') {
+    return { width: String(text).length * fontSize * 0.55, height: fontSize * 1.3 };
+  }
+  return __velox_measure_text(String(text), fontSize, Number.isFinite(maxWidth) ? maxWidth : 1e6);
+}
+
 // ── File system API ───────────────────────────────────────────────────────────
 //
 // All methods return Promises. Requires `fs.read` / `fs.write` capabilities
@@ -1461,6 +1473,14 @@ export async function fetch(url, options = {}) {
     text:       () => Promise.resolve(data.body),
     json:       () => Promise.resolve(JSON.parse(data.body)),
   };
+}
+
+// Expose `fetch` as a global (the embedded V8 runtime has no platform fetch, so
+// this is purely additive — nothing standard is shadowed). Lets web-oriented
+// libraries (Supabase, Stripe, etc.) work unmodified, and matches web/Node 18+.
+// Still available as a named import for explicit/tree-shaken usage.
+if (typeof globalThis.fetch === 'undefined') {
+  globalThis.fetch = fetch;
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────

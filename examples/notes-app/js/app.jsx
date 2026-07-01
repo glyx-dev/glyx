@@ -1,13 +1,13 @@
 // Week 23 — Reference App: Notes
 //
-// A real-world notes app demonstrating Velox's full API surface:
+// A real-world notes app demonstrating Glyx's full API surface:
 //   • SQLite persistence (db.run / db.query / db.transaction)
 //   • Vector search with keyword embeddings (vectorDb)
 //   • File export via save dialog (dialog.saveFile + fs.writeFile)
 //   • Clipboard integration (clipboard.writeText)
 //   • Desktop notifications (notification.send)
-//   • Dynamic window title (veloxWindow.setTitle)
-//   • Multi-screen navigation (@velox/router)
+//   • Dynamic window title (glyxWindow.setTitle)
+//   • Multi-screen navigation (@glyx/router)
 //   • Responsive layout (useWindowSize)
 //
 // Screens:
@@ -18,19 +18,19 @@
 import React, { useState, useEffect, useContext, createContext, useCallback, useMemo } from 'react';
 import {
   View, Text, Pressable, TextInput, ScrollView, render, useWindowSize, useMediaQuery, measureText,
-  db, vectorDb, fs, dialog, clipboard, notification, veloxWindow, fetch, ws, mdns, ipc,
+  db, vectorDb, fs, dialog, clipboard, notification, glyxWindow, fetch, ws, mdns, ipc,
   battery, system, power, storage, input, perf, deeplink, credentials, crash,
   Checkbox, Switch, RadioGroup, Radio, FileInput, audio,
   Slider, Select, DatePicker,
   Canvas, Canvas3D,
   ai, camera, microphone, Camera,
   Video, Image,
-} from '@velox/react';
-import { Router, Route, useNavigate, useRoute } from '@velox/router';
-import { createKeychain, createTypedKeychain } from '@velox/keychain';
-import { initStore, createStore } from '@velox/store';
-import { Scene, PerspectiveCamera, AmbientLight, DirectionalLight, PointLight, SpotLight, Mesh, Model } from '@velox/three';
-import { createDrizzle } from '@velox/drizzle';
+} from '@glyx/react';
+import { Router, Route, useNavigate, useRoute } from '@glyx/router';
+import { createKeychain, createTypedKeychain } from '@glyx/keychain';
+import { initStore, createStore } from '@glyx/store';
+import { Scene, PerspectiveCamera, AmbientLight, DirectionalLight, PointLight, SpotLight, Mesh, Model } from '@glyx/three';
+import { createDrizzle } from '@glyx/drizzle';
 import { sqliteTable, integer, text, real } from 'drizzle-orm/sqlite-core';
 import { desc, eq, gt } from 'drizzle-orm';
 
@@ -96,7 +96,7 @@ function embedNote(title, body) {
 const SEED_NOTES = [
   {
     title: 'Project Ideas',
-    body:  'Ideas for next velox feature: vector search UI, nice responsive layout improvements, cross-platform build. Plan rollout for Q2.',
+    body:  'Ideas for next glyx feature: vector search UI, nice responsive layout improvements, cross-platform build. Plan rollout for Q2.',
   },
   {
     title: 'Team Meeting Notes',
@@ -325,7 +325,7 @@ function NoteListScreen() {
   const [status, setStatus] = useState('');
 
   // Update window title on mount
-  useEffect(() => { veloxWindow.setTitle('Notes'); }, []);
+  useEffect(() => { glyxWindow.setTitle('Notes'); }, []);
 
   // Live SQL filter as user types
   useEffect(() => {
@@ -536,7 +536,7 @@ function NoteListScreen() {
       )}
 
       <Text fontSize={10} width={inner} height={14} style={{ color: C.dim }}>
-        {'Beautiful by default • SQL filtering • Semantic search powered by your Velox vector store'}
+        {'Beautiful by default • SQL filtering • Semantic search powered by your Glyx vector store'}
       </Text>
     </View>
   );
@@ -572,14 +572,14 @@ function NoteEditScreen() {
             setTitle(note.title);
             setBody(note.body);
             setStatus('');
-            veloxWindow.setTitle(note.title || 'Edit Note');
+            glyxWindow.setTitle(note.title || 'Edit Note');
           } else {
             setStatus('Note not found.');
           }
         })
         .catch((e) => setStatus('Load error: ' + e.message));
     } else {
-      veloxWindow.setTitle('New Note');
+      glyxWindow.setTitle('New Note');
     }
   }, [noteId, isNew]);
 
@@ -615,7 +615,7 @@ function NoteEditScreen() {
       }
 
       await refreshNotes();
-      veloxWindow.setTitle(title || 'Note');
+      glyxWindow.setTitle(title || 'Note');
       notification.send({ title: 'Notes', body: `"${title || 'Untitled'}" saved.` })
         .catch(() => {});  // notifications are best-effort
 
@@ -835,7 +835,7 @@ function NoteSearchScreen() {
   const [isSearching,setIsSearching]= useState(false);
   const [status,     setStatus]     = useState('Enter a phrase and press Search.');
 
-  useEffect(() => { veloxWindow.setTitle('Notes — Semantic Search'); }, []);
+  useEffect(() => { glyxWindow.setTitle('Notes — Semantic Search'); }, []);
 
   const search = useCallback(async () => {
     if (!vdb || !query.trim()) return;
@@ -1097,7 +1097,7 @@ function SysApiScreen() {
   const batterySaver  = system.isBatterySaverActive();
 
   // perf.snapshot() is synchronous — read it inline each render instead of
-  // using setInterval (which Velox's V8 context does not polyfill).
+  // using setInterval (which Glyx's V8 context does not polyfill).
   const perfSnap = perf.snapshot();
 
   // Load OS data once on mount (async).
@@ -1263,7 +1263,7 @@ function FormDemoScreen() {
 
   async function testCredentials() {
     try {
-      await credentials.set('demo-token', 'velox-secret-1234');
+      await credentials.set('demo-token', 'glyx-secret-1234');
       const val = await credentials.get('demo-token');
       setCredStatus('Stored & retrieved: ' + val);
       await credentials.delete('demo-token');
@@ -1465,7 +1465,7 @@ function AudioDemoScreen() {
         </View>
 
         <Text fontSize={12} width={inner} height={18} style={{ color: C.dim }}>
-          Requires <Text fontSize={12} style={{ color: C.accent }}>audio: true</Text> + <Text fontSize={12} style={{ color: C.accent }}>dialog: true</Text> in velox.config.json
+          Requires <Text fontSize={12} style={{ color: C.accent }}>audio: true</Text> + <Text fontSize={12} style={{ color: C.accent }}>dialog: true</Text> in glyx.config.json
         </Text>
 
         {/* Transport controls */}
@@ -1543,7 +1543,7 @@ function NetworkTestScreen() {
       const res = await fetch('https://jsonplaceholder.typicode.com/posts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: 'Velox test', body: 'Hello from Velox fetch!', userId: 1 }),
+        body: JSON.stringify({ title: 'Glyx test', body: 'Hello from Glyx fetch!', userId: 1 }),
       });
       const data = await res.json();
       setPostResult(JSON.stringify(data, null, 2));
@@ -1635,7 +1635,7 @@ function WsTestBox({ width }) {
   const C = useThemeColors();
   const [socket,   setSocket]   = useState(null);
   const [log,      setLog]      = useState([]);
-  const [msgInput, setMsgInput] = useState('Hello from Velox WebSocket!');
+  const [msgInput, setMsgInput] = useState('Hello from Glyx WebSocket!');
   const [status,   setStatus]   = useState('disconnected');
 
   function addLog(line) {
@@ -1822,7 +1822,7 @@ function MultiWindowTestBox({ width }) {
     setStatus('opening…');
     setLog([]);
     try {
-      const win = await veloxWindow.create({ title: 'Velox IPC Child', width: 520, height: 460 });
+      const win = await glyxWindow.create({ title: 'Glyx IPC Child', width: 520, height: 460 });
       setWinHandle(win);
       setStatus(`opened (handle ${win.id})`);
       setLog(l => [...l, `Window opened (id=${win.id}). Sending ping…`]);
@@ -1886,7 +1886,7 @@ function MultiWindowTestBox({ width }) {
 
 function TextInputTestBox({ width }) {
   const C = useThemeColors();
-  const [val, setVal] = useState('Hello, Velox! Edit me and try Ctrl+A to select all.');
+  const [val, setVal] = useState('Hello, Glyx! Edit me and try Ctrl+A to select all.');
   return (
     <TextInput
       value={val}
@@ -1907,7 +1907,7 @@ function TextInputTestBox({ width }) {
 // Exercises the upgraded 3D pipeline: multiple dynamic lights (ambient +
 // directional + an orbiting point light + a spot light from above), a sphere
 // (new UV vertex format), and an optional textured GLTF model. Set
-// VELOX_DEMO_GLB to an absolute .glb/.gltf path to smoke-test the textured
+// GLYX_DEMO_GLB to an absolute .glb/.gltf path to smoke-test the textured
 // model path; otherwise the primitives alone validate the shader + light loop.
 const DEMO_GLB = null; // e.g. 'C:/path/to/model.glb'
 
@@ -2062,7 +2062,7 @@ function CanvasDemoScreen() {
       {/* 3D Canvas — isolated component so its 30 fps state updates don't
           re-render the 2D canvas, header, or Text nodes above. */}
       <Text fontSize={13} width={inner} height={18} style={{ color: C.dim }}>
-        3D Canvas — declarative @velox/three (R3F-style)
+        3D Canvas — declarative @glyx/three (R3F-style)
       </Text>
       <Canvas3DDemo />
     </ScrollView>
@@ -2357,8 +2357,8 @@ function MediaDemoScreen() {
 
   function handleStartRecord() {
     const ts  = Date.now();
-    const dir = typeof __velox_tmp_dir !== 'undefined' ? __velox_tmp_dir : '/tmp';
-    const out = `${dir}/velox_rec_${ts}.mp4`;
+    const dir = typeof __glyx_tmp_dir !== 'undefined' ? __glyx_tmp_dir : '/tmp';
+    const out = `${dir}/glyx_rec_${ts}.mp4`;
     setCamError(''); setVideoPath('');
     try {
       camRef.current.startRecord(out);
@@ -2652,7 +2652,7 @@ function MediaDemoScreen() {
       {tab === 2 && (
         <View style={{ gap: 10, alignItems: 'flex-start' }} width={inner} height={660}>
           <Text fontSize={13} width={inner} height={18} style={{ color: C.dim }}>
-            Pick a video file or type a URL. Requires velox-media DLL.
+            Pick a video file or type a URL. Requires glyx-media DLL.
           </Text>
 
           {/* File picker + URL input row */}
@@ -2803,7 +2803,7 @@ function MediaDemoScreen() {
   );
 }
 
-// ── Screen: Packages Demo (@velox/keychain + @velox/store) ────────────────────
+// ── Screen: Packages Demo (@glyx/keychain + @glyx/store) ────────────────────
 
 // Module-level singletons — created once, shared across all renders.
 const appChain   = createTypedKeychain('demo', { apiKey: null, sessionToken: null });
@@ -2814,7 +2814,7 @@ function PackagesDemoScreen() {
   const inner = winW - PAD * 2;
   const C = useThemeColors();
 
-  // ── @velox/keychain demo ───────────────────────────────────────────────────
+  // ── @glyx/keychain demo ───────────────────────────────────────────────────
   const [kcInput,  setKcInput]  = useState('');
   const [kcStored, setKcStored] = useState(null);
   const [kcStatus, setKcStatus] = useState('');
@@ -2845,7 +2845,7 @@ function PackagesDemoScreen() {
     } catch (e) { setKcStatus('Clear error: ' + String(e)); }
   }
 
-  // ── @velox/store demo ──────────────────────────────────────────────────────
+  // ── @glyx/store demo ──────────────────────────────────────────────────────
   const { state: ctr, set: setCtr, reset: resetCtr, hydrated } = useCounter();
 
   return (
@@ -2855,8 +2855,8 @@ function PackagesDemoScreen() {
         <Text fontSize={18} height={24} style={{ color: C.text }}>Packages</Text>
       </View>
 
-      {/* @velox/keychain ────────────────────────────────────────────────── */}
-      <Text fontSize={15} width={inner} height={20} style={{ color: C.accent }}>@velox/keychain</Text>
+      {/* @glyx/keychain ────────────────────────────────────────────────── */}
+      <Text fontSize={15} width={inner} height={20} style={{ color: C.accent }}>@glyx/keychain</Text>
       <Text fontSize={12} width={inner} height={16} style={{ color: C.dim }}>
         Typed namespace-scoped wrapper over the OS credential store (DPAPI / Keychain / Secret Service).
       </Text>
@@ -2895,8 +2895,8 @@ function PackagesDemoScreen() {
         </Text>
       ) : null}
 
-      {/* @velox/store ───────────────────────────────────────────────────── */}
-      <Text fontSize={15} width={inner} height={20} style={{ color: C.accent }}>@velox/store</Text>
+      {/* @glyx/store ───────────────────────────────────────────────────── */}
+      <Text fontSize={15} width={inner} height={20} style={{ color: C.accent }}>@glyx/store</Text>
       <Text fontSize={12} width={inner} height={16} style={{ color: C.dim }}>
         Persistent reactive store backed by SQLite. State survives app restarts.
         {hydrated ? '' : '  (hydrating…)'}
@@ -2931,9 +2931,9 @@ function PackagesDemoScreen() {
 // ── Screen: Drizzle ORM ────────────────────────────────────────────────────────
 
 const SEED_PRODUCTS = [
-  { name: 'Velox Pro',        price: 49.99  },
-  { name: 'Velox Starter',    price: 9.99   },
-  { name: 'Velox Enterprise', price: 299.99 },
+  { name: 'Glyx Pro',        price: 49.99  },
+  { name: 'Glyx Starter',    price: 9.99   },
+  { name: 'Glyx Enterprise', price: 299.99 },
 ];
 
 function DrizzleScreen() {
@@ -2968,7 +2968,7 @@ function DrizzleScreen() {
         setDriz(d);
         const initial = await d.select().from(drzProducts).orderBy(desc(drzProducts.id));
         setRows(initial);
-        setStatus('Drizzle ORM — in-memory SQLite via Velox bindings');
+        setStatus('Drizzle ORM — in-memory SQLite via Glyx bindings');
       } catch (e) {
         setStatus('Error: ' + e.message);
       }
@@ -3077,7 +3077,7 @@ function DrizzleScreen() {
 
       <Text fontSize={10} style={{ color: C.dim, marginTop: 12, lineHeight: 16 }}>
         {'Typed insert / select / delete / where / orderBy — zero raw SQL in the screen. ' +
-         'Drizzle generates the SQL; @velox/drizzle routes it through __velox_db_* bindings.'}
+         'Drizzle generates the SQL; @glyx/drizzle routes it through __glyx_db_* bindings.'}
       </Text>
     </ScrollView>
   );
@@ -3155,7 +3155,7 @@ function App() {
             '  updated_at INTEGER NOT NULL' +
             ')'
           ),
-          initStore(),  // creates velox_store table in the same notes.db
+          initStore(),  // creates glyx_store table in the same notes.db
         ]);
       })
       .then(() => db.query('SELECT count(*) AS cnt FROM notes'))
@@ -3200,12 +3200,12 @@ function App() {
   // ── Window controls ────────────────────────────────────────────────────────
   const toggleFullscreen = () => {
     const next = !fullscreen;
-    veloxWindow.setFullscreen(next);
+    glyxWindow.setFullscreen(next);
     setFullscreen(next);
   };
   const toggleMaximize = () => {
     const next = !maximized;
-    veloxWindow.setMaximized(next);
+    glyxWindow.setMaximized(next);
     setMaximized(next);
   };
 
@@ -3270,7 +3270,7 @@ function App() {
               height={30}
             >
               <Text fontSize={12} width={200} height={16} style={{ color: C.accent }}>
-                {`Velox Notes  •  ${winW} × ${winH}`}
+                {`Glyx Notes  •  ${winW} × ${winH}`}
               </Text>
             </View>
 
@@ -3299,7 +3299,7 @@ function App() {
               </Text>
             </Pressable>
             <Pressable
-              onPress={() => veloxWindow.setMinimized()}
+              onPress={() => glyxWindow.setMinimized()}
               width={84}
               height={30}
               style={{ backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, borderColor: C.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}
@@ -3340,4 +3340,4 @@ function App() {
 
 render(<App />);
 
-__velox_log('Week 23: Notes reference app loaded.');
+__glyx_log('Week 23: Notes reference app loaded.');

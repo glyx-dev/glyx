@@ -5,16 +5,16 @@
     "": {
       "name": "cli-test",
       "dependencies": {
-        "@velox/react": "file:../../js/packages/@velox/react",
-        "@velox/router": "file:../../js/packages/@velox/router",
+        "@glyx/react": "file:../../js/packages/@glyx/react",
+        "@glyx/router": "file:../../js/packages/@glyx/router",
         "react": "^18",
       },
     },
   },
   "packages": {
-    "@velox/react": ["@velox/react@file:../../js/packages/@velox/react", { "peerDependencies": { "react": "^18.2.0", "react-reconciler": "^0.29.0" } }],
+    "@glyx/react": ["@glyx/react@file:../../js/packages/@glyx/react", { "peerDependencies": { "react": "^18.2.0", "react-reconciler": "^0.29.0" } }],
 
-    "@velox/router": ["@velox/router@file:../../js/packages/@velox/router", { "peerDependencies": { "react": "^18.2.0" } }],
+    "@glyx/router": ["@glyx/router@file:../../js/packages/@glyx/router", { "peerDependencies": { "react": "^18.2.0" } }],
 
     "js-tokens": ["js-tokens@4.0.0", "", {}, "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ=="],
 

@@ -1,6 +1,6 @@
 import './polyfills.js';
 import React, { useState } from 'react';
-import { View, Text, Pressable, render, useWindowSize } from '@velox/react';
+import { View, Text, Pressable, render, useWindowSize } from '@glyx/react';
 
 function App() {
   const { width, height } = useWindowSize();

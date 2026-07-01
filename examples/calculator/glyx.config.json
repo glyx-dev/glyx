@@ -1,0 +1,26 @@
+{
+  "app": {
+    "version":     "0.1.0",
+    "publisher":   "Glyx Examples",
+    "description": "A calculator app for testing Glyx improvements",
+    "website":     "https://glyx.dev"
+  },
+  "window": {
+    "title":       "Calculator",
+    "width":       320,
+    "height":      480,
+    "startupMode": "windowed",
+    "background":  "#1e1e2e",
+    "decorations": false,
+    "renderMode":  "skia"
+  },
+  "capabilities": {
+    "fs": { "read": ["**"], "write": ["**"] },
+    "dialog": true
+  },
+  "dev": {
+    "entry":  "js/app.jsx",
+    "output": "js/dist/app.js",
+    "watch":  ["js"]
+  }
+}

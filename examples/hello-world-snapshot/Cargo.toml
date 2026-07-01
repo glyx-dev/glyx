@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-velox-core = { path = "../../crates/velox-core" }
+glyx-core = { path = "../../crates/glyx-core" }
 
 [[bin]]
 name = "hello-world-snapshot"

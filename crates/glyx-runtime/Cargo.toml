@@ -1,0 +1,58 @@
+[package]
+name    = "glyx-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+v8             = { workspace = true }
+tokio          = { workspace = true }
+log            = { workspace = true }
+parking_lot    = { workspace = true }
+thiserror      = { workspace = true }
+anyhow         = { workspace = true }
+glyx-security = { path = "../glyx-security" }
+glyx-db       = { path = "../glyx-db" }
+serde_json     = { workspace = true }
+rfd                 = { workspace = true }
+arboard             = { workspace = true }
+clipboard-win       = { workspace = true }
+notify-rust         = { workspace = true }
+raw-window-handle   = { workspace = true }
+reqwest             = { workspace = true, optional = true }
+base64              = { workspace = true }
+tokio-tungstenite   = { workspace = true, optional = true }
+futures-util        = { workspace = true, optional = true }
+mdns-sd             = { workspace = true }
+glyx-perf          = { path = "../glyx-perf" }
+glyx-sysapi        = { path = "../glyx-sysapi" }
+glyx-text          = { path = "../glyx-text" }
+battery             = { workspace = true }
+sysinfo             = { workspace = true }
+keepawake           = { workspace = true }
+gilrs               = { workspace = true, optional = true }
+global-hotkey       = { workspace = true }
+rodio               = { workspace = true, optional = true }
+hidapi              = { workspace = true, optional = true }
+self_update         = { workspace = true, optional = true }
+sha2                = { workspace = true, optional = true }
+ed25519-dalek       = { workspace = true, optional = true }
+glyx-media         = { path = "../glyx-media" }
+serde               = { workspace = true }
+glyx-3d            = { path = "../glyx-3d", optional = true }
+glyx-ai            = { path = "../glyx-ai", optional = true }
+
+[features]
+default = ["v8", "full"]
+v8 = []       # V8 backend (current only backend; rusty_v8 dep is always required for now)
+dev = []      # dev overlay, hot-reload, CDP inspector
+full     = ["audio", "gamepad", "canvas3d", "ai", "hid", "updater", "fetch", "websocket"]
+fetch     = ["dep:reqwest"]
+websocket = ["dep:tokio-tungstenite", "dep:futures-util"]
+audio    = ["dep:rodio"]
+gamepad  = ["dep:gilrs"]
+canvas3d = ["dep:glyx-3d"]
+ai       = ["dep:glyx-ai"]
+hid      = ["dep:hidapi"]
+updater  = ["dep:self_update", "dep:sha2", "dep:ed25519-dalek"]
+# jsc = []    # future: JavaScriptCore (iOS/macOS)
+# quickjs = [] # future: QuickJS (embedded/WASM)

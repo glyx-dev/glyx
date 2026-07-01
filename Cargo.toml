@@ -1,28 +1,28 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/velox-core",
-    "crates/velox-shell",
-    "crates/velox-gpu",
-    "crates/velox-renderer",
-    "crates/velox-text",
-    "crates/velox-layout",
-    "crates/velox-runtime",
-    "crates/velox-security",
-    "crates/velox-db",
-    "crates/velox-3d",
-    "crates/velox-ai",
-    "crates/velox-sysapi",
-    "crates/velox-perf",
-    "crates/velox-cli",
-    "crates/velox-runner",
+    "crates/glyx-core",
+    "crates/glyx-shell",
+    "crates/glyx-gpu",
+    "crates/glyx-renderer",
+    "crates/glyx-text",
+    "crates/glyx-layout",
+    "crates/glyx-runtime",
+    "crates/glyx-security",
+    "crates/glyx-db",
+    "crates/glyx-3d",
+    "crates/glyx-ai",
+    "crates/glyx-sysapi",
+    "crates/glyx-perf",
+    "crates/glyx-cli",
+    "crates/glyx-runner",
     "examples/hello-world",
     "examples/hello-world-snapshot",
     "examples/cli-test",
     "examples/notes-app",
     "examples/calculator",
-    "crates/velox-snapshot",
-    "crates/velox-media",
+    "crates/glyx-snapshot",
+    "crates/glyx-media",
 ]
 
 [workspace.dependencies]
@@ -128,3 +128,4 @@ panic = "abort"        # no unwinding machinery; smaller binary, lower working s
 [patch.crates-io]
 vello            = { path = "vendor/vello" }
 libmimalloc-sys  = { path = "vendor/libmimalloc-sys" }
+femtovg          = { path = "vendor/femtovg" }

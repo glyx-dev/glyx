@@ -1,0 +1,22 @@
+[package]
+name    = "glyx-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "glyx"
+path = "src/main.rs"
+
+[dependencies]
+clap       = { workspace = true }
+anyhow     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+env_logger = { workspace = true }
+log        = { workspace = true }
+crc32fast  = { workspace = true }
+image      = { workspace = true }
+ico        = { workspace = true }
+zip        = { workspace = true }
+flate2     = { workspace = true }
+tar        = { workspace = true }

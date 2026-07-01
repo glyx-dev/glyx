@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-sign_manifest.py — generate a manifest.json + manifest.sig for a velox-media DLL.
+sign_manifest.py — generate a manifest.json + manifest.sig for a glyx-media DLL.
 
 Usage:
   python3 sign_manifest.py <dll_path> <platform> <arch> <version>
 
-Reads VELOX_MEDIA_SIGN_KEY from the environment (hex-encoded 64-byte Ed25519 seed).
+Reads GLYX_MEDIA_SIGN_KEY from the environment (hex-encoded 64-byte Ed25519 seed).
 Writes {stem}.manifest.json and {stem}.manifest.sig alongside the DLL.
 
-The Ed25519 signing key (VELOX_MEDIA_SIGN_KEY) is stored as a GitHub repository secret.
-The corresponding 32-byte public key is compiled into velox-media's verify.rs as PUBKEY.
+The Ed25519 signing key (GLYX_MEDIA_SIGN_KEY) is stored as a GitHub repository secret.
+The corresponding 32-byte public key is compiled into glyx-media's verify.rs as PUBKEY.
 """
 
 import hashlib
@@ -37,9 +37,9 @@ def main():
         from cryptography.hazmat.primitives.serialization import (
             Encoding, PublicFormat, PrivateFormat, NoEncryption
         )
-        sign_key_hex = os.environ.get("VELOX_MEDIA_SIGN_KEY", "")
+        sign_key_hex = os.environ.get("GLYX_MEDIA_SIGN_KEY", "")
         if not sign_key_hex:
-            print("Warning: VELOX_MEDIA_SIGN_KEY not set — using zero key (not for production)")
+            print("Warning: GLYX_MEDIA_SIGN_KEY not set — using zero key (not for production)")
             sign_key_hex = "0" * 128  # 64 zero bytes
         sign_key_bytes = bytes.fromhex(sign_key_hex)
         private_key = Ed25519PrivateKey.from_private_bytes(sign_key_bytes[:32])
@@ -51,7 +51,7 @@ def main():
     ext  = os.path.splitext(dll_path)[1].lstrip(".")
 
     dll_hash = sha256_hex(dll_path)
-    cdn_base = "https://cdn.velox.dev/media"
+    cdn_base = "https://cdn.glyx.dev/media"
     dll_name = os.path.basename(dll_path)
     url = f"{cdn_base}/{version}/{dll_name}"
 

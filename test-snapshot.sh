@@ -3,12 +3,12 @@
 
 set -e
 
-echo "=== Velox Snapshot Performance Test ==="
+echo "=== Glyx Snapshot Performance Test ==="
 echo ""
 
 # Build tools
-echo "1. Building velox-snapshot tool..."
-cargo build -p velox-snapshot --quiet
+echo "1. Building glyx-snapshot tool..."
+cargo build -p glyx-snapshot --quiet
 echo "   ✓ Built"
 echo ""
 
@@ -19,7 +19,7 @@ cat > /tmp/framework.js << 'EOF'
 // Empty framework
 EOF
 
-./target/debug/velox-snapshot.exe \
+./target/debug/glyx-snapshot.exe \
   examples/hello-world/js/polyfills.js \
   /tmp/framework.js \
   examples/hello-world/js/app.js \
@@ -42,10 +42,10 @@ echo ""
 echo "To test startup performance:"
 echo ""
 echo "With snapshot (fast ~50ms):"
-echo "  VELOX_SNAPSHOT_PATH=/tmp/hello-world.snapshot cargo run -p hello-world-snapshot"
+echo "  GLYX_SNAPSHOT_PATH=/tmp/hello-world.snapshot cargo run -p hello-world-snapshot"
 echo ""
 echo "Without snapshot (eval ~500-1000ms):"
 echo "  cargo run -p hello-world"
 echo ""
 echo "Watch the console output for startup times in dev mode."
-echo "In the code, look at velox-core/src/lib.rs for the timing logs."
+echo "In the code, look at glyx-core/src/lib.rs for the timing logs."

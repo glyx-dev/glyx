@@ -1,0 +1,188 @@
+# glyx-media-build.yml
+#
+# Builds the glyx-media native shared library on Windows, macOS, and Linux
+# using a minimal static ffmpeg build. Produces signed release artifacts.
+#
+# Artifacts are uploaded to GitHub Releases as:
+#   glyx-media-{version}-{platform}-{arch}.{ext}
+#   glyx-media-{version}-{platform}-{arch}.manifest.json
+#   glyx-media-{version}-{platform}-{arch}.manifest.sig
+#
+# Triggered on version tags (v1.0.0) or manually via workflow_dispatch.
+
+name: Build glyx-media DLL
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string (e.g. 1.0.0)"
+        required: true
+        default: "1.0.0"
+
+env:
+  GLYX_MEDIA_VERSION: ${{ github.event.inputs.version || '1.0.0' }}
+
+jobs:
+  # ── Windows x64 ──────────────────────────────────────────────────────────────
+  build-windows:
+    name: Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg build deps (vcpkg)
+        run: |
+          # Use pre-built static ffmpeg from BtbN's GitHub releases
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+          Invoke-WebRequest $url -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-dist
+          $dir = Get-ChildItem ffmpeg-dist | Select-Object -First 1 -ExpandProperty FullName
+          echo "FFMPEG_DIR=$dir" >> $env:GITHUB_ENV
+
+      - name: Build glyx-media.dll (MSVC)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cl /LD /O2 /I "%FFMPEG_DIR%\include" ^
+            glyx-media-c\glyx_media.c ^
+            /Fe:glyx-media-%GLYX_MEDIA_VERSION%-windows-x64.dll ^
+            /link /LIBPATH:"%FFMPEG_DIR%\lib" ^
+            avformat.lib avcodec.lib avfilter.lib swscale.lib swresample.lib avutil.lib
+
+      - name: Generate manifest + sign
+        env:
+          GLYX_MEDIA_SIGN_KEY: ${{ secrets.GLYX_MEDIA_SIGN_KEY }}
+        run: |
+          python3 .github/scripts/sign_manifest.py `
+            glyx-media-$env:GLYX_MEDIA_VERSION-windows-x64.dll `
+            windows x64 $env:GLYX_MEDIA_VERSION
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: glyx-media-windows-x64
+          path: |
+            glyx-media-${{ env.GLYX_MEDIA_VERSION }}-windows-x64.dll
+            glyx-media-${{ env.GLYX_MEDIA_VERSION }}-windows-x64.manifest.json
+            glyx-media-${{ env.GLYX_MEDIA_VERSION }}-windows-x64.manifest.sig
+
+  # ── macOS x64 + arm64 ────────────────────────────────────────────────────────
+  build-macos:
+    name: macOS
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        arch: [x64, arm64]
+        include:
+          - arch: x64
+            target: x86_64-apple-macosx13.0
+          - arch: arm64
+            target: arm64-apple-macosx13.0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg (Homebrew)
+        run: brew install ffmpeg pkg-config
+
+      - name: Build glyx-media.dylib
+        run: |
+          FFMPEG_CFLAGS=$(pkg-config --cflags libavformat libavcodec libswscale libswresample libavutil)
+          FFMPEG_LIBS=$(pkg-config --libs libavformat libavcodec libswscale libswresample libavutil)
+          clang -arch ${{ matrix.arch == 'arm64' && 'arm64' || 'x86_64' }} \
+            -shared -fPIC -O2 \
+            $FFMPEG_CFLAGS \
+            glyx-media-c/glyx_media.c \
+            $FFMPEG_LIBS \
+            -o glyx-media-${GLYX_MEDIA_VERSION}-macos-${{ matrix.arch }}.dylib
+
+      - name: Generate manifest + sign
+        env:
+          GLYX_MEDIA_SIGN_KEY: ${{ secrets.GLYX_MEDIA_SIGN_KEY }}
+        run: |
+          python3 .github/scripts/sign_manifest.py \
+            glyx-media-${GLYX_MEDIA_VERSION}-macos-${{ matrix.arch }}.dylib \
+            macos ${{ matrix.arch }} ${GLYX_MEDIA_VERSION}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: glyx-media-macos-${{ matrix.arch }}
+          path: |
+            glyx-media-${{ env.GLYX_MEDIA_VERSION }}-macos-${{ matrix.arch }}.dylib
+            glyx-media-${{ env.GLYX_MEDIA_VERSION }}-macos-${{ matrix.arch }}.manifest.json
+            glyx-media-${{ env.GLYX_MEDIA_VERSION }}-macos-${{ matrix.arch }}.manifest.sig
+
+  # ── Linux x64 ────────────────────────────────────────────────────────────────
+  build-linux:
+    name: Linux x64
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libavformat-dev libavcodec-dev \
+            libswscale-dev libswresample-dev libavutil-dev pkg-config
+
+      - name: Build glyx-media.so
+        run: |
+          FFMPEG_CFLAGS=$(pkg-config --cflags libavformat libavcodec libswscale libswresample libavutil)
+          FFMPEG_LIBS=$(pkg-config --libs libavformat libavcodec libswscale libswresample libavutil)
+          gcc -shared -fPIC -O2 \
+            $FFMPEG_CFLAGS \
+            glyx-media-c/glyx_media.c \
+            $FFMPEG_LIBS \
+            -lpthread -lm -lz \
+            -o glyx-media-${GLYX_MEDIA_VERSION}-linux-x64.so
+
+      - name: Generate manifest + sign
+        env:
+          GLYX_MEDIA_SIGN_KEY: ${{ secrets.GLYX_MEDIA_SIGN_KEY }}
+        run: |
+          python3 .github/scripts/sign_manifest.py \
+            glyx-media-${GLYX_MEDIA_VERSION}-linux-x64.so \
+            linux x64 ${GLYX_MEDIA_VERSION}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: glyx-media-linux-x64
+          path: |
+            glyx-media-${{ env.GLYX_MEDIA_VERSION }}-linux-x64.so
+            glyx-media-${{ env.GLYX_MEDIA_VERSION }}-linux-x64.manifest.json
+            glyx-media-${{ env.GLYX_MEDIA_VERSION }}-linux-x64.manifest.sig
+
+  # ── Publish to GitHub Release ────────────────────────────────────────────────
+  release:
+    name: Publish Release
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            glyx-media-*.dll
+            glyx-media-*.dylib
+            glyx-media-*.so
+            glyx-media-*.manifest.json
+            glyx-media-*.manifest.sig
+          body: |
+            glyx-media DLL release — ffmpeg-backed media codec for Glyx apps.
+
+            Download the DLL for your platform and cache it at:
+            `~/.glyx/cache/media/glyx-media-{version}-{platform}-{arch}.{ext}`

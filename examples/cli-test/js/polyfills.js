@@ -9,8 +9,8 @@
 
 if (typeof performance === 'undefined') {
   globalThis.performance = {
-    // __velox_getTime() returns Unix ms as a number.
-    now: () => Number(__velox_getTime()),
+    // __glyx_getTime() returns Unix ms as a number.
+    now: () => Number(__glyx_getTime()),
   };
 }
 

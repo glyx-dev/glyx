@@ -1,0 +1,43 @@
+{
+  "app": {
+    "version":     "1.0.0",
+    "publisher":   "Glyx Examples",
+    "description": "A demo notes application built with Glyx",
+    "website":     "https://glyx.dev"
+  },
+  "window": {
+    "title":       "Notes",
+    "width":       1100,
+    "height":      780,
+    "startupMode": "windowed",
+    "background":  "#171923",
+    "renderMode":  "skia"
+  },
+  "capabilities": {
+    "fs":             { "read": ["**"], "write": ["**"] },
+    "network":        { "allow": ["*"] },
+    "db":             true,
+    "dialog":         true,
+    "clipboard":      true,
+    "notification":   true,
+    "mdns":           true,
+    "battery":        true,
+    "system":         true,
+    "power":          true,
+    "storage":        true,
+    "gamepads":       true,
+    "globalShortcuts": true,
+    "credentials":    true,
+    "audio":          true,
+    "ai":             true,
+    "camera":         true,
+    "microphone":     true,
+    "video":          true,
+    "deeplink": { "scheme": "notes", "singleInstance": true }
+  },
+  "dev": {
+    "entry": "js/app.jsx",
+    "output": "js/dist/app.js",
+    "watch": ["js"]
+  }
+}

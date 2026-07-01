@@ -5,9 +5,9 @@ edition = "2021"
 
 [features]
 default = ["dev"]
-dev     = ["velox-core/dev"]
+dev     = ["glyx-core/dev"]
 
 [dependencies]
-velox-core  = { path = "../../crates/velox-core", default-features = false }
-velox-shell = { path = "../../crates/velox-shell" }
+glyx-core  = { path = "../../crates/glyx-core", default-features = false }
+glyx-shell = { path = "../../crates/glyx-shell" }
 env_logger  = { workspace = true }

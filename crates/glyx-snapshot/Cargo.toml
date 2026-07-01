@@ -1,0 +1,15 @@
+[package]
+name = "glyx-snapshot"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "glyx-snapshot"
+path = "src/main.rs"
+
+[dependencies]
+v8 = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+glyx-runtime = { path = "../glyx-runtime" }

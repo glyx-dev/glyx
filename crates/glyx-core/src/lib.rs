@@ -1,0 +1,2892 @@
+//! glyx-core — application lifecycle coordinator.
+//!
+//! Wires together every framework subsystem and runs the main event loop.
+//!
+//! ## Frame budget
+//!
+//! We use `ControlFlow::Wait` so the event loop sleeps when nothing changes.
+//! A redraw is requested explicitly when:
+//!   - the window first appears,
+//!   - the window is resized,
+//!   - a JS async completion arrives (driven by the runtime tick), or
+//!   - any other state mutation occurs (mouse, keyboard, scroll).
+//!
+//! This keeps idle CPU usage near zero — important for battery life and for
+//! not saturating the GPU on a static UI.
+//!
+//! ## Incremental layout (Week 14)
+//!
+//! `apply_scene_commands` tracks whether any *layout-affecting* prop changed
+//! in an UpdateNode command.  Layout props are: width, height, flex,
+//! flex_direction, justify_content, align_items, padding, gap, text, font_size.
+//! Visual-only props (color, background, border, clip, scroll_offset_y) skip
+//! the Taffy rebuild entirely, saving ~1 ms per hover/scroll frame.
+//!
+//! ## Recursive renderer (Week 14)
+//!
+//! The flat `build_render_order` loop has been replaced by `render_subtree`,
+//! a depth-first recursive function that carries a cumulative `scroll_y`
+//! offset.  ScrollView nodes push a Vello clip layer, apply their
+//! `scroll_offset_y` to all descendants, then pop the layer.
+//!
+//! ## Multi-line text / measure function (Week 15A)
+//!
+//! Text leaf nodes carry a `TextMeasureCtx` so Taffy can call a measure
+//! closure during layout.  The closure shapes the text with Parley and
+//! returns its natural (width, height).  If no explicit `height` prop is set,
+//! Taffy uses the measured height — enabling dynamic multi-line text without
+//! fixed height props in JS.
+//!
+//! ## ScrollView nested hit-test fix (Week 15A)
+//!
+//! After every layout pass, `update_scroll_positions` walks the JS tree and
+//! writes *scroll-adjusted* Y values into the runtime layout cache.
+//! JS hit-testing via `__glyx_getLayout` then returns the visually correct
+//! position for Pressables inside scrolled containers.
+//!
+//! ## Text shaping
+//!
+//! `CachedLabel` holds a shaped result keyed by (text, font_size, max_width,
+//! color).  Cache misses call Parley once; cache hits return instantly.
+
+use mimalloc::MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
+#[cfg(feature = "dev")]
+use notify::{RecursiveMode, Watcher};
+use std::path::PathBuf;
+#[cfg(feature = "dev")]
+use std::process::Command;
+#[cfg(feature = "dev")]
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
+use parking_lot::Mutex;
+use std::time::{Duration, Instant};
+use smallvec::SmallVec;
+use glyx_gpu::{GpuContext, GpuTier};
+use glyx_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
+use glyx_renderer::{colors, peniko, AnyRenderer, AnyFrame, BackendKind, Scene};
+use glyx_runtime::{
+    init_v8, new_ipc_bus,
+    CanvasCmd, InputEvent, LengthValue, NodeProps, NodeType, SceneCommand,
+    GlyxRuntime, WindowController,
+};
+
+pub use glyx_runtime::GlyxExtension;
+use glyx_security::Capabilities;
+use glyx_media;
+use glyx_shell::{ShellEvent, GlyxUserEvent};
+use glyx_text::{TextLayout, TextSystem};
+use glyx_layout::NodeId;
+
+include!(concat!(env!("OUT_DIR"), "/embedded_snapshot.rs"));
+
+// ── Config file parsing ───────────────────────────────────────────────────────
+
+/// Splash screen configuration from `glyx.config.json`.
+#[derive(serde::Deserialize, Default)]
+struct SplashCfgJson {
+    /// Path to a PNG image displayed centered on the splash background. Optional.
+    image:       Option<String>,
+    /// Background color as `"#rrggbb"` or `"#rrggbbaa"`. Default: opaque black.
+    background:  Option<String>,
+    /// Minimum display time in milliseconds. The splash is not hidden before this
+    /// elapses even if JS calls `glyxWindow.hideSplash()`. Default: 0 (immediate).
+    #[serde(rename = "minimumMs", default)]
+    minimum_ms:  u64,
+}
+
+/// A single JS plugin entry from `glyx.config.json`.
+#[derive(serde::Deserialize, Default)]
+struct PluginConfigJson {
+    /// Path to the plugin entry file (JS/TS). Required.
+    entry: String,
+    /// Optional namespace name. If set, functions are callable as `backend.<name>.<fn>()`.
+    /// If omitted, functions are registered flat: `backend.<fn>()`.
+    name: Option<String>,
+    /// Capability declarations (informational — used for docs/tooling; not enforced at runtime).
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct GlyxConfigFile {
+    /// Semantic version string for this app, e.g. `"1.2.0"`.
+    /// Exposed via `updater.getVersion()` and used by `updater.checkManifest()`.
+    version:      Option<String>,
+    window:       Option<WindowCfgJson>,
+    capabilities: Option<Capabilities>,
+    /// Path to the app icon (PNG, 512×512 or 1024×1024 recommended).
+    /// Used for the window icon (all platforms), taskbar (Windows/Linux),
+    /// Dock (macOS), and installer icon (glyx package --installer).
+    icon:         Option<String>,
+    /// Splash screen configuration. Optional — omit for no splash.
+    splash:       Option<SplashCfgJson>,
+    /// JS plugin extensions. Each plugin is bundled by bun at startup and its
+    /// exported async functions are registered as backend commands.
+    #[serde(default)]
+    plugins:      Vec<PluginConfigJson>,
+    /// Canvas2D transport settings (binary command buffer vs JSON).
+    canvas:       Option<CanvasCfgJson>,
+}
+
+/// Canvas2D transport settings from `glyx.config.json`.
+#[derive(serde::Deserialize, Default)]
+struct CanvasCfgJson {
+    /// `"binary"` (default) uses a shared command buffer; `"json"` forces the
+    /// legacy JSON path. Unknown values fall back to `"binary"`.
+    protocol: Option<String>,
+    /// Command-buffer size in KiB (advanced). Default 256. Clamped to [16, 4096].
+    /// Larger = fewer flush round-trips for very high draw-call frames; the
+    /// buffer is allocated once at startup so the cost is a flat reservation.
+    #[serde(rename = "bufferKB")]
+    buffer_kb: Option<u32>,
+}
+
+/// Window settings from `glyx.config.json`.
+/// All fields are optional — absent fields leave `AppConfig::window` unchanged.
+#[derive(serde::Deserialize)]
+struct WindowCfgJson {
+    title:        Option<String>,
+    /// Width in physical pixels. Only used when `startupMode` is `"windowed"`.
+    width:        Option<u32>,
+    /// Height in physical pixels. Only used when `startupMode` is `"windowed"`.
+    height:       Option<u32>,
+    /// `"windowed"` (default) | `"maximized"` | `"fullscreen"`.
+    /// Omitting `width`/`height` with no `startupMode` also implies `"maximized"`.
+    #[serde(rename = "startupMode")]
+    startup_mode: Option<String>,
+    /// `true` (default) = OS title bar. `false` = frameless custom title bar.
+    decorations:  Option<bool>,
+    /// GPU clear color shown before the first JS frame renders.
+    /// Format: `"#rrggbb"` or `"#rrggbbaa"`. Defaults to Glyx dark background.
+    /// Set this to your app's root background color to eliminate the white flash.
+    background:   Option<String>,
+    /// Rendering backend: `"gpu"` (default) | `"cpu"`.
+    /// `"cpu"` uses Vello's built-in Cranelift CPU path — runs without a discrete GPU.
+    /// Can also be forced via the `GLYX_CPU_RENDER=1` environment variable.
+    #[serde(rename = "renderMode")]
+    render_mode:  Option<String>,
+    /// Hard cap on V8's old-generation heap in MB.
+    /// Omit to let Glyx auto-calculate from bundle size (recommended).
+    /// Explicit values are clamped to [16, 512].
+    #[serde(rename = "maxJsHeapMb")]
+    max_js_heap_mb: Option<u32>,
+}
+
+/// Read the project config as a JSON string.
+/// Priority: embedded (snapshot) → glyx.config.ts (via bun) → glyx.config.json.
+fn read_config_json() -> Option<String> {
+    if let Some(embedded) = EMBEDDED_CONFIG {
+        return Some(embedded.to_string());
+    }
+    // Try glyx.config.ts (dev mode with TypeScript config).
+    if std::path::Path::new("glyx.config.ts").exists() {
+        let result = if cfg!(target_os = "windows") {
+            std::process::Command::new("cmd")
+                .args(["/C", "bun", "run", "glyx.config.ts"])
+                .output()
+        } else {
+            std::process::Command::new("bun")
+                .args(["run", "glyx.config.ts"])
+                .output()
+        };
+        if let Ok(out) = result {
+            if out.status.success() {
+                if let Ok(json) = String::from_utf8(out.stdout) {
+                    let trimmed = json.trim().to_string();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed);
+                    }
+                }
+            }
+        }
+    }
+    // Fall back to glyx.config.json.
+    std::fs::read_to_string("glyx.config.json").ok()
+}
+
+// ── JS plugin bundling ────────────────────────────────────────────────────────
+
+pub use glyx_runtime::{JsPlugin, JsPlugins, CancellableTask};
+
+/// Bundle a single plugin entry using bun.
+/// Returns `None` on failure (error already logged).
+fn bundle_plugin(entry: &str, safe_name: &str) -> Option<String> {
+    let global_name = format!("__glyx_plugin_{safe_name}");
+    let tmp_out = std::env::temp_dir().join(format!("glyx_plugin_{safe_name}.js"));
+
+    let run = |args: &[&str]| -> std::io::Result<std::process::Output> {
+        #[cfg(target_os = "windows")]
+        {
+            match std::process::Command::new("bun").args(args).output() {
+                Ok(o) => return Ok(o),
+                Err(_) => {
+                    let mut cmd = vec!["/C", "bun"];
+                    cmd.extend_from_slice(args);
+                    return std::process::Command::new("cmd").args(&cmd).output();
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        std::process::Command::new("bun").args(args).output()
+    };
+
+    let out_str = tmp_out.to_str()?;
+    let bun_args = [
+        "build", entry,
+        "--outfile", out_str,
+        "--target", "browser",
+        "--format", "iife",
+        "--global-name", &global_name,
+    ];
+
+    match run(&bun_args) {
+        Ok(o) if o.status.success() => {
+            match std::fs::read_to_string(&tmp_out) {
+                Ok(js) => {
+                    log::info!("[plugins] bundled '{entry}' → {global_name}");
+                    let _ = std::fs::remove_file(&tmp_out);
+                    Some(js)
+                }
+                Err(e) => {
+                    log::error!("[plugins] could not read bundle for '{entry}': {e}");
+                    None
+                }
+            }
+        }
+        Ok(o) => {
+            let msg = String::from_utf8_lossy(&o.stderr);
+            log::error!("[plugins] bun build failed for '{entry}': {msg}");
+            None
+        }
+        Err(e) => {
+            log::error!("[plugins] failed to run bun for '{entry}': {e}");
+            None
+        }
+    }
+}
+
+/// Parse a glyx config JSON string, apply window overrides, and return capabilities + plugins.
+fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabilities, Vec<JsPlugin>) {
+    let file: Option<GlyxConfigFile> = serde_json::from_str::<GlyxConfigFile>(json)
+        .map_err(|e| { log::error!("glyx config parse error: {e}"); e })
+        .ok();
+
+    if let Some(w) = file.as_ref().and_then(|f| f.window.as_ref()) {
+        if let Some(t) = &w.title { cfg.title = t.clone(); }
+        if let Some(d) = w.decorations { cfg.decorations = d; }
+        if let Some(bg) = w.background.as_deref().and_then(parse_hex_color) {
+            cfg.background_color = bg;
+        }
+
+        cfg.startup_mode = match w.startup_mode.as_deref() {
+            Some("fullscreen") => StartupMode::Fullscreen,
+            Some("maximized")  => StartupMode::Maximized,
+            None if w.width.is_none() && w.height.is_none() => StartupMode::Maximized,
+            _ => {
+                if let Some(wd) = w.width  { cfg.width  = wd; }
+                if let Some(ht) = w.height { cfg.height = ht; }
+                StartupMode::Windowed
+            }
+        };
+
+        if let Some(rm) = w.render_mode.as_deref() {
+            cfg.render_mode = match rm {
+                "cpu"     => RenderMode::Cpu,
+                "skia"    => RenderMode::TinySkia,
+                "femtovg" => RenderMode::Femtovg,
+                "auto"    => RenderMode::Auto,
+                _         => RenderMode::Gpu,
+            };
+        }
+
+        if let Some(mb) = w.max_js_heap_mb {
+            cfg.max_js_heap_mb = Some(mb.clamp(16, 512));
+        }
+    }
+
+    // Canvas2D transport (top-level `canvas` section).
+    if let Some(c) = file.as_ref().and_then(|f| f.canvas.as_ref()) {
+        cfg.canvas_protocol = match c.protocol.as_deref() {
+            Some("json") => "json".into(),
+            _            => "binary".into(), // default + unknown → binary
+        };
+        cfg.canvas_buffer_kb = c.buffer_kb.map(|kb| kb.clamp(16, 4096));
+    }
+
+    // Load icon PNG → RGBA bytes for winit window icon.
+    if let Some(icon_path) = file.as_ref().and_then(|f| f.icon.as_ref()) {
+        cfg.icon_rgba = load_icon_png(icon_path);
+    } else {
+        // Fall back to the embedded Glyx logo so the taskbar always shows
+        // an icon even when the user hasn't configured one yet.
+        cfg.icon_rgba = load_icon_from_bytes(DEFAULT_ICON_BYTES);
+    }
+
+    // Bundle JS plugins.
+    let plugins = file.as_ref().map(|f| {
+        f.plugins.iter().enumerate().filter_map(|(i, p)| {
+            if p.entry.is_empty() { return None; }
+            // Safe identifier: use name if set, else "plugin<i>".
+            let safe = p.name.as_deref()
+                .map(|n| n.replace(|c: char| !c.is_alphanumeric() && c != '_', "_"))
+                .unwrap_or_else(|| format!("plugin{i}"));
+            let global_name = format!("__glyx_plugin_{safe}");
+            let bundled_js = bundle_plugin(&p.entry, &safe)?;
+            Some(JsPlugin {
+                prefix: p.name.clone(),
+                bundled_js,
+                global_name,
+            })
+        }).collect::<Vec<_>>()
+    }).unwrap_or_default();
+
+    // Store app version for updater bindings.
+    let version = file.as_ref()
+        .and_then(|f| f.version.as_ref())
+        .cloned()
+        .unwrap_or_else(|| "0.0.0".to_string());
+    glyx_security::init_version(version);
+
+    let caps = file.and_then(|f| f.capabilities).unwrap_or_default();
+    (caps, plugins)
+}
+
+/// Decode a PNG at `path` to raw RGBA bytes for use as a winit window icon.
+/// Returns `None` and logs a warning on failure.
+fn load_icon_png(path: &str) -> Option<(Vec<u8>, u32, u32)> {
+    match image::open(path) {
+        Ok(img) => {
+            let rgba = img.into_rgba8();
+            let (w, h) = rgba.dimensions();
+            log::info!("[icon] loaded {path} ({w}×{h})");
+            Some((rgba.into_raw(), w, h))
+        }
+        Err(e) => {
+            log::warn!("[icon] failed to load '{path}': {e}");
+            None
+        }
+    }
+}
+
+/// Decode PNG bytes (e.g. from `include_bytes!`) to RGBA for a winit window icon.
+fn load_icon_from_bytes(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    use image::ImageReader;
+    use std::io::Cursor;
+    match ImageReader::new(Cursor::new(bytes)).with_guessed_format() {
+        Ok(reader) => match reader.decode() {
+            Ok(img) => {
+                let rgba = img.into_rgba8();
+                let (w, h) = rgba.dimensions();
+                Some((rgba.into_raw(), w, h))
+            }
+            Err(_) => None,
+        },
+        Err(_) => None,
+    }
+}
+
+/// Default Glyx icon embedded in all builds.
+/// Used as the window icon when the user hasn't configured one in glyx.config.json.
+static DEFAULT_ICON_BYTES: &[u8] = include_bytes!("../../../glyx.png");
+
+/// Return the platform-specific directory for Glyx crash dumps.
+/// Mirrors `glyx_runtime::bindings::crash_reports_dir()`.
+fn crash_reports_dir() -> std::path::PathBuf {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    home.join(".glyx").join("crashes")
+}
+
+/// Install a Rust panic hook that writes a JSON crash dump to `~/.glyx/crashes/`.
+///
+/// This always runs (no capability check needed) since panics are exceptional.
+/// In release builds with `panic = "abort"`, the hook may not execute; JS-side
+/// crash reporting via `__glyx_crash_report_js` covers those scenarios.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let dir = crash_reports_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let message: &str = info.payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let file = info.location().map(|l| l.file()).unwrap_or("unknown");
+        let line = info.location().map(|l| l.line()).unwrap_or(0);
+        let json = format!(
+            "{{\"type\":\"rust_panic\",\"timestamp\":{},\"message\":{},\"file\":{},\"line\":{}}}",
+            ts,
+            serde_json::to_string(message).unwrap_or_else(|_| "\"\"".to_string()),
+            serde_json::to_string(file).unwrap_or_else(|_| "\"\"".to_string()),
+            line,
+        );
+        let path = dir.join(format!("rust_{}.json", ts));
+        let _ = std::fs::write(&path, json.as_bytes());
+        log::error!("[crash] Rust panic: {message} at {file}:{line}");
+    }));
+}
+
+/// Parse a `"#rrggbb"` or `"#rrggbbaa"` hex color string to RGBA bytes.
+/// Returns `None` if the format is invalid.
+fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
+    let s = s.trim_start_matches('#');
+    let parse = |h: &str| u8::from_str_radix(h, 16).ok();
+    match s.len() {
+        6 => Some([parse(&s[0..2])?, parse(&s[2..4])?, parse(&s[4..6])?, 255]),
+        8 => Some([parse(&s[0..2])?, parse(&s[2..4])?, parse(&s[4..6])?, parse(&s[6..8])?]),
+        _ => None,
+    }
+}
+
+/// Build a `SplashState` from the `"splash"` section of `glyx.config.json`.
+/// Returns `None` if no splash section is present.
+fn load_splash_state() -> Option<SplashState> {
+    let json = read_config_json()?;
+    let file: GlyxConfigFile = serde_json::from_str(&json).ok()?;
+    let cfg = file.splash?;
+    let now = Instant::now();
+    let min_ms = cfg.minimum_ms;
+    let min_until    = now + Duration::from_millis(min_ms);
+    // Safety auto-hide: at least minimumMs, at most 30 seconds.
+    let auto_hide_at = now + Duration::from_millis(min_ms.max(30_000));
+
+    let background = cfg.background.as_deref()
+        .and_then(parse_hex_color)
+        .unwrap_or([0, 0, 0, 255]);
+
+    let img = cfg.image.as_ref().and_then(|path| {
+        match image::open(path) {
+            Ok(img) => {
+                let rgba = img.into_rgba8();
+                let (w, h) = rgba.dimensions();
+                Some(peniko::ImageData {
+                    data: peniko::Blob::from(rgba.into_raw()),
+                    format: peniko::ImageFormat::Rgba8,
+                    alpha_type: peniko::ImageAlphaType::Alpha,
+                    width: w, height: h,
+                })
+            }
+            Err(e) => { log::warn!("[splash] failed to load '{path}': {e}"); None }
+        }
+    });
+
+    Some(SplashState { image: img, background, min_until, auto_hide_at, hidden: false })
+}
+
+/// Calculate a sensible V8 max-heap cap from the JS bundle size.
+///
+/// Formula: `bundle_bytes × 12 / 1 MB`, floored at 32 MB and capped at 256 MB.
+/// The 12× multiplier accounts for runtime object allocation on top of the parsed source:
+/// a typical React app live-heap is 4-8× its minified bundle, plus GC headroom.
+///
+/// Examples:
+///   0.85 MB bundle (hello-world) → 10 MB → floor → **32 MB**
+///   4 MB bundle   (notes-app)    → 48 MB
+///   10 MB bundle  (AI app)       → 120 MB
+///   25 MB bundle  (large game)   → 300 MB → ceil → **256 MB**
+fn calc_heap_mb(bundle_bytes: usize) -> usize {
+    const MB: usize = 1024 * 1024;
+    ((bundle_bytes * 12) / MB).max(32).min(256)
+}
+
+/// Load the Glyx config from the current working directory.
+///
+/// Applies any `window` overrides to `cfg` and returns (capabilities, js_plugins).
+/// Missing file → warning + all capabilities OFF, no plugins (fail-closed).
+fn load_glyx_config(cfg: &mut WindowConfig) -> (Capabilities, Vec<JsPlugin>) {
+    let json = match read_config_json() {
+        Some(j) => j,
+        None => {
+            log::warn!(
+                "glyx-security: no glyx.config.ts / glyx.config.json found or no capabilities declared \
+                 — all capabilities default to OFF"
+            );
+            return (Capabilities::default(), vec![]);
+        }
+    };
+
+    let (caps, plugins) = apply_config_json(&json, cfg);
+
+    if caps.can_read_fs() || caps.db || caps.network.is_some() {
+        log::info!(
+            "glyx-security: capabilities loaded (fs_read={}, db={}, network_hosts={})",
+            caps.can_read_fs(),
+            caps.db,
+            caps.network.as_ref().map(|n| n.allow.len()).unwrap_or(0),
+        );
+    } else {
+        log::warn!(
+            "glyx-security: no glyx.config.ts / glyx.config.json found or no capabilities declared \
+             — all capabilities default to OFF"
+        );
+    }
+
+    (caps, plugins)
+}
+
+pub use glyx_shell::ShellConfig as WindowConfig;
+pub use glyx_shell::StartupMode;
+pub use glyx_shell::RenderMode;
+
+/// Read `dev.output` from glyx.config.json and return its file contents.
+fn read_output_js() -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Cfg { dev: Option<DevSection> }
+    #[derive(serde::Deserialize)]
+    struct DevSection { output: Option<String> }
+
+    let cfg: Cfg = serde_json::from_str(&read_config_json()?).ok()?;
+    let output = cfg.dev?.output.unwrap_or_else(|| "js/dist/app.js".to_string());
+    match std::fs::read_to_string(&output) {
+        Ok(js) => { log::info!("Loaded JS from {}", output); Some(js) }
+        Err(e) => { log::warn!("Could not read JS from {}: {}", output, e); None }
+    }
+}
+
+/// Build a DevModeConfig from glyx.config.json's `dev` section.
+fn build_dev_mode_config() -> Option<DevModeConfig> {
+    #[derive(serde::Deserialize)]
+    struct Cfg { dev: Option<DevSection> }
+    #[derive(serde::Deserialize)]
+    struct DevSection {
+        entry:  Option<String>,
+        output: Option<String>,
+        watch:  Option<Vec<String>>,
+    }
+
+    let src = read_config_json()?;
+    let cfg: Cfg = serde_json::from_str(&src).ok()?;
+    let dev = cfg.dev?;
+    let entry  = dev.entry?;
+    let output = dev.output.unwrap_or_else(|| "js/dist/app.js".to_string());
+    let watch  = dev.watch.unwrap_or_else(|| vec!["js".into()]);
+
+    Some(DevModeConfig {
+        project_root: PathBuf::from("."),
+        entry_jsx:    PathBuf::from(&entry),
+        output_js:    PathBuf::from(&output),
+        watch_paths:  watch.iter().map(PathBuf::from).collect(),
+    })
+}
+
+fn embedded_snapshot_blob() -> Option<Vec<u8>> {
+    EMBEDDED_SNAPSHOT.map(|blob| blob.to_vec())
+}
+
+/// Return the app JS embedded at build time via `GLYX_APP_JS` env var, if present.
+fn embedded_app_js() -> Option<String> {
+    EMBEDDED_APP_JS.map(|s| s.to_string())
+}
+mod scene;
+mod layout;
+mod render;
+
+use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, snapshot_resolved};
+use layout::{recompute_layout, update_scroll_positions};
+use render::{render_subtree, RenderCtx, compute_scrollbar_thumb};
+
+/// Zero-allocation cache key for shaped text.
+///
+/// The text content is represented by a 64-bit hash rather than a heap-allocated
+/// `String`, eliminating one (or two with `.clone()`) String allocations per
+/// cache lookup — i.e. per text node per frame.
+///
+/// Hash collisions are astronomically unlikely for typical UI text and merely
+/// produce a cache miss (re-shape), never a correctness bug.
+#[derive(Hash, Eq, PartialEq)]
+struct LabelKey {
+    text_hash:      u64,
+    font_size_bits: u32,
+    max_width_bits: u32,
+    color:          [u8; 4],
+}
+
+impl LabelKey {
+    fn new(text: &str, font_size: f32, max_width: f32, color: [u8; 4]) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        Self {
+            text_hash:      h.finish(),
+            font_size_bits: font_size.to_bits(),
+            max_width_bits: max_width.to_bits(),
+            color,
+        }
+    }
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/// Top-level configuration passed to [`run`].
+pub struct AppConfig {
+    /// Window / display settings.
+    pub window: WindowConfig,
+    /// JavaScript source evaluated at startup.
+    ///
+    /// Use `include_str!` in your example or application crate to embed a
+    /// `.js` file at compile time:
+    ///
+    /// ```no_run
+    /// glyx_core::run(glyx_core::AppConfig {
+    ///     window: glyx_core::WindowConfig::default(),
+    ///     js_src: Some(include_str!("../js/app.js").to_string()),
+    ///     snapshot_blob: None,
+    ///     dev_mode: None,
+    /// });
+    /// ```
+    pub js_src: Option<String>,
+    /// Pre-executed V8 snapshot blob (from glyx-snapshot tool).
+    ///
+    /// When provided, the isolate is restored from the snapshot (fast startup ~50ms).
+    /// Falls back to eval() if not provided or if in dev mode.
+    pub snapshot_blob: Option<Vec<u8>>,
+    pub dev_mode: Option<DevModeConfig>,
+    /// Optional native Rust extensions that register custom __glyx_* bindings.
+    pub extensions: Vec<Box<dyn GlyxExtension>>,
+    /// Bundled JS plugins from `glyx.config.json` `plugins` array.
+    /// Each plugin's exported async functions are callable via `backend.<name>.<fn>()`.
+    pub js_plugins: Vec<JsPlugin>,
+}
+
+impl AppConfig {
+    /// Load configuration from `glyx.config.json` in the current directory.
+    ///
+    /// JS source is read from the path specified in `glyx.config.json`'s `dev.output`
+    /// field (defaults to `js/dist/app.js`). This is the zero-boilerplate entry point:
+    /// ```no_run
+    /// fn main() {
+    ///     glyx_core::run(glyx_core::AppConfig::from_config());
+    /// }
+    /// ```
+    pub fn from_config() -> Self {
+        let mut window = WindowConfig::default();
+        let (caps, js_plugins) = load_glyx_config(&mut window);
+        glyx_security::init(caps);
+        let snapshot_blob = embedded_snapshot_blob();
+        // Prefer build-time embedded app JS (snapshot mode), fall back to reading from disk.
+        // The snapshot contains only stubs+polyfills; the app code is always eval'd at runtime.
+        let js_src = embedded_app_js().or_else(read_output_js);
+        AppConfig {
+            window,
+            js_src,
+            snapshot_blob,
+            dev_mode:      build_dev_mode_config(),
+            extensions:    vec![],
+            js_plugins,
+        }
+    }
+
+    /// Create an AppConfig from a binary trailer payload appended to the runner executable.
+    ///
+    /// Called by glyx-runner when it detects embedded payload in its own bytes.
+    /// The trailer is written by `glyx build --mode snapshot` for JS-only projects
+    /// without invoking cargo.
+    pub fn from_trailer(snapshot_blob: Vec<u8>, js_src: String, config_json: &str) -> Self {
+        let mut window = WindowConfig::default();
+        let (caps, js_plugins) = apply_config_json(config_json, &mut window);
+        glyx_security::init(caps);
+        AppConfig {
+            window,
+            js_src: Some(js_src),
+            snapshot_blob: Some(snapshot_blob),
+            dev_mode: None,
+            extensions: vec![],
+            js_plugins,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct DevModeConfig {
+    pub project_root: PathBuf,
+    pub entry_jsx: PathBuf,
+    pub output_js: PathBuf,
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl DevModeConfig {
+    pub fn new(project_root: PathBuf, entry_jsx: PathBuf, output_js: PathBuf, watch_paths: Vec<PathBuf>) -> Self {
+        Self { project_root, entry_jsx, output_js, watch_paths }
+    }
+
+    pub fn from_entry(project_root: PathBuf, entry_jsx: PathBuf, output_js: PathBuf) -> Self {
+        let mut watch_paths = Vec::new();
+        if let Some(parent) = entry_jsx.parent() {
+            watch_paths.push(parent.to_path_buf());
+        }
+        Self { project_root, entry_jsx, output_js, watch_paths }
+    }
+}
+
+// ── Cached label ──────────────────────────────────────────────────────────────
+
+/// A shaped text label — holds the Parley layout plus pre-computed metrics
+/// for centering inside a box without re-querying the layout object.
+struct CachedLabel {
+    layout: TextLayout,
+    /// Pre-computed advance width for horizontal centering.
+    width:       f64,
+    /// Pre-computed ascent for *visual* vertical centering (single-line).
+    ascent:      f64,
+    /// Parley's full line-box height including all wrapped lines.
+    /// Used to detect whether the layout box was auto-sized to the text —
+    /// in which case we top-align rather than center-align vertically.
+    text_height: f64,
+    /// Offset from the layout-box top (`ty`) to where the cursor rect starts.
+    /// Skips the leading above the ascenders so the cursor isn't drawn above
+    /// the visible glyphs.
+    cursor_top:    f64,
+    /// Height of the cursor rect — spans from ascenders to descenders only,
+    /// excluding any line leading.
+    cursor_height: f64,
+}
+
+impl CachedLabel {
+    fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4]) -> Self {
+        let layout      = ts.label_centered(text, font_size, max_width);
+        let width       = layout.width() as f64;
+        let text_height = layout.height() as f64;
+        // For an empty string Parley produces no glyph runs, so ascent() = 0.
+        // Shape a reference "M" at the same size to get the real font ascent.
+        let ref_layout = if layout.ascent() > 0.1 {
+            None
+        } else {
+            Some(ts.label_centered("M", font_size, max_width))
+        };
+        let _ = color; // used at draw time via frame.draw_text
+        let src    = ref_layout.as_ref().unwrap_or(&layout);
+        let ascent = src.ascent() as f64;
+        let (cursor_top_raw, cursor_height_raw) = src.cursor_metrics();
+        Self {
+            layout,
+            width,
+            ascent,
+            text_height,
+            cursor_top:    cursor_top_raw    as f64,
+            cursor_height: cursor_height_raw as f64,
+        }
+    }
+}
+
+// ── Application state ─────────────────────────────────────────────────────────
+
+/// Splash screen overlay state. Active from window open until dismissed.
+struct SplashState {
+    /// Optional decoded splash image (centered on background).
+    image:      Option<peniko::ImageData>,
+    /// RGBA background fill color shown behind the image and during image load.
+    background: [u8; 4],
+    /// Splash is shown until this instant regardless of `hidden` (minimum display time).
+    min_until:  Instant,
+    /// Safety auto-hide: splash is removed no later than this instant.
+    auto_hide_at: Instant,
+    /// `true` after JS calls `glyxWindow.hideSplash()`.
+    hidden:     bool,
+}
+
+impl SplashState {
+    fn is_visible(&self) -> bool {
+        let now = Instant::now();
+        // Still within minimum display time → always show.
+        if now < self.min_until { return true; }
+        // Safety timeout → always hide.
+        if now >= self.auto_hide_at { return false; }
+        // After minimum but before safety timeout → show only if not explicitly hidden.
+        !self.hidden
+    }
+}
+
+/// Live camera capture stream. Owned by `PerWindowState`.
+/// The capture thread writes RGBA frames into `frame_buf`;
+/// the main render loop reads them and creates a `peniko::Image`.
+struct CameraStream {
+    /// Latest RGBA frame: (width, height, raw_bytes). `take()`d each frame by the render loop.
+    frame_buf:      Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>,
+    /// Last raw frame ever written — never drained. Used by CaptureCamera so a
+    /// photo can always be taken even after the render loop has already consumed frame_buf.
+    last_raw_frame: Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>,
+    /// Set to `true` to signal the capture thread to exit.
+    stop_flag:    Arc<std::sync::atomic::AtomicBool>,
+    /// Latest peniko::Image built from the most recent frame.
+    latest_image: Option<peniko::ImageData>,
+    /// Actual FPS negotiated with the camera hardware (written by capture thread
+    /// shortly after open_stream; read by StartCameraRecord for the encoder).
+    capture_fps:  Arc<std::sync::atomic::AtomicU32>,
+    // ── Recording ─────────────────────────────────────────────────────────────
+    /// When recording is active, the capture thread clones each RGBA frame and
+    /// sends it here. Dropping the sender signals the recording thread to stop.
+    record_frame_tx: Arc<Mutex<Option<std::sync::mpsc::SyncSender<(u32, u32, Vec<u8>)>>>>,
+    /// Receives `Ok(output_path)` / `Err(msg)` from the recording thread after
+    /// it finishes flushing the MP4. Consumed by `StopCameraRecord`.
+    record_done_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+}
+
+/// Live video playback stream. Owned by `PerWindowState`.
+/// The decode thread reads frames from the glyx-media DLL and writes RGBA frames
+/// into `frame_buf`; the main render loop consumes them and builds a `peniko::Image`.
+struct VideoStream {
+    /// Latest decoded RGBA frame: (width, height, raw_bytes). `take()`d by the render loop.
+    frame_buf:    Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>,
+    /// Signal the decode thread to stop (also stops the audio thread).
+    stop_flag:    Arc<std::sync::atomic::AtomicBool>,
+    /// Signal the decode + audio threads to pause (spin-wait). Cleared by ResumeVideo.
+    pause_flag:   Arc<std::sync::atomic::AtomicBool>,
+    /// Stops the audio thread only — replaced each seek so a new thread can start fresh.
+    audio_stop_flag: Arc<std::sync::atomic::AtomicBool>,
+    /// Send seek-to-seconds requests to the decode thread.
+    seek_tx:      std::sync::mpsc::SyncSender<f64>,
+    /// Pending events (ended, metadata, timeupdate). Drained into glyx-runtime each frame.
+    events:       Arc<Mutex<std::collections::VecDeque<String>>>,
+    /// Most recent peniko::Image built from the decoded frame. Used by render.rs.
+    latest_image: Option<peniko::ImageData>,
+    /// Shared volume (0.0–2.0). Written by SetVideoVolume, read by the audio thread.
+    video_volume: Arc<Mutex<f32>>,
+    /// Original URL — needed to restart the audio thread after seeking.
+    url:          String,
+}
+
+/// Per-window rendering + runtime state.
+/// One instance per open window; keyed by `window_handle` (0 = main window).
+struct PerWindowState {
+    gpu:          GpuContext,
+    renderer:     AnyRenderer,
+    text_sys:     TextSystem,
+    layout:       LayoutTree,
+    runtime:      GlyxRuntime,
+    layout_dirty: bool,
+    /// When true, the scene graph structure changed (nodes added/removed/reparented).
+    /// `recompute_layout` must do a full Taffy tree rebuild before computing.
+    /// When false but `layout_dirty` is true, only style props changed — Taffy's
+    /// incremental path (mark_dirty + compute) is used, skipping clean subtrees.
+    layout_structure_dirty: bool,
+    resolved:     Vec<(NodeId, ResolvedLayout)>,
+    js_nodes:     std::collections::HashMap<u32, JsNode>,
+    js_root:      Option<u32>,
+    images:       std::collections::HashMap<u32, peniko::ImageData>,
+    /// Path-keyed image cache — decoded images reused across remounts without re-decoding.
+    /// Capped at 64 entries (LRU eviction) so long sessions don't accumulate stale decoded bitmaps.
+    images_by_path: lru::LruCache<String, peniko::ImageData>,
+    image_cache_hits: u64,
+    image_cache_misses: u64,
+    /// Shaped text cache — keyed by (text, font_size_bits, max_width_bits, color).
+    /// Capped at 256 entries (LRU eviction) to prevent unbounded growth during long sessions.
+    label_cache: lru::LruCache<LabelKey, CachedLabel>,
+    /// Current cursor position in physical pixels.
+    cursor_x:     f32,
+    cursor_y:     f32,
+    /// Drag tracking: set when left button is held down and cursor has moved.
+    drag_active:  bool,
+    drag_start_x: f32,
+    drag_start_y: f32,
+    /// Callback to request another frame — used for cursor blinking.
+    /// Wrapped in Arc so it can be cloned into the blink timer thread.
+    request_redraw: Arc<dyn Fn() + Send + Sync>,
+    /// Whether the cursor rect is visible in the current blink phase.
+    cursor_blink_on:       bool,
+    /// When to flip the blink phase next.
+    cursor_blink_deadline: Instant,
+    /// Rolling performance metrics — shared with the JS binding via Arc.
+    perf: Arc<Mutex<glyx_perf::PerfState>>,
+    /// Process RSS bytes — written by a background tokio task every 2 s.
+    /// Reading is always lock-free (Relaxed load) so it never stalls the frame loop.
+    rss_bytes: Arc<std::sync::atomic::AtomicU64>,
+    /// Frame counter — used to schedule periodic V8 GC hints.
+    /// Incremented every rendered frame; wraps naturally at u32::MAX.
+    gc_frame_counter: u32,
+    /// Draw commands for Canvas nodes, keyed by node ID.
+    /// Updated each frame when JS calls `__glyx_canvas_update`.
+    canvas_cmds: std::collections::HashMap<u32, Vec<CanvasCmd>>,
+    /// Scene descriptions for Canvas3D nodes, keyed by node ID.
+    canvas3d_scenes: std::collections::HashMap<u32, glyx_3d::Scene3D>,
+    /// Canvas3D nodes whose scene changed this frame (cleared after render).
+    canvas3d_dirty: std::collections::HashSet<u32>,
+    /// 3D renderer — lazy-initialised on first Canvas3D encounter.
+    renderer_3d: Option<glyx_3d::Renderer3D>,
+    /// Live camera streams keyed by glyx handle ID.
+    camera_streams: std::collections::HashMap<u32, CameraStream>,
+    /// Video playback streams keyed by glyx handle ID.
+    video_streams: std::collections::HashMap<u32, VideoStream>,
+    /// Splash screen overlay. `None` if no splash was configured.
+    splash_state: Option<SplashState>,
+    /// Whether the window is frameless (decorations=false). When true, glyx
+    /// handles window drag via `glyxDraggable` nodes.
+    decorations: bool,
+    /// Closure that initiates an OS-level window drag. Populated only when
+    /// `decorations=false`; calling it is equivalent to the user grabbing the
+    /// title bar.
+    drag_window_fn: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Active scrollbar thumb drag, if any.
+    scrollbar_drag: Option<ScrollbarDragState>,
+    /// Node IDs whose visual props or layout positions changed this frame.
+    /// Populated by `apply_scene_commands` (prop changes) and
+    /// `update_dirty_from_layout` (position changes). Cleared after render.
+    dirty_nodes: std::collections::HashSet<u32>,
+    /// Subset of `dirty_nodes` whose changed prop requires cascading the dirty
+    /// state to all descendants.  Only opacity and scroll_offset_y changes are
+    /// included: opacity changes affect `child_opacity` in child draw calls, and
+    /// scroll changes affect absolute y-positions baked into cached leaf scenes.
+    /// Other visual-only changes (background, border, shadow) do not cascade.
+    descendant_cascade_nodes: std::collections::HashSet<u32>,
+    /// `dirty_nodes` ∪ all their ancestors ∪ descendants of `descendant_cascade_nodes`.
+    /// Built each frame by `build_dirty_subtrees` after layout.
+    /// Used by `render_subtree` to skip clean subtrees once O4b caching lands.
+    /// An empty set means "render everything" (first frame, full invalidation).
+    dirty_subtrees: std::collections::HashSet<u32>,
+    /// Per-node layout snapshot from the previous rendered frame.
+    /// Compared post-layout in `update_dirty_from_layout` to detect
+    /// position/size changes caused by incremental layout cascades.
+    prev_resolved: std::collections::HashMap<u32, ResolvedLayout>,
+    /// Per-node Vello scene fragment from the most recent rendered frame.
+    /// `render_subtree` replays this for nodes absent from `dirty_subtrees`,
+    /// skipping CPU traversal and Vello draw-call construction.
+    scene_cache:     std::collections::HashMap<u32, Scene>,
+    /// Accumulates newly captured scene fragments during the current frame.
+    /// Swapped with `scene_cache` after `texture.present()` and then cleared.
+    scene_cache_new: std::collections::HashMap<u32, Scene>,
+    /// Cached Vello scene fragments for `RepaintBoundary` subtrees (read path).
+    /// When none of a boundary's descendants are dirty, its entire fragment is
+    /// replayed directly — skipping traversal of the whole subtree.
+    boundary_scene_cache:     std::collections::HashMap<u32, Scene>,
+    /// Write path for `boundary_scene_cache` — swapped after present.
+    boundary_scene_cache_new: std::collections::HashMap<u32, Scene>,
+    /// Set to `true` after the first successful frame render.
+    /// Used to call `renderer.try_save_pipeline_cache()` exactly once,
+    /// ensuring compiled shader bytecode is persisted for future runs.
+    pipeline_cache_saved: bool,
+    #[cfg(feature = "dev")]
+    dev_mode: Option<DevModeState>,
+}
+
+struct JsNode {
+    node_type: NodeType,
+    props:     NodeProps,
+    /// Inline storage for up to 4 children — covers the vast majority of nodes
+    /// without a heap allocation.  Spills to the heap only for containers with
+    /// 5+ children (e.g. long lists rendered inside a loop).
+    children:  SmallVec<[u32; 4]>,
+    layout_id: Option<NodeId>,
+}
+
+/// State for an active scrollbar thumb drag.
+struct ScrollbarDragState {
+    node_id: u32,
+    /// Height of the scrollbar track.
+    track_h: f64,
+    /// Height of the thumb at the start of the drag.
+    thumb_h: f64,
+    /// Total scrollable range (content_height - viewport_height).
+    scroll_range: f64,
+    /// Scroll offset when drag started.
+    start_scroll_y: f64,
+    /// Mouse Y position when drag started.
+    start_mouse_y: f64,
+}
+
+#[cfg(feature = "dev")]
+enum DevBuildEvent {
+    BuildOk(String),
+    BuildErr(String),
+}
+
+#[cfg(feature = "dev")]
+struct DevModeState {
+    rx: Receiver<DevBuildEvent>,
+    overlay_visible: bool,
+    last_reload: Option<Instant>,
+    last_build_message: String,
+    ctrl_down: bool,
+    shift_down: bool,
+    /// Cached text lines for the overlay — refreshed at most 4× per second
+    /// so the numbers are readable instead of flickering at 120 fps.
+    overlay_lines:        Vec<String>,
+    overlay_next_refresh: Instant,
+    /// Throttles the overlay's self-scheduled redraws to ~20 fps.
+    /// Prevents the dev overlay from pinning the GPU at full vsync speed
+    /// when the app content is otherwise static.
+    overlay_next_redraw:  Instant,
+    /// Last JS exception from frame_tick — shown as an error overlay.
+    /// Cleared on the next successful reload.
+    last_js_error: Option<String>,
+    /// RSS at app start — used to show the delta (`+NMB since start`).
+    /// Captured on the first frame where `process_rss_bytes > 0`.
+    startup_rss_bytes: u64,
+    /// V8 total heap at app start (same capture timing as `startup_rss_bytes`).
+    startup_v8_total_bytes: usize,
+}
+
+// ── Colour helpers ─────────────────────────────────────────────────────────────
+
+fn rgba_to_vello(c: [u8; 4]) -> peniko::Color {
+    peniko::Color::from_rgba8(c[0], c[1], c[2], c[3])
+}
+
+/// Returns `true` if any descendant of `id` with `pressable=true` covers (cx, cy).
+/// Used by the drag check to yield window-drag priority to interactive children
+/// inside a `glyxDraggable` region (e.g. buttons inside a custom title bar).
+fn has_pressable_descendant_at(
+    id:     u32,
+    cx:     f32,
+    cy:     f32,
+    nodes:  &std::collections::HashMap<u32, JsNode>,
+    cache:  &std::collections::HashMap<u32, [f32; 4]>,
+) -> bool {
+    let Some(node) = nodes.get(&id) else { return false };
+    for &child_id in &node.children {
+        if let Some(child) = nodes.get(&child_id) {
+            // Direct pressable covering cursor → stop drag
+            if child.props.pressable == Some(true) {
+                if cache.get(&child_id).map_or(false, |&[x, y, w, h]| {
+                    cx >= x && cx <= x + w && cy >= y && cy <= y + h
+                }) {
+                    return true;
+                }
+            }
+            // Recurse into non-pressable containers (e.g. a row View wrapping buttons)
+            if has_pressable_descendant_at(child_id, cx, cy, nodes, cache) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Try to start a scrollbar thumb drag at the current cursor position.
+/// Returns `Some(ScrollbarDragState)` if the cursor is over a scrollbar thumb.
+fn try_start_scrollbar_drag(s: &mut PerWindowState) -> Option<ScrollbarDragState> {
+    let cx = s.cursor_x as f64;
+    let cy = s.cursor_y as f64;
+    for (&id, node) in &s.js_nodes {
+        let show = node.props.show_scrollbar.unwrap_or(true);
+        if !show { continue; }
+        let Some(lid) = node.layout_id else { continue };
+        let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == lid) else { continue };
+        let scroll_y = node.props.scroll_offset_y.unwrap_or(0.0);
+        let bar_w = node.props.scrollbar_width.unwrap_or(8.0);
+        let rx = rl.x as f64;
+        let ry = rl.y as f64;
+        let rw = rl.width as f64;
+        let rh = rl.height as f64;
+        // Skip if cursor is not even in the track X range
+        let track_x = rx + rw - bar_w as f64;
+        if cx < track_x || cx > rx + rw { continue; }
+        // Compute max_child_bottom from raw Taffy positions (not the scroll-adjusted cache)
+        let max_child_bottom: f64 = node.children.iter()
+            .filter_map(|&cid| {
+                let cn   = s.js_nodes.get(&cid)?;
+                let clid = cn.layout_id?;
+                s.resolved.iter()
+                    .find(|(nid, _)| *nid == clid)
+                    .map(|(_, crl)| (crl.y + crl.height) as f64)
+            })
+            .fold(f64::NEG_INFINITY, f64::max);
+        if !max_child_bottom.is_finite() { continue; }
+        // Both rl.y and max_child_bottom are window-absolute; content height is
+        // the distance from this node's top to the furthest child bottom.
+        let content_h = max_child_bottom - rl.y as f64;
+        if let Some((_tx, ty, _tw, th)) = compute_scrollbar_thumb(
+            rx, ry, rw, rh,
+            scroll_y as f64, content_h, bar_w as f64,
+        ) {
+            if cy >= ty && cy <= ty + th {
+                let vp_h = rh;
+                let scroll_range = (content_h - vp_h).max(0.0);
+                return Some(ScrollbarDragState {
+                    node_id: id,
+                    track_h: rh,
+                    thumb_h: th,
+                    scroll_range,
+                    start_scroll_y: scroll_y as f64,
+                    start_mouse_y: s.cursor_y as f64,
+                });
+            }
+        }
+    }
+    None
+}
+
+#[cfg(feature = "dev")]
+fn dev_mode_config_from_env() -> Option<DevModeConfig> {
+    let root = std::env::var("GLYX_DEV_ROOT").ok()
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())?;
+    let entry_jsx = std::env::var("GLYX_DEV_ENTRY").ok().map(PathBuf::from)?;
+    let output_js = std::env::var("GLYX_DEV_OUTPUT").ok().map(PathBuf::from)?;
+    let watch_paths = std::env::var("GLYX_DEV_WATCH")
+        .ok()
+        .map(|v| v.split(';').filter(|s| !s.trim().is_empty()).map(PathBuf::from).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if watch_paths.is_empty() {
+        Some(DevModeConfig::from_entry(root, entry_jsx, output_js))
+    } else {
+        Some(DevModeConfig::new(root, entry_jsx, output_js, watch_paths))
+    }
+}
+
+#[cfg(feature = "dev")]
+fn start_dev_mode_worker(
+    redraw: Arc<dyn Fn() + Send + Sync>,
+    config: Option<DevModeConfig>,
+) -> Option<Receiver<DevBuildEvent>> {
+    let config = config.or_else(dev_mode_config_from_env)?;
+    let cwd = if config.project_root.is_absolute() {
+        config.project_root.clone()
+    } else {
+        std::env::current_dir().ok()?.join(config.project_root)
+    };
+    let app_jsx = if config.entry_jsx.is_absolute() {
+        config.entry_jsx.clone()
+    } else {
+        cwd.join(config.entry_jsx)
+    };
+    let app_js = if config.output_js.is_absolute() {
+        config.output_js.clone()
+    } else {
+        cwd.join(config.output_js)
+    };
+    if !app_jsx.exists() || app_js.as_os_str().is_empty() {
+        return None;
+    }
+
+    let (out_tx, out_rx) = mpsc::channel::<DevBuildEvent>();
+
+    // The watch channel is created here (outside the thread) so the stdin
+    // reader can hold a clone of the sender alongside the file-watcher.
+    let (watch_tx, watch_rx) = mpsc::channel::<()>();
+
+    // Stdin reader — press R (+ Enter) in the terminal to force a full rebuild.
+    {
+        let watch_tx = watch_tx.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::stdin().lock().lines().flatten() {
+                if line.trim().eq_ignore_ascii_case("r") {
+                    log::info!("[HMR] full reload triggered (R)");
+                    let _ = watch_tx.send(());
+                }
+            }
+        });
+    }
+
+    std::thread::spawn(move || {
+        let out_tx_watch = out_tx.clone();
+        // The output JS path — we skip events for this file to avoid a circular
+        // rebuild loop (bun writes app.js → watcher fires → bun runs again → ...).
+        let app_js_for_filter = app_js.clone();
+        let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            match res {
+                Ok(event) => {
+                    // Skip events caused by the output file being written by bun itself.
+                    // Only source file changes (.jsx/.tsx/.ts/.js source, not the bundle)
+                    // should trigger a rebuild.
+                    let is_output_file = event.paths.iter().any(|p| p == &app_js_for_filter);
+                    if is_output_file {
+                        return;
+                    }
+                    log::debug!("[HMR] file changed: {:?}", event.paths);
+                    let _ = watch_tx.send(());
+                }
+                Err(e) => {
+                    let _ = out_tx_watch.send(DevBuildEvent::BuildErr(e.to_string()));
+                }
+            }
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                let _ = out_tx.send(DevBuildEvent::BuildErr(e.to_string()));
+                return;
+            }
+        };
+
+        let watch_paths = if config.watch_paths.is_empty() {
+            app_jsx.parent().map(|p| vec![p.to_path_buf()]).unwrap_or_default()
+        } else {
+            config.watch_paths.clone()
+        };
+        for p in &watch_paths {
+            let wp = if p.is_absolute() { p.clone() } else { cwd.join(p) };
+            if wp.exists() {
+                log::info!("[HMR] watching {:?}", wp);
+                let _ = watcher.watch(&wp, RecursiveMode::Recursive);
+            } else {
+                log::warn!("[HMR] watch path does not exist: {:?}", wp);
+            }
+        }
+        log::info!("[HMR] ready — edit {:?} to hot-reload  (press R + Enter to force reload)", app_jsx);
+
+        while watch_rx.recv().is_ok() {
+            while watch_rx.recv_timeout(Duration::from_millis(180)).is_ok() {}
+            log::info!("[HMR] change detected — rebuilding… (cwd={:?})", cwd);
+
+            // On Windows bun may only be resolvable through the shell (e.g.
+            // installed via scoop/winget which adds a .cmd shim).  Try the
+            // direct exe first; fall back to a cmd /C wrapper on failure.
+            let run_bun = |cwd: &std::path::Path| -> std::io::Result<std::process::Output> {
+                let bun_args = [
+                    "build",
+                    app_jsx.to_str().unwrap_or(""),
+                    "--outfile",
+                    app_js.to_str().unwrap_or(""),
+                    "--target",      "browser",
+                    "--format",      "iife",
+                    "--define",      "process.env.NODE_ENV='production'",
+                    "--sourcemap=inline",  // enables source-mapped V8 stacks in dev
+                ];
+                #[cfg(target_os = "windows")]
+                {
+                    // First attempt: bun.exe directly.
+                    match Command::new("bun").args(&bun_args).current_dir(cwd).output() {
+                        Ok(o) => return Ok(o),
+                        Err(_) => {
+                            // Second attempt: through cmd /C so .cmd shims are resolved.
+                            let mut cmd_args = vec!["/C", "bun"];
+                            cmd_args.extend_from_slice(&bun_args);
+                            return Command::new("cmd").args(&cmd_args).current_dir(cwd).output();
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                Command::new("bun").args(&bun_args).current_dir(cwd).output()
+            };
+
+            match run_bun(&cwd) {
+                Ok(out) if out.status.success() => {
+                    match std::fs::read_to_string(&app_js) {
+                        Ok(js) => {
+                            log::info!("[HMR] build ok — reloading app");
+                            let _ = out_tx.send(DevBuildEvent::BuildOk(js));
+                        }
+                        Err(e) => {
+                            log::warn!("[HMR] build succeeded but could not read output: {e}");
+                            let _ = out_tx.send(DevBuildEvent::BuildErr(e.to_string()));
+                        }
+                    }
+                }
+                Ok(out) => {
+                    let mut msg = String::new();
+                    if !out.stderr.is_empty() {
+                        msg.push_str(&String::from_utf8_lossy(&out.stderr));
+                    }
+                    if !out.stdout.is_empty() {
+                        if !msg.is_empty() {
+                            msg.push('\n');
+                        }
+                        msg.push_str(&String::from_utf8_lossy(&out.stdout));
+                    }
+                    if msg.is_empty() {
+                        msg = format!("bun build failed (exit {:?})", out.status.code());
+                    }
+                    log::warn!("[HMR] build error: {msg}");
+                    let _ = out_tx.send(DevBuildEvent::BuildErr(msg));
+                }
+                Err(e) => {
+                    log::warn!("[HMR] failed to run bun: {e}  (is bun installed and in PATH?)");
+                    let _ = out_tx.send(DevBuildEvent::BuildErr(e.to_string()));
+                }
+            }
+            redraw();
+        }
+    });
+
+    Some(out_rx)
+}
+
+#[cfg(feature = "dev")]
+fn handle_dev_build_events(state: &mut PerWindowState) {
+    if state.dev_mode.is_none() { return; }
+    loop {
+        // Borrow dev_mode only long enough to try_recv — released before apply_scene_commands.
+        let event = state.dev_mode.as_mut().unwrap().rx.try_recv();
+        match event {
+            Ok(DevBuildEvent::BuildOk(js)) => {
+                state.js_nodes.clear();
+                state.js_root = None;
+                state.images.clear();
+                state.images_by_path.clear();
+                state.image_cache_hits = 0;
+                state.image_cache_misses = 0;
+                state.label_cache.clear();
+                state.resolved.clear();
+                state.layout = LayoutTree::new();
+                state.runtime.layout_cache.lock().clear();
+                state.canvas_cmds.clear();
+                state.canvas3d_scenes.clear();
+                state.canvas3d_dirty.clear();
+                // Discard any stale commands that accumulated before the reload.
+                let _ = state.runtime.drain_scene_commands();
+                match state.runtime.eval(&js) {
+                    Ok(_) => {
+                        // Flush V8 microtasks so any React work deferred via
+                        // Promise/queueMicrotask during eval() is committed now.
+                        state.runtime.flush_microtasks();
+                        // Apply the new scene commands immediately rather than
+                        // waiting for the frame loop's pre_commands drain — this
+                        // guarantees js_root and js_nodes are populated before
+                        // recompute_layout runs later in the same frame.
+                        let reload_cmds = state.runtime.drain_scene_commands();
+                        log::info!("[HMR] eval ok — {} scene commands", reload_cmds.len());
+                        apply_scene_commands(state, reload_cmds);
+                        state.layout_dirty = true;
+                        if let Some(dev) = state.dev_mode.as_mut() {
+                            dev.last_reload = Some(Instant::now());
+                            dev.last_build_message = "reload ok".to_string();
+                            dev.last_js_error = None;
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("[HMR] eval error: {e}");
+                        if let Some(dev) = state.dev_mode.as_mut() {
+                            dev.last_build_message = format!("reload error: {}", e);
+                            dev.last_js_error = Some(format!("Eval error: {}", e));
+                        }
+                    }
+                }
+            }
+            Ok(DevBuildEvent::BuildErr(msg)) => {
+                if let Some(dev) = state.dev_mode.as_mut() {
+                    dev.last_build_message = format!("build error: {}", msg);
+                }
+            }
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
+#[cfg(feature = "dev")]
+fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut AnyFrame) {
+    let Some(dev) = state.dev_mode.as_mut() else { return };
+    if !dev.overlay_visible { return; }
+
+    let now = Instant::now();
+
+    // Refresh the displayed text at most 4× per second so numbers are readable.
+    if now >= dev.overlay_next_refresh || dev.overlay_lines.is_empty() {
+        let perf_g = state.perf.lock();
+        let fps    = perf_g.fps();
+        let avg_ms = perf_g.avg_frame_time();
+        let p99_ms = perf_g.p99_frame_time();
+        let js_ms  = perf_g.avg_js_time();
+        let lay_ms = perf_g.avg_layout_time();
+        let gpu_ms = perf_g.avg_gpu_time();
+        let last_f = perf_g.last_frame();
+        let last_ms = last_f.frame_time_ms;
+        let heap_used_mb  = last_f.heap_used_bytes  as f64 / (1024.0 * 1024.0);
+        let heap_total_mb = last_f.heap_total_bytes  as f64 / (1024.0 * 1024.0);
+        let rss_mb        = last_f.process_rss_bytes as f64 / (1024.0 * 1024.0);
+        let gpu_buf_mb    = last_f.gpu_buffer_bytes    as f64 / (1024.0 * 1024.0);
+        let gpu_tex_mb    = last_f.gpu_texture_bytes   as f64 / (1024.0 * 1024.0);
+        let gpu_resv_mb   = last_f.gpu_reserved_bytes  as f64 / (1024.0 * 1024.0);
+        let gpu_buf_n     = last_f.gpu_buffer_count;
+        let gpu_tex_n     = last_f.gpu_texture_count;
+        // Average buffer size helps distinguish "few huge" vs "many small" allocations.
+        let avg_buf_mb    = if gpu_buf_n > 0 { gpu_buf_mb / gpu_buf_n as f64 } else { 0.0 };
+        // Heap waste = reserved DX12/Vulkan blocks minus actual live allocations.
+        let gpu_waste_mb  = (gpu_resv_mb - gpu_buf_mb - gpu_tex_mb).max(0.0);
+        let budget = perf_g.budget_ms;
+        drop(perf_g);
+
+        // Startup deltas — show how much RSS and native (non-V8) memory grew.
+        let start_rss_mb   = dev.startup_rss_bytes      as f64 / (1024.0 * 1024.0);
+        let start_v8_mb    = dev.startup_v8_total_bytes  as f64 / (1024.0 * 1024.0);
+        let delta_rss_mb   = rss_mb - start_rss_mb;
+        // "native" = RSS minus V8 total heap — isolates Rust+wgpu from JS growth.
+        let native_mb      = (rss_mb - heap_total_mb).max(0.0);
+        let native_start   = (start_rss_mb - start_v8_mb).max(0.0);
+        let delta_native_mb = native_mb - native_start;
+
+        let since = dev.last_reload
+            .map(|t| now.saturating_duration_since(t).as_secs())
+            .unwrap_or(0);
+        let phys_w = state.gpu.width();
+        let phys_h = state.gpu.height();
+        dev.overlay_lines = vec![
+            format!("Dev  {}×{}px  budget {:.1}ms  (Ctrl+Shift+D)", phys_w, phys_h, budget),
+            format!("FPS {:.0}  last {:.1}ms  avg {:.1}ms  P99 {:.1}ms", fps, last_ms, avg_ms, p99_ms),
+            format!("JS {:.2}ms  layout {:.2}ms  GPU {:.2}ms  nodes {}",
+                js_ms, lay_ms, gpu_ms, state.js_nodes.len()),
+            format!("cache {} frags  img {}/{}  labels {}/256  canvas {}",
+                state.scene_cache.len(),
+                state.images.len(), state.images_by_path.len(),
+                state.label_cache.len(),
+                state.canvas_cmds.len()),
+            // Row 5: V8 heap breakdown + RSS with startup deltas
+            format!("V8 {:.1}/{:.1}MB  RSS {:.1}MB  native {:.1}MB  \u{0394}RSS {:+.1}  \u{0394}nat {:+.1}",
+                heap_used_mb, heap_total_mb, rss_mb, native_mb, delta_rss_mb, delta_native_mb),
+            // Row 6: wgpu GPU memory — buf count reveals avg size (few huge vs many small)
+            format!("wgpu  buf {:.1}MB×{}  avg {:.1}MB  tex {:.1}MB×{}  waste {:.1}MB",
+                gpu_buf_mb, gpu_buf_n, avg_buf_mb, gpu_tex_mb, gpu_tex_n, gpu_waste_mb),
+            format!("{}  (reload {}s ago)", dev.last_build_message, since),
+        ];
+        dev.overlay_next_refresh = now + Duration::from_millis(250);
+    }
+
+    // Sparkline is always re-read (it's visual, not text to read).
+    let sparkline_data: Vec<glyx_perf::PerfFrame> = {
+        let perf_g = state.perf.lock();
+        let budget = perf_g.budget_ms;
+        let data: Vec<_> = perf_g.ring.iter().copied().collect();
+        drop(perf_g);
+        let _ = budget; // used below via the cached line
+        data
+    };
+    let budget = {
+        let perf_g = state.perf.lock();
+        perf_g.budget_ms
+    };
+
+    // ── Overlay background ────────────────────────────────────────────────
+    let overlay_w = 530.0_f64;
+    let overlay_h = 195.0_f64;  // 7 text rows × 20px + 35px header margin
+    frame.fill_rounded_rect(16.0, 16.0, overlay_w, overlay_h, 8.0, peniko::Color::from_rgba8(15, 15, 25, 225));
+
+    // ── Text rows ─────────────────────────────────────────────────────────
+    let txt_color  = peniko::Color::from_rgba8(220, 220, 235, 255);
+    let mem_color  = peniko::Color::from_rgba8(140, 210, 255, 255); // blue tint for memory rows
+    let lines = &dev.overlay_lines;
+    for (i, line) in lines.iter().enumerate() {
+        // Rows 4 and 5 (0-indexed) are the memory breakdown rows — highlight them.
+        let col = if i == 4 || i == 5 { mem_color } else { txt_color };
+        let text = state.text_sys.label(line, 12.0);
+        frame.draw_text(&text, 26.0, 34.0 + (i as f64 * 20.0), col);
+    }
+
+    // ── Sparkline — last 60 frame times ──────────────────────────────────
+    // 2 px per bar × 60 bars = 120 px wide; 20 px tall; bottom at y=172
+    let spark_x  = 26.0_f64;
+    let spark_y  = 177.0_f64;  // top of sparkline (below 7 text rows)
+    let bar_w    = 2.0_f64;
+    let spark_h  = 18.0_f64;
+    let samples: Vec<f64> = sparkline_data.iter()
+        .rev().take(60).map(|f| f.frame_time_ms).collect::<Vec<_>>()
+        .into_iter().rev().collect();
+    for (i, &ms) in samples.iter().enumerate() {
+        let h   = (ms / (budget * 2.0)).min(1.0) * spark_h;
+        let x   = spark_x + i as f64 * bar_w;
+        let y   = spark_y + (spark_h - h);
+        let col = if ms > budget * 2.0 {
+            peniko::Color::from_rgba8(255, 80, 80, 220)
+        } else if ms > budget {
+            peniko::Color::from_rgba8(255, 180, 50, 220)
+        } else {
+            peniko::Color::from_rgba8(80, 200, 120, 200)
+        };
+        frame.fill_rect(x, y, bar_w - 0.5, h, col);
+    }
+}
+
+/// Draw the JS error overlay — a panel at the bottom of the window.
+///
+/// Layout:
+///   ─ red top border ─────────────────────────────────────────────────────
+///   ⚠ JavaScript Error  —  fix source and save to dismiss
+///   ─ dim separator ──────────────────────────────────────────────────────
+///   TypeError: Cannot read properties of … (message, up to 2 lines, red)
+///
+///     at App (App.jsx:45:12)          ← amber  (user .jsx/.tsx frame)
+///     at renderWithHooks (app.js:...) ← dim    (framework frame)
+///     … N more frames
+///   ─ footer ─────────────────────────────────────────────────────────────
+///
+/// Requires `--source-map=inline` in bun dev build and V8 `--enable_source_maps`
+/// (set in glyx-runtime for dev feature) so that .jsx file names and original
+/// line numbers appear instead of bundle offsets.
+#[cfg(feature = "dev")]
+fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFrame) {
+    let Some(dev) = state.dev_mode.as_ref() else { return };
+    let Some(ref err) = dev.last_js_error.clone() else { return };
+
+    let win_w = state.gpu.width()  as f64;
+    let win_h = state.gpu.height() as f64;
+
+    let panel_h = 210.0_f64;
+    let panel_y = win_h - panel_h;
+
+    // Background
+    frame.fill_rounded_rect(0.0, panel_y, win_w, panel_h, 0.0,
+        peniko::Color::from_rgba8(26, 4, 4, 252));
+
+    // Red top border
+    frame.fill_rect(0.0, panel_y, win_w, 3.0,
+        peniko::Color::from_rgba8(220, 50, 50, 255));
+
+    let title_col  = peniko::Color::from_rgba8(255, 100, 100, 210);
+    let msg_col    = peniko::Color::from_rgba8(255, 130, 130, 255); // error message lines
+    let source_col = peniko::Color::from_rgba8(255, 200, 100, 255); // user .jsx/.tsx frames
+    let frame_col  = peniko::Color::from_rgba8(180, 140, 140, 200); // framework frames
+    let dim_col    = peniko::Color::from_rgba8(130, 90,  90,  180); // hints, "more"
+
+    // Title
+    let title_lbl = state.text_sys.label(
+        "⚠ JavaScript Error  —  fix source and save to dismiss", 11.0);
+    frame.draw_text(&title_lbl, 16.0, panel_y + 10.0, title_col);
+
+    // Thin separator
+    frame.fill_rect(0.0, panel_y + 25.0, win_w, 1.0,
+        peniko::Color::from_rgba8(90, 20, 20, 140));
+
+    // ~7 px per char at 11 pt — truncate long lines
+    let max_ch = (win_w as usize).saturating_sub(56) / 7;
+    let trunc = |s: &str| -> String {
+        if s.len() > max_ch {
+            let end = s.char_indices().nth(max_ch).map(|(i, _)| i).unwrap_or(s.len());
+            format!("{}…", &s[..end])
+        } else {
+            s.to_owned()
+        }
+    };
+
+    // Split the error string:
+    //   lines before the first "at " frame  → error message
+    //   lines starting with "at "           → stack frames
+    let all_lines: Vec<&str> = err.lines().collect();
+    let first_frame_idx = all_lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("at "))
+        .unwrap_or(all_lines.len());
+    let msg_lines   = &all_lines[..first_frame_idx];
+    let frame_lines = &all_lines[first_frame_idx..];
+
+    // Draw error message (up to 2 non-empty lines)
+    let mut y = panel_y + 32.0;
+    let mut drawn_msg = 0usize;
+    for line in msg_lines.iter().take(3) {
+        let t = line.trim();
+        if t.is_empty() { continue; }
+        if drawn_msg >= 2 { break; }
+        let lbl = state.text_sys.label(&trunc(t), 12.0);
+        frame.draw_text(&lbl, 16.0, y, msg_col);
+        y += 19.0;
+        drawn_msg += 1;
+    }
+    y += 5.0; // gap before frames
+
+    // Draw stack frames (up to 7)
+    let max_frames = 7usize;
+    let mut drawn_frames = 0usize;
+    for line in frame_lines.iter() {
+        let t = line.trim();
+        if t.is_empty() || !t.starts_with("at ") { continue; }
+        if drawn_frames >= max_frames || y > panel_y + panel_h - 22.0 { break; }
+
+        // Amber for frames that point to user source (.jsx / .tsx / .ts);
+        // dim for React internals, node_modules, polyfills, etc.
+        let is_user = t.contains(".jsx") || t.contains(".tsx")
+                   || (t.contains(".ts") && !t.contains("node_modules"))
+                   || (t.contains(".js")
+                       && !t.contains("node_modules")
+                       && !t.contains("polyfills")
+                       && !t.contains("chunk-"));
+        let col = if is_user { source_col } else { frame_col };
+
+        let lbl = state.text_sys.label(&trunc(t), 10.5);
+        frame.draw_text(&lbl, 26.0, y, col);
+        y += 17.0;
+        drawn_frames += 1;
+    }
+
+    let total_frames = frame_lines.iter()
+        .filter(|l| l.trim_start().starts_with("at ")).count();
+    if total_frames > max_frames {
+        let more_lbl = state.text_sys.label(
+            &format!("  … {} more frames  (glyx dev --inspect for full trace)",
+                     total_frames - max_frames),
+            10.0,
+        );
+        frame.draw_text(&more_lbl, 26.0, y, dim_col);
+    }
+
+    // Footer
+    let hint_lbl = state.text_sys.label(
+        "Save any file to rebuild  ·  glyx dev --inspect for Chrome DevTools", 10.0);
+    frame.draw_text(&hint_lbl, 16.0, panel_y + panel_h - 14.0, dim_col);
+}
+
+// ── Window controller builder ─────────────────────────────────────────────────
+
+/// Register `scheme://` as a URL handler in the Windows registry under HKCU.
+/// Uses the built-in `reg.exe` tool — no extra dependencies, no admin rights.
+/// Called once at startup; idempotent (safe to call on every launch).
+#[cfg(target_os = "windows")]
+fn register_deeplink_scheme_windows(scheme: &str) {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(_) => return,
+    };
+    // Normalise forward slashes to backslashes (Windows registry convention).
+    let exe = exe.replace('/', "\\");
+
+    // The command value: "C:\path\to\app.exe" "%1"
+    let cmd_value = format!("\"{}\" \"%1\"", exe);
+
+    let entries = [
+        (
+            format!("HKCU\\Software\\Classes\\{scheme}"),
+            None,  // default value
+            format!("URL:{scheme} Protocol"),
+        ),
+        (
+            format!("HKCU\\Software\\Classes\\{scheme}"),
+            Some("URL Protocol"),
+            String::new(),
+        ),
+        (
+            format!("HKCU\\Software\\Classes\\{scheme}\\shell\\open\\command"),
+            None,
+            cmd_value,
+        ),
+    ];
+
+    for (key, value_name, data) in &entries {
+        let mut args = vec!["add", key, "/f", "/d", data];
+        if let Some(vn) = value_name {
+            args.extend_from_slice(&["/v", vn]);
+        } else {
+            args.push("/ve");  // default (unnamed) value
+        }
+        let _ = std::process::Command::new("reg").args(&args).output();
+    }
+
+    log::debug!("glyx: registered deep-link scheme {}:// → {}", scheme, exe);
+}
+
+fn build_window_controller(
+    window: Arc<winit::window::Window>,
+    create_window_fn: Option<Arc<dyn Fn(u32, String, u32, u32) + Send + Sync>>,
+    quit_fn:    Option<Arc<dyn Fn() + Send + Sync>>,
+    restart_fn: Option<Arc<dyn Fn() + Send + Sync>>,
+) -> WindowController {
+    use winit::window::Fullscreen;
+
+    // Extract the raw platform HWND (Windows) so dialogs can be parented to
+    // the Glyx window and appear in front of it rather than behind it.
+    let hwnd: Option<isize> = {
+        #[cfg(target_os = "windows")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            window.window_handle().ok().and_then(|h| {
+                match h.as_raw() {
+                    RawWindowHandle::Win32(w) => Some(w.hwnd.get()),
+                    _ => None,
+                }
+            })
+        }
+        #[cfg(not(target_os = "windows"))]
+        { None }
+    };
+
+    let w1 = Arc::clone(&window);
+    let w2 = Arc::clone(&window);
+    let w3 = Arc::clone(&window);
+    let w4 = Arc::clone(&window);
+    let w5 = Arc::clone(&window);
+    let w6 = Arc::clone(&window);
+    let w7 = Arc::clone(&window);
+    let w8 = Arc::clone(&window);
+    let w9 = Arc::clone(&window);
+    let w10 = Arc::clone(&window);
+
+    WindowController {
+        get_window_size: Arc::new(move || {
+            let s = w1.inner_size();
+            (s.width, s.height)
+        }),
+        get_screen_size: Arc::new(move || {
+            let monitor = w2.current_monitor()?;
+            let s = monitor.size();
+            Some((s.width, s.height))
+        }),
+        request_redraw: Arc::new(move || {
+            w10.request_redraw();
+        }),
+        set_fullscreen: Arc::new(move |full| {
+            if full {
+                w3.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            } else {
+                w3.set_fullscreen(None);
+            }
+        }),
+        set_maximized: Arc::new(move |maximized| {
+            w4.set_maximized(maximized);
+        }),
+        set_minimized: Arc::new(move || {
+            w5.set_minimized(true);
+        }),
+        is_fullscreen: Arc::new(move || {
+            w6.fullscreen().is_some()
+        }),
+        is_maximized: Arc::new(move || {
+            w7.is_maximized()
+        }),
+        set_always_on_top: Arc::new(move |on| {
+            use winit::window::WindowLevel;
+            w8.set_window_level(if on { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal });
+        }),
+        set_title: Arc::new(move |title| {
+            w9.set_title(&title);
+        }),
+        hwnd,
+        create_window: create_window_fn,
+        quit:    quit_fn,
+        restart: restart_fn,
+    }
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+pub fn run(mut config: AppConfig) -> bool {
+    // On Windows, Ctrl+C causes STATUS_CONTROL_C_EXIT (0xc000013a) by default,
+    // which cargo treats as a failure even though the user intentionally quit.
+    // Install a console ctrl handler that exits cleanly with code 0.
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetConsoleCtrlHandler(
+                handler: Option<unsafe extern "system" fn(u32) -> i32>,
+                add: i32,
+            ) -> i32;
+        }
+        unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
+            std::process::exit(0);
+        }
+        unsafe { SetConsoleCtrlHandler(Some(ctrl_handler), 1); }
+    }
+
+    // Install Rust panic hook early so panics during init are also captured.
+    install_panic_hook();
+
+    // Set module-specific log levels first so they take precedence over any
+    // global level set by RUST_LOG (e.g. RUST_LOG=info would otherwise
+    // re-enable the very noisy wgpu_core submission-index spam).
+    let mut log_builder = env_logger::Builder::new();
+    log_builder
+        .filter_module("wgpu_core", log::LevelFilter::Warn)
+        .filter_module("wgpu_hal",  log::LevelFilter::Warn)
+        .filter_module("naga",      log::LevelFilter::Warn)
+        .filter_level(log::LevelFilter::Info);
+    // RUST_LOG can still add more specific directives (e.g. glyx_core=debug)
+    // but cannot remove the per-module suppression above.
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        log_builder.parse_filters(&rust_log);
+    }
+    log_builder.init();
+
+    // Load .env from the working directory (or any parent) if one exists.
+    match dotenvy::dotenv() {
+        Ok(path) => log::info!("glyx: loaded env from {}", path.display()),
+        Err(dotenvy::Error::Io(_)) => {}
+        Err(e) => log::warn!("glyx: .env parse error: {e}"),
+    }
+
+    // Init security from config only if not already done (e.g. via AppConfig::from_config()).
+    // This fallback ensures security is initialised even when AppConfig is built manually.
+    if !glyx_security::is_initialized() {
+        let (caps, _plugins) = load_glyx_config(&mut config.window);
+        glyx_security::init(caps);
+    }
+
+    // ── Deep link: check launch args for a URL matching the configured scheme ──
+    //
+    // If the app registered `"deeplink": { "scheme": "notes" }` and was launched
+    // with `notes://note/42` as an argument, we capture it in `GLYX_LAUNCH_URL`
+    // so the `__glyx_deeplink_getInitialUrl()` binding can retrieve it.
+    //
+    // Single-instance mode (opt-in):
+    //   First instance  — binds a TCP socket on localhost, writes port to a temp
+    //                     file so second instances know where to forward URLs.
+    //   Second instance — connects to that socket, sends the URL, exits.
+    //
+    // The TCP listener is started after the runtime is ready (inside WindowReady)
+    // using the Tokio handle and the runtime's `deeplink_url_queue`.
+    let mut single_instance_tcp: Option<std::net::TcpListener> = {
+        if let Some(ref dl) = glyx_security::get().deeplink {
+            let scheme_prefix = format!("{}://", dl.scheme);
+            let launch_url: Option<String> = std::env::args()
+                .skip(1)
+                .find(|a| a.starts_with(&scheme_prefix));
+
+            if let Some(ref url) = launch_url {
+                // Safety: this is the only write; bindings read it after runtime starts.
+                #[allow(unused_unsafe)]
+                unsafe { std::env::set_var("GLYX_LAUNCH_URL", url); }
+                log::info!("glyx: deep-link launch URL: {}", url);
+            }
+
+            // Auto-register the URL scheme on Windows so the app handles deeplinks
+            // without requiring a manual .reg import.  We write to HKCU (no admin needed).
+            #[cfg(target_os = "windows")]
+            register_deeplink_scheme_windows(&dl.scheme);
+
+            if dl.single_instance {
+                let app_name = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| "glyx-app".to_string());
+                let port_file = std::env::temp_dir().join(format!("glyx-{}.port", app_name));
+
+                // Try to connect as a second instance.
+                let is_second = port_file.exists() && {
+                    let connected = std::fs::read_to_string(&port_file)
+                        .ok()
+                        .and_then(|s| s.trim().parse::<u16>().ok())
+                        .and_then(|port| {
+                            use std::io::Write;
+                            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                            std::net::TcpStream::connect_timeout(
+                                &addr,
+                                std::time::Duration::from_millis(150),
+                            )
+                                .ok()
+                                .and_then(|mut s| {
+                                    let payload = launch_url.as_deref().unwrap_or("").to_string() + "\n";
+                                    s.write_all(payload.as_bytes()).ok()
+                                })
+                        })
+                        .is_some();
+                    connected
+                };
+
+                if is_second {
+                    log::info!("glyx: second instance detected — forwarded URL and exiting");
+                    std::process::exit(0);
+                }
+
+                // First instance: bind TCP listener.
+                match std::net::TcpListener::bind("127.0.0.1:0") {
+                    Ok(listener) => {
+                        listener.set_nonblocking(true).ok();
+                        let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+                        std::fs::write(&port_file, port.to_string()).ok();
+                        log::info!("glyx: single-instance listener on port {}", port);
+                        Some(listener)
+                    }
+                    Err(e) => {
+                        log::warn!("glyx: could not bind single-instance socket: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    // GLYX_PERF_CHECK=<duration_secs>:<budget_ms> — set by `glyx build --check-performance`.
+    // After the given duration the app prints a JSON perf summary and exits.
+    let perf_check: Option<(u64, f64)> = std::env::var("GLYX_PERF_CHECK").ok().and_then(|v| {
+        let mut parts = v.splitn(2, ':');
+        let dur  = parts.next()?.parse::<u64>().ok()?;
+        let bud  = parts.next()?.parse::<f64>().ok()?;
+        Some((dur, bud))
+    });
+
+    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("Failed to build Tokio runtime");
+    let tokio_handle = tokio_rt.handle().clone();
+
+    init_v8();
+
+    let AppConfig { window, js_src, snapshot_blob, dev_mode: _dev_mode, extensions, js_plugins } = config;
+    // Capture before `window` is moved into glyx_shell::run().
+    let window_decorations = window.decorations;
+
+    // Load splash state from config (None = no splash configured).
+    // Wrapped in Option so it can be moved into the main window's PerWindowState exactly once.
+    let mut main_splash_state: Option<SplashState> = load_splash_state();
+
+    // Shared across all windows.
+    let ipc_bus        = new_ipc_bus();
+    let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
+
+    // Wrap in Arc so secondary-window creation can reuse them.
+    let js_src_arc        = Arc::new(js_src);
+    let snapshot_blob_arc = Arc::new(snapshot_blob);
+    let extensions_arc    = Arc::new(extensions);
+    let js_plugins_arc: glyx_runtime::JsPlugins = Arc::new(js_plugins);
+    // Build the backend command registry once; share it across all windows.
+    let backend_registry  = Arc::new(glyx_runtime::build_backend_registry(&*extensions_arc));
+
+    // Per-window state: handle → PerWindowState.
+    let mut windows: std::collections::HashMap<u32, PerWindowState> =
+        std::collections::HashMap::new();
+
+    // Save background color and render mode before `window` (ShellConfig) is moved into run().
+    let window_bg = window.background_color;
+    // Capture configured mode; Auto is resolved after GPU adapter is known.
+    let render_mode_config = window.render_mode;
+    // Canvas2D transport config — applied to each runtime after construction.
+    let canvas_protocol  = window.canvas_protocol.clone();
+    let canvas_buffer_kb = window.canvas_buffer_kb.unwrap_or(256) as usize;
+    // Compute V8 heap cap: explicit config wins; otherwise auto-calculate from bundle size.
+    let heap_cap_mb: usize = match window.max_js_heap_mb {
+        Some(mb) => mb as usize,
+        None => {
+            let bundle_bytes = (*js_src_arc).as_ref().map(|s| s.len()).unwrap_or(0);
+            let cap = calc_heap_mb(bundle_bytes);
+            log::info!("[v8] heap cap: {cap} MB (auto from {:.2} MB bundle)", bundle_bytes as f64 / (1024.0 * 1024.0));
+            cap
+        }
+    };
+
+    let restart = glyx_shell::run(window, move |event| {
+        match event {
+            // ── Window ready — initialise per-window subsystems ──────────
+            ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy } => {
+                let gpu_ctx = pollster::block_on(GpuContext::new(window.clone()))
+                    .expect("Failed to initialise GPU");
+                // Resolve RenderMode → BackendKind.
+                // GLYX_CPU_RENDER=1 forces the cheapest CPU path (TinySkia) for
+                // CI, headless testing, or machines without a supported GPU.
+                let force_cpu = std::env::var("GLYX_CPU_RENDER")
+                    .map(|v| v.trim() == "1").unwrap_or(false);
+                let backend_kind = match render_mode_config {
+                    RenderMode::Auto => {
+                        // Three-tier heuristic driven by adapter device type:
+                        //   No/software GPU  → TinySkia  (~97 MB)
+                        //   iGPU / virtual   → TinySkia  (~97 MB)
+                        //   Intel Arc dGPU   → FemtoVG   (~103–153 MB)
+                        //   NVIDIA/AMD dGPU  → Vello     (~285–328 MB)
+                        let tier = if force_cpu { GpuTier::None } else { gpu_ctx.gpu_tier() };
+                        let kind = match tier {
+                            GpuTier::None | GpuTier::Integrated => BackendKind::TinySkia,
+                            GpuTier::DiscreteIntel              => BackendKind::FemtoVg,
+                            GpuTier::Discrete                   => BackendKind::Vello { use_cpu: false },
+                        };
+                        log::info!(
+                            "[glyx] renderMode=auto → {} ({})",
+                            match &kind {
+                                BackendKind::TinySkia                 => "skia",
+                                BackendKind::FemtoVg                  => "femtovg",
+                                BackendKind::Vello { use_cpu: false } => "vello",
+                                BackendKind::Vello { use_cpu: true  } => "vello/cpu",
+                            },
+                            gpu_ctx.adapter_name(),
+                        );
+                        kind
+                    }
+                    RenderMode::Cpu      => BackendKind::Vello { use_cpu: true },
+                    RenderMode::Gpu      => BackendKind::Vello { use_cpu: force_cpu },
+                    RenderMode::TinySkia => BackendKind::TinySkia,
+                    RenderMode::Femtovg  => BackendKind::FemtoVg,
+                };
+                let mut renderer = AnyRenderer::new(&gpu_ctx, backend_kind)
+                    .expect("Failed to initialise renderer");
+                // Apply window background color so the GPU clear matches the
+                // app theme from frame zero — no blank white flash on startup.
+                renderer.set_background_color(rgba_to_vello(window_bg));
+
+                // Build callbacks that send events to the shell event loop.
+                let proxy_for_fn = ev_proxy.clone();
+                let create_fn: Arc<dyn Fn(u32, String, u32, u32) + Send + Sync> =
+                    Arc::new(move |id, title, width, height| {
+                        let _ = proxy_for_fn.send_event(
+                            GlyxUserEvent::CreateWindow { id, title, width, height }
+                        );
+                    });
+
+                let proxy_quit = ev_proxy.clone();
+                let quit_fn: Arc<dyn Fn() + Send + Sync> =
+                    Arc::new(move || { let _ = proxy_quit.send_event(GlyxUserEvent::Quit); });
+
+                let proxy_restart = ev_proxy.clone();
+                let restart_fn: Arc<dyn Fn() + Send + Sync> =
+                    Arc::new(move || { let _ = proxy_restart.send_event(GlyxUserEvent::Restart); });
+
+                let window_ctrl = build_window_controller(
+                    Arc::clone(&window),
+                    Some(Arc::clone(&create_fn)),
+                    Some(Arc::clone(&quit_fn)),
+                    Some(Arc::clone(&restart_fn)),
+                );
+
+                let ipc_clone  = Arc::clone(&ipc_bus);
+                let nwid       = Arc::clone(&next_window_id);
+                // Create the shared perf Arc BEFORE the runtime so both
+                // PerWindowState (writer) and AsyncState binding (reader) share it.
+                let shared_perf: Arc<Mutex<glyx_perf::PerfState>> =
+                    Arc::new(Mutex::new(glyx_perf::PerfState::new()));
+
+                // GLYX_PERF_CHECK: apply budget, then spawn a timer that exits after duration.
+                if let Some((duration_secs, budget_ms)) = perf_check {
+                    shared_perf.lock().budget_ms = budget_ms;
+                    let perf_arc  = Arc::clone(&shared_perf);
+                    let proxy_pc  = ev_proxy.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(duration_secs));
+                        // Print perf summary to stdout for CLI to capture.
+                        let p = perf_arc.lock();
+                        let violations = p.violations.len();
+                        let avg_ms = p.avg_frame_time();
+                        let p99_ms = p.p99_frame_time();
+                        let fps    = p.fps();
+                        drop(p);
+                        let pass = violations == 0;
+                        println!("GLYX_PERF_RESULT:{{\"violations\":{violations},\"avgFrameMs\":{avg_ms:.2},\"p99FrameMs\":{p99_ms:.2},\"fps\":{fps:.1},\"pass\":{pass}}}");
+                        let _ = proxy_pc.send_event(GlyxUserEvent::Quit);
+                    });
+                }
+
+                let mut rt = if let Some(ref blob) = *snapshot_blob_arc {
+                    match GlyxRuntime::new_from_snapshot_with_ipc(
+                        blob, tokio_handle.clone(), Some(window_ctrl),
+                        Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
+                        Arc::clone(&shared_perf),
+                        Arc::clone(&backend_registry),
+                        Arc::clone(&js_plugins_arc),
+                        heap_cap_mb,
+                    ) {
+                        Ok(rt) => {
+                            log::info!("Window {}: restored from snapshot", window_handle);
+                            rt
+                        }
+                        Err(e) => {
+                            log::warn!("Window {}: snapshot restore failed ({}); eval mode", window_handle, e);
+                            let proxy_fb  = ev_proxy.clone();
+                            let proxy_qfb = ev_proxy.clone();
+                            let proxy_rfb = ev_proxy.clone();
+                            let wc = build_window_controller(
+                                Arc::clone(&window),
+                                Some(Arc::new(move |id, title, width, height| {
+                                    let _ = proxy_fb.send_event(
+                                        GlyxUserEvent::CreateWindow { id, title, width, height }
+                                    );
+                                })),
+                                Some(Arc::new(move || {
+                                    let _ = proxy_qfb.send_event(GlyxUserEvent::Quit);
+                                })),
+                                Some(Arc::new(move || {
+                                    let _ = proxy_rfb.send_event(GlyxUserEvent::Restart);
+                                })),
+                            );
+                            GlyxRuntime::new_with_ipc(
+                                tokio_handle.clone(), Some(wc),
+                                Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
+                                Arc::clone(&shared_perf),
+                                Arc::clone(&backend_registry),
+                                Arc::clone(&js_plugins_arc),
+                                heap_cap_mb,
+                            )
+                        }
+                    }
+                } else {
+                    GlyxRuntime::new_with_ipc(
+                        tokio_handle.clone(), Some(window_ctrl),
+                        Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
+                        Arc::clone(&shared_perf),
+                        Arc::clone(&backend_registry),
+                        Arc::clone(&js_plugins_arc),
+                        heap_cap_mb,
+                    )
+                };
+
+                // Set up the Canvas2D binary command buffer (or mark json mode).
+                rt.init_canvas_buffers(&canvas_protocol, canvas_buffer_kb);
+
+                rt.register_extensions(&*extensions_arc);
+
+                // ── Single-instance deep-link listener (main window only) ──
+                // If a TCP listener was created before the event loop started, hand it
+                // to a Tokio task that forwards URLs from second instances into the
+                // runtime's deeplink_url_queue.
+                if window_handle == 0 {
+                    if let Some(listener) = single_instance_tcp.take() {
+                        let queue_clone = Arc::clone(&rt.deeplink_url_queue);
+                        // Push URLs to the queue; the next frame will pick them up.
+                        tokio_handle.spawn(async move {
+                            use tokio::io::AsyncBufReadExt;
+                            // Convert the std listener to a tokio listener.
+                            let async_listener = match tokio::net::TcpListener::from_std(listener) {
+                                Ok(l)  => l,
+                                Err(e) => {
+                                    log::warn!("glyx: deep-link listener error: {}", e);
+                                    return;
+                                }
+                            };
+                            loop {
+                                match async_listener.accept().await {
+                                    Ok((stream, _addr)) => {
+                                        let queue = Arc::clone(&queue_clone);
+                                        tokio::spawn(async move {
+                                            let reader = tokio::io::BufReader::new(stream);
+                                            let mut lines = reader.lines();
+                                            while let Ok(Some(line)) = lines.next_line().await {
+                                                let url = line.trim().to_string();
+                                                if !url.is_empty() {
+                                                    log::info!("glyx: deep-link forwarded URL: {}", url);
+                                                    queue.lock().push_back(url);
+                                                    // Note: no request_redraw here — the frame loop will
+                                                    // pick up the URL on the next scheduled frame.
+                                                }
+                                            }
+                                        });
+                                    }
+                                    Err(e) => {
+                                        log::warn!("glyx: deep-link listener accept error: {}", e);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+
+                if let Some(ref js) = *js_src_arc {
+                    match rt.eval(js) {
+                        Ok(_)  => log::info!("Window {}: JS eval complete.", window_handle),
+                        Err(e) => log::error!("Window {}: JS eval error: {}", window_handle, e),
+                    }
+                }
+
+                let win = window.clone();
+                let request_redraw: Arc<dyn Fn() + Send + Sync> =
+                    Arc::new(move || win.request_redraw());
+
+                // Frameless drag closure — captures the window directly.
+                let drag_window_fn: Option<Arc<dyn Fn() + Send + Sync>> =
+                    if !window_decorations {
+                        let w_drag = Arc::clone(&window);
+                        Some(Arc::new(move || { w_drag.drag_window().ok(); }))
+                    } else {
+                        None
+                    };
+
+                let ws = PerWindowState {
+                    gpu:          gpu_ctx,
+                    renderer,
+                    text_sys:     TextSystem::new(),
+                    layout:       LayoutTree::new(),
+                    runtime:      rt,
+                    layout_dirty:           true,
+                    layout_structure_dirty: true,
+                    resolved:               Vec::new(),
+                    js_nodes:     std::collections::HashMap::with_capacity(256),
+                    js_root:      None,
+                    images:       std::collections::HashMap::with_capacity(32),
+                    images_by_path: lru::LruCache::new(std::num::NonZeroUsize::new(64).unwrap()),
+                    image_cache_hits: 0,
+                    image_cache_misses: 0,
+                    label_cache:  lru::LruCache::new(std::num::NonZeroUsize::new(256).unwrap()),
+                    cursor_x:     0.0,
+                    cursor_y:     0.0,
+                    drag_active:  false,
+                    drag_start_x: 0.0,
+                    drag_start_y: 0.0,
+                    request_redraw: Arc::clone(&request_redraw),
+                    cursor_blink_on:       true,
+                    cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
+                    perf:          shared_perf,
+                    rss_bytes:     {
+                        // Spawn a background task that polls RSS every 2 s via sysinfo.
+                        // This keeps the heavy OS syscall off the render thread entirely,
+                        // eliminating the P99 spikes that the previous per-30-frame poll caused.
+                        let rss_atomic = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                        let rss_clone  = Arc::clone(&rss_atomic);
+                        let pid        = sysinfo::Pid::from_u32(std::process::id());
+                        tokio_handle.spawn(async move {
+                            let mut sys = sysinfo::System::new();
+                            loop {
+                                sys.refresh_processes(
+                                    sysinfo::ProcessesToUpdate::Some(&[pid]), false,
+                                );
+                                let rss = sys.process(pid)
+                                    .map(|p| p.memory())
+                                    .unwrap_or(0);
+                                rss_clone.store(rss, std::sync::atomic::Ordering::Relaxed);
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            }
+                        });
+                        rss_atomic
+                    },
+                    gc_frame_counter: 0,
+                    canvas_cmds:     std::collections::HashMap::new(),
+                    canvas3d_scenes: std::collections::HashMap::new(),
+                    canvas3d_dirty:  std::collections::HashSet::new(),
+                    renderer_3d:     None,
+                    camera_streams:  std::collections::HashMap::new(),
+                    video_streams:   std::collections::HashMap::new(),
+                    // Splash only applies to the main window; secondary windows get None.
+                    splash_state: if window_handle == 0 { main_splash_state.take() } else { None },
+                    decorations:     window_decorations,
+                    drag_window_fn,
+                    scrollbar_drag:  None,
+                    dirty_nodes:              std::collections::HashSet::new(),
+                    descendant_cascade_nodes: std::collections::HashSet::new(),
+                    dirty_subtrees:           std::collections::HashSet::new(),
+                    prev_resolved:   std::collections::HashMap::new(),
+                    scene_cache:              std::collections::HashMap::new(),
+                    scene_cache_new:          std::collections::HashMap::new(),
+                    boundary_scene_cache:     std::collections::HashMap::new(),
+                    boundary_scene_cache_new: std::collections::HashMap::new(),
+                    pipeline_cache_saved:     false,
+                    #[cfg(feature = "dev")]
+                    dev_mode: if window_handle == 0 {
+                        // Hot-reload dev overlay is only wired to the main window.
+                        start_dev_mode_worker(
+                            Arc::clone(&request_redraw),
+                            _dev_mode.clone(),
+                        )
+                        .map(|rx| DevModeState {
+                            rx,
+                            overlay_visible: false,
+                            last_reload: None,
+                            last_build_message: "watching changes".to_string(),
+                            ctrl_down: false,
+                            shift_down: false,
+                            overlay_lines:         Vec::new(),
+                            overlay_next_refresh:  Instant::now(),
+                            overlay_next_redraw:    Instant::now(),
+                            last_js_error:          None,
+                            startup_rss_bytes:      0,
+                            startup_v8_total_bytes: 0,
+                        })
+                    } else {
+                        None
+                    },
+                };
+                windows.insert(window_handle, ws);
+                window.request_redraw();
+
+                // Kick off ffmpeg-sidecar download in the background once, on the
+                // main window only.  The download is a no-op when ffmpeg is already
+                // reachable via PATH or the sidecar dir.
+                #[cfg(feature = "dev")]
+                if window_handle == 0 {
+                    crate::scene::ensure_dev_ffmpeg();
+                }
+            }
+
+            // ── Resize ────────────────────────────────────────────────────
+            ShellEvent::Resized { window_handle, width, height } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
+                    let prev_w = s.gpu.width();
+                    let prev_h = s.gpu.height();
+                    s.gpu.resize(width, height);
+                    if s.gpu.width() != prev_w || s.gpu.height() != prev_h {
+                        s.layout_dirty = true;
+                        s.runtime.push_event(InputEvent::Resize { width, height });
+                    }
+                }
+            }
+
+            // ── Cursor movement ───────────────────────────────────────────
+            ShellEvent::CursorMoved { window_handle, x, y } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
+                    let prev_x = s.cursor_x;
+                    let prev_y = s.cursor_y;
+                    s.cursor_x = x as f32;
+                    s.cursor_y = y as f32;
+                    s.runtime.push_event(InputEvent::CursorMoved {
+                        x: s.cursor_x,
+                        y: s.cursor_y,
+                    });
+
+                    // Scrollbar thumb drag
+                    if let Some(ref drag) = s.scrollbar_drag {
+                        let cursor_y = y as f64;
+                        let mouse_delta = cursor_y - drag.start_mouse_y;
+                        let drag_range = drag.track_h - drag.thumb_h;
+                        if drag_range > 0.0 && drag.scroll_range > 0.0 {
+                            let ratio = drag.scroll_range / drag_range;
+                            let new_scroll_y =
+                                (drag.start_scroll_y + mouse_delta * ratio).clamp(0.0, drag.scroll_range);
+                            s.runtime.push_event(InputEvent::ScrollbarDrag {
+                                node_id: drag.node_id,
+                                scroll_y: new_scroll_y as f32,
+                            });
+                        }
+                    }
+
+                    if s.drag_active {
+                        s.runtime.push_event(InputEvent::DragMove {
+                            x: s.cursor_x,
+                            y: s.cursor_y,
+                            dx: s.cursor_x - prev_x,
+                            dy: s.cursor_y - prev_y,
+                        });
+                    }
+                    (s.request_redraw)();
+                }
+            }
+
+            // ── Mouse button ──────────────────────────────────────────────
+            ShellEvent::MouseInput { window_handle, button, pressed } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
+                    // When frameless and left button pressed: check for a glyxDraggable
+                    // node under the cursor. If found, initiate an OS window drag and
+                    // skip the normal DragStart event so JS sliders/etc. aren't affected.
+                    if button == 0 && pressed && !s.decorations {
+                        if let Some(ref drag_fn) = s.drag_window_fn.clone() {
+                            let cx = s.cursor_x;
+                            let cy = s.cursor_y;
+                            let hit = {
+                                let cache = s.runtime.layout_cache.lock();
+                                s.js_nodes.iter().any(|(&id, node)| {
+                                    node.props.draggable == Some(true)
+                                        && cache.get(&id).map_or(false, |&[x, y, w, h]| {
+                                            cx >= x && cx <= x + w && cy >= y && cy <= y + h
+                                        })
+                                        // Skip drag if a Pressable descendant is under cursor.
+                                        // Clicking a button inside the title bar should press
+                                        // the button, not drag the window.
+                                        && !has_pressable_descendant_at(id, cx, cy, &s.js_nodes, &cache)
+                                })
+                            };
+                            if hit {
+                                drag_fn();
+                                // Still send MouseButton so onPressIn handlers fire, but
+                                // do NOT start a DragStart — the OS owns this drag now.
+                                s.runtime.push_event(InputEvent::MouseButton {
+                                    x: cx, y: cy, button, pressed,
+                                });
+                                return;
+                            }
+                        }
+                    }
+
+                    // ── Scrollbar thumb drag ─────────────────────────────
+                    if button == 0 {
+                        if pressed {
+                            // Clear any stale drag (e.g. from focus loss).
+                            s.scrollbar_drag = None;
+                            if let Some(drag) = try_start_scrollbar_drag(s) {
+                                s.scrollbar_drag = Some(drag);
+                                return;
+                            }
+                        } else if s.scrollbar_drag.take().is_some() {
+                            return;
+                        }
+                    }
+
+                    s.runtime.push_event(InputEvent::MouseButton {
+                        x: s.cursor_x, y: s.cursor_y, button, pressed,
+                    });
+                    // Track left-button drag state (button == 0).
+                    if button == 0 {
+                        if pressed {
+                            s.drag_active  = true;
+                            s.drag_start_x = s.cursor_x;
+                            s.drag_start_y = s.cursor_y;
+                            s.runtime.push_event(InputEvent::DragStart {
+                                x: s.cursor_x, y: s.cursor_y,
+                            });
+                        } else if s.drag_active {
+                            s.drag_active = false;
+                            s.runtime.push_event(InputEvent::DragEnd {
+                                x: s.cursor_x, y: s.cursor_y,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // ── Keyboard ──────────────────────────────────────────────────
+            ShellEvent::KeyInput { window_handle, key, text, pressed } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
+                    #[cfg(feature = "dev")]
+                    if let Some(dev) = s.dev_mode.as_mut() {
+                        match key.as_str() {
+                            "ControlLeft" | "ControlRight" => dev.ctrl_down = pressed,
+                            "ShiftLeft" | "ShiftRight"     => dev.shift_down = pressed,
+                            "KeyD" if pressed && dev.ctrl_down && dev.shift_down => {
+                                dev.overlay_visible = !dev.overlay_visible;
+                                (s.request_redraw)();
+                            }
+                            _ => {}
+                        }
+                    }
+                    s.runtime.push_event(InputEvent::KeyInput { key, text, pressed });
+                }
+            }
+
+            // ── Scroll ────────────────────────────────────────────────────
+            ShellEvent::Scroll { window_handle, delta_y } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
+                    s.runtime.push_event(InputEvent::Scroll { delta_y });
+                }
+            }
+
+            // ── Draw ──────────────────────────────────────────────────────
+            ShellEvent::RedrawRequested { window_handle } => {
+                let Some(s) = windows.get_mut(&window_handle) else { return };
+
+                #[cfg(feature = "dev")]
+                handle_dev_build_events(s);
+
+                // ── Perf: wall-clock frame time ───────────────────────────
+                let frame_start = Instant::now();
+                let frame_time_ms = {
+                    let perf = s.perf.lock();
+                    if let Some(prev) = perf.last_frame_at {
+                        (frame_start - prev).as_secs_f64() * 1000.0
+                    } else {
+                        0.0
+                    }
+                };
+
+                // 1. Resolve async JS Promises.
+                s.runtime.tick();
+
+                // 2. Pre-frame scene commands (initial mount, async completions).
+                let pre_commands = s.runtime.drain_scene_commands();
+                let pre_changed  = apply_scene_commands(s, pre_commands);
+
+                // 3. JS frame callback — dispatchEvents, React state updates.
+                let js_start = Instant::now();
+                let frame_tick_err = s.runtime.frame_tick();
+                let js_time_ms = js_start.elapsed().as_secs_f64() * 1000.0;
+
+                // In dev mode, surface JS exceptions as a visual overlay.
+                #[cfg(feature = "dev")]
+                if let Some(err) = frame_tick_err {
+                    if let Some(dev) = s.dev_mode.as_mut() {
+                        dev.last_js_error = Some(err);
+                    }
+                }
+
+                // 4. Post-frame commands (React re-renders from step 3 events).
+                let post_commands = s.runtime.drain_scene_commands();
+                let post_changed  = apply_scene_commands(s, post_commands);
+
+                // 5a. Pull latest camera frames and build peniko::ImageData.
+                let mut media_changed = false;
+                for stream in s.camera_streams.values_mut() {
+                    if let Some((w, h, data)) = stream.frame_buf.lock().take() {
+                        stream.latest_image = Some(peniko::ImageData {
+                            data: peniko::Blob::from(data),
+                            format: peniko::ImageFormat::Rgba8,
+                            alpha_type: peniko::ImageAlphaType::Alpha,
+                            width: w, height: h,
+                        });
+                        media_changed = true;
+                    }
+                }
+
+                // 5b. Pull latest video frames and build peniko::ImageData.
+                // Also drain video events into the runtime's video_events queue.
+                for stream in s.video_streams.values_mut() {
+                    if let Some((w, h, data)) = stream.frame_buf.lock().take() {
+                        stream.latest_image = Some(peniko::ImageData {
+                            data: peniko::Blob::from(data),
+                            format: peniko::ImageFormat::Rgba8,
+                            alpha_type: peniko::ImageAlphaType::Alpha,
+                            width: w, height: h,
+                        });
+                        media_changed = true;
+                    }
+                    let pending: Vec<_> = stream.events.lock().drain(..).collect();
+                    if !pending.is_empty() {
+                        let mut ve = s.runtime.video_events.lock();
+                        ve.extend(pending);
+                    }
+                }
+
+                // 5. Single layout pass.
+                let layout_start = Instant::now();
+                recompute_layout(s);
+                // Detect any position/size changes that cascaded out of layout and
+                // add them to dirty_nodes before building the dirty subtree set.
+                update_dirty_from_layout(s);
+                build_dirty_subtrees(s);
+                let layout_time_ms = layout_start.elapsed().as_secs_f64() * 1000.0;
+
+                // Placeholder for gpu_time_ms; set after render_frame+present below.
+                let perf_snapshot_pre = (frame_time_ms, js_time_ms, layout_time_ms);
+                let perf_node_count   = s.js_nodes.len();
+
+                // 6. Scroll-adjusted positions for next frame's hit-testing.
+                update_scroll_positions(s);
+
+                // 6b. Cursor blink phase — evaluated before the gate so blink flips
+                //     are included in the dirty check.
+                let now = Instant::now();
+                let blink_changed = if now >= s.cursor_blink_deadline {
+                    s.cursor_blink_on       = !s.cursor_blink_on;
+                    s.cursor_blink_deadline = now + Duration::from_millis(500);
+                    true
+                } else {
+                    false
+                };
+
+                // ── Frame gate ────────────────────────────────────────────────
+                // Skip GPU work entirely when nothing changed visually.
+                //
+                // Two-level decision:
+                //   • Release: nothing changed → return immediately, no GPU work.
+                //   • Dev: overlay timer fires every ~50ms regardless of scene changes.
+                //     Full Vello render only when scene changed OR overlay text is due
+                //     for its 250ms refresh.  All other overlay-timer ticks blit the
+                //     previous frame — skipping all 35 compute passes.
+                let scene_needs_gpu = pre_changed || post_changed || media_changed || blink_changed;
+
+                // Release: skip entirely when nothing changed.
+                #[cfg(not(feature = "dev"))]
+                if !scene_needs_gpu { return; }
+
+                // Dev: compute whether a full render is actually required.
+                #[cfg(feature = "dev")]
+                let needs_full_render = {
+                    let overlay_refresh_due = s.dev_mode.as_ref().map(|d| {
+                        d.overlay_lines.is_empty()                   // first overlay draw
+                        || Instant::now() >= d.overlay_next_refresh  // 250ms text refresh
+                        || d.last_js_error.is_some()                 // error banner active
+                    }).unwrap_or(false);
+                    scene_needs_gpu || overlay_refresh_due
+                };
+                #[cfg(not(feature = "dev"))]
+                let needs_full_render = true; // always true here (early return above)
+
+                // 7. Acquire swapchain texture.
+                let texture = match s.gpu.current_texture() {
+                    Some(t) => t,
+                    None => {
+                        log::warn!("Surface lost or outdated; reconfiguring.");
+                        s.gpu.resize(s.gpu.width(), s.gpu.height());
+                        return;
+                    }
+                };
+
+                // ── Overlay timer reschedule ───────────────────────────────────
+                // Placed here — before any early return — so the timer keeps
+                // firing on blit-only frames and static apps don't freeze.
+                #[cfg(feature = "dev")]
+                if let Some(dev) = s.dev_mode.as_mut() {
+                    if dev.overlay_visible {
+                        let now = Instant::now();
+                        if now >= dev.overlay_next_redraw {
+                            dev.overlay_next_redraw = now + Duration::from_millis(200);
+                            let req = Arc::clone(&s.request_redraw);
+                            tokio_handle.spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                                req();
+                            });
+                        }
+                    }
+                }
+
+                // ── Fast path: blit cached frame ──────────────────────────────
+                // Neither the scene nor the overlay text changed.  Re-blit the
+                // previous rendered frame — skips all Vello compute passes and
+                // TinySkia CPU rasterization + write_texture upload.
+                //
+                // Guard: `pipeline_cache_saved` is set after the first successful
+                // render_frame(), so the upload texture / Vello target always
+                // holds a valid image when we enter this path.
+                // `!scene_cache.is_empty()` covers the Vello-specific case where
+                // pipeline_cache_saved is unavailable (shouldn't happen, but safe).
+                //
+                // Without this fix, TinySkia (supports_caching=false) never
+                // populates scene_cache, so the old guard was always false and
+                // TinySkia ran a full 60fps re-rasterize even on static screens.
+                #[cfg(feature = "dev")]
+                if !needs_full_render && (s.pipeline_cache_saved || !s.scene_cache.is_empty()) {
+                    // Stamp last_frame_at so FPS reflects the visual refresh rate
+                    // (~20fps from the overlay timer), not the full-render rate (~4fps).
+                    s.perf.lock().last_frame_at = Some(frame_start);
+                    if let Err(e) = s.renderer.blit_cached_frame(&s.gpu, &texture) {
+                        log::warn!("blit_cached_frame: {e}");
+                    } else {
+                        texture.present();
+                        s.gpu.poll();
+                    }
+                    return;
+                }
+
+                // 9. Render JS scene graph.
+                // Sync renderer dims before begin_frame — TinySkia/FemtoVG create
+                // their per-frame buffer at their stored size; if the window was
+                // just maximized/resized, Resized only updated gpu, not the renderer.
+                s.renderer.notify_resize(s.gpu.width().max(1), s.gpu.height().max(1));
+                let mut frame = s.renderer.begin_frame();
+                let mut any_cursor_active = false;
+                let mut canvas3d_overlays: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
+
+                if let Some(root_id) = s.js_root {
+                    let mut render_ctx = RenderCtx {
+                        nodes:             &s.js_nodes,
+                        images:            &s.images,
+                        resolved:          &s.resolved,
+                        frame:             &mut frame,
+                        text_sys:          &mut s.text_sys,
+                        label_cache:       &mut s.label_cache,
+                        canvas_cmds:       &s.canvas_cmds,
+                        canvas3d_overlays: &mut canvas3d_overlays,
+                        camera_streams:    &s.camera_streams,
+                        video_streams:     &s.video_streams,
+                        cursor_blink_on:   s.cursor_blink_on,
+                        any_cursor_active: &mut any_cursor_active,
+                        dirty_subtrees:      &s.dirty_subtrees,
+                        scene_cache:         &mut s.scene_cache,
+                        scene_cache_new:     &mut s.scene_cache_new,
+                        boundary_cache:      &mut s.boundary_scene_cache,
+                        boundary_cache_new:  &mut s.boundary_scene_cache_new,
+                        win_w: s.gpu.width()  as f64,
+                        win_h: s.gpu.height() as f64,
+                    };
+                    render_subtree(root_id, 0.0, 1.0, &mut render_ctx);
+                }
+
+                // Splash screen overlay — drawn on top of JS scene.
+                if let Some(sp) = &s.splash_state {
+                    if sp.is_visible() {
+                        let sw = s.gpu.width()  as f64;
+                        let sh = s.gpu.height() as f64;
+                        let bg = rgba_to_vello(sp.background);
+                        frame.fill_rect(0.0, 0.0, sw, sh, bg);
+                        if let Some(img) = &sp.image {
+                            let iw = img.width  as f64;
+                            let ih = img.height as f64;
+                            let scale  = (sw / iw).min(sh / ih).min(1.0);
+                            let dw = iw * scale;
+                            let dh = ih * scale;
+                            let dx = (sw - dw) * 0.5;
+                            let dy = (sh - dh) * 0.5;
+                            frame.draw_image(img, dx, dy, dw, dh);
+                        }
+                        // Request another frame so the splash keeps redrawing until hidden.
+                        (s.request_redraw)();
+                    }
+                }
+
+                #[cfg(feature = "dev")]
+                draw_dev_overlay(s, &mut frame);
+
+                #[cfg(feature = "dev")]
+                draw_error_overlay(s, &mut frame);
+
+                // (overlay timer reschedule moved to before the blit-only fast path above)
+
+                let gpu_start = Instant::now();
+                if let Err(e) = s.renderer.render_frame(&s.gpu, &texture, frame) {
+                    log::error!("Render error: {}", e);
+                    return;
+                }
+
+                // 3D overlays — blitted on top of Vello with LoadOp::Load.
+                if !canvas3d_overlays.is_empty() {
+                    let surface_view = texture.texture.create_view(&Default::default());
+                    let sw = s.gpu.width()  as f32;
+                    let sh = s.gpu.height() as f32;
+                    for (id, x, y, w, h) in &canvas3d_overlays {
+                        // Lazy-initialise Renderer3D on first use.
+                        if s.renderer_3d.is_none() {
+                            s.renderer_3d = Some(glyx_3d::Renderer3D::new(
+                                &s.gpu.device,
+                                &s.gpu.queue,
+                                s.gpu.surface_format(),
+                            ));
+                        }
+                        if s.canvas3d_dirty.contains(id) {
+                            // Scene changed this frame: full re-render.
+                            if let Some(scene) = s.canvas3d_scenes.get(id) {
+                                let gltf_paths: Vec<&str> = scene.meshes.iter()
+                                    .filter_map(|m| match &m.geometry {
+                                        glyx_3d::Geometry3D::Gltf { path } => Some(path.as_str()),
+                                        _ => None,
+                                    })
+                                    .collect();
+                                let r3d = s.renderer_3d.as_mut().unwrap();
+                                for path in gltf_paths {
+                                    if let Err(e) = r3d.load_gltf(&s.gpu.device, &s.gpu.queue, path) {
+                                        log::warn!("GLTF load error '{}': {}", path, e);
+                                    }
+                                }
+                                r3d.render(&s.gpu.device, &s.gpu.queue,
+                                           *id, scene, *x, *y, *w, *h,
+                                           &surface_view, sw, sh);
+                            }
+                            s.canvas3d_dirty.remove(id);
+                        } else if s.canvas3d_scenes.contains_key(id) {
+                            // Scene unchanged: blit cached texture, skip the 3D pipeline.
+                            let r3d = s.renderer_3d.as_mut().unwrap();
+                            r3d.blit_only(&s.gpu.device, &s.gpu.queue,
+                                          *id, *x, *y, *w, *h,
+                                          &surface_view, sw, sh);
+                        }
+                    }
+                }
+
+                texture.present();
+
+                // Release staging buffers and D3D12 command allocators from
+                // completed GPU submissions.  Without this, wgpu's upload ring
+                // buffer accumulates every frame (especially on DX12/iGPU where
+                // GPU memory = system RAM), causing unbounded RSS growth.
+                s.gpu.poll();
+
+                // Periodic V8 major GC — every ~5 s at 60 fps.
+                // Animation loops (Canvas3D at 30 fps, Canvas2D at 60 fps) promote
+                // short-lived React objects into V8's old generation faster than
+                // automatic minor GC can drain them, causing ~46 KB/s RSS growth.
+                // `gc_hint()` forces a full collection that reclaims them (<2 ms).
+                s.gc_frame_counter = s.gc_frame_counter.wrapping_add(1);
+                if s.gc_frame_counter % 180 == 0 {
+                    s.runtime.gc_hint();
+                    // After V8 reclaims its heap, force mimalloc to immediately
+                    // decommit any segments that are now completely free rather
+                    // than waiting for its background purge timer (which can
+                    // take 20+ minutes to trigger a large segment decommit).
+                    // mi_collect(force=true) is a no-op if nothing is free,
+                    // so it is safe to call unconditionally here.
+                    extern "C" { fn mi_collect(force: bool); }
+                    unsafe { mi_collect(true); }
+                }
+
+                // Persist compiled shader bytecode once so subsequent launches
+                // skip Vulkan shader recompilation.  Runs exactly once per
+                // process (no-op after the first frame; no-op on DX12/Metal).
+                if !s.pipeline_cache_saved {
+                    s.renderer.try_save_pipeline_cache();
+                    s.pipeline_cache_saved = true;
+                }
+
+                // Update prev_resolved snapshot and clear per-frame dirty sets.
+                snapshot_resolved(s);
+                s.dirty_nodes.clear();
+                s.dirty_subtrees.clear();
+
+                // Rotate scene cache: scene_cache_new becomes the cache for the
+                // next frame; the old scene_cache (stale entries for hidden /
+                // removed nodes) is cleared and reused as the write buffer.
+                std::mem::swap(&mut s.scene_cache, &mut s.scene_cache_new);
+                s.scene_cache_new.clear();
+                // Same rotation for RepaintBoundary fragment cache.
+                std::mem::swap(&mut s.boundary_scene_cache, &mut s.boundary_scene_cache_new);
+                s.boundary_scene_cache_new.clear();
+
+                let gpu_time_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
+
+                // Record perf sample (skips the first frame where frame_time_ms = 0).
+                let (frame_time_ms, js_time_ms, layout_time_ms) = perf_snapshot_pre;
+                if frame_time_ms > 0.0 {
+                    let heap = s.runtime.heap_stats();
+                    // RSS is updated by a background tokio task every 2 s — zero OS cost here.
+                    let process_rss = s.rss_bytes.load(std::sync::atomic::Ordering::Relaxed);
+                    // wgpu GPU memory counters — reads atomics, zero GPU cost.
+                    let (gpu_buf_bytes, gpu_tex_bytes, gpu_reserved_bytes,
+                         gpu_buf_count, gpu_tex_count) = s.gpu.memory_counters();
+                    let mut perf = s.perf.lock();
+                    perf.last_frame_at = Some(frame_start);
+
+                    // Dev mode: simple node-count leak heuristic.
+                    // If the node count grows monotonically for 600 frames (5s at 120fps),
+                    // emit a warning suggesting a possible render leak.
+                    #[cfg(feature = "dev")]
+                    {
+                        if perf._node_history.len() >= 600 { perf._node_history.pop_front(); }
+                        let prev = perf._node_history.back().copied().unwrap_or(0);
+                        perf._node_history.push_back(perf_node_count);
+                        if perf_node_count > prev {
+                            perf._monotonic_frames += 1;
+                            if perf._monotonic_frames == 600 {
+                                perf.push_leak_warning(format!(
+                                    "{{\"type\":\"nodeCount\",\"count\":{},\"frames\":600,\"msg\":\"Node count has grown monotonically for 600 frames — possible render leak\"}}",
+                                    perf_node_count
+                                ));
+                            }
+                        } else {
+                            perf._monotonic_frames = 0;
+                        }
+                    }
+
+                    // Capture startup baseline on first frame with valid RSS.
+                    #[cfg(feature = "dev")]
+                    if let Some(dev) = s.dev_mode.as_mut() {
+                        if dev.startup_rss_bytes == 0 && process_rss > 0 {
+                            dev.startup_rss_bytes      = process_rss;
+                            dev.startup_v8_total_bytes = heap.total_heap_size;
+                        }
+                    }
+
+                    perf.push(glyx_perf::PerfFrame {
+                        frame_time_ms,
+                        js_time_ms,
+                        layout_time_ms,
+                        gpu_time_ms,
+                        node_count: perf_node_count,
+                        heap_used_bytes:  heap.used_heap_size,
+                        heap_total_bytes: heap.total_heap_size,
+                        process_rss_bytes: process_rss,
+                        gpu_buffer_bytes:   gpu_buf_bytes,
+                        gpu_texture_bytes:  gpu_tex_bytes,
+                        gpu_reserved_bytes: gpu_reserved_bytes,
+                        gpu_buffer_count:   gpu_buf_count,
+                        gpu_texture_count:  gpu_tex_count,
+                    });
+                } else {
+                    s.perf.lock().last_frame_at = Some(frame_start);
+                }
+
+                if any_cursor_active {
+                    let redraw   = Arc::clone(&s.request_redraw);
+                    let deadline = s.cursor_blink_deadline;
+                    std::thread::spawn(move || {
+                        let now = Instant::now();
+                        if deadline > now { std::thread::sleep(deadline - now); }
+                        redraw();
+                    });
+                }
+            }
+
+            // ── Close ─────────────────────────────────────────────────────
+            // ── Window occluded (minimised / hidden) ──────────────────────
+            // Release the ~100–170 MB Vello GPU buffer pool while the window
+            // is not visible.  Buffers are reallocated lazily on first redraw
+            // after restore (µs cost; compiled shaders stay cached in driver).
+            ShellEvent::Occluded { window_handle, occluded: true } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
+                    s.renderer.trim_resources();
+                    // Also drop CPU-side decoded image pixels. They'll be re-decoded
+                    // from disk on restore (fast; atlas re-upload is the slow part,
+                    // and that cost is paid anyway after trim_resources clears GPU buffers).
+                    s.images_by_path.clear();
+                    log::debug!("Window {window_handle} occluded — GPU buffer pool + image CPU cache released.");
+                }
+            }
+
+            ShellEvent::Occluded { .. } => {} // un-occlude: nothing to do, buffers reallocate lazily
+
+            ShellEvent::FocusChanged { focused: false, .. } => {
+                // Window lost focus — user switched to another app.
+                // Run V8 GC + renderer pool trim + mimalloc segment decommit
+                // immediately while no frame is in flight. This is the primary
+                // intelligent trigger for memory recovery; no developer action
+                // required. The renderer pools (Vello GPU buffers, skia/femtovg
+                // glyph caches) rebuild lazily over the next few frames on return.
+                for s in windows.values_mut() {
+                    s.runtime.gc_hint();
+                    s.renderer.trim_resources();
+                }
+                extern "C" { fn mi_collect(force: bool); }
+                unsafe { mi_collect(true); }
+                log::debug!("Focus lost — GC + renderer trim + mi_collect triggered.");
+            }
+
+            ShellEvent::FocusChanged { .. } => {} // gained focus: nothing to do
+
+            ShellEvent::CloseRequested { window_handle } => {
+                log::info!("Window {} closed.", window_handle);
+                // Close SQLite pools gracefully before dropping the window state.
+                if let Some(s) = windows.get(&window_handle) {
+                    s.runtime.shutdown_db_pools();
+                }
+                windows.remove(&window_handle);
+            }
+        }
+    });
+
+    drop(tokio_rt);
+    restart
+}

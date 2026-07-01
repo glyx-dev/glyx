@@ -1,0 +1,11 @@
+{
+  "name": "@glyx/split-pane",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "description": "Resizable split-pane layouts with a draggable divider.",
+  "peerDependencies": {
+    "react": "^18.2.0",
+    "@glyx/react": "0.1.0"
+  }
+}

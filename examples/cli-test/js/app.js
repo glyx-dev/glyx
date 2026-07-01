@@ -5759,7 +5759,7 @@ No matching component was found for:
   // js/polyfills.js
   if (typeof performance === "undefined") {
     globalThis.performance = {
-      now: () => Number(__velox_getTime())
+      now: () => Number(__glyx_getTime())
     };
   }
   if (typeof setTimeout === "undefined") {
@@ -5796,73 +5796,73 @@ No matching component was found for:
   // js/app.jsx
   var import_react2 = __toESM(require_react(), 1);
 
-  // ../../js/packages/@velox/react/src/index.js
+  // ../../js/packages/@glyx/react/src/index.js
   var import_react = __toESM(require_react(), 1);
   var import_react_reconciler = __toESM(require_react_reconciler(), 1);
 
-  // ../../js/packages/@velox/react/src/hostConfig.js
+  // ../../js/packages/@glyx/react/src/hostConfig.js
   var import_constants = __toESM(require_constants(), 1);
   function createInstance(type, props) {
-    const { children, style, ref: _ref, _veloxOnMount, ...rest } = props;
+    const { children, style, ref: _ref, _glyxOnMount, ...rest } = props;
     const nodeProps = { ...rest, ...style };
-    const id = __velox_createNode(type, nodeProps);
-    if (typeof _veloxOnMount === "function") {
-      _veloxOnMount(id);
+    const id = __glyx_createNode(type, nodeProps);
+    if (typeof _glyxOnMount === "function") {
+      _glyxOnMount(id);
     }
     return { id };
   }
   function createTextInstance(text) {
-    __velox_log('[Velox] Warning: raw text node "' + text + '" — wrap in <Text>');
+    __glyx_log('[Glyx] Warning: raw text node "' + text + '" — wrap in <Text>');
     return { id: -1 };
   }
   function appendInitialChild(parentInstance, child) {
     if (child.id !== -1) {
-      __velox_appendChild(parentInstance.id, child.id);
+      __glyx_appendChild(parentInstance.id, child.id);
     }
   }
   function appendChild(parentInstance, child) {
     if (child.id !== -1) {
-      __velox_appendChild(parentInstance.id, child.id);
+      __glyx_appendChild(parentInstance.id, child.id);
     }
   }
   function appendChildToContainer(_container, child) {
     if (child.id !== -1) {
-      __velox_setRoot(child.id);
+      __glyx_setRoot(child.id);
     }
   }
   function insertBefore(parentInstance, child, _beforeChild) {
     if (child.id !== -1) {
-      __velox_appendChild(parentInstance.id, child.id);
+      __glyx_appendChild(parentInstance.id, child.id);
     }
   }
   function insertInContainerBefore(_container, child, _beforeChild) {
     if (child.id !== -1) {
-      __velox_setRoot(child.id);
+      __glyx_setRoot(child.id);
     }
   }
   function removeChild(_parentInstance, child) {
     if (child.id !== -1) {
-      __velox_removeNode(child.id);
+      __glyx_removeNode(child.id);
     }
   }
   function removeChildFromContainer(_container, child) {
     if (child.id !== -1) {
-      __velox_removeNode(child.id);
+      __glyx_removeNode(child.id);
     }
   }
   function clearContainer(_container) {}
   function detachDeletedInstance(instance) {
     if (instance.id !== -1) {
-      __velox_removeNode(instance.id);
+      __glyx_removeNode(instance.id);
     }
   }
   function prepareUpdate(_instance, _type, _oldProps, newProps) {
     return newProps;
   }
   function commitUpdate(instance, updatePayload) {
-    const { children, style, ref: _ref, _veloxOnMount, ...rest } = updatePayload;
+    const { children, style, ref: _ref, _glyxOnMount, ...rest } = updatePayload;
     const nodeProps = { ...rest, ...style };
-    __velox_updateNode(instance.id, nodeProps);
+    __glyx_updateNode(instance.id, nodeProps);
   }
   function commitTextUpdate() {}
   function commitMount() {}
@@ -5946,7 +5946,7 @@ No matching component was found for:
   };
   var hostConfig_default = HostConfig;
 
-  // ../../js/packages/@velox/react/src/events.js
+  // ../../js/packages/@glyx/react/src/events.js
   var pressableRegistry = new Map;
   var inputRegistry = new Map;
   var scrollRegistry = new Map;
@@ -5981,13 +5981,13 @@ No matching component was found for:
     }
   }
   function hitTest(nodeId, px, py) {
-    const layout = __velox_getLayout(nodeId);
+    const layout = __glyx_getLayout(nodeId);
     if (!layout)
       return false;
     return px >= layout.x && px < layout.x + layout.width && py >= layout.y && py < layout.y + layout.height;
   }
   function dispatchEvents() {
-    const events = __velox_pollEvents();
+    const events = __glyx_pollEvents();
     if (!events || events.length === 0)
       return;
     let cursorMovedThisFrame = false;
@@ -6072,16 +6072,16 @@ No matching component was found for:
     }
   }
 
-  // ../../js/packages/@velox/react/src/index.js
-  var VeloxReconciler = import_react_reconciler.default(hostConfig_default);
-  var rootContainer = VeloxReconciler.createContainer({ isVeloxRoot: true }, 0, null, false, null, "", (err) => __velox_log("[React] Recoverable error: " + err.message), null);
-  globalThis.__velox_frameCallback = function veloxFrameCallback() {
-    VeloxReconciler.flushSync(() => {
+  // ../../js/packages/@glyx/react/src/index.js
+  var GlyxReconciler = import_react_reconciler.default(hostConfig_default);
+  var rootContainer = GlyxReconciler.createContainer({ isGlyxRoot: true }, 0, null, false, null, "", (err) => __glyx_log("[React] Recoverable error: " + err.message), null);
+  globalThis.__glyx_frameCallback = function glyxFrameCallback() {
+    GlyxReconciler.flushSync(() => {
       dispatchEvents();
     });
   };
   function render(element) {
-    VeloxReconciler.updateContainer(element, rootContainer, null, null);
+    GlyxReconciler.updateContainer(element, rootContainer, null, null);
   }
   var View = ({ children, style, ...props }) => import_react.default.createElement("view", { style, ...props }, children);
   var Text = ({ children, style, showCursor, ...props }) => import_react.default.createElement("text", { text: children, style, showCursor, ...props });
@@ -6127,11 +6127,11 @@ No matching component was found for:
       };
     }, []);
     const mergedStyle = pressed ? { ...style, borderWidth: 2, borderColor: "#ffffffaa" } : hovered ? { ...style, borderWidth: 1, borderColor: "#ffffff55" } : style;
-    return import_react.default.createElement("view", { _veloxOnMount: onMount, style: mergedStyle, ...props }, children);
+    return import_react.default.createElement("view", { _glyxOnMount: onMount, style: mergedStyle, ...props }, children);
   }
   function useWindowSize() {
     const [size, setSize] = import_react.useState(() => {
-      const s = typeof __velox_getWindowSize !== "undefined" ? __velox_getWindowSize() : null;
+      const s = typeof __glyx_getWindowSize !== "undefined" ? __glyx_getWindowSize() : null;
       return s ? { width: s.width, height: s.height } : { width: 0, height: 0 };
     });
     import_react.useEffect(() => {

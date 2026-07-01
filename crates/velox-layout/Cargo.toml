@@ -1,9 +1,0 @@
-[package]
-name    = "velox-layout"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-taffy     = { workspace = true }
-log       = { workspace = true }
-thiserror = { workspace = true }

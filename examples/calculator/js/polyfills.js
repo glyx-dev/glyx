@@ -9,7 +9,7 @@
 
 if (typeof performance === 'undefined') {
   globalThis.performance = {
-    now: () => Number(__velox_getTime()),
+    now: () => Number(__glyx_getTime()),
   };
 }
 
@@ -21,15 +21,15 @@ if (typeof setTimeout === 'undefined') {
     const id = _nextTimerId++;
     const delay = ms > 0 ? ms : 0;
     _pendingTimers.set(id, { fn, due: performance.now() + delay });
-    if (typeof __velox_request_frame !== 'undefined') {
-      __velox_request_frame(delay);
+    if (typeof __glyx_request_frame !== 'undefined') {
+      __glyx_request_frame(delay);
     }
     return id;
   };
 
   globalThis.clearTimeout = (id) => { _pendingTimers.delete(id); };
 
-  globalThis._veloxDrainTimers = () => {
+  globalThis._glyxDrainTimers = () => {
     if (_pendingTimers.size === 0) return;
     const now = performance.now();
     const due = [];
@@ -49,14 +49,14 @@ if (typeof setInterval === 'undefined') {
     const id   = _nextIntervalId++;
     const delay = ms > 0 ? ms : 0;
     _pendingIntervals.set(id, { fn, ms: delay, nextDue: performance.now() + delay });
-    if (typeof __velox_request_frame !== 'undefined') __velox_request_frame(delay);
+    if (typeof __glyx_request_frame !== 'undefined') __glyx_request_frame(delay);
     return id;
   };
 
   globalThis.clearInterval = (id) => { _pendingIntervals.delete(id); };
 
-  const _prevDrain = globalThis._veloxDrainTimers;
-  globalThis._veloxDrainTimers = () => {
+  const _prevDrain = globalThis._glyxDrainTimers;
+  globalThis._glyxDrainTimers = () => {
     _prevDrain?.();
     if (_pendingIntervals.size === 0) return;
     const now = performance.now();

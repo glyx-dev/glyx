@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, Pressable, ScrollView, render, useWindowSize,
-} from '@velox/react';
+} from '@glyx/react';
 
 // ── Theme ─────────────────────────────────────────────────────────────────────
 
@@ -167,7 +167,7 @@ function App() {
       >
         {/* Custom titlebar — draggable (frameless window) */}
         <View
-          veloxDraggable
+          glyxDraggable
           style={{
             backgroundColor: C.surfaceAlt,
             borderRadius: 8,
@@ -188,7 +188,7 @@ function App() {
             <Pressable onPress={() => setGridMode(m => !m)} width={36} height={24} style={{ backgroundColor: C.mauve, borderRadius: 6, alignItems: 'center', justifyContent: 'center' }}>
               <Text fontSize={10} height={12} style={{ color: C.onLight }}>{gridMode ? 'Std' : 'Sci'}</Text>
             </Pressable>
-            <Pressable onPress={() => __velox_quit()}             width={24} height={24} style={{ backgroundColor: C.red, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}>
+            <Pressable onPress={() => __glyx_quit()}             width={24} height={24} style={{ backgroundColor: C.red, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}>
               <Text fontSize={10} height={12} style={{ color: C.onLight }}>×</Text>
             </Pressable>
           </View>
@@ -338,7 +338,7 @@ function App() {
                 scrollbarWidth={3}
                 scrollbarColor={C.overlay}
               >
-                {/* Wrapper with explicit height + flex-start overrides Velox's
+                {/* Wrapper with explicit height + flex-start overrides Glyx's
                     default justifyContent:center so pills stack from the top. */}
                 <View
                   width={200}

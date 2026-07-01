@@ -1,0 +1,20 @@
+[package]
+name    = "glyx-renderer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glyx-gpu  = { path = "../glyx-gpu" }
+glyx-text = { path = "../glyx-text" }
+vello      = { workspace = true }
+peniko     = { workspace = true }
+kurbo      = { workspace = true }
+parley     = { workspace = true }
+wgpu       = { workspace = true }
+log        = { workspace = true }
+thiserror  = { workspace = true }
+tiny-skia  = { workspace = true }
+swash      = { workspace = true }
+femtovg    = { workspace = true }
+image      = { workspace = true }
+lru        = { workspace = true }

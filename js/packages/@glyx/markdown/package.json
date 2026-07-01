@@ -1,0 +1,11 @@
+{
+  "name": "@glyx/markdown",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "description": "Render Markdown as Glyx component trees.",
+  "peerDependencies": {
+    "react": "^18.2.0",
+    "@glyx/react": "0.1.0"
+  }
+}

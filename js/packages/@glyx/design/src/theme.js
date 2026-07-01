@@ -1,0 +1,138 @@
+// @glyx/design — ThemeProvider + useTheme hook
+//
+// Usage:
+//   import { ThemeProvider, useTheme } from '@glyx/design';
+//
+//   // Wrap your app root:
+//   render(
+//     <ThemeProvider>
+//       <App />
+//     </ThemeProvider>
+//   );
+//
+//   // In any component:
+//   function MyButton({ label, onPress }) {
+//     const { colors, space, radius } = useTheme();
+//     return (
+//       <Pressable
+//         onPress={onPress}
+//         style={{
+//           backgroundColor: colors.primary,
+//           padding: space[3],
+//           borderRadius: radius.md,
+//         }}
+//       >
+//         <Text style={{ color: colors.primaryText }}>{label}</Text>
+//       </Pressable>
+//     );
+//   }
+
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import { tokens, darkTokens } from './tokens.js';
+
+// ── Context ───────────────────────────────────────────────────────────────────
+
+const ThemeContext = createContext(tokens);
+
+// ── ThemeProvider ─────────────────────────────────────────────────────────────
+
+/**
+ * Provides design tokens to the component subtree.
+ *
+ * @param {object}  props
+ * @param {'light'|'dark'|'system'} [props.colorScheme='system']
+ *   Explicit color scheme.  `'system'` (default) follows the OS preference via
+ *   `__glyx_system_getDarkMode`.
+ * @param {object}  [props.overrides]
+ *   Partial token overrides merged on top of the selected scheme tokens.
+ *   E.g. `{ colors: { primary: '#ff0000' } }`.
+ * @param {React.ReactNode} props.children
+ */
+export function ThemeProvider({ colorScheme = 'system', overrides, children }) {
+  const [isDark, setIsDark] = useState(() => {
+    if (colorScheme === 'dark') return true;
+    if (colorScheme === 'light') return false;
+    // 'system': read current OS preference.
+    try {
+      return typeof __glyx_system_getDarkMode !== 'undefined'
+        ? __glyx_system_getDarkMode() === 'dark'
+        : false;
+    } catch { return false; }
+  });
+
+  // Track OS preference changes when colorScheme='system'.
+  useEffect(() => {
+    if (colorScheme !== 'system') {
+      setIsDark(colorScheme === 'dark');
+      return;
+    }
+    // Poll every 2 seconds (winit doesn't fire a change event today).
+    const id = setInterval(() => {
+      try {
+        if (typeof __glyx_system_getDarkMode !== 'undefined') {
+          setIsDark(__glyx_system_getDarkMode() === 'dark');
+        }
+      } catch {}
+    }, 2000);
+    return () => clearInterval(id);
+  }, [colorScheme]);
+
+  const base = isDark ? darkTokens : tokens;
+
+  // Deep-merge overrides if provided.
+  const theme = overrides
+    ? _deepMerge(base, overrides)
+    : base;
+
+  return (
+    <ThemeContext.Provider value={theme}>
+      {children}
+    </ThemeContext.Provider>
+  );
+}
+
+// ── useTheme ──────────────────────────────────────────────────────────────────
+
+/**
+ * Returns the current theme tokens.
+ * Must be called inside a `<ThemeProvider>`.
+ *
+ * @returns {typeof import('./tokens.js').tokens}
+ */
+export function useTheme() {
+  return useContext(ThemeContext);
+}
+
+// ── createTheme ───────────────────────────────────────────────────────────────
+
+/**
+ * Merge custom token overrides with a base scheme.
+ *
+ * @param {'light'|'dark'} [base='light']
+ * @param {object} overrides  Partial token overrides.
+ * @returns {typeof tokens}
+ */
+export function createTheme(base = 'light', overrides = {}) {
+  const baseTokens = base === 'dark' ? darkTokens : tokens;
+  return _deepMerge(baseTokens, overrides);
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+function _deepMerge(base, overrides) {
+  const result = Object.assign({}, base);
+  for (const key of Object.keys(overrides)) {
+    if (
+      overrides[key] !== null &&
+      typeof overrides[key] === 'object' &&
+      !Array.isArray(overrides[key]) &&
+      base[key] !== null &&
+      typeof base[key] === 'object'
+    ) {
+      result[key] = _deepMerge(base[key], overrides[key]);
+    } else {
+      result[key] = overrides[key];
+    }
+  }
+  return result;
+}

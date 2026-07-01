@@ -1,5 +1,5 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 fn main() {
-    velox_core::run(velox_core::AppConfig::from_config());
+    glyx_core::run(glyx_core::AppConfig::from_config());
 }

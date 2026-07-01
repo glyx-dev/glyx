@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-# "dev" gates hot-reload watcher, bun subprocess, dev overlay in velox-core.
-# Production builds (velox build) disable this feature via --no-default-features.
+# "dev" gates hot-reload watcher, bun subprocess, dev overlay in glyx-core.
+# Production builds (glyx build) disable this feature via --no-default-features.
 default = ["dev"]
-dev     = ["velox-core/dev"]
+dev     = ["glyx-core/dev"]
 
 [dependencies]
-velox-core  = { path = "../../crates/velox-core", default-features = false }
-velox-shell = { path = "../../crates/velox-shell" }
+glyx-core  = { path = "../../crates/glyx-core", default-features = false }
+glyx-shell = { path = "../../crates/glyx-shell" }
 env_logger  = { workspace = true }

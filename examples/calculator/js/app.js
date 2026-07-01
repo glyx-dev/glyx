@@ -5759,10 +5759,10 @@ No matching component was found for:
   // js/app.jsx
   var import_react2 = __toESM(require_react(), 1);
 
-  // ../../js/packages/@velox/react/src/polyfills.js
+  // ../../js/packages/@glyx/react/src/polyfills.js
   if (typeof performance === "undefined") {
     globalThis.performance = {
-      now: () => Number(__velox_getTime())
+      now: () => Number(__glyx_getTime())
     };
   }
   if (typeof setTimeout === "undefined") {
@@ -5772,15 +5772,15 @@ No matching component was found for:
       const id = _nextTimerId++;
       const delay = ms > 0 ? ms : 0;
       _pendingTimers.set(id, { fn, due: performance.now() + delay });
-      if (typeof __velox_request_frame !== "undefined") {
-        __velox_request_frame(delay);
+      if (typeof __glyx_request_frame !== "undefined") {
+        __glyx_request_frame(delay);
       }
       return id;
     };
     globalThis.clearTimeout = (id) => {
       _pendingTimers.delete(id);
     };
-    globalThis._veloxDrainTimers = () => {
+    globalThis._glyxDrainTimers = () => {
       if (_pendingTimers.size === 0)
         return;
       const now = performance.now();
@@ -5802,15 +5802,15 @@ No matching component was found for:
       const id = _nextIntervalId++;
       const delay = ms > 0 ? ms : 0;
       _pendingIntervals.set(id, { fn, ms: delay, nextDue: performance.now() + delay });
-      if (typeof __velox_request_frame !== "undefined")
-        __velox_request_frame(delay);
+      if (typeof __glyx_request_frame !== "undefined")
+        __glyx_request_frame(delay);
       return id;
     };
     globalThis.clearInterval = (id) => {
       _pendingIntervals.delete(id);
     };
-    const _prevDrain = globalThis._veloxDrainTimers;
-    globalThis._veloxDrainTimers = () => {
+    const _prevDrain = globalThis._glyxDrainTimers;
+    globalThis._glyxDrainTimers = () => {
       _prevDrain?.();
       if (_pendingIntervals.size === 0)
         return;
@@ -5846,14 +5846,14 @@ No matching component was found for:
     };
   }
 
-  // ../../js/packages/@velox/react/src/index.js
+  // ../../js/packages/@glyx/react/src/index.js
   var import_react = __toESM(require_react(), 1);
   var import_react_reconciler = __toESM(require_react_reconciler(), 1);
 
-  // ../../js/packages/@velox/react/src/hostConfig.js
+  // ../../js/packages/@glyx/react/src/hostConfig.js
   var import_constants = __toESM(require_constants(), 1);
 
-  // ../../js/packages/@velox/react/src/events.js
+  // ../../js/packages/@glyx/react/src/events.js
   var pressableRegistry = new Map;
   var inputRegistry = new Map;
   var scrollRegistry = new Map;
@@ -5943,7 +5943,7 @@ No matching component was found for:
   function hitTest(nodeId, px, py) {
     if (pointerEventsNoneRegistry.has(nodeId))
       return false;
-    const layout = __velox_getLayout(nodeId);
+    const layout = __glyx_getLayout(nodeId);
     if (!layout)
       return false;
     return px >= layout.x && px < layout.x + layout.width && py >= layout.y && py < layout.y + layout.height;
@@ -5988,7 +5988,7 @@ No matching component was found for:
     return bestId;
   }
   function dispatchEvents() {
-    const events = __velox_pollEvents();
+    const events = __glyx_pollEvents();
     if (!events || events.length === 0)
       return;
     let cursorMovedThisFrame = false;
@@ -6008,7 +6008,7 @@ No matching component was found for:
           if (topmostId !== null) {
             const ph = pressableRegistry.get(topmostId);
             if (ph && !isDisabled(topmostId)) {
-              const layout = __velox_getLayout(topmostId);
+              const layout = __glyx_getLayout(topmostId);
               ph.onPress?.({
                 x: ev.x,
                 y: ev.y,
@@ -6019,7 +6019,7 @@ No matching component was found for:
             const ih = inputRegistry.get(topmostId);
             if (ih && !isDisabled(topmostId)) {
               setFocus(topmostId);
-              const layout = __velox_getLayout(topmostId);
+              const layout = __glyx_getLayout(topmostId);
               if (layout)
                 ih.onClickAt?.(ev.x - layout.x, ev.y - layout.y);
             }
@@ -6128,69 +6128,69 @@ No matching component was found for:
     }
   }
 
-  // ../../js/packages/@velox/react/src/hostConfig.js
+  // ../../js/packages/@glyx/react/src/hostConfig.js
   function createInstance(type, props) {
-    const { children, style, ref: _ref, _veloxOnMount, veloxDraggable, ...rest } = props;
+    const { children, style, ref: _ref, _glyxOnMount, glyxDraggable, ...rest } = props;
     const nodeProps = { ...rest, ...style };
-    if (veloxDraggable)
+    if (glyxDraggable)
       nodeProps.draggable = true;
-    const id = __velox_createNode(type, nodeProps);
+    const id = __glyx_createNode(type, nodeProps);
     if (type === "view") {
       registerSolid(id);
       if (nodeProps.zIndex)
         setNodeZIndex(id, nodeProps.zIndex);
     }
-    if (typeof _veloxOnMount === "function") {
-      _veloxOnMount(id);
+    if (typeof _glyxOnMount === "function") {
+      _glyxOnMount(id);
     }
     return { id };
   }
   function createTextInstance(text) {
-    __velox_log('[Velox] Warning: raw text node "' + text + '" — wrap in <Text>');
+    __glyx_log('[Glyx] Warning: raw text node "' + text + '" — wrap in <Text>');
     return { id: -1 };
   }
   function appendInitialChild(parentInstance, child) {
     if (child.id !== -1) {
-      __velox_appendChild(parentInstance.id, child.id);
+      __glyx_appendChild(parentInstance.id, child.id);
       setNodeParent(child.id, parentInstance.id);
     }
   }
   function appendChild(parentInstance, child) {
     if (child.id !== -1) {
-      __velox_appendChild(parentInstance.id, child.id);
+      __glyx_appendChild(parentInstance.id, child.id);
       setNodeParent(child.id, parentInstance.id);
     }
   }
   function appendChildToContainer(_container, child) {
     if (child.id !== -1) {
-      __velox_setRoot(child.id);
+      __glyx_setRoot(child.id);
     }
   }
   function insertBefore(parentInstance, child, _beforeChild) {
     if (child.id !== -1) {
-      __velox_appendChild(parentInstance.id, child.id);
+      __glyx_appendChild(parentInstance.id, child.id);
       setNodeParent(child.id, parentInstance.id);
     }
   }
   function insertInContainerBefore(_container, child, _beforeChild) {
     if (child.id !== -1) {
-      __velox_setRoot(child.id);
+      __glyx_setRoot(child.id);
     }
   }
   function removeChild(_parentInstance, child) {
     if (child.id !== -1) {
-      __velox_removeNode(child.id);
+      __glyx_removeNode(child.id);
     }
   }
   function removeChildFromContainer(_container, child) {
     if (child.id !== -1) {
-      __velox_removeNode(child.id);
+      __glyx_removeNode(child.id);
     }
   }
   function clearContainer(_container) {}
   function detachDeletedInstance(instance) {
     if (instance.id !== -1) {
-      __velox_removeNode(instance.id);
+      __glyx_removeNode(instance.id);
       removeNodeFromTree(instance.id);
     }
   }
@@ -6198,11 +6198,11 @@ No matching component was found for:
     return newProps;
   }
   function commitUpdate(instance, updatePayload) {
-    const { children, style, ref: _ref, _veloxOnMount, veloxDraggable, ...rest } = updatePayload;
+    const { children, style, ref: _ref, _glyxOnMount, glyxDraggable, ...rest } = updatePayload;
     const nodeProps = { ...rest, ...style };
-    if (veloxDraggable)
+    if (glyxDraggable)
       nodeProps.draggable = true;
-    __velox_updateNode(instance.id, nodeProps);
+    __glyx_updateNode(instance.id, nodeProps);
     setNodeZIndex(instance.id, nodeProps.zIndex ?? 0);
   }
   function commitTextUpdate() {}
@@ -6287,9 +6287,9 @@ No matching component was found for:
   };
   var hostConfig_default = HostConfig;
 
-  // ../../js/packages/@velox/react/src/index.js
-  var VeloxReconciler = import_react_reconciler.default(hostConfig_default);
-  var rootContainer = VeloxReconciler.createContainer({ isVeloxRoot: true }, 0, null, false, null, "", (err) => __velox_log("[React] Recoverable error: " + err.message), null);
+  // ../../js/packages/@glyx/react/src/index.js
+  var GlyxReconciler = import_react_reconciler.default(hostConfig_default);
+  var rootContainer = GlyxReconciler.createContainer({ isGlyxRoot: true }, 0, null, false, null, "", (err) => __glyx_log("[React] Recoverable error: " + err.message), null);
   var _wsOpenSockets = new Map;
   var _ipcListeners = [];
   var _deeplinkCallbacks = [];
@@ -6297,26 +6297,26 @@ No matching component was found for:
   function _pollDeeplinks() {
     if (!_deeplinkInitialFired && _deeplinkCallbacks.length > 0) {
       _deeplinkInitialFired = true;
-      if (typeof __velox_deeplink_getInitialUrl !== "undefined") {
+      if (typeof __glyx_deeplink_getInitialUrl !== "undefined") {
         try {
-          const url = __velox_deeplink_getInitialUrl();
+          const url = __glyx_deeplink_getInitialUrl();
           if (url) {
             for (const cb of _deeplinkCallbacks) {
               try {
                 cb(url);
               } catch (e) {
-                __velox_log("[deeplink] callback error: " + e);
+                __glyx_log("[deeplink] callback error: " + e);
               }
             }
           }
         } catch {}
       }
     }
-    if (typeof __velox_deeplink_poll === "undefined")
+    if (typeof __glyx_deeplink_poll === "undefined")
       return;
     let raw;
     try {
-      raw = __velox_deeplink_poll();
+      raw = __glyx_deeplink_poll();
     } catch {
       return;
     }
@@ -6333,20 +6333,20 @@ No matching component was found for:
         try {
           cb(url);
         } catch (e) {
-          __velox_log("[deeplink] callback error: " + e);
+          __glyx_log("[deeplink] callback error: " + e);
         }
       }
     }
   }
   var _globalShortcutCallbacks = new Map;
   function _pollGlobalShortcuts() {
-    if (typeof __velox_shortcut_poll === "undefined")
+    if (typeof __glyx_shortcut_poll === "undefined")
       return;
     if (_globalShortcutCallbacks.size === 0)
       return;
     let raw;
     try {
-      raw = __velox_shortcut_poll();
+      raw = __glyx_shortcut_poll();
     } catch {
       return;
     }
@@ -6364,18 +6364,18 @@ No matching component was found for:
         try {
           cb();
         } catch (e) {
-          __velox_log("[shortcut] callback error: " + e);
+          __glyx_log("[shortcut] callback error: " + e);
         }
     }
   }
   function _pollGamepads() {
-    if (typeof __velox_gamepad_poll === "undefined")
+    if (typeof __glyx_gamepad_poll === "undefined")
       return;
     if (!globalThis._gamepadCallbacks || globalThis._gamepadCallbacks.length === 0)
       return;
     let raw;
     try {
-      raw = __velox_gamepad_poll();
+      raw = __glyx_gamepad_poll();
     } catch {
       return;
     }
@@ -6392,7 +6392,7 @@ No matching component was found for:
         try {
           cb(ev);
         } catch (e) {
-          __velox_log("[gamepad] callback error: " + e);
+          __glyx_log("[gamepad] callback error: " + e);
         }
       }
     }
@@ -6414,7 +6414,7 @@ No matching component was found for:
         try {
           cb();
         } catch (e) {
-          __velox_log("[shortcut] local callback error: " + e);
+          __glyx_log("[shortcut] local callback error: " + e);
         }
       }
     }
@@ -6422,13 +6422,13 @@ No matching component was found for:
   var _perfBudgetCallbacks = [];
   var _perfLeakCallbacks = [];
   function _pollPerfViolations() {
-    if (typeof __velox_perf_poll_violations === "undefined")
+    if (typeof __glyx_perf_poll_violations === "undefined")
       return;
     if (_perfBudgetCallbacks.length === 0)
       return;
     let raw;
     try {
-      raw = __velox_perf_poll_violations();
+      raw = __glyx_perf_poll_violations();
     } catch {
       return;
     }
@@ -6445,19 +6445,19 @@ No matching component was found for:
         try {
           cb(v);
         } catch (e) {
-          __velox_log("[perf] onBudgetExceeded callback error: " + e);
+          __glyx_log("[perf] onBudgetExceeded callback error: " + e);
         }
       }
     }
   }
   function _pollLeakWarnings() {
-    if (typeof __velox_perf_poll_leak_warnings === "undefined")
+    if (typeof __glyx_perf_poll_leak_warnings === "undefined")
       return;
     if (_perfLeakCallbacks.length === 0)
       return;
     let raw;
     try {
-      raw = __velox_perf_poll_leak_warnings();
+      raw = __glyx_perf_poll_leak_warnings();
     } catch {
       return;
     }
@@ -6474,18 +6474,18 @@ No matching component was found for:
         try {
           cb(w);
         } catch (e) {
-          __velox_log("[perf] onLeakDetected callback error: " + e);
+          __glyx_log("[perf] onLeakDetected callback error: " + e);
         }
       }
     }
   }
   var _audioCallbacks = new Map;
   function _pollAudio() {
-    if (typeof __velox_audio_poll === "undefined")
+    if (typeof __glyx_audio_poll === "undefined")
       return;
     let raw;
     try {
-      raw = __velox_audio_poll();
+      raw = __glyx_audio_poll();
     } catch {
       return;
     }
@@ -6506,7 +6506,7 @@ No matching component was found for:
             try {
               cb.onEnded();
             } catch (e) {
-              __velox_log("[audio] onEnded error: " + e);
+              __glyx_log("[audio] onEnded error: " + e);
             }
           }
         }
@@ -6515,9 +6515,9 @@ No matching component was found for:
       }
     }
   }
-  globalThis.__velox_frameCallback = function veloxFrameCallback() {
-    VeloxReconciler.flushSync(() => {
-      globalThis._veloxDrainTimers?.();
+  globalThis.__glyx_frameCallback = function glyxFrameCallback() {
+    GlyxReconciler.flushSync(() => {
+      globalThis._glyxDrainTimers?.();
       _pollWebSockets();
       _pollIpc();
       _pollDeeplinks();
@@ -6531,7 +6531,7 @@ No matching component was found for:
     });
   };
   function render(element) {
-    VeloxReconciler.updateContainer(element, rootContainer, null, null);
+    GlyxReconciler.updateContainer(element, rootContainer, null, null);
   }
   var View = ({ children, style, ...props }) => import_react.default.createElement("view", { style, ...props }, children);
   var Text = ({ children, style, showCursor, ...props }) => import_react.default.createElement("text", { text: children, style, showCursor, ...props });
@@ -6589,7 +6589,7 @@ No matching component was found for:
     }, []);
     const baseOpacity = style?.opacity ?? 1;
     const mergedStyle = pressed && !disabled ? { ...style, opacity: baseOpacity * 0.65 } : hovered && !disabled ? { ...style, opacity: baseOpacity * 0.85 } : style;
-    return import_react.default.createElement("view", { _veloxOnMount: onMount, style: mergedStyle, pressable: true, ...props }, children);
+    return import_react.default.createElement("view", { _glyxOnMount: onMount, style: mergedStyle, pressable: true, ...props }, children);
   }
   function ScrollView({
     children,
@@ -6641,11 +6641,11 @@ No matching component was found for:
       scrollbarColor,
       ...style
     };
-    return import_react.default.createElement("view", { _veloxOnMount: onMount, style: viewStyle, width, height, ...props }, children);
+    return import_react.default.createElement("view", { _glyxOnMount: onMount, style: viewStyle, width, height, ...props }, children);
   }
   function useWindowSize() {
     const [size, setSize] = import_react.useState(() => {
-      const s = typeof __velox_getWindowSize !== "undefined" ? __velox_getWindowSize() : null;
+      const s = typeof __glyx_getWindowSize !== "undefined" ? __glyx_getWindowSize() : null;
       return s ? { width: s.width, height: s.height } : { width: 0, height: 0 };
     });
     import_react.useEffect(() => {
@@ -6655,23 +6655,23 @@ No matching component was found for:
     }, []);
     return size;
   }
-  var veloxWindow = {
-    setFullscreen: (full) => typeof __velox_setFullscreen !== "undefined" && __velox_setFullscreen(full),
-    setMaximized: (max) => typeof __velox_setMaximized !== "undefined" && __velox_setMaximized(max),
-    setMinimized: () => typeof __velox_setMinimized !== "undefined" && __velox_setMinimized(),
-    isFullscreen: () => typeof __velox_isFullscreen !== "undefined" ? __velox_isFullscreen() : false,
-    isMaximized: () => typeof __velox_isMaximized !== "undefined" ? __velox_isMaximized() : false,
-    getWindowSize: () => typeof __velox_getWindowSize !== "undefined" ? __velox_getWindowSize() : { width: 0, height: 0 },
-    getScreenSize: () => typeof __velox_getScreenSize !== "undefined" ? __velox_getScreenSize() : { width: 0, height: 0 },
-    setAlwaysOnTop: (on) => typeof __velox_setAlwaysOnTop !== "undefined" && __velox_setAlwaysOnTop(on),
-    setTitle: (title) => typeof __velox_setTitle !== "undefined" && __velox_setTitle(title)
+  var glyxWindow = {
+    setFullscreen: (full) => typeof __glyx_setFullscreen !== "undefined" && __glyx_setFullscreen(full),
+    setMaximized: (max) => typeof __glyx_setMaximized !== "undefined" && __glyx_setMaximized(max),
+    setMinimized: () => typeof __glyx_setMinimized !== "undefined" && __glyx_setMinimized(),
+    isFullscreen: () => typeof __glyx_isFullscreen !== "undefined" ? __glyx_isFullscreen() : false,
+    isMaximized: () => typeof __glyx_isMaximized !== "undefined" ? __glyx_isMaximized() : false,
+    getWindowSize: () => typeof __glyx_getWindowSize !== "undefined" ? __glyx_getWindowSize() : { width: 0, height: 0 },
+    getScreenSize: () => typeof __glyx_getScreenSize !== "undefined" ? __glyx_getScreenSize() : { width: 0, height: 0 },
+    setAlwaysOnTop: (on) => typeof __glyx_setAlwaysOnTop !== "undefined" && __glyx_setAlwaysOnTop(on),
+    setTitle: (title) => typeof __glyx_setTitle !== "undefined" && __glyx_setTitle(title)
   };
   var _noBinding = (name) => Promise.reject(new Error(`${name}: binding not available`));
   function _pollWebSockets() {
     for (const [id, handlers] of _wsOpenSockets) {
       let raw;
       try {
-        raw = __velox_ws_poll(id);
+        raw = __glyx_ws_poll(id);
       } catch {
         continue;
       }
@@ -6684,7 +6684,7 @@ No matching component was found for:
         continue;
       }
       for (const m of msgs) {
-        if (m === "__VELOX_WS_CLOSED__") {
+        if (m === "__GLYX_WS_CLOSED__") {
           handlers.onclose?.();
           _wsOpenSockets.delete(id);
           break;
@@ -6695,11 +6695,11 @@ No matching component was found for:
     }
   }
   function _pollIpc() {
-    if (typeof __velox_ipc_poll === "undefined")
+    if (typeof __glyx_ipc_poll === "undefined")
       return;
     let raw;
     try {
-      raw = __velox_ipc_poll();
+      raw = __glyx_ipc_poll();
     } catch {
       return;
     }
@@ -6721,8 +6721,8 @@ No matching component was found for:
   }
   var ipc = {
     send(targetHandle, message) {
-      if (typeof __velox_ipc_send !== "undefined") {
-        __velox_ipc_send(targetHandle, String(message));
+      if (typeof __glyx_ipc_send !== "undefined") {
+        __glyx_ipc_send(targetHandle, String(message));
       }
     },
     on(event, callback) {
@@ -6736,10 +6736,10 @@ No matching component was found for:
       };
     }
   };
-  veloxWindow.create = function create(opts = {}) {
-    if (typeof __velox_window_create === "undefined")
-      return _noBinding("veloxWindow.create");
-    return __velox_window_create(JSON.stringify(opts)).then((idStr) => {
+  glyxWindow.create = function create(opts = {}) {
+    if (typeof __glyx_window_create === "undefined")
+      return _noBinding("glyxWindow.create");
+    return __glyx_window_create(JSON.stringify(opts)).then((idStr) => {
       const id = Number(idStr);
       return {
         get id() {
@@ -6751,34 +6751,34 @@ No matching component was found for:
       };
     });
   };
-  veloxWindow.quit = function quit() {
-    if (typeof __velox_quit !== "undefined")
-      __velox_quit();
+  glyxWindow.quit = function quit() {
+    if (typeof __glyx_quit !== "undefined")
+      __glyx_quit();
   };
-  veloxWindow.restart = function restart() {
-    if (typeof __velox_restart !== "undefined")
-      __velox_restart();
+  glyxWindow.restart = function restart() {
+    if (typeof __glyx_restart !== "undefined")
+      __glyx_restart();
   };
-  veloxWindow.close = function close() {
-    if (typeof __velox_window_close !== "undefined")
-      __velox_window_close();
+  glyxWindow.close = function close() {
+    if (typeof __glyx_window_close !== "undefined")
+      __glyx_window_close();
   };
   var _platformCache = null;
-  veloxWindow.platform = function platform() {
+  glyxWindow.platform = function platform() {
     if (_platformCache !== null)
       return _platformCache;
-    _platformCache = typeof __velox_platform !== "undefined" ? __velox_platform() : "unknown";
+    _platformCache = typeof __glyx_platform !== "undefined" ? __glyx_platform() : "unknown";
     return _platformCache;
   };
-  veloxWindow.hideSplash = function hideSplash() {
-    if (typeof __velox_splash_hide !== "undefined")
-      __velox_splash_hide();
+  glyxWindow.hideSplash = function hideSplash() {
+    if (typeof __glyx_splash_hide !== "undefined")
+      __glyx_splash_hide();
   };
   (function _installCrashHandlers() {
     function _report(data) {
       try {
-        if (typeof __velox_crash_report_js !== "undefined") {
-          __velox_crash_report_js(JSON.stringify(data));
+        if (typeof __glyx_crash_report_js !== "undefined") {
+          __glyx_crash_report_js(JSON.stringify(data));
         }
       } catch (_) {}
     }
@@ -6811,7 +6811,7 @@ No matching component was found for:
   })();
   function _backendCall(cmd, args) {
     var json = args === undefined ? "{}" : JSON.stringify(args);
-    return __velox_backend_call(cmd, json).then(function(raw) {
+    return __glyx_backend_call(cmd, json).then(function(raw) {
       try {
         return JSON.parse(raw);
       } catch (_) {
@@ -6843,7 +6843,7 @@ No matching component was found for:
   var _RadioCtx = import_react.default.createContext(null);
   var _videoCallbacks = new Map;
   function _pollVideo() {
-    const events = JSON.parse(__velox_video_poll());
+    const events = JSON.parse(__glyx_video_poll());
     for (const ev of events) {
       const cbs = _videoCallbacks.get(ev.id);
       if (!cbs)
@@ -6860,24 +6860,24 @@ No matching component was found for:
   }
   var video = {
     async open(url, { onEnded, onMetadata, onTimeUpdate, onError } = {}) {
-      const handleId = parseInt(await __velox_video_open(url));
+      const handleId = parseInt(await __glyx_video_open(url));
       _videoCallbacks.set(handleId, { onEnded, onMetadata, onTimeUpdate, onError });
       return handleId;
     },
     seek(handleId, seconds) {
-      __velox_video_seek(String(handleId), Math.max(0, seconds));
+      __glyx_video_seek(String(handleId), Math.max(0, seconds));
     },
     setVolume(handleId, volume) {
-      __velox_video_set_volume(String(handleId), volume);
+      __glyx_video_set_volume(String(handleId), volume);
     },
     pause(handleId) {
-      __velox_video_pause(String(handleId));
+      __glyx_video_pause(String(handleId));
     },
     play(handleId) {
-      __velox_video_play(String(handleId));
+      __glyx_video_play(String(handleId));
     },
     close(handleId) {
-      __velox_video_close(String(handleId));
+      __glyx_video_close(String(handleId));
       _videoCallbacks.delete(handleId);
     }
   };
@@ -6886,7 +6886,7 @@ No matching component was found for:
     import_react.default.useEffect(() => {
       return () => {
         if (cameraHandle !== null) {
-          __velox_camera_close(String(cameraHandle));
+          __glyx_camera_close(String(cameraHandle));
         }
       };
     }, [cameraHandle]);
@@ -6895,30 +6895,30 @@ No matching component was found for:
         return cameraHandle;
       },
       async start(deviceIndex = 0) {
-        const handle = parseInt(await __velox_camera_open(deviceIndex));
+        const handle = parseInt(await __glyx_camera_open(deviceIndex));
         setCameraHandle(handle);
         return handle;
       },
       stop() {
         if (cameraHandle !== null) {
-          __velox_camera_close(String(cameraHandle));
+          __glyx_camera_close(String(cameraHandle));
           setCameraHandle(null);
         }
       },
       async capture() {
         if (cameraHandle === null)
           throw new Error("Camera not open");
-        return __velox_camera_capture(String(cameraHandle));
+        return __glyx_camera_capture(String(cameraHandle));
       },
       startRecord(outputPath) {
         if (cameraHandle === null)
           throw new Error("Camera not open");
-        __velox_camera_record_start(String(cameraHandle), outputPath);
+        __glyx_camera_record_start(String(cameraHandle), outputPath);
       },
       async stopRecord() {
         if (cameraHandle === null)
           throw new Error("Camera not open");
-        return __velox_camera_record_stop(String(cameraHandle));
+        return __glyx_camera_record_stop(String(cameraHandle));
       }
     }), [cameraHandle]);
     return import_react.default.createElement("camera", {
@@ -7039,7 +7039,7 @@ No matching component was found for:
     return [255, 255, 255, 255];
   }
 
-  class VeloxCanvasContext {
+  class GlyxCanvasContext {
     constructor(nativeId) {
       this._id = nativeId;
       this._cmds = [];
@@ -7069,12 +7069,12 @@ No matching component was found for:
       this._cmds.push({ type: "fillText", text: String(text), x, y, fontSize, color: _parseColor(this.fillStyle) });
     }
     flush() {
-      if (typeof __velox_canvas_update === "undefined")
+      if (typeof __glyx_canvas_update === "undefined")
         return;
       try {
-        __velox_canvas_update(this._id, JSON.stringify(this._cmds));
+        __glyx_canvas_update(this._id, JSON.stringify(this._cmds));
       } catch (e) {
-        __velox_log("[canvas] flush error: " + e);
+        __glyx_log("[canvas] flush error: " + e);
       }
       this._cmds = [];
     }
@@ -7084,7 +7084,7 @@ No matching component was found for:
     const nativeId = import_react.useRef(null);
     const onMount = import_react.useCallback((id) => {
       nativeId.current = id;
-      const ctx = new VeloxCanvasContext(id);
+      const ctx = new GlyxCanvasContext(id);
       ctxRef.current = ctx;
       if (ref) {
         if (typeof ref === "function")
@@ -7094,38 +7094,38 @@ No matching component was found for:
       }
     }, [ref]);
     return import_react.default.createElement("canvas", {
-      _veloxOnMount: onMount,
+      _glyxOnMount: onMount,
       style,
       ...props
     });
   });
 
-  class VeloxCanvas3DContext {
+  class GlyxCanvas3DContext {
     constructor(nativeId) {
       this._id = nativeId;
     }
     updateScene(scene) {
-      if (typeof __velox_canvas3d_update === "undefined")
+      if (typeof __glyx_canvas3d_update === "undefined")
         return;
       try {
-        __velox_canvas3d_update(this._id, JSON.stringify(scene));
+        __glyx_canvas3d_update(this._id, JSON.stringify(scene));
       } catch (e) {
-        __velox_log("[canvas3d] updateScene error: " + e);
+        __glyx_log("[canvas3d] updateScene error: " + e);
       }
     }
     loadGltf(path) {
-      if (typeof __velox_canvas3d_load_gltf === "undefined")
+      if (typeof __glyx_canvas3d_load_gltf === "undefined")
         return;
       try {
-        __velox_canvas3d_load_gltf(this._id, path);
+        __glyx_canvas3d_load_gltf(this._id, path);
       } catch (e) {
-        __velox_log("[canvas3d] loadGltf error: " + e);
+        __glyx_log("[canvas3d] loadGltf error: " + e);
       }
     }
   }
   var Canvas3D = import_react.default.forwardRef(function Canvas3D2({ style, ...props }, ref) {
     const onMount = import_react.useCallback((id) => {
-      const ctx = new VeloxCanvas3DContext(id);
+      const ctx = new GlyxCanvas3DContext(id);
       if (ref) {
         if (typeof ref === "function")
           ref(ctx);
@@ -7134,7 +7134,7 @@ No matching component was found for:
       }
     }, [ref]);
     return import_react.default.createElement("canvas3d", {
-      _veloxOnMount: onMount,
+      _glyxOnMount: onMount,
       style,
       ...props
     });
@@ -7275,7 +7275,7 @@ No matching component was found for:
           height: "100%",
           children: [
             /* @__PURE__ */ jsx_runtime.jsxs(View, {
-              veloxDraggable: true,
+              glyxDraggable: true,
               style: {
                 backgroundColor: C.surfaceAlt,
                 borderRadius: 8,
@@ -7325,7 +7325,7 @@ No matching component was found for:
                       })
                     }),
                     /* @__PURE__ */ jsx_runtime.jsx(Pressable, {
-                      onPress: () => __velox_quit(),
+                      onPress: () => __glyx_quit(),
                       width: 24,
                       height: 24,
                       style: { backgroundColor: C.red, borderRadius: 12, alignItems: "center", justifyContent: "center" },

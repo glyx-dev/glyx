@@ -1,7 +1,0 @@
-{
-  "name": "@velox/testing",
-  "version": "0.1.0",
-  "type": "module",
-  "main": "src/index.js",
-  "description": "Test utilities for Velox apps — compatible with Bun's test runner"
-}

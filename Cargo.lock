@@ -769,8 +769,8 @@ name = "calculator"
 version = "0.1.0"
 dependencies = [
  "env_logger",
- "velox-core",
- "velox-shell",
+ "glyx-core",
+ "glyx-shell",
 ]
 
 [[package]]
@@ -962,8 +962,8 @@ name = "cli-test"
 version = "0.1.0"
 dependencies = [
  "env_logger",
- "velox-core",
- "velox-shell",
+ "glyx-core",
+ "glyx-shell",
 ]
 
 [[package]]
@@ -2006,8 +2006,6 @@ dependencies = [
 [[package]]
 name = "femtovg"
 version = "0.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f43d05da42e81724c16d34a150fb7fda53d3f786e5a94673ee526ff8602f0f6a"
 dependencies = [
  "bitflags 2.11.0",
  "bytemuck",
@@ -2745,6 +2743,265 @@ dependencies = [
 ]
 
 [[package]]
+name = "glyx-3d"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "gltf",
+ "glyx-gpu",
+ "log",
+ "serde",
+ "serde_json",
+ "wgpu",
+]
+
+[[package]]
+name = "glyx-ai"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "candle-nn",
+ "candle-transformers",
+ "hf-hub",
+ "log",
+ "serde",
+ "serde_json",
+ "tokenizers",
+ "zip 2.4.2",
+]
+
+[[package]]
+name = "glyx-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crc32fast",
+ "env_logger",
+ "flate2",
+ "ico",
+ "image",
+ "log",
+ "serde",
+ "serde_json",
+ "tar",
+ "zip 2.4.2",
+]
+
+[[package]]
+name = "glyx-core"
+version = "0.1.0"
+dependencies = [
+ "dotenvy",
+ "env_logger",
+ "ffmpeg-sidecar",
+ "glyx-3d",
+ "glyx-gpu",
+ "glyx-layout",
+ "glyx-media",
+ "glyx-perf",
+ "glyx-renderer",
+ "glyx-runtime",
+ "glyx-security",
+ "glyx-shell",
+ "glyx-text",
+ "image",
+ "log",
+ "lru 0.12.5",
+ "mimalloc",
+ "nokhwa",
+ "notify",
+ "parking_lot",
+ "pollster",
+ "rodio",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "sysinfo",
+ "taffy",
+ "thiserror 1.0.69",
+ "tokio",
+ "winit",
+]
+
+[[package]]
+name = "glyx-db"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libsqlite3-sys",
+ "log",
+ "serde_json",
+ "sqlx",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "glyx-gpu"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "thiserror 1.0.69",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "glyx-layout"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "taffy",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "glyx-media"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "libloading",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
+name = "glyx-perf"
+version = "0.1.0"
+
+[[package]]
+name = "glyx-renderer"
+version = "0.1.0"
+dependencies = [
+ "femtovg",
+ "glyx-gpu",
+ "glyx-text",
+ "image",
+ "kurbo 0.11.3",
+ "log",
+ "lru 0.12.5",
+ "parley",
+ "peniko",
+ "swash",
+ "thiserror 1.0.69",
+ "tiny-skia",
+ "vello",
+ "wgpu",
+]
+
+[[package]]
+name = "glyx-runner"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "env_logger",
+ "glyx-core",
+ "glyx-shell",
+]
+
+[[package]]
+name = "glyx-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "base64 0.22.1",
+ "battery",
+ "clipboard-win",
+ "ed25519-dalek",
+ "futures-util",
+ "gilrs",
+ "global-hotkey",
+ "glyx-3d",
+ "glyx-ai",
+ "glyx-db",
+ "glyx-media",
+ "glyx-perf",
+ "glyx-security",
+ "glyx-sysapi",
+ "glyx-text",
+ "hidapi",
+ "keepawake",
+ "log",
+ "mdns-sd",
+ "notify-rust",
+ "parking_lot",
+ "raw-window-handle",
+ "reqwest",
+ "rfd",
+ "rodio",
+ "rusty_v8",
+ "self_update",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
+name = "glyx-security"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde",
+]
+
+[[package]]
+name = "glyx-shell"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "thiserror 1.0.69",
+ "winit",
+]
+
+[[package]]
+name = "glyx-snapshot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "glyx-runtime",
+ "log",
+ "rusty_v8",
+]
+
+[[package]]
+name = "glyx-sysapi"
+version = "0.1.0"
+dependencies = [
+ "battery",
+ "cpal",
+ "dark-light",
+ "hound",
+ "keepawake",
+ "keyring",
+ "log",
+ "nokhwa",
+ "sysinfo",
+]
+
+[[package]]
+name = "glyx-text"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "parley",
+ "peniko",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "gpu-allocator"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2880,15 +3137,15 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 name = "hello-world"
 version = "0.1.0"
 dependencies = [
- "velox-core",
- "velox-shell",
+ "glyx-core",
+ "glyx-shell",
 ]
 
 [[package]]
 name = "hello-world-snapshot"
 version = "0.1.0"
 dependencies = [
- "velox-core",
+ "glyx-core",
 ]
 
 [[package]]
@@ -4262,8 +4519,8 @@ name = "notes-app"
 version = "0.1.0"
 dependencies = [
  "env_logger",
- "velox-core",
- "velox-shell",
+ "glyx-core",
+ "glyx-shell",
 ]
 
 [[package]]
@@ -7662,265 +7919,6 @@ dependencies = [
  "naga",
  "thiserror 2.0.18",
  "vello_encoding",
-]
-
-[[package]]
-name = "velox-3d"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam",
- "gltf",
- "log",
- "serde",
- "serde_json",
- "velox-gpu",
- "wgpu",
-]
-
-[[package]]
-name = "velox-ai"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "candle-core",
- "candle-nn",
- "candle-transformers",
- "hf-hub",
- "log",
- "serde",
- "serde_json",
- "tokenizers",
- "zip 2.4.2",
-]
-
-[[package]]
-name = "velox-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crc32fast",
- "env_logger",
- "flate2",
- "ico",
- "image",
- "log",
- "serde",
- "serde_json",
- "tar",
- "zip 2.4.2",
-]
-
-[[package]]
-name = "velox-core"
-version = "0.1.0"
-dependencies = [
- "dotenvy",
- "env_logger",
- "ffmpeg-sidecar",
- "image",
- "log",
- "lru 0.12.5",
- "mimalloc",
- "nokhwa",
- "notify",
- "parking_lot",
- "pollster",
- "rodio",
- "serde",
- "serde_json",
- "smallvec",
- "sysinfo",
- "taffy",
- "thiserror 1.0.69",
- "tokio",
- "velox-3d",
- "velox-gpu",
- "velox-layout",
- "velox-media",
- "velox-perf",
- "velox-renderer",
- "velox-runtime",
- "velox-security",
- "velox-shell",
- "velox-text",
- "winit",
-]
-
-[[package]]
-name = "velox-db"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "libsqlite3-sys",
- "log",
- "serde_json",
- "sqlx",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
-name = "velox-gpu"
-version = "0.1.0"
-dependencies = [
- "log",
- "thiserror 1.0.69",
- "wgpu",
- "winit",
-]
-
-[[package]]
-name = "velox-layout"
-version = "0.1.0"
-dependencies = [
- "log",
- "taffy",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "velox-media"
-version = "0.1.0"
-dependencies = [
- "ed25519-dalek",
- "libloading",
- "log",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
-]
-
-[[package]]
-name = "velox-perf"
-version = "0.1.0"
-
-[[package]]
-name = "velox-renderer"
-version = "0.1.0"
-dependencies = [
- "femtovg",
- "image",
- "kurbo 0.11.3",
- "log",
- "lru 0.12.5",
- "parley",
- "peniko",
- "swash",
- "thiserror 1.0.69",
- "tiny-skia",
- "vello",
- "velox-gpu",
- "velox-text",
- "wgpu",
-]
-
-[[package]]
-name = "velox-runner"
-version = "0.1.0"
-dependencies = [
- "crc32fast",
- "env_logger",
- "velox-core",
- "velox-shell",
-]
-
-[[package]]
-name = "velox-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "base64 0.22.1",
- "battery",
- "clipboard-win",
- "ed25519-dalek",
- "futures-util",
- "gilrs",
- "global-hotkey",
- "hidapi",
- "keepawake",
- "log",
- "mdns-sd",
- "notify-rust",
- "parking_lot",
- "raw-window-handle",
- "reqwest",
- "rfd",
- "rodio",
- "rusty_v8",
- "self_update",
- "serde",
- "serde_json",
- "sha2",
- "sysinfo",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
- "velox-3d",
- "velox-ai",
- "velox-db",
- "velox-media",
- "velox-perf",
- "velox-security",
- "velox-sysapi",
- "velox-text",
-]
-
-[[package]]
-name = "velox-security"
-version = "0.1.0"
-dependencies = [
- "log",
- "serde",
-]
-
-[[package]]
-name = "velox-shell"
-version = "0.1.0"
-dependencies = [
- "log",
- "thiserror 1.0.69",
- "winit",
-]
-
-[[package]]
-name = "velox-snapshot"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "env_logger",
- "log",
- "rusty_v8",
- "velox-runtime",
-]
-
-[[package]]
-name = "velox-sysapi"
-version = "0.1.0"
-dependencies = [
- "battery",
- "cpal",
- "dark-light",
- "hound",
- "keepawake",
- "keyring",
- "log",
- "nokhwa",
- "sysinfo",
-]
-
-[[package]]
-name = "velox-text"
-version = "0.1.0"
-dependencies = [
- "log",
- "parley",
- "peniko",
- "thiserror 1.0.69",
 ]
 
 [[package]]

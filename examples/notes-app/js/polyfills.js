@@ -9,14 +9,14 @@
 
 if (typeof performance === 'undefined') {
   globalThis.performance = {
-    // __velox_getTime() returns Unix ms as a number.
-    now: () => Number(__velox_getTime()),
+    // __glyx_getTime() returns Unix ms as a number.
+    now: () => Number(__glyx_getTime()),
   };
 }
 
 if (typeof setTimeout === 'undefined') {
-  // Deferred timer queue — drained each frame by _veloxDrainTimers()
-  // which is called from __velox_frameCallback in @velox/react/index.js.
+  // Deferred timer queue — drained each frame by _glyxDrainTimers()
+  // which is called from __glyx_frameCallback in @glyx/react/index.js.
   // Calling fn() immediately caused infinite recursion in animation loops.
   let _nextTimerId = 1;
   const _pendingTimers = new Map(); // id → { fn, due }
@@ -27,16 +27,16 @@ if (typeof setTimeout === 'undefined') {
     _pendingTimers.set(id, { fn, due: performance.now() + delay });
     // Ask Rust to wake the event loop after `delay` ms so the timer fires on time.
     // Without this, timers only run when the frame loop is already awake (e.g. overlay on).
-    if (typeof __velox_request_frame !== 'undefined') {
-      __velox_request_frame(delay);
+    if (typeof __glyx_request_frame !== 'undefined') {
+      __glyx_request_frame(delay);
     }
     return id;
   };
 
   globalThis.clearTimeout = (id) => { _pendingTimers.delete(id); };
 
-  // Called once per frame from __velox_frameCallback (index.js).
-  globalThis._veloxDrainTimers = () => {
+  // Called once per frame from __glyx_frameCallback (index.js).
+  globalThis._glyxDrainTimers = () => {
     if (_pendingTimers.size === 0) return;
     const now = performance.now();
     const due = [];
@@ -57,15 +57,15 @@ if (typeof setInterval === 'undefined') {
     const id   = _nextIntervalId++;
     const delay = ms > 0 ? ms : 0;
     _pendingIntervals.set(id, { fn, ms: delay, nextDue: performance.now() + delay });
-    if (typeof __velox_request_frame !== 'undefined') __velox_request_frame(delay);
+    if (typeof __glyx_request_frame !== 'undefined') __glyx_request_frame(delay);
     return id;
   };
 
   globalThis.clearInterval = (id) => { _pendingIntervals.delete(id); };
 
   // Extend the drain function so intervals are also processed each frame.
-  const _prevDrain = globalThis._veloxDrainTimers;
-  globalThis._veloxDrainTimers = () => {
+  const _prevDrain = globalThis._glyxDrainTimers;
+  globalThis._glyxDrainTimers = () => {
     _prevDrain?.();
     if (_pendingIntervals.size === 0) return;
     const now = performance.now();

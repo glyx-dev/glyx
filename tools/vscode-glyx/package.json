@@ -1,0 +1,228 @@
+{
+  "name": "vscode-glyx",
+  "displayName": "Glyx",
+  "description": "Official VS Code extension for Glyx — run, build, and develop Glyx desktop apps from the editor.",
+  "version": "0.1.0",
+  "publisher": "glyx",
+  "icon": "assets/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/glyx-dev/glyx"
+  },
+  "categories": ["Other"],
+  "keywords": ["glyx", "desktop", "rust", "react", "wgpu"],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "activationEvents": [
+    "workspaceContains:glyx.config.json",
+    "workspaceContains:glyx.config.ts"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "glyx.run",
+        "title": "Run Dev Server",
+        "category": "Glyx",
+        "icon": "$(play)"
+      },
+      {
+        "command": "glyx.stopDev",
+        "title": "Stop Dev Server",
+        "category": "Glyx",
+        "icon": "$(stop-circle)"
+      },
+      {
+        "command": "glyx.build",
+        "title": "Build",
+        "category": "Glyx",
+        "icon": "$(package)"
+      },
+      {
+        "command": "glyx.package",
+        "title": "Package for Distribution",
+        "category": "Glyx",
+        "icon": "$(archive)"
+      },
+      {
+        "command": "glyx.openConfig",
+        "title": "Open glyx.config.json",
+        "category": "Glyx",
+        "icon": "$(settings-gear)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "glyx.run",
+          "when": "view == glyxProject && !glyx.devRunning",
+          "group": "navigation"
+        },
+        {
+          "command": "glyx.stopDev",
+          "when": "view == glyxProject && glyx.devRunning",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "glyx.run",
+          "when": "resourceFilename == glyx.config.json",
+          "group": "glyx"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "glyx-sidebar",
+          "title": "Glyx",
+          "icon": "assets/glyx-activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "glyx-sidebar": [
+        {
+          "id": "glyxProject",
+          "name": "Project",
+          "when": "glyx.isGlyxProject"
+        },
+        {
+          "id": "glyxNoProject",
+          "name": "Glyx",
+          "when": "!glyx.isGlyxProject"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "glyxNoProject",
+        "contents": "No Glyx project detected in this workspace.\n\nOpen a folder containing **glyx.config.json** or create a new project:\n[Create Glyx App](command:glyx.createProject)"
+      }
+    ],
+    "configuration": {
+      "title": "Glyx",
+      "properties": {
+        "glyx.cliPath": {
+          "type": "string",
+          "default": "glyx",
+          "description": "Path to the glyx CLI executable. Uses 'glyx' from PATH by default."
+        },
+        "glyx.buildTarget": {
+          "type": "string",
+          "default": "",
+          "enum": ["", "windows", "macos", "linux"],
+          "enumDescriptions": [
+            "Current platform",
+            "Windows (x86_64-pc-windows-msvc)",
+            "macOS (aarch64-apple-darwin)",
+            "Linux (x86_64-unknown-linux-gnu)"
+          ],
+          "description": "Default target platform for glyx build."
+        },
+        "glyx.autoOpenDevTools": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically open the CDP inspector URL when running glyx dev --inspect."
+        }
+      }
+    },
+    "snippets": [
+      {
+        "language": "javascriptreact",
+        "path": "./snippets/glyx.code-snippets"
+      },
+      {
+        "language": "typescriptreact",
+        "path": "./snippets/glyx.code-snippets"
+      },
+      {
+        "language": "javascript",
+        "path": "./snippets/glyx.code-snippets"
+      },
+      {
+        "language": "typescript",
+        "path": "./snippets/glyx.code-snippets"
+      }
+    ],
+    "jsonValidation": [
+      {
+        "fileMatch": "glyx.config.json",
+        "url": "./schemas/glyx.config.schema.json"
+      }
+    ],
+    "taskDefinitions": [
+      {
+        "type": "glyx",
+        "required": ["command"],
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The glyx command to run",
+            "enum": ["dev", "build", "package"]
+          },
+          "args": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Additional CLI arguments"
+          }
+        }
+      }
+    ],
+    "problemMatchers": [
+      {
+        "name": "glyx-cargo",
+        "owner": "glyx",
+        "source": "glyx build",
+        "fileLocation": ["relative", "${workspaceFolder}"],
+        "severity": "error",
+        "pattern": [
+          {
+            "regexp": "^(error|warning)(\\[([A-Z]\\d+)\\])?: (.*)$",
+            "severity": 1,
+            "code": 3,
+            "message": 4
+          },
+          {
+            "regexp": "^\\s+-->\\s+([^:]+):(\\d+):(\\d+)$",
+            "file": 1,
+            "line": 2,
+            "column": 3,
+            "loop": true
+          }
+        ]
+      },
+      {
+        "name": "glyx-js",
+        "owner": "glyx",
+        "source": "glyx dev",
+        "fileLocation": ["relative", "${workspaceFolder}"],
+        "pattern": {
+          "regexp": "^\\s+at .+ \\((.+):(\\d+):(\\d+)\\)$",
+          "file": 1,
+          "line": 2,
+          "column": 3
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "\\[HMR\\] change detected",
+          "endsPattern": "\\[HMR\\] (build ok|build failed)"
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -p . --watch",
+    "vscode:prepublish": "tsc -p .",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "typescript": "^5.3.0"
+  }
+}

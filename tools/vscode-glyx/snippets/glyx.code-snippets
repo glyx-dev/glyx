@@ -1,0 +1,351 @@
+{
+  // ── Imports ────────────────────────────────────────────────────────────────
+  "Import @glyx/react primitives": {
+    "prefix": "vimport",
+    "body": [
+      "import { View, Text, Pressable, ScrollView, TextInput, Image } from '@glyx/react';"
+    ],
+    "description": "Import core Glyx primitives"
+  },
+  "Import @glyx/design components": {
+    "prefix": "vdesign",
+    "body": [
+      "import { ThemeProvider, useTheme, Button, Card, Heading, Label } from '@glyx/design';"
+    ],
+    "description": "Import Glyx design system"
+  },
+
+  // ── Full screen component ─────────────────────────────────────────────────
+  "Glyx Screen component": {
+    "prefix": "vscreen",
+    "body": [
+      "import React, { useState } from 'react';",
+      "import { View, Text, Pressable } from '@glyx/react';",
+      "import { useTheme } from '@glyx/design';",
+      "",
+      "export function ${1:MyScreen}() {",
+      "  const { colors, space } = useTheme();",
+      "",
+      "  return (",
+      "    <View style={{ flex: 1, backgroundColor: colors.bg, padding: space[4] }}>",
+      "      $0",
+      "    </View>",
+      "  );",
+      "}"
+    ],
+    "description": "Full Glyx screen component with theme"
+  },
+
+  // ── Primitives ────────────────────────────────────────────────────────────
+  "View": {
+    "prefix": "vview",
+    "body": [
+      "<View style={{ $1 }}>",
+      "  $0",
+      "</View>"
+    ],
+    "description": "Glyx View container"
+  },
+  "View (flex row)": {
+    "prefix": "vrow",
+    "body": [
+      "<View style={{ flexDirection: 'row', alignItems: 'center', gap: ${1:8}${2:, flex: 1} }}>",
+      "  $0",
+      "</View>"
+    ],
+    "description": "Glyx View as flex row"
+  },
+  "View (flex column)": {
+    "prefix": "vcol",
+    "body": [
+      "<View style={{ flexDirection: 'column', gap: ${1:8}${2:, flex: 1} }}>",
+      "  $0",
+      "</View>"
+    ],
+    "description": "Glyx View as flex column"
+  },
+  "Text": {
+    "prefix": "vtext",
+    "body": [
+      "<Text fontSize={${1:14}} style={{ color: '${2:#000000}' }}>",
+      "  ${0:text}",
+      "</Text>"
+    ],
+    "description": "Glyx Text element"
+  },
+  "Pressable": {
+    "prefix": "vpress",
+    "body": [
+      "<Pressable onPress={() => { $1 }} style={{ $2 }}>",
+      "  $0",
+      "</Pressable>"
+    ],
+    "description": "Glyx Pressable button"
+  },
+  "Pressable (with hover style)": {
+    "prefix": "vpressh",
+    "body": [
+      "<Pressable",
+      "  onPress={() => { $1 }}",
+      "  style={({ pressed, hovered }) => ({",
+      "    $2",
+      "    opacity: pressed ? 0.7 : hovered ? 0.85 : 1,",
+      "  })}",
+      ">",
+      "  $0",
+      "</Pressable>"
+    ],
+    "description": "Glyx Pressable with hover/press state"
+  },
+  "ScrollView": {
+    "prefix": "vscroll",
+    "body": [
+      "<ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: ${1:16}, gap: ${2:12} }}>",
+      "  $0",
+      "</ScrollView>"
+    ],
+    "description": "Glyx ScrollView"
+  },
+  "ScrollView (horizontal)": {
+    "prefix": "vscrollh",
+    "body": [
+      "<ScrollView horizontal showsScrollIndicator={false} style={{ $1 }}>",
+      "  $0",
+      "</ScrollView>"
+    ],
+    "description": "Horizontal Glyx ScrollView"
+  },
+  "Image": {
+    "prefix": "vimage",
+    "body": [
+      "<Image",
+      "  src={${1:imagePath}}",
+      "  width={${2:200}}",
+      "  height={${3:200}}",
+      "  resizeMode=\"${4|contain,cover,stretch|}\"",
+      "/>"
+    ],
+    "description": "Glyx Image element"
+  },
+  "TextInput": {
+    "prefix": "vinput",
+    "body": [
+      "<TextInput",
+      "  value={${1:value}}",
+      "  onChangeText={${2:setValue}}",
+      "  placeholder=\"${3:Enter text…}\"",
+      "  placeholderTextColor=\"#999\"",
+      "  style={{ color: '${4:#000}', fontSize: ${5:14} }}",
+      "/>"
+    ],
+    "description": "Glyx TextInput"
+  },
+
+  // ── Canvas ────────────────────────────────────────────────────────────────
+  "Canvas 2D": {
+    "prefix": "vcanvas",
+    "body": [
+      "const canvasRef = React.useRef(null);",
+      "",
+      "React.useEffect(() => {",
+      "  const ctx = canvasRef.current;",
+      "  if (!ctx) return;",
+      "  const id = setInterval(() => {",
+      "    ctx.clear();",
+      "    $0",
+      "    ctx.flush();",
+      "  }, ${1:16});",
+      "  return () => clearInterval(id);",
+      "}, []);",
+      "",
+      "<Canvas ref={canvasRef} width={${2:400}} height={${3:300}} />"
+    ],
+    "description": "Glyx Canvas 2D with animation loop"
+  },
+  "Canvas 3D": {
+    "prefix": "vcanvas3d",
+    "body": [
+      "const sceneRef = React.useRef(null);",
+      "",
+      "<Canvas3D",
+      "  ref={sceneRef}",
+      "  width={${1:400}}",
+      "  height={${2:300}}",
+      "/>"
+    ],
+    "description": "Glyx Canvas3D element"
+  },
+
+  // ── @glyx/design components ───────────────────────────────────────────────
+  "Button (design)": {
+    "prefix": "vbtn",
+    "body": [
+      "<Button",
+      "  label=\"${1:Click me}\"",
+      "  onPress={() => { $0 }}",
+      "  variant=\"${2|primary,secondary,ghost|}\"",
+      "/>"
+    ],
+    "description": "Glyx design Button"
+  },
+  "IconButton (design)": {
+    "prefix": "viconbtn",
+    "body": [
+      "<IconButton",
+      "  icon=\"${1:✕}\"",
+      "  onPress={() => { $0 }}",
+      "  variant=\"${2|secondary,primary,ghost,danger|}\"",
+      "  size={${3:36}}",
+      "/>"
+    ],
+    "description": "Glyx design IconButton"
+  },
+  "Card (design)": {
+    "prefix": "vcard",
+    "body": [
+      "<Card style={{ $1 }}>",
+      "  $0",
+      "</Card>"
+    ],
+    "description": "Glyx design Card"
+  },
+  "TextField (design)": {
+    "prefix": "vtextfield",
+    "body": [
+      "<TextField",
+      "  label=\"${1:Label}\"",
+      "  value={${2:value}}",
+      "  onChangeText={${3:setValue}}",
+      "  placeholder=\"${4:Enter value…}\"",
+      "  ${5:error={error}}",
+      "/>"
+    ],
+    "description": "Glyx design TextField"
+  },
+  "SwitchRow (design)": {
+    "prefix": "vswitch",
+    "body": [
+      "<SwitchRow",
+      "  label=\"${1:Setting}\"",
+      "  description=\"${2:Description of this setting}\"",
+      "  value={${3:enabled}}",
+      "  onValueChange={${4:setEnabled}}",
+      "/>"
+    ],
+    "description": "Glyx design SwitchRow"
+  },
+  "Alert (design)": {
+    "prefix": "valert",
+    "body": [
+      "<Alert",
+      "  variant=\"${1|info,success,warning,error|}\"",
+      "  title=\"${2:Title}\"",
+      "  message=\"${3:Message}\"",
+      "  ${4:onClose={() => setVisible(false)}}",
+      "/>"
+    ],
+    "description": "Glyx design Alert"
+  },
+  "Modal (design)": {
+    "prefix": "vmodal",
+    "body": [
+      "<Modal",
+      "  visible={${1:modalVisible}}",
+      "  onClose={() => ${2:setModalVisible}(false)}",
+      "  title=\"${3:Title}\"",
+      ">",
+      "  $0",
+      "  <ModalFooter>",
+      "    <Button label=\"Cancel\" variant=\"ghost\" onPress={() => ${2:setModalVisible}(false)} />",
+      "    <Button label=\"Confirm\" variant=\"primary\" onPress={handleConfirm} />",
+      "  </ModalFooter>",
+      "</Modal>"
+    ],
+    "description": "Glyx design Modal dialog"
+  },
+  "Tabs (design)": {
+    "prefix": "vtabs",
+    "body": [
+      "<Tabs",
+      "  defaultValue=\"${1:tab1}\"",
+      "  variant=\"${2|underline,pill|}\"",
+      "  items={[",
+      "    { key: '${1:tab1}', label: '${3:Tab 1}', content: <${4:Tab1Content} /> },",
+      "    { key: '${5:tab2}', label: '${6:Tab 2}', content: <${7:Tab2Content} /> },",
+      "  ]}",
+      "/>"
+    ],
+    "description": "Glyx design Tabs"
+  },
+  "Accordion (design)": {
+    "prefix": "vaccordion",
+    "body": [
+      "<Accordion",
+      "  items={[",
+      "    { key: '${1:item1}', title: '${2:Section 1}', content: '${3:Content here}' },",
+      "    { key: '${4:item2}', title: '${5:Section 2}', content: '${6:Content here}' },",
+      "  ]}",
+      "/>"
+    ],
+    "description": "Glyx design Accordion"
+  },
+  "Toast usage": {
+    "prefix": "vtoast",
+    "body": [
+      "const { showToast } = useToast();",
+      "",
+      "showToast({",
+      "  message: '${1:Operation complete}',",
+      "  variant: '${2|default,success,error,warning|}',",
+      "  duration: ${3:3000},",
+      "});"
+    ],
+    "description": "Glyx design useToast"
+  },
+
+  // ── Hooks & patterns ──────────────────────────────────────────────────────
+  "useState": {
+    "prefix": "vus",
+    "body": [
+      "const [${1:value}, set${1/(.*)/${1:/capitalize}/}] = useState(${2:null});"
+    ],
+    "description": "React useState"
+  },
+  "useEffect": {
+    "prefix": "vue",
+    "body": [
+      "useEffect(() => {",
+      "  $0",
+      "  return () => { $1 };",
+      "}, [${2}]);"
+    ],
+    "description": "React useEffect"
+  },
+  "useTheme": {
+    "prefix": "vtheme",
+    "body": [
+      "const { colors, space, radius, fontSize, fontWeight } = useTheme();"
+    ],
+    "description": "Glyx design useTheme destructuring"
+  },
+
+  // ── glyx.config.json ─────────────────────────────────────────────────────
+  "glyx.config.json scaffold": {
+    "prefix": "vconfig",
+    "body": [
+      "{",
+      "  \"name\": \"${1:my-app}\",",
+      "  \"version\": \"${2:0.1.0}\",",
+      "  \"window\": {",
+      "    \"title\": \"${3:My App}\",",
+      "    \"width\": ${4:1280},",
+      "    \"height\": ${5:800}",
+      "  },",
+      "  \"capabilities\": {",
+      "    $0",
+      "  }",
+      "}"
+    ],
+    "description": "Scaffold glyx.config.json"
+  }
+}

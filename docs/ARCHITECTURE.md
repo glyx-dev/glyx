@@ -1,6 +1,6 @@
-# Velox Architecture
+# Glyx Architecture
 
-Velox is a Rust framework for building desktop applications with React and TypeScript. The rendering stack, layout engine, text shaper, and JavaScript runtime are all written in Rust. The application logic and UI are written in React+TypeScript and bundled by Bun. There is no Electron, no Chromium, no DOM.
+Glyx is a Rust framework for building desktop applications with React and TypeScript. The rendering stack, layout engine, text shaper, and JavaScript runtime are all written in Rust. The application logic and UI are written in React+TypeScript and bundled by Bun. There is no Electron, no Chromium, no DOM.
 
 This document describes how the pieces fit together.
 
@@ -36,13 +36,13 @@ This document describes how the pieces fit together.
 ## 1. High-Level Overview
 
 ```
-  App Developer writes:           Velox Rust runtime provides:
+  App Developer writes:           Glyx Rust runtime provides:
 
   js/app.jsx                      winit  (OS window, input events)
       |                           wgpu   (GPU context, swapchain)
   React component tree            Vello  (2D vector rendering)
       |                           Taffy  (CSS flexbox layout)
-  @velox/react bindings           Parley (text shaping)
+  @glyx/react bindings           Parley (text shaping)
       |                           V8     (JavaScript engine)
   native bindings (~120)          Tokio  (async runtime)
       |
@@ -50,7 +50,7 @@ This document describes how the pieces fit together.
   (db, fs, net, audio, video, AI, camera, ...)
 ```
 
-The app developer writes React components. Velox's React reconciler (built on `react-reconciler`) translates component tree mutations into `SceneCommand` messages. The Rust side processes those commands, computes layout via Taffy, and draws the result via Vello onto a wgpu texture, which is then blitted to the OS window surface.
+The app developer writes React components. Glyx's React reconciler (built on `react-reconciler`) translates component tree mutations into `SceneCommand` messages. The Rust side processes those commands, computes layout via Taffy, and draws the result via Vello onto a wgpu texture, which is then blitted to the OS window surface.
 
 There is no DOM. There is no WebView. JS runs in an embedded V8 isolate. All I/O goes through the native binding layer. Rust enforces capability-based access control at each binding.
 
@@ -62,43 +62,43 @@ All crates live under `crates/`.
 
 | Crate | Binary/Lib | Purpose |
 |-------|-----------|---------|
-| `velox-shell` | lib | winit window creation and raw input event forwarding. Translates winit types into primitive Rust types so no winit types leak to velox-core. Multi-window handle mapping. |
-| `velox-core` | lib | Main application coordinator. Wires all subsystems together. Owns the per-frame loop, state management, HMR in dev mode, and the JS-to-Vello rendering path. |
-| `velox-runtime` | lib | V8 embedding. Registers all native bindings (~120 functions). Manages the async completion queue. Exposes `VeloxRuntime` which owns the V8 Isolate, Context, and the global `AsyncState`. |
-| `velox-renderer` | lib | Vello-based 2D rendering. `FrameBuilder` accumulates draw calls. `VeloxRenderer::render_frame()` rasterizes via Vello and blits to the swapchain surface. |
-| `velox-text` | lib | Text shaping and layout via Parley. Font discovery per platform. Cursor position measurement for `TextInput`. |
-| `velox-layout` | lib | Taffy flex-layout integration. Converts `NodeProps` to `taffy::Style`. `LayoutTree` owns all Taffy node IDs. |
-| `velox-gpu` | lib | wgpu context creation and surface management. Surface resize. `GpuContext` owns `Device`, `Queue`, `Surface`. |
-| `velox-security` | lib | Capability model. Parses `velox.config.json` into `Capabilities`. Global singleton via `OnceLock`. Binding layer queries it before every privileged operation. |
-| `velox-db` | lib | SQLx + libsqlite3-sys. Connection pool per database file. Graceful shutdown drains pools before process exit. |
-| `velox-sysapi` | lib | OS-level APIs: battery status, system info, dark mode detection, OS keychain via `keyring`, audio recording via CPAL, camera list/capture. |
-| `velox-3d` | lib | wgpu 3D rendering pass. Phong lighting pipeline in WGSL. Off-screen RGBA8 target composited over the Vello scene. glTF mesh loading via `gltf` crate. |
-| `velox-ai` | lib | Local ML inference via Candle. MiniLM-L6-v2 embeddings, Phi-2 Q4_K_M generation, Whisper-tiny transcription. HF Hub model downloads. |
-| `velox-media` | lib | Thin loader for the velox-media DLL. `OnceLock` singleton. Ed25519 manifest verification. Exposes ffmpeg decode/encode API through raw function pointers. |
-| `velox-perf` | lib | Frame timing metrics. FPS, P99 latency, JS execution time, layout time. Values displayed in the dev overlay. |
-| `velox-runner` | bin | Prebuilt binary for JS-only projects. Reads binary trailer (snapshot + app.js + config) from its own executable. Enables zero-Cargo deployment. |
-| `velox-cli` | bin | `velox create/dev/build/runtime` CLI. Project scaffolding, runner caching, snapshot build, Bun invocation. |
+| `glyx-shell` | lib | winit window creation and raw input event forwarding. Translates winit types into primitive Rust types so no winit types leak to glyx-core. Multi-window handle mapping. |
+| `glyx-core` | lib | Main application coordinator. Wires all subsystems together. Owns the per-frame loop, state management, HMR in dev mode, and the JS-to-Vello rendering path. |
+| `glyx-runtime` | lib | V8 embedding. Registers all native bindings (~120 functions). Manages the async completion queue. Exposes `GlyxRuntime` which owns the V8 Isolate, Context, and the global `AsyncState`. |
+| `glyx-renderer` | lib | Vello-based 2D rendering. `FrameBuilder` accumulates draw calls. `GlyxRenderer::render_frame()` rasterizes via Vello and blits to the swapchain surface. |
+| `glyx-text` | lib | Text shaping and layout via Parley. Font discovery per platform. Cursor position measurement for `TextInput`. |
+| `glyx-layout` | lib | Taffy flex-layout integration. Converts `NodeProps` to `taffy::Style`. `LayoutTree` owns all Taffy node IDs. |
+| `glyx-gpu` | lib | wgpu context creation and surface management. Surface resize. `GpuContext` owns `Device`, `Queue`, `Surface`. |
+| `glyx-security` | lib | Capability model. Parses `glyx.config.json` into `Capabilities`. Global singleton via `OnceLock`. Binding layer queries it before every privileged operation. |
+| `glyx-db` | lib | SQLx + libsqlite3-sys. Connection pool per database file. Graceful shutdown drains pools before process exit. |
+| `glyx-sysapi` | lib | OS-level APIs: battery status, system info, dark mode detection, OS keychain via `keyring`, audio recording via CPAL, camera list/capture. |
+| `glyx-3d` | lib | wgpu 3D rendering pass. Phong lighting pipeline in WGSL. Off-screen RGBA8 target composited over the Vello scene. glTF mesh loading via `gltf` crate. |
+| `glyx-ai` | lib | Local ML inference via Candle. MiniLM-L6-v2 embeddings, Phi-2 Q4_K_M generation, Whisper-tiny transcription. HF Hub model downloads. |
+| `glyx-media` | lib | Thin loader for the glyx-media DLL. `OnceLock` singleton. Ed25519 manifest verification. Exposes ffmpeg decode/encode API through raw function pointers. |
+| `glyx-perf` | lib | Frame timing metrics. FPS, P99 latency, JS execution time, layout time. Values displayed in the dev overlay. |
+| `glyx-runner` | bin | Prebuilt binary for JS-only projects. Reads binary trailer (snapshot + app.js + config) from its own executable. Enables zero-Cargo deployment. |
+| `glyx-cli` | bin | `glyx create/dev/build/runtime` CLI. Project scaffolding, runner caching, snapshot build, Bun invocation. |
 
-Each crate has a narrow, well-defined responsibility. `velox-core` is the coordinator but contains no rendering or layout logic itself — it calls into `velox-renderer` and `velox-layout`.
+Each crate has a narrow, well-defined responsibility. `glyx-core` is the coordinator but contains no rendering or layout logic itself — it calls into `glyx-renderer` and `glyx-layout`.
 
 ---
 
 ## 3. Startup Sequence
 
 ```
-velox-runner::main()  (or notes-app::main() for native projects)
+glyx-runner::main()  (or notes-app::main() for native projects)
   |
-  AppConfig::from_config()          read velox.config.json, parse capabilities
+  AppConfig::from_config()          read glyx.config.json, parse capabilities
   |                                 OR
   AppConfig::from_trailer()         read binary trailer from own exe
   |
-velox-core::run(config)
+glyx-core::run(config)
   |
-  velox_security::init(caps)        set global capability singleton
-  velox_gpu::GpuContext::new()      init wgpu adapter/device/queue
-  velox_renderer::VeloxRenderer::new()
-  velox_text::TextSystem::new()     discover platform fonts
-  VeloxRuntime::new_with_ipc()      create V8 Isolate + Context
+  glyx_security::init(caps)        set global capability singleton
+  glyx_gpu::GpuContext::new()      init wgpu adapter/device/queue
+  glyx_renderer::GlyxRenderer::new()
+  glyx_text::TextSystem::new()     discover platform fonts
+  GlyxRuntime::new_with_ipc()      create V8 Isolate + Context
     -> eval(snapshot_blob)          OR eval(app_js) if no snapshot
     -> register_all()               register ~120 native bindings
     -> runtime.eval(app_js)         execute app bundle
@@ -108,7 +108,7 @@ velox-core::run(config)
   #[cfg(feature = "dev")]
   init_dev_mode()                   start notify file watcher + bun rebuild thread
   |
-  velox_shell::run(app_state, handler)
+  glyx_shell::run(app_state, handler)
     -> EventLoop::build()
     -> event_loop.run_app(ShellApp)  ← main thread blocks here
 ```
@@ -119,7 +119,7 @@ After startup, all application logic runs inside the winit event loop on the mai
 
 ## 4. Shell: winit Event Loop
 
-**File**: `crates/velox-shell/src/lib.rs`
+**File**: `crates/glyx-shell/src/lib.rs`
 
 The shell uses winit 0.30.12. The event loop runs with `ControlFlow::Wait`, which means the process sleeps when no events arrive. On a static UI with no animations this results in 0% CPU usage.
 
@@ -127,8 +127,8 @@ The shell uses winit 0.30.12. The event loop runs with `ControlFlow::Wait`, whic
 
 ```
 ShellApp {
-    windows:      HashMap<WindowId, u32>           winit ID -> velox handle
-    window_arcs:  HashMap<u32, Arc<Window>>        velox handle -> winit Window
+    windows:      HashMap<WindowId, u32>           winit ID -> glyx handle
+    window_arcs:  HashMap<u32, Arc<Window>>        glyx handle -> winit Window
     cursor_pos:   HashMap<u32, (f64, f64)>         per-window cursor tracking
     frameless:    HashMap<u32, bool>               frameless window flags
     handler:      Box<dyn FnMut(ShellEvent, &EventLoopProxy)>
@@ -149,14 +149,14 @@ ShellApp {
 
 **Frameless windows** (custom title bar):
 
-When `ShellConfig::decorations = false`, the shell enables edge resize detection. On any `MouseInput` event, the shell checks whether the cursor is within 8px of a window edge using `edge_resize_direction(x, y, w, h)`. If it is, `window.drag_resize_window(direction)` is called and the event is not forwarded to velox-core.
+When `ShellConfig::decorations = false`, the shell enables edge resize detection. On any `MouseInput` event, the shell checks whether the cursor is within 8px of a window edge using `edge_resize_direction(x, y, w, h)`. If it is, `window.drag_resize_window(direction)` is called and the event is not forwarded to glyx-core.
 
-On left-button-press on a node with `veloxDraggable: true`, velox-core calls `window.drag_window()` to initiate OS-level window drag.
+On left-button-press on a node with `glyxDraggable: true`, glyx-core calls `window.drag_window()` to initiate OS-level window drag.
 
-**User events** (cross-thread, via `EventLoopProxy<VeloxUserEvent>`):
+**User events** (cross-thread, via `EventLoopProxy<GlyxUserEvent>`):
 
 ```rust
-enum VeloxUserEvent {
+enum GlyxUserEvent {
     CreateWindow { id: u32, title: String, width: u32, height: u32 },
     Quit,
     Restart,   // for OTA auto-updater: re-exec the binary after update
@@ -169,9 +169,9 @@ These are posted from Tokio threads to the main thread event loop.
 
 ## 5. Frame Loop Sequence
 
-**File**: `crates/velox-core/src/lib.rs`
+**File**: `crates/glyx-core/src/lib.rs`
 
-Every frame, velox-core executes this sequence on the main thread:
+Every frame, glyx-core executes this sequence on the main thread:
 
 ```
 1. runtime.tick()
@@ -185,7 +185,7 @@ Every frame, velox-core executes this sequence on the main thread:
    - Mark layout dirty if layout-affecting props changed
 
 3. runtime.frame_tick()
-   - Call JS __velox_frameCallback(timestamp)
+   - Call JS __glyx_frameCallback(timestamp)
    - _pollWebSockets(), _pollIpc(), _pollVideo(), _pollAudio() etc. run inside
    - React processes events, runs effects, calls setState
    - More SceneCommands are pushed by React's reconciler
@@ -226,7 +226,7 @@ Every frame, velox-core executes this sequence on the main thread:
     - handle_dev_build_events() checks HMR channel (try_recv, non-blocking)
 ```
 
-**Dirty tracking**: Velox distinguishes between layout-affecting and visual-only property changes.
+**Dirty tracking**: Glyx distinguishes between layout-affecting and visual-only property changes.
 
 Layout-affecting: `width`, `height`, `flex`, `flex_direction`, `justify_content`, `align_items`, `padding`, `gap`, `text`, `font_size` — trigger Taffy recompute.
 
@@ -236,9 +236,9 @@ Visual-only: `color`, `background_color`, `border_color`, `border_width`, `borde
 
 ## 6. JavaScript Runtime
 
-**File**: `crates/velox-runtime/src/lib.rs`
+**File**: `crates/glyx-runtime/src/lib.rs`
 
-`VeloxRuntime` owns a V8 `OwnedIsolate` and a `Global<Context>`. V8 is initialized once per process via `v8::Platform::new()`.
+`GlyxRuntime` owns a V8 `OwnedIsolate` and a `Global<Context>`. V8 is initialized once per process via `v8::Platform::new()`.
 
 **Memory configuration** (production builds):
 
@@ -252,7 +252,7 @@ params.heap_limits(2 * 1024 * 1024, 256 * 1024 * 1024);  // 2MB initial, 256MB m
 **Evaluation**:
 
 ```
-VeloxRuntime::eval(js: &str) -> Result<(), String>
+GlyxRuntime::eval(js: &str) -> Result<(), String>
   scope.execute_script(source)
   scope.perform_microtask_checkpoint()   <- flush Promise queues
   low_memory_notification()              <- hint V8 to GC
@@ -262,13 +262,13 @@ VeloxRuntime::eval(js: &str) -> Result<(), String>
 
 **ReactDOM render model**:
 
-The app bundle calls `render(<App />)` which calls `react-reconciler`'s `createRoot().render()`. Velox's HostConfig (in `js/packages/@velox/react/src/hostConfig.js`) maps reconciler calls to native bindings:
+The app bundle calls `render(<App />)` which calls `react-reconciler`'s `createRoot().render()`. Glyx's HostConfig (in `js/packages/@glyx/react/src/hostConfig.js`) maps reconciler calls to native bindings:
 
 ```
-createInstance(type, props)     -> __velox_createNode(id, type, props_json)
-appendChildToContainer(p, c)   -> __velox_appendChild(parent_id, child_id)
-commitUpdate(inst, diff)       -> __velox_updateNode(id, changed_props_json)
-removeChild(parent, child)     -> __velox_removeNode(child_id)
+createInstance(type, props)     -> __glyx_createNode(id, type, props_json)
+appendChildToContainer(p, c)   -> __glyx_appendChild(parent_id, child_id)
+commitUpdate(inst, diff)       -> __glyx_updateNode(id, changed_props_json)
+removeChild(parent, child)     -> __glyx_removeNode(child_id)
 ```
 
 These run synchronously in V8. The SceneCommand queue is effectively a synchronous channel between JS and Rust — JS pushes to it during the reconciler commit phase, Rust drains it immediately after `frame_tick()` returns.
@@ -277,7 +277,7 @@ These run synchronously in V8. The SceneCommand queue is effectively a synchrono
 
 ## 7. Binding Pattern
 
-**File**: `crates/velox-runtime/src/bindings.rs`
+**File**: `crates/glyx-runtime/src/bindings.rs`
 
 All native bindings are registered in `register_all()` during runtime initialization. A `register!` macro attaches each callback to the V8 global object:
 
@@ -380,7 +380,7 @@ fn tick(&mut self) {
 Privileged bindings check capabilities before making a Promise. If the capability is absent, they return a pre-rejected Promise synchronously:
 
 ```rust
-if !velox_security::get().network {
+if !glyx_security::get().network {
     rv.set(reject_cap_promise(scope, "network").into());
     return;
 }
@@ -392,7 +392,7 @@ if !velox_security::get().network {
 
 ## 9. Scene Command System
 
-**File**: `crates/velox-runtime/src/bindings.rs`, `crates/velox-core/src/scene.rs`
+**File**: `crates/glyx-runtime/src/bindings.rs`, `crates/glyx-core/src/scene.rs`
 
 The scene command queue is the interface between JS and the Rust UI tree. It is an `Arc<Mutex<VecDeque<SceneCommand>>>`.
 
@@ -441,11 +441,11 @@ padding, gap, text, font_size, font_weight, color, background_color,
 border_width, border_color, border_radius, opacity,
 image_path, image_mode (cover/contain/stretch/fill/center),
 clip, scroll_offset_y, z_index,
-draggable, velox_draggable,
+draggable, glyx_draggable,
 video_handle, camera_handle, camera_mirror
 ```
 
-**apply_scene_commands** (`crates/velox-core/src/scene.rs`):
+**apply_scene_commands** (`crates/glyx-core/src/scene.rs`):
 
 Processes each command in order:
 
@@ -457,7 +457,7 @@ Processes each command in order:
 - `CreateImage`: loads image bytes via `image` crate, decodes to `peniko::Image`, stores in LRU cache (64 entries)
 - `CanvasUpdate`: stores `Vec<CanvasCmd>` in `canvas_cmds: HashMap<u32, Vec<CanvasCmd>>`
 - `Canvas3DUpdate`: stores `Scene3D` in `canvas3d_scenes: HashMap<u32, Scene3D>`
-- `OpenVideo`: spawns decode thread (velox-media DLL); spawns audio thread (rodio)
+- `OpenVideo`: spawns decode thread (glyx-media DLL); spawns audio thread (rodio)
 - `OpenCamera`: spawns nokhwa camera capture thread
 
 **Image LRU cache**:
@@ -468,9 +468,9 @@ Images decoded from disk are stored in `images_by_path: LruCache<String, peniko:
 
 ## 10. Layout Engine
 
-**Files**: `crates/velox-layout/`, `crates/velox-core/src/layout.rs`
+**Files**: `crates/glyx-layout/`, `crates/glyx-core/src/layout.rs`
 
-Velox uses Taffy for CSS flexbox layout. Taffy is driven on the main thread, synchronously, during the frame loop.
+Glyx uses Taffy for CSS flexbox layout. Taffy is driven on the main thread, synchronously, during the frame loop.
 
 **Node style conversion** (`to_taffy_style`):
 
@@ -493,11 +493,11 @@ size.width:   Length(px)   (explicit width required)
 size.height:  Length(px)
 ```
 
-Text nodes register a measure function with Taffy. When Taffy needs to know a text node's size, it calls back into `velox-text`'s `TextSystem::measure()` which returns `(shaped_width, shaped_height)` based on the text content, font size, and available width. This is how text wrapping integrates with flex layout.
+Text nodes register a measure function with Taffy. When Taffy needs to know a text node's size, it calls back into `glyx-text`'s `TextSystem::measure()` which returns `(shaped_width, shaped_height)` based on the text content, font size, and available width. This is how text wrapping integrates with flex layout.
 
 **Incremental layout**:
 
-Velox distinguishes two types of layout changes:
+Glyx distinguishes two types of layout changes:
 
 1. **Structure change** (nodes added/removed, children reordered): full Taffy tree rebuild. `rebuild_layout_from_scene()` reconstructs all Taffy nodes from the current `js_nodes` map. This is the expensive path.
 
@@ -509,18 +509,18 @@ Velox distinguishes two types of layout changes:
 
 After `compute()`, `update_scroll_positions()` walks the JS tree and, for each `ScrollView` node, adds `scroll_offset_y` to the layout positions of all its children. This is a post-processing step because Taffy positions children absolutely relative to their parent's top-left, ignoring scroll state.
 
-The hit-test binding `__velox_getLayout(id)` returns scroll-adjusted positions, so JS-side event dispatch always uses the correct visual coordinates.
+The hit-test binding `__glyx_getLayout(id)` returns scroll-adjusted positions, so JS-side event dispatch always uses the correct visual coordinates.
 
 ---
 
 ## 11. Rendering Pipeline
 
-**File**: `crates/velox-renderer/src/lib.rs`
+**File**: `crates/glyx-renderer/src/lib.rs`
 
 **Structure**:
 
 ```
-VeloxRenderer {
+GlyxRenderer {
     renderer:    vello::Renderer         // Vello CPU/GPU rasterizer
     blit:        BlitPipeline            // wgpu pipeline: off-screen -> swapchain
     target:      RenderTarget            // off-screen RGBA8 wgpu texture
@@ -530,7 +530,7 @@ VeloxRenderer {
 
 **FrameBuilder pattern**:
 
-The `scene` field is moved out of `VeloxRenderer` at the start of each frame and moved into `FrameBuilder`:
+The `scene` field is moved out of `GlyxRenderer` at the start of each frame and moved into `FrameBuilder`:
 
 ```rust
 pub fn begin_frame(&mut self) -> FrameBuilder {
@@ -551,9 +551,9 @@ pub fn render_frame(&mut self, gpu, surface_texture, frame: FrameBuilder) {
 }
 ```
 
-This ownership transfer pattern avoids a two-mutable-borrow conflict: if FrameBuilder borrowed `&mut self.scene` from `VeloxRenderer`, the borrow would prevent calling `render_frame(&mut self)`.
+This ownership transfer pattern avoids a two-mutable-borrow conflict: if FrameBuilder borrowed `&mut self.scene` from `GlyxRenderer`, the borrow would prevent calling `render_frame(&mut self)`.
 
-**render_subtree** (velox-core, iterates `js_nodes`):
+**render_subtree** (glyx-core, iterates `js_nodes`):
 
 For each node in z-index sorted order:
 
@@ -574,7 +574,7 @@ Before rendering children of a node, the children list is sorted by `z_index` (s
 
 **3D overlay pass** (post-Vello):
 
-After `render_frame()` composites the Vello scene onto the off-screen texture, `velox-3d`'s `Renderer3D::render()` is called for each entry in `canvas3d_overlays`. The 3D pass renders into a separate off-screen RGBA8+depth target and then composites the result over the Vello texture at the recorded (x, y, w, h) bounds.
+After `render_frame()` composites the Vello scene onto the off-screen texture, `glyx-3d`'s `Renderer3D::render()` is called for each entry in `canvas3d_overlays`. The 3D pass renders into a separate off-screen RGBA8+depth target and then composites the result over the Vello texture at the recorded (x, y, w, h) bounds.
 
 **Blit pipeline**:
 
@@ -584,7 +584,7 @@ The off-screen Vello texture is not the swapchain surface directly — this allo
 
 ## 12. Text System
 
-**File**: `crates/velox-text/src/lib.rs`
+**File**: `crates/glyx-text/src/lib.rs`
 
 Text rendering uses Parley (a text layout library built on Fontique for font discovery and Swash for shaping/rasterization).
 
@@ -617,13 +617,13 @@ Iterates Parley `GlyphRun`s and calls `scene.draw_glyphs(&font).font_size(px).tr
 
 **Cursor measurement** (`TextSystem::measure_to_cursor()`):
 
-For TextInput, Velox needs to know the pixel position of the cursor at character index N. Parley provides `hit_test_point()` and `line_metrics()`. For trailing whitespace, a sentinel character `"x"` is appended and its width subtracted — Parley ignores trailing whitespace in advance measurements.
+For TextInput, Glyx needs to know the pixel position of the cursor at character index N. Parley provides `hit_test_point()` and `line_metrics()`. For trailing whitespace, a sentinel character `"x"` is appended and its width subtracted — Parley ignores trailing whitespace in advance measurements.
 
 ---
 
 ## 13. 3D Rendering
 
-**File**: `crates/velox-3d/src/lib.rs`
+**File**: `crates/glyx-3d/src/lib.rs`
 
 The 3D rendering system is a separate wgpu render pass that runs after Vello completes.
 
@@ -681,19 +681,19 @@ Loaded via the `gltf` crate. Vertex positions, normals, and UV coordinates are e
 
 **Capacity limits**: MAX_MESHES = 64 per scene.
 
-**@velox/three** (JS layer):
+**@glyx/three** (JS layer):
 
-`@velox/three` provides a declarative React API over the imperative `VeloxCanvas3DContext.updateScene()` call. `<Scene>` collects child component data synchronously during React's render phase (Velox uses synchronous LegacyRoot rendering), assembles the scene JSON, and commits it via `useLayoutEffect`. Child components (`<PerspectiveCamera>`, `<AmbientLight>`, `<DirectionalLight>`, `<Mesh>`, `<Model>`) call a `register(type, data)` function obtained from React context. No custom reconciler is needed.
+`@glyx/three` provides a declarative React API over the imperative `GlyxCanvas3DContext.updateScene()` call. `<Scene>` collects child component data synchronously during React's render phase (Glyx uses synchronous LegacyRoot rendering), assembles the scene JSON, and commits it via `useLayoutEffect`. Child components (`<PerspectiveCamera>`, `<AmbientLight>`, `<DirectionalLight>`, `<Mesh>`, `<Model>`) call a `register(type, data)` function obtained from React context. No custom reconciler is needed.
 
 ---
 
 ## 14. Security and Capabilities
 
-**File**: `crates/velox-security/src/lib.rs`
+**File**: `crates/glyx-security/src/lib.rs`
 
-Velox uses Android/iOS-style capability declarations rather than Electron-style process isolation. The threat model is: the developer ships a known-good JS bundle. The JS bundle is not arbitrary web content. The security layer prevents accidental capability use and documents app requirements for distribution.
+Glyx uses Android/iOS-style capability declarations rather than Electron-style process isolation. The threat model is: the developer ships a known-good JS bundle. The JS bundle is not arbitrary web content. The security layer prevents accidental capability use and documents app requirements for distribution.
 
-**Capability declaration** (in `velox.config.json`):
+**Capability declaration** (in `glyx.config.json`):
 
 ```json
 {
@@ -712,7 +712,7 @@ Velox uses Android/iOS-style capability declarations rather than Electron-style 
 
 ```rust
 fn fetch_callback(scope, args, rv) {
-    if !velox_security::get().network_allowed(&url) {
+    if !glyx_security::get().network_allowed(&url) {
         rv.set(reject_cap_promise(scope, "network").into());
         return;
     }
@@ -720,7 +720,7 @@ fn fetch_callback(scope, args, rv) {
 }
 ```
 
-The global `Capabilities` singleton is set once at startup via `velox_security::init(caps)` and never mutated. `velox_security::get()` returns `&'static Capabilities` with zero cost.
+The global `Capabilities` singleton is set once at startup via `glyx_security::init(caps)` and never mutated. `glyx_security::get()` returns `&'static Capabilities` with zero cost.
 
 **Filesystem capability matching**:
 
@@ -738,9 +738,9 @@ Patterns support trailing `*` for prefix matching: `"MY_APP_*"` matches `"MY_APP
 
 ## 15. Hot Reload (HMR)
 
-**File**: `crates/velox-core/src/lib.rs` (feature-gated `#[cfg(feature = "dev")]`)
+**File**: `crates/glyx-core/src/lib.rs` (feature-gated `#[cfg(feature = "dev")]`)
 
-HMR (Hot Module Replacement) in Velox is full-page reload of the JS bundle with state reset, not React component-level fast refresh. This is appropriate because Velox's IPC-format bundle (IIFE) is incompatible with the per-component transforms that React Fast Refresh requires.
+HMR (Hot Module Replacement) in Glyx is full-page reload of the JS bundle with state reset, not React component-level fast refresh. This is appropriate because Glyx's IPC-format bundle (IIFE) is incompatible with the per-component transforms that React Fast Refresh requires.
 
 **Architecture**:
 
@@ -765,19 +765,19 @@ Main thread (handle_dev_build_events, called each frame):
     draw_error_overlay()
 ```
 
-**Windows Bun invocation**: Bun installed via winget or scoop creates a `.cmd` shim rather than a native `.exe`. `Command::new("bun")` fails because Windows does not run `.cmd` files without a shell. Velox first tries `bun` directly, then falls back to `cmd /C bun ...` if the first attempt fails.
+**Windows Bun invocation**: Bun installed via winget or scoop creates a `.cmd` shim rather than a native `.exe`. `Command::new("bun")` fails because Windows does not run `.cmd` files without a shell. Glyx first tries `bun` directly, then falls back to `cmd /C bun ...` if the first attempt fails.
 
 **Error overlay**: When a JS exception occurs (from `frame_tick`) or a build error (from HMR), a 140px red panel is drawn at the bottom of the window using `FrameBuilder` directly (bypassing the JS scene tree). It shows the exception message and stack trace with line wrapping.
 
-**Dev feature gate**: HMR code is compiled only when the `dev` Cargo feature is enabled. The production velox-runner binary is built with `--no-default-features`, which excludes `notify`, the file watcher, the error overlay, and the dev overlay. This removes ~2MB from the production binary.
+**Dev feature gate**: HMR code is compiled only when the `dev` Cargo feature is enabled. The production glyx-runner binary is built with `--no-default-features`, which excludes `notify`, the file watcher, the error overlay, and the dev overlay. This removes ~2MB from the production binary.
 
 ---
 
 ## 16. Multi-Window Architecture
 
-**Files**: `crates/velox-shell/src/lib.rs`, `crates/velox-core/src/lib.rs`, `crates/velox-runtime/src/lib.rs`
+**Files**: `crates/glyx-shell/src/lib.rs`, `crates/glyx-core/src/lib.rs`, `crates/glyx-runtime/src/lib.rs`
 
-Velox supports multiple windows from a single process. All windows share the JS isolate and the V8 context — there is one JS runtime per process.
+Glyx supports multiple windows from a single process. All windows share the JS isolate and the V8 context — there is one JS runtime per process.
 
 **Window state isolation**:
 
@@ -786,8 +786,8 @@ Each window has its own `PerWindowState`:
 PerWindowState {
     js_nodes:        HashMap<u32, JsNode>
     js_root:         Option<u32>
-    runtime:         VeloxRuntime    // separate V8 Isolate per window
-    renderer:        VeloxRenderer
+    runtime:         GlyxRuntime    // separate V8 Isolate per window
+    renderer:        GlyxRenderer
     layout:          LayoutTree
     images_by_path:  LruCache<...>
     canvas_cmds:     HashMap<u32, Vec<CanvasCmd>>
@@ -797,7 +797,7 @@ PerWindowState {
 }
 ```
 
-Each secondary window gets its own `VeloxRuntime` (separate V8 Isolate). The JS bundle is re-evaluated in each window's isolate. Windows do not share JS state — communication is via IPC.
+Each secondary window gets its own `GlyxRuntime` (separate V8 Isolate). The JS bundle is re-evaluated in each window's isolate. Windows do not share JS state — communication is via IPC.
 
 **IPC bus**:
 
@@ -806,11 +806,11 @@ type IpcInbox = Arc<Mutex<VecDeque<String>>>;
 type IpcBus   = Arc<Mutex<HashMap<u32, IpcInbox>>>;
 ```
 
-`__velox_ipc_send(target_handle, message)` pushes a JSON string to the target window's inbox. `__velox_ipc_poll()` returns all pending messages for the current window. Polling happens inside `__velox_frameCallback`, so messages are delivered once per frame.
+`__glyx_ipc_send(target_handle, message)` pushes a JSON string to the target window's inbox. `__glyx_ipc_poll()` returns all pending messages for the current window. Polling happens inside `__glyx_frameCallback`, so messages are delivered once per frame.
 
 **Window creation**:
 
-`__velox_window_create({ title, width, height })` resolves with the new window's handle. The binding posts a `VeloxUserEvent::CreateWindow` to the winit event loop via `EventLoopProxy`. The main thread creates the window, initializes `PerWindowState`, evaluates the same JS bundle, and begins driving the new window's frame loop.
+`__glyx_window_create({ title, width, height })` resolves with the new window's handle. The binding posts a `GlyxUserEvent::CreateWindow` to the winit event loop via `EventLoopProxy`. The main thread creates the window, initializes `PerWindowState`, evaluates the same JS bundle, and begins driving the new window's frame loop.
 
 **Dev mode**: HMR only applies to window handle 0. Secondary windows are not hot-reloaded independently.
 
@@ -818,26 +818,26 @@ type IpcBus   = Arc<Mutex<HashMap<u32, IpcInbox>>>;
 
 ## 17. Media Architecture
 
-**File**: `crates/velox-media/src/lib.rs`, `crates/velox-core/src/scene.rs`
+**File**: `crates/glyx-media/src/lib.rs`, `crates/glyx-core/src/scene.rs`
 
-The velox-media DLL provides ffmpeg decode/encode capabilities without statically linking ffmpeg into the application binary.
+The glyx-media DLL provides ffmpeg decode/encode capabilities without statically linking ffmpeg into the application binary.
 
 **DLL singleton**:
 
 ```rust
-static VELOX_MEDIA: OnceLock<Option<Arc<VeloxMedia>>> = OnceLock::new();
+static GLYX_MEDIA: OnceLock<Option<Arc<GlyxMedia>>> = OnceLock::new();
 
-pub fn get_media() -> Option<Arc<VeloxMedia>> {
-    VELOX_MEDIA.get_or_init(|| {
+pub fn get_media() -> Option<Arc<GlyxMedia>> {
+    GLYX_MEDIA.get_or_init(|| {
         let path = find_cached_media()?;
-        VeloxMedia::load(&path).ok().map(Arc::new)
+        GlyxMedia::load(&path).ok().map(Arc::new)
     }).clone()
 }
 ```
 
 The `OnceLock` ensures the DLL is loaded at most once per process. If loading fails (DLL not found, symbol missing, integrity check failed), `get_media()` returns `None` for the entire process lifetime. Retrying is not supported — callers must handle `None` gracefully.
 
-**Dynamic loading** (`VeloxMedia::load()`):
+**Dynamic loading** (`GlyxMedia::load()`):
 
 ```rust
 let lib = unsafe { Library::new(path) }?;
@@ -845,16 +845,16 @@ let lib = unsafe { Library::new(path) }?;
 let decoder_open  = sym!(lib, b"vm_decoder_open\0",  FnDecoderOpen);
 let decoder_frame = sym!(lib, b"vm_decoder_next_frame\0", FnDecoderNextFrame);
 // ...
-VeloxMedia { decoder_open, decoder_frame, ..., _lib: lib }
+GlyxMedia { decoder_open, decoder_frame, ..., _lib: lib }
 ```
 
-`_lib: Library` is stored last in the struct so it is dropped last. Dropping `Library` closes the OS handle. All function pointers become dangling after this drop — keeping `_lib` alive for the entire `VeloxMedia` lifetime prevents use-after-free.
+`_lib: Library` is stored last in the struct so it is dropped last. Dropping `Library` closes the OS handle. All function pointers become dangling after this drop — keeping `_lib` alive for the entire `GlyxMedia` lifetime prevents use-after-free.
 
 **Video playback** (`OpenVideo` scene command):
 
 ```
 spawn thread A (video decode):
-  VmDecoder::open(url) via velox-media DLL
+  VmDecoder::open(url) via glyx-media DLL
   loop:
     next_frame() -> (w, h, rgba_bytes, pts_seconds)
     lock frame_buf, store Some((w, h, rgba))
@@ -863,7 +863,7 @@ spawn thread A (video decode):
       if sleep_duration > 1ms: thread::sleep(sleep_duration)
 
 spawn thread B (audio decode):
-  VmAudioDecoder::open(url) via velox-media DLL
+  VmAudioDecoder::open(url) via glyx-media DLL
   FfmpegAudioSource wraps VmAudioDecoder as rodio::Source
   rodio Sink::append(FfmpegAudioSource)
   Audio plays via WASAPI/CoreAudio/ALSA
@@ -885,23 +885,23 @@ Camera capture uses `nokhwa` with the MSMF backend on Windows, AVFoundation on m
 
 **Integrity verification**:
 
-The velox-media DLL ships with a sidecar `velox-media.manifest.json` (SHA-256 hash, version, CDN URL) and `velox-media.manifest.sig` (Ed25519 signature over the manifest). The signing private key is held by CI — locally-built DLLs have invalid signatures. In debug builds (`cfg!(debug_assertions)`), signature verification is skipped automatically. In release builds, `VELOX_MEDIA_SKIP_VERIFY=1` can be set explicitly, but this is not recommended for production.
+The glyx-media DLL ships with a sidecar `glyx-media.manifest.json` (SHA-256 hash, version, CDN URL) and `glyx-media.manifest.sig` (Ed25519 signature over the manifest). The signing private key is held by CI — locally-built DLLs have invalid signatures. In debug builds (`cfg!(debug_assertions)`), signature verification is skipped automatically. In release builds, `GLYX_MEDIA_SKIP_VERIFY=1` can be set explicitly, but this is not recommended for production.
 
 ---
 
 ## 18. Snapshot Pipeline and Distribution
 
-**File**: `crates/velox-runner/src/main.rs`, `crates/velox-cli/src/main.rs`
+**File**: `crates/glyx-runner/src/main.rs`, `crates/glyx-cli/src/main.rs`
 
-Velox supports three distribution models:
+Glyx supports three distribution models:
 
-**1. JS-only portable** (`velox build --target portable`)
+**1. JS-only portable** (`glyx build --target portable`)
 
-Copies the pre-built `velox-runner` binary alongside `app.js` and `velox.config.json`. Requires the runner binary to be present. The runner reads `app.js` from disk at startup.
+Copies the pre-built `glyx-runner` binary alongside `app.js` and `glyx.config.json`. Requires the runner binary to be present. The runner reads `app.js` from disk at startup.
 
-**2. JS-only bundle** (`velox build --target bundle`)
+**2. JS-only bundle** (`glyx build --target bundle`)
 
-Produces a single executable by appending a binary trailer to the velox-runner binary.
+Produces a single executable by appending a binary trailer to the glyx-runner binary.
 
 **Binary trailer format** (last 72 bytes of the executable):
 
@@ -917,39 +917,39 @@ Offset  Size  Field
  52       4   flags          u32 LE = 0 (reserved)
  56       4   crc32          u32 LE  (over snap+js+cfg payload)
  60       4   reserved       u32 LE = 0
- 64       8   magic          u64 LE = 0x4C52_5458_4F4C_4556  ("VELOXTRL")
+ 64       8   magic          u64 LE = 0x4C52_5458_4F4C_4556  ("GLYXTRL")
 ```
 
 `read_trailer()` seeks to the last 72 bytes, validates magic and CRC32, then seeks to each payload section offset.
 
-The snapshot section is currently zero-length (no V8 snapshot in the CLI flow). The JS section contains the minified app bundle. The config section contains the `velox.config.json` content.
+The snapshot section is currently zero-length (no V8 snapshot in the CLI flow). The JS section contains the minified app bundle. The config section contains the `glyx.config.json` content.
 
 **3. Native** (apps with custom Rust extensions)
 
-Native projects have a `Cargo.toml` and implement a `VeloxExtension` trait. These are built with `cargo build --release` directly. No runner binary is involved.
+Native projects have a `Cargo.toml` and implement a `GlyxExtension` trait. These are built with `cargo build --release` directly. No runner binary is involved.
 
 **Runner caching**:
 
-The velox-cli caches pre-built runner binaries in `~/.velox/runners/{dev|prod}/velox-runner[.exe]`. On first use, the runner is compiled from the velox source tree and cached. Subsequent `velox build` and `velox dev` invocations use the cached binary, requiring no Rust toolchain.
+The glyx-cli caches pre-built runner binaries in `~/.glyx/runners/{dev|prod}/glyx-runner[.exe]`. On first use, the runner is compiled from the glyx source tree and cached. Subsequent `glyx build` and `glyx dev` invocations use the cached binary, requiring no Rust toolchain.
 
-**velox dev** (JS-only project):
+**glyx dev** (JS-only project):
 
 ```
-velox dev
+glyx dev
   is_native_project()? (Cargo.toml exists)
     yes -> cargo run -p {project_name}
     no  -> find_or_build_runner(dev=true)
-           cmd.env("VELOX_MEDIA_SKIP_VERIFY", "1")
-           runner js/app.js velox.config.json --dev
+           cmd.env("GLYX_MEDIA_SKIP_VERIFY", "1")
+           runner js/app.js glyx.config.json --dev
 ```
 
 ---
 
 ## 19. Database Layer
 
-**Files**: `crates/velox-db/`, `crates/velox-runtime/src/bindings.rs`
+**Files**: `crates/glyx-db/`, `crates/glyx-runtime/src/bindings.rs`
 
-Velox wraps SQLx with SQLite as the database engine.
+Glyx wraps SQLx with SQLite as the database engine.
 
 **Connection pooling**:
 
@@ -969,19 +969,19 @@ db.transaction(statements[])   -> Promise<void>
 db.close(handle)               -> Promise<void>
 ```
 
-**Vector store** (`@velox/react` `vectorDb` API):
+**Vector store** (`@glyx/react` `vectorDb` API):
 
 Built on SQLite with a custom BLOB column for storing float32 vectors. Cosine similarity search is computed in Rust (no sqlite-vss). This is a simple approximate search suitable for a few thousand vectors — not a production vector database.
 
 **Graceful shutdown**:
 
-On `CloseRequested`, velox-core calls `runtime.shutdown_db_pools()` which drains all open connections and calls `SqlitePool::close()` on each. This ensures WAL journal files are flushed before process exit.
+On `CloseRequested`, glyx-core calls `runtime.shutdown_db_pools()` which drains all open connections and calls `SqlitePool::close()` on each. This ensures WAL journal files are flushed before process exit.
 
 ---
 
 ## 20. Local AI
 
-**File**: `crates/velox-ai/src/lib.rs`
+**File**: `crates/glyx-ai/src/lib.rs`
 
 Local inference uses the Candle framework (pure Rust, no Python).
 
@@ -1001,33 +1001,33 @@ Models are wrapped in `Arc<Mutex<Option<Model>>>`. The first call to `ai.embed/g
 
 **Battery awareness**:
 
-Before `ai.generate()`, `velox_sysapi::battery_status()` is checked. If discharging, a warning is logged. Actual throttling (reducing model precision, cancelling inference) is deferred to a future phase.
+Before `ai.generate()`, `glyx_sysapi::battery_status()` is checked. If discharging, a warning is logged. Actual throttling (reducing model precision, cancelling inference) is deferred to a future phase.
 
 ---
 
 ## 21. JS Package Ecosystem
 
-All packages live under `js/packages/@velox/`. All are pure ESM with `"type": "module"`. Bun resolves imports from workspace symlinks — no build step is needed for the packages themselves.
+All packages live under `js/packages/@glyx/`. All are pure ESM with `"type": "module"`. Bun resolves imports from workspace symlinks — no build step is needed for the packages themselves.
 
 | Package | Entry | Description |
 |---------|-------|-------------|
-| `@velox/react` | `src/index.js` | React reconciler, HostConfig, all native bindings exposed as JS APIs. The runtime. |
-| `@velox/router` | `src/index.js` | Named-route history stack. `<Router>`, `<Route>`, `useNavigate`, `useRoute`. |
-| `@velox/drizzle` | `src/index.js` | Drizzle ORM sqlite-proxy adapter. Translates Drizzle's SQL+params into `db.run`/`db.query` calls. |
-| `@velox/keychain` | `src/index.js` | Typed, namespace-scoped OS keychain wrapper. `createKeychain`, `createTypedKeychain`. |
-| `@velox/store` | `src/index.js` | Persistent reactive Zustand-style store backed by SQLite. `initStore`, `createStore`. |
-| `@velox/three` | `src/index.js` | Declarative R3F-style 3D API over `Canvas3D`. `<Scene>`, `<Mesh>`, `<Model>`, math utilities. |
+| `@glyx/react` | `src/index.js` | React reconciler, HostConfig, all native bindings exposed as JS APIs. The runtime. |
+| `@glyx/router` | `src/index.js` | Named-route history stack. `<Router>`, `<Route>`, `useNavigate`, `useRoute`. |
+| `@glyx/drizzle` | `src/index.js` | Drizzle ORM sqlite-proxy adapter. Translates Drizzle's SQL+params into `db.run`/`db.query` calls. |
+| `@glyx/keychain` | `src/index.js` | Typed, namespace-scoped OS keychain wrapper. `createKeychain`, `createTypedKeychain`. |
+| `@glyx/store` | `src/index.js` | Persistent reactive Zustand-style store backed by SQLite. `initStore`, `createStore`. |
+| `@glyx/three` | `src/index.js` | Declarative R3F-style 3D API over `Canvas3D`. `<Scene>`, `<Mesh>`, `<Model>`, math utilities. |
 
 **Package conventions**:
 
 - No build step — Bun resolves ESM directly from `src/index.js`
 - Peer dependencies declared in `package.json` (never bundled)
-- Packages import from `@velox/react` for access to native bindings; they do not call `__velox_*` bindings directly
+- Packages import from `@glyx/react` for access to native bindings; they do not call `__glyx_*` bindings directly
 - New packages are added to root `package.json` workspaces array and `bun install` is run
 
-**React reconciler** (`@velox/react`):
+**React reconciler** (`@glyx/react`):
 
-The reconciler is built on `react-reconciler@0.29` in `legacy` mode (synchronous rendering). All React state updates and effects execute synchronously within the V8 call initiated by `__velox_frameCallback`. There is no concurrent mode, no scheduler, no time-slicing. The simplicity trades concurrency for predictability — every frame, React processes all pending work before Rust proceeds to layout and render.
+The reconciler is built on `react-reconciler@0.29` in `legacy` mode (synchronous rendering). All React state updates and effects execute synchronously within the V8 call initiated by `__glyx_frameCallback`. There is no concurrent mode, no scheduler, no time-slicing. The simplicity trades concurrency for predictability — every frame, React processes all pending work before Rust proceeds to layout and render.
 
 ---
 
@@ -1047,15 +1047,15 @@ Vello is a GPU-accelerated vector renderer well-suited for UI primitives (rectan
 
 **No DOM, no CSS**
 
-Velox uses Taffy (CSS flexbox subset) not a full CSS engine. There are no classes, no selectors, no cascade. All styles are inline on each node. This is the same model as React Native. The absence of CSS cascade eliminates a large category of bugs and makes layout predictable.
+Glyx uses Taffy (CSS flexbox subset) not a full CSS engine. There are no classes, no selectors, no cascade. All styles are inline on each node. This is the same model as React Native. The absence of CSS cascade eliminates a large category of bugs and makes layout predictable.
 
 **Capability model not process isolation**
 
-Velox does not sandbox the renderer process from the main process (there is only one process). The security model is appropriate for desktop apps where the developer ships the code — it prevents accidental capability use and creates a formal declaration of what APIs the app needs. Electron's two-process model exists partly because Chromium can render untrusted web content; Velox does not.
+Glyx does not sandbox the renderer process from the main process (there is only one process). The security model is appropriate for desktop apps where the developer ships the code — it prevents accidental capability use and creates a formal declaration of what APIs the app needs. Electron's two-process model exists partly because Chromium can render untrusted web content; Glyx does not.
 
-**velox-media as a separate DLL**
+**glyx-media as a separate DLL**
 
-Statically linking ffmpeg adds ~30 MB to the binary. By loading it as a DLL at runtime, velox-runner stays small and the DLL is shared across app versions. Apps that do not use video or camera do not need the DLL at all. The DLL is downloaded once and cached in `~/.velox/cache/media/`.
+Statically linking ffmpeg adds ~30 MB to the binary. By loading it as a DLL at runtime, glyx-runner stays small and the DLL is shared across app versions. Apps that do not use video or camera do not need the DLL at all. The DLL is downloaded once and cached in `~/.glyx/cache/media/`.
 
 **Binary trailer for single-file distribution**
 
@@ -1063,8 +1063,8 @@ Appending a trailer to the runner binary avoids ZIP or resource section formats 
 
 **Taffy incremental layout**
 
-The most expensive part of a UI framework is layout. Velox distinguishes three dirtiness levels (no-op, incremental, full rebuild) and only runs Taffy when necessary. On a typical user interaction (button press → color change), the layout engine does zero work — only the renderer re-reads cached positions with updated colors.
+The most expensive part of a UI framework is layout. Glyx distinguishes three dirtiness levels (no-op, incremental, full rebuild) and only runs Taffy when necessary. On a typical user interaction (button press → color change), the layout engine does zero work — only the renderer re-reads cached positions with updated colors.
 
 **ControlFlow::Wait**
 
-winit's `Wait` mode puts the process to sleep when no events are pending. A static Velox app consumes 0% CPU. An animated app (Canvas, rotating 3D scene) must call `window.request_redraw()` each frame to keep the loop alive. This is a deliberate energy-efficiency tradeoff.
+winit's `Wait` mode puts the process to sleep when no events are pending. A static Glyx app consumes 0% CPU. An animated app (Canvas, rotating 3D scene) must call `window.request_redraw()` each frame to keep the loop alive. This is a deliberate energy-efficiency tradeoff.

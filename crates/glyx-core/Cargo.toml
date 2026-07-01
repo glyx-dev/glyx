@@ -1,0 +1,43 @@
+[package]
+name    = "glyx-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# "dev" gates hot-reload: file watcher, bun subprocess, dev overlay.
+# Production builds (glyx build --mode snapshot/bundle) disable this feature
+# so notify and std::process::Command are never compiled in.
+default = ["dev"]
+dev = ["notify", "glyx-runtime/dev", "ffmpeg-sidecar"]
+
+[dependencies]
+glyx-gpu      = { path = "../glyx-gpu" }
+glyx-security = { path = "../glyx-security" }
+glyx-shell    = { path = "../glyx-shell" }
+glyx-renderer = { path = "../glyx-renderer" }
+glyx-text     = { path = "../glyx-text" }
+glyx-layout   = { path = "../glyx-layout" }
+glyx-runtime  = { path = "../glyx-runtime" }
+glyx-perf     = { path = "../glyx-perf" }
+winit          = { workspace = true }
+tokio          = { workspace = true }
+pollster       = { workspace = true }
+log            = { workspace = true }
+parking_lot    = { workspace = true }
+thiserror      = { workspace = true }
+env_logger     = { workspace = true }
+taffy          = { workspace = true }
+image          = { workspace = true }
+notify          = { workspace = true, optional = true }
+ffmpeg-sidecar  = { workspace = true, optional = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+dotenvy        = { workspace = true }
+sysinfo        = { workspace = true }
+lru            = { workspace = true }
+smallvec       = { workspace = true }
+glyx-3d       = { path = "../glyx-3d" }
+nokhwa         = { workspace = true }
+rodio          = { workspace = true }
+glyx-media    = { path = "../glyx-media" }
+mimalloc       = { workspace = true }

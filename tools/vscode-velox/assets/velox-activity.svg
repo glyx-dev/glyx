@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
-  <!-- Velox "V" lightning bolt — used as activity bar icon (VS Code colorizes it) -->
-  <path
-    fill="currentColor"
-    d="M4 3 L9 3 L12 9 L15 3 L20 3 L12 20 Z"
-  />
-</svg>

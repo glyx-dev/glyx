@@ -86,6 +86,8 @@ pub enum InputEvent {
     ScrollbarDrag { node_id: u32, scroll_y: f32 },
     /// Window resized to new physical pixel dimensions.
     Resize { width: u32, height: u32 },
+    /// An image failed to load (missing file, unreadable format).
+    ImageError { image_id: u32, path: String },
 }
 
 /// Callbacks for window control operations.
@@ -572,7 +574,7 @@ impl<T> std::fmt::Debug for OneshotSender<T> {
 #[derive(Debug)]
 pub enum SceneCommand {
     CreateNode    { id: u32, node_type: NodeType, props: NodeProps },
-    CreateImage   { id: u32, path: String },
+    CreateImage   { id: u32, path: String, width: Option<f32>, height: Option<f32> },
     AppendChild   { parent_id: u32, child_id: u32 },
     UpdateNode    { id: u32, props: NodeProps },
     RemoveNode    { id: u32 },
@@ -1524,6 +1526,11 @@ fn poll_events_callback(
                 set_num!("width", width);
                 set_num!("height", height);
             }
+            InputEvent::ImageError { image_id, path } => {
+                set_str!("type", "imageError");
+                set_num!("imageId", image_id);
+                set_str!("path", &path);
+            }
             InputEvent::DragStart { x, y } => {
                 set_str!("type", "dragStart");
                 set_num!("x", x);
@@ -1770,9 +1777,13 @@ fn create_image_callback(
         .map(|s| s.to_rust_string_lossy(scope))
         .unwrap_or_default();
 
+    // Optional display-size hint (used to rasterize SVGs at the rendered size).
+    let width  = args.get(1).number_value(scope).filter(|v| *v > 0.0).map(|v| v as f32);
+    let height = args.get(2).number_value(scope).filter(|v| *v > 0.0).map(|v| v as f32);
+
     let id = state.next_image_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     state.scene.lock()
-        .push_back(SceneCommand::CreateImage { id, path });
+        .push_back(SceneCommand::CreateImage { id, path, width, height });
 
     rv.set(v8::Number::new(scope, id as f64).into());
 }

@@ -15,6 +15,7 @@ import {
   addWindowSizeListener, removeWindowSizeListener,
   addKeyListener,
   addGlobalClickListener, removeGlobalClickListener,
+  registerImageError, unregisterImageError,
 } from './events.js';
 
 // ── Reconciler ────────────────────────────────────────────────────────────────
@@ -344,11 +345,24 @@ export function Text({ children, style, showCursor, ...props }) {
   return React.createElement('text', { text, style, showCursor, ...props });
 }
 
-export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', style, ...props }) {
+export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', onError, style, ...props }) {
+  // Display-size hint: lets the engine rasterize SVGs at the rendered size
+  // (bitmaps ignore it). style.width/height win over the props, matching layout.
+  const hintW = typeof style?.width  === 'number' ? style.width  : (typeof width  === 'number' ? width  : 0);
+  const hintH = typeof style?.height === 'number' ? style.height : (typeof height === 'number' ? height : 0);
   const imageId = React.useMemo(() => {
     if (!src) return null;
-    return __glyx_createImage(src);
-  }, [src]);
+    return __glyx_createImage(src, hintW, hintH);
+  }, [src, hintW, hintH]);
+
+  // Keep the latest onError without re-registering each render.
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+  useEffect(() => {
+    if (imageId == null) return;
+    registerImageError(imageId, ev => onErrorRef.current?.(ev));
+    return () => unregisterImageError(imageId);
+  }, [imageId]);
 
   return React.createElement('image', {
     imageId,

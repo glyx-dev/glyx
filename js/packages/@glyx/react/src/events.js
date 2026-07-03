@@ -61,6 +61,9 @@ const parentMap = new Map();
 // Currently dragged node id (or null). Set on dragStart, cleared on dragEnd.
 let activeDragId = null;
 
+// Map from imageId -> onError callback, fired when a native image load fails.
+const imageErrorRegistry = new Map();
+
 // Listeners notified on window resize: Array<(size: {width, height}) => void>
 const windowSizeListeners = [];
 
@@ -96,6 +99,19 @@ let cursorY = 0;
  */
 export function registerPressable(nodeId, handlers) {
   pressableRegistry.set(nodeId, handlers);
+}
+
+/**
+ * Register a callback fired when the image with `imageId` fails to load.
+ * @param {number} imageId - id returned by __glyx_createImage
+ * @param {(ev: { path: string }) => void} onError
+ */
+export function registerImageError(imageId, onError) {
+  imageErrorRegistry.set(imageId, onError);
+}
+
+export function unregisterImageError(imageId) {
+  imageErrorRegistry.delete(imageId);
 }
 
 /**
@@ -525,6 +541,12 @@ export function dispatchEvents() {
       case 'resize': {
         const size = { width: ev.width, height: ev.height };
         for (const fn of windowSizeListeners) fn(size);
+        break;
+      }
+
+      case 'imageError': {
+        const onError = imageErrorRegistry.get(ev.imageId);
+        if (onError) try { onError({ path: ev.path }); } catch {}
         break;
       }
 

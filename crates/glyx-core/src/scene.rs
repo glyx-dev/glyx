@@ -73,10 +73,40 @@ fn srgb_to_linear_u8(v: u8) -> u8 {
     (lin * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
-fn load_image_from_path(path: &str) -> Option<peniko::ImageData> {
+/// Placeholder shown when an image fails to load: light panel, gray border,
+/// red diagonal cross — the classic "broken image" glyph. Built once, shared.
+fn broken_image_placeholder() -> peniko::ImageData {
+    static PLACEHOLDER: std::sync::OnceLock<peniko::ImageData> = std::sync::OnceLock::new();
+    PLACEHOLDER.get_or_init(|| {
+        const S: u32 = 64;
+        let mut bytes = vec![0u8; (S * S * 4) as usize];
+        for y in 0..S {
+            for x in 0..S {
+                let i = ((y * S + x) * 4) as usize;
+                let border = x < 2 || y < 2 || x >= S - 2 || y >= S - 2;
+                let d1 = (x as i32 - y as i32).abs() <= 2;
+                let d2 = (x as i32 + y as i32 - (S as i32 - 1)).abs() <= 2;
+                let (r, g, b) = if border {
+                    (0x99, 0x99, 0x99)
+                } else if d1 || d2 {
+                    (0xCC, 0x44, 0x44)
+                } else {
+                    (0xEE, 0xEE, 0xEE)
+                };
+                bytes[i] = r;
+                bytes[i + 1] = g;
+                bytes[i + 2] = b;
+                bytes[i + 3] = 0xFF;
+            }
+        }
+        rgba_to_peniko(bytes, S, S).expect("placeholder image")
+    }).clone()
+}
+
+fn load_image_from_path(path: &str, width: Option<f32>, height: Option<f32>) -> Option<peniko::ImageData> {
     let lower = path.to_ascii_lowercase();
     if lower.ends_with(".svg") {
-        return load_svg_from_path(path);
+        return load_svg_from_path(path, width, height);
     }
     let decoded = image::open(path).ok()?;
     let rgba = decoded.into_rgba8();
@@ -84,19 +114,28 @@ fn load_image_from_path(path: &str) -> Option<peniko::ImageData> {
     rgba_to_peniko(rgba.into_raw(), w, h)
 }
 
-fn load_svg_from_path(path: &str) -> Option<peniko::ImageData> {
+fn load_svg_from_path(path: &str, width: Option<f32>, height: Option<f32>) -> Option<peniko::ImageData> {
     let svg_data = std::fs::read(path).ok()?;
     let opts = resvg::usvg::Options::default();
     let tree = resvg::usvg::Tree::from_data(&svg_data, &opts).ok()?;
     let size = tree.size();
-    let w = size.width().ceil() as u32;
-    let h = size.height().ceil() as u32;
-    if w == 0 || h == 0 {
+    let (iw, ih) = (size.width(), size.height());
+    if iw <= 0.0 || ih <= 0.0 {
         log::warn!("[svg] zero-size SVG: {path}");
         return None;
     }
+    // Rasterize at the requested display size when given; a missing axis keeps
+    // the intrinsic aspect ratio. No hint at all → intrinsic viewBox size.
+    let (tw, th) = match (width, height) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None)    => (w, w * ih / iw),
+        (None, Some(h))    => (h * iw / ih, h),
+        (None, None)       => (iw, ih),
+    };
+    let w = tw.ceil().max(1.0) as u32;
+    let h = th.ceil().max(1.0) as u32;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
-    let transform = resvg::tiny_skia::Transform::identity();
+    let transform = resvg::tiny_skia::Transform::from_scale(tw / iw, th / ih);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
     rgba_to_peniko(pixmap.take(), w, h)
 }
@@ -144,17 +183,36 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 layout_changed   = true;
                 structure_changed = true;
             }
-            SceneCommand::CreateImage { id, path } => {
-                if let Some(image) = state.images_by_path.get(&path).cloned() {
+            SceneCommand::CreateImage { id, path, width, height } => {
+                // SVGs are rasterized per requested display size, so the cache
+                // key carries the size; bitmaps decode once regardless of size.
+                let cache_key = if path.to_ascii_lowercase().ends_with(".svg") {
+                    format!(
+                        "{path}#{}x{}",
+                        width.map_or(0, |v| v.ceil() as u32),
+                        height.map_or(0, |v| v.ceil() as u32),
+                    )
+                } else {
+                    path.clone()
+                };
+                if let Some(image) = state.images_by_path.get(&cache_key).cloned() {
                     state.image_cache_hits += 1;
                     state.images.insert(id, image);
                 } else {
                     state.image_cache_misses += 1;
-                    if let Some(image) = load_image_from_path(&path) {
-                        state.images_by_path.put(path.clone(), image.clone());
+                    if let Some(image) = load_image_from_path(&path, width, height) {
+                        state.images_by_path.put(cache_key, image.clone());
                         state.images.insert(id, image);
                     } else {
                         log::error!("Failed to load image at path: {}", path);
+                        // Show a broken-image placeholder instead of rendering
+                        // nothing. Deliberately NOT cached by path, so a fixed
+                        // file is retried on the next CreateImage for that src.
+                        state.images.insert(id, broken_image_placeholder());
+                        // Let JS fire the <Image onError> callback.
+                        state.runtime.push_event(
+                            crate::InputEvent::ImageError { image_id: id, path: path.clone() },
+                        );
                     }
                 }
                 let total = state.image_cache_hits + state.image_cache_misses;

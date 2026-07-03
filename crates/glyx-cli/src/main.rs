@@ -267,6 +267,8 @@ fn cmd_create(name: &str, native: bool, template: &str) -> Result<()> {
 
 fn cmd_create_js(name: &str, dest: &Path, glyx_home: &Path, template: &str) -> Result<()> {
     std::fs::create_dir_all(dest.join("js"))?;
+    std::fs::create_dir_all(dest.join("assets"))?;
+    copy_glyx_mark(glyx_home, dest);
 
     let react_path   = relpath(dest, &glyx_home.join("js/packages/@glyx/react"));
     let router_path  = relpath(dest, &glyx_home.join("js/packages/@glyx/router"));
@@ -298,6 +300,8 @@ fn cmd_create_js(name: &str, dest: &Path, glyx_home: &Path, template: &str) -> R
 fn cmd_create_native(name: &str, dest: &Path, glyx_home: &Path, template: &str) -> Result<()> {
     std::fs::create_dir_all(dest.join("src"))?;
     std::fs::create_dir_all(dest.join("js"))?;
+    std::fs::create_dir_all(dest.join("assets"))?;
+    copy_glyx_mark(glyx_home, dest);
 
     let core_path   = relpath(dest, &glyx_home.join("crates/glyx-core"));
     let shell_path  = relpath(dest, &glyx_home.join("crates/glyx-shell"));
@@ -357,21 +361,7 @@ fn app_jsx_for_template(name: &str, template: &str) -> String {
 
 fn app_jsx_blank(name: &str) -> String {
     format!(r#"import React, {{ useState }} from 'react';
-import {{ View, Text, Pressable, render, useWindowSize }} from '@glyx/react';
-
-// Glyx logo — four squares, mirroring the glyx.dev favicon.
-function GlyxLogo({{ size = 56 }}) {{
-  const sq = Math.round(size * 0.42);
-  const gap = Math.round(size * 0.08);
-  return (
-    <View style={{{{ flexDirection: 'row', flexWrap: 'wrap', width: size, gap }}}}>
-      <View style={{{{ width: sq, height: sq, borderRadius: 5, backgroundColor: '#00A878', opacity: 0.55 }}}} />
-      <View style={{{{ width: sq, height: sq, borderRadius: 5, borderWidth: 1.5, borderColor: '#00A87888' }}}} />
-      <View style={{{{ width: sq, height: sq, borderRadius: 5, backgroundColor: '#00A878', opacity: 0.28 }}}} />
-      <View style={{{{ width: sq, height: sq, borderRadius: 5, backgroundColor: '#00A878' }}}} />
-    </View>
-  );
-}}
+import {{ View, Text, Image, Pressable, render, useWindowSize }} from '@glyx/react';
 
 function App() {{
   const {{ width, height }} = useWindowSize();
@@ -381,20 +371,20 @@ function App() {{
     <View
       width={{width}}
       height={{height}}
-      style={{{{ backgroundColor: '#1e1e2e', justifyContent: 'center', alignItems: 'center', gap: 20 }}}}
+      style={{{{ backgroundColor: '#0A0A0E', justifyContent: 'center', alignItems: 'center', gap: 20 }}}}
     >
-      <GlyxLogo size={{64}} />
-      <Text fontSize={{28}} style={{{{ color: '#cdd6f4', fontWeight: '700' }}}}>
+      <Image src="./assets/glyx-mark.svg" width={{64}} height={{56}} />
+      <Text style={{{{ fontSize: 28, color: '#EDEDF2', fontWeight: '700' }}}}>
         {name}
       </Text>
-      <Text fontSize={{16}} style={{{{ color: '#a6adc8' }}}}>
+      <Text style={{{{ fontSize: 16, color: '#A9A9B8' }}}}>
         count: {{count}}
       </Text>
       <Pressable
         onPress={{() => setCount(c => c + 1)}}
-        style={{{{ backgroundColor: '#89b4fa', paddingVertical: 10, paddingHorizontal: 24, borderRadius: 8 }}}}
+        style={{{{ backgroundColor: '#F59E0B', paddingVertical: 10, paddingHorizontal: 24, borderRadius: 8 }}}}
       >
-        <Text fontSize={{15}} style={{{{ color: '#1e1e2e', fontWeight: '600' }}}}>increment</Text>
+        <Text style={{{{ fontSize: 15, color: '#131318', fontWeight: '600' }}}}>increment</Text>
       </Pressable>
     </View>
   );
@@ -2628,6 +2618,14 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
         else { std::fs::copy(entry.path(), &dest_path).with_context(|| format!("copy {}", entry.path().display()))?; }
     }
     Ok(())
+}
+
+fn copy_glyx_mark(glyx_home: &Path, dest: &Path) {
+    let src = glyx_home.join("assets/glyx-mark.svg");
+    let dst = dest.join("assets/glyx-mark.svg");
+    if let Err(e) = std::fs::copy(&src, &dst) {
+        log::warn!("[create] could not copy glyx-mark.svg: {e}");
+    }
 }
 
 fn write_file(path: impl AsRef<Path>, content: &str) -> Result<()> {

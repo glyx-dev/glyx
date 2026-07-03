@@ -28,6 +28,7 @@ thiserror      = { workspace = true }
 env_logger     = { workspace = true }
 taffy          = { workspace = true }
 image          = { workspace = true }
+resvg          = "0.44"
 notify          = { workspace = true, optional = true }
 ffmpeg-sidecar  = { workspace = true, optional = true }
 serde          = { workspace = true }

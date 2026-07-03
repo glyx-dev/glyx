@@ -74,10 +74,34 @@ fn srgb_to_linear_u8(v: u8) -> u8 {
 }
 
 fn load_image_from_path(path: &str) -> Option<peniko::ImageData> {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".svg") {
+        return load_svg_from_path(path);
+    }
     let decoded = image::open(path).ok()?;
     let rgba = decoded.into_rgba8();
     let (w, h) = rgba.dimensions();
-    let mut bytes = rgba.into_raw();
+    rgba_to_peniko(rgba.into_raw(), w, h)
+}
+
+fn load_svg_from_path(path: &str) -> Option<peniko::ImageData> {
+    let svg_data = std::fs::read(path).ok()?;
+    let opts = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_data(&svg_data, &opts).ok()?;
+    let size = tree.size();
+    let w = size.width().ceil() as u32;
+    let h = size.height().ceil() as u32;
+    if w == 0 || h == 0 {
+        log::warn!("[svg] zero-size SVG: {path}");
+        return None;
+    }
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+    let transform = resvg::tiny_skia::Transform::identity();
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    rgba_to_peniko(pixmap.take(), w, h)
+}
+
+fn rgba_to_peniko(mut bytes: Vec<u8>, w: u32, h: u32) -> Option<peniko::ImageData> {
     for px in bytes.chunks_exact_mut(4) {
         px[0] = srgb_to_linear_u8(px[0]);
         px[1] = srgb_to_linear_u8(px[1]);

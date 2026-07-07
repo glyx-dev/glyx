@@ -429,8 +429,13 @@ impl Canvas3DTarget {
 
 pub struct Renderer3D {
     pipeline_3d:  wgpu::RenderPipeline,
+    // Bind-group layouts are only consumed inside `new()` today; kept on the
+    // struct for dynamic bind-group rebuilds (streaming meshes/lights).
+    #[allow(dead_code)]
     camera_bgl:   wgpu::BindGroupLayout,
+    #[allow(dead_code)]
     per_obj_bgl:  wgpu::BindGroupLayout,
+    #[allow(dead_code)]
     lighting_bgl: wgpu::BindGroupLayout,
     tex_bgl:      wgpu::BindGroupLayout,
     overlay_bgl:  wgpu::BindGroupLayout,

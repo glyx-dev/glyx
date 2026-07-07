@@ -68,6 +68,9 @@ impl v8::inspector::ChannelImpl for GlyxChannel {
 
 pub struct GlyxInspectorClient {
     base:   v8::inspector::V8InspectorClientBase,
+    /// Shared handle to the DevTools message queue; kept so the pause
+    /// busy-wait loop can pump it (reads go through the Arc clone).
+    #[allow(dead_code)]
     inbox:  Arc<Mutex<VecDeque<String>>>,
     paused: bool,
 }
@@ -111,7 +114,9 @@ impl v8::inspector::V8InspectorClientImpl for GlyxInspectorClient {
 pub struct GlyxInspector {
     /// Active inspector session — dropped first (depends on inspector).
     session:   v8::UniqueRef<v8::inspector::V8InspectorSession>,
-    /// V8Inspector — dropped after session.
+    /// V8Inspector — never read, but MUST be held: `session` borrows from it,
+    /// and field order guarantees session drops first.
+    #[allow(dead_code)]
     inspector: v8::UniqueRef<v8::inspector::V8Inspector>,
     /// Channel that routes V8 CDP responses out to the WebSocket.
     _channel:  Box<GlyxChannel>,

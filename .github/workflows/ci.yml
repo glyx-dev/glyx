@@ -1,0 +1,48 @@
+# CI — runs on every PR and push to dev/main.
+#
+# Deliberately targeted rather than `--workspace`:
+#  - glyx-runtime links rusty_v8 (large static lib download) — cached, but the
+#    first uncached run is slow. Targeted -p flags keep the tested surface to
+#    the crates that have tests without building glyx-ai (Candle) etc.
+#  - GPU-backend rendering is NOT exercised here (runners have no GPU);
+#    TinySkia paths and all pure logic are. See docs on renderer selection.
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Rust tests never open a window, but belt-and-braces for anything that probes.
+  GLYX_CPU_RENDER: "1"
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # Zero-warnings bar (see CONTRIBUTING.md). RUSTFLAGS="-D warnings" is not
+      # used because it would also deny warnings inside vendored path deps
+      # (vendor/vello, vendor/femtovg); instead, fail on any warning whose
+      # source location is in our own crates/.
+      - name: cargo check (zero warnings in crates/)
+        run: |
+          cargo check --workspace --message-format short 2>&1 | tee check.log
+          if grep -E "^crates[/\\].*warning" check.log; then
+            echo "::error::warnings found in workspace crates"; exit 1
+          fi
+      - name: cargo test (tested crates)
+        run: cargo test -p glyx-security -p glyx-core -p glyx-runtime
+
+  js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun test js/packages

@@ -410,7 +410,7 @@ pub struct NodeProps {
 
 // ── Canvas 2D draw commands ───────────────────────────────────────────────────
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum CanvasCmd {
     Clear,
@@ -520,7 +520,10 @@ fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_bytes: &[u8]) 
                 if i + 6 > slots { break; }
                 let off = f32_at(i + 4) as usize;
                 let len = f32_at(i + 5) as usize;
-                let text = str_bytes.get(off..off + len)
+                // checked_add: off/len are JS-controlled and saturate at
+                // usize::MAX, so a plain `off + len` could overflow-panic.
+                let text = off.checked_add(len)
+                    .and_then(|end| str_bytes.get(off..end))
                     .and_then(|b| std::str::from_utf8(b).ok())
                     .unwrap_or("")
                     .to_string();
@@ -536,8 +539,10 @@ fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_bytes: &[u8]) 
                 let count = f32_at(i) as usize;
                 let color = color_at(i + 1);
                 let start = i + 2;
-                let npts  = count * 2;
-                if start + npts > slots { break; }
+                // count is JS-controlled: checked math so huge values break
+                // out of the decode loop instead of overflow-panicking.
+                let npts = match count.checked_mul(2) { Some(n) => n, None => break };
+                if start.checked_add(npts).map_or(true, |end| end > slots) { break; }
                 cmds.push(CanvasCmd::FillPath { points: read_points(start, npts), color });
                 i = start + npts;
             }
@@ -549,8 +554,8 @@ fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_bytes: &[u8]) 
                 let lw     = f32_at(i + 2);
                 let closed = f32_at(i + 3) != 0.0;
                 let start  = i + 4;
-                let npts   = count * 2;
-                if start + npts > slots { break; }
+                let npts = match count.checked_mul(2) { Some(n) => n, None => break };
+                if start.checked_add(npts).map_or(true, |end| end > slots) { break; }
                 cmds.push(CanvasCmd::StrokePath {
                     points: read_points(start, npts), color, line_width: lw, closed,
                 });
@@ -5752,4 +5757,190 @@ fn throw_js_error(scope: &mut v8::HandleScope, msg: &str) {
     let s  = v8::String::new(scope, msg).unwrap();
     let ex = v8::Exception::error(scope, s);
     scope.throw_exception(ex);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Canvas binary protocol ────────────────────────────────────────────────
+    //
+    // Mirrors what @glyx/react's VeloxCanvasContext writes: f32 slots, with
+    // color slots written through a Uint32Array alias (raw RGBA bytes).
+
+    /// Little-endian f32 slot stream builder.
+    struct Stream(Vec<u8>);
+    impl Stream {
+        fn new() -> Self { Stream(Vec::new()) }
+        fn f(mut self, v: f32) -> Self { self.0.extend_from_slice(&v.to_le_bytes()); self }
+        fn color(mut self, rgba: [u8; 4]) -> Self { self.0.extend_from_slice(&rgba); self }
+        fn decode(self, strs: &[u8]) -> Vec<CanvasCmd> {
+            let count = self.0.len() / 4;
+            decode_canvas_binary(&self.0, count, strs)
+        }
+    }
+
+    const RED: [u8; 4] = [255, 0, 0, 255];
+
+    #[test]
+    fn binary_decodes_fill_rect() {
+        let cmds = Stream::new()
+            .f(canvas_op::FILL_RECT as f32)
+            .f(1.0).f(2.0).f(30.0).f(40.0).color(RED)
+            .decode(&[]);
+        assert_eq!(cmds, vec![CanvasCmd::FillRect { x: 1.0, y: 2.0, w: 30.0, h: 40.0, color: RED }]);
+    }
+
+    #[test]
+    fn binary_decodes_mixed_command_sequence() {
+        let cmds = Stream::new()
+            .f(canvas_op::CLEAR as f32)
+            .f(canvas_op::FILL_CIRCLE as f32).f(10.0).f(20.0).f(5.0).color(RED)
+            .f(canvas_op::STROKE_LINE as f32).f(0.0).f(0.0).f(9.0).f(9.0).color(RED).f(2.0)
+            .decode(&[]);
+        assert_eq!(cmds, vec![
+            CanvasCmd::Clear,
+            CanvasCmd::FillCircle { cx: 10.0, cy: 20.0, r: 5.0, color: RED },
+            CanvasCmd::StrokeLine { x0: 0.0, y0: 0.0, x1: 9.0, y1: 9.0, color: RED, line_width: 2.0 },
+        ]);
+    }
+
+    #[test]
+    fn binary_decodes_fill_text_from_string_region() {
+        let strs = "hello world".as_bytes();
+        let cmds = Stream::new()
+            .f(canvas_op::FILL_TEXT as f32)
+            .f(5.0).f(6.0).f(14.0).color(RED)
+            .f(6.0)  // offset: "world"
+            .f(5.0)  // length
+            .decode(strs);
+        assert_eq!(cmds, vec![CanvasCmd::FillText {
+            text: "world".into(), x: 5.0, y: 6.0, font_size: 14.0, color: RED,
+        }]);
+    }
+
+    #[test]
+    fn binary_decodes_variable_length_paths() {
+        // FILL_PATH: [op, count, color, x0,y0,x1,y1,x2,y2], then another command
+        // after it — proves the per-arm index advance is correct.
+        let cmds = Stream::new()
+            .f(canvas_op::FILL_PATH as f32).f(3.0).color(RED)
+            .f(0.0).f(0.0).f(10.0).f(0.0).f(5.0).f(8.0)
+            .f(canvas_op::STROKE_PATH as f32).f(2.0).color(RED).f(1.5).f(1.0)
+            .f(1.0).f(1.0).f(2.0).f(2.0)
+            .decode(&[]);
+        assert_eq!(cmds, vec![
+            CanvasCmd::FillPath { points: vec![0.0, 0.0, 10.0, 0.0, 5.0, 8.0], color: RED },
+            CanvasCmd::StrokePath {
+                points: vec![1.0, 1.0, 2.0, 2.0], color: RED, line_width: 1.5, closed: true,
+            },
+        ]);
+    }
+
+    #[test]
+    fn binary_and_json_paths_decode_identically() {
+        // The same drawing through both transports must yield the same commands
+        // — this pins the two decoders against drifting apart.
+        let from_binary = Stream::new()
+            .f(canvas_op::FILL_RECT as f32).f(1.0).f(2.0).f(3.0).f(4.0).color(RED)
+            .f(canvas_op::FILL_PATH as f32).f(2.0).color(RED).f(0.0).f(0.0).f(7.0).f(7.0)
+            .decode(&[]);
+        let from_json: Vec<CanvasCmd> = serde_json::from_str(r#"[
+            { "type": "fillRect", "x": 1, "y": 2, "w": 3, "h": 4, "color": [255,0,0,255] },
+            { "type": "fillPath", "points": [0,0,7,7], "color": [255,0,0,255] }
+        ]"#).unwrap();
+        assert_eq!(from_binary, from_json);
+    }
+
+    #[test]
+    fn binary_truncated_stream_stops_cleanly() {
+        // FILL_RECT needs 5 args; only 2 are present → decode stops, no panic.
+        let cmds = Stream::new()
+            .f(canvas_op::CLEAR as f32)
+            .f(canvas_op::FILL_RECT as f32).f(1.0).f(2.0)
+            .decode(&[]);
+        assert_eq!(cmds, vec![CanvasCmd::Clear]);
+    }
+
+    #[test]
+    fn binary_unknown_opcode_stops_cleanly() {
+        let cmds = Stream::new()
+            .f(canvas_op::FILL_CIRCLE as f32).f(1.0).f(2.0).f(3.0).color(RED)
+            .f(999.0) // corrupt
+            .f(canvas_op::CLEAR as f32)
+            .decode(&[]);
+        assert_eq!(cmds.len(), 1); // everything after the corrupt opcode is dropped
+    }
+
+    #[test]
+    fn binary_float_count_limits_live_slots() {
+        // Buffer holds two commands but float_count says only the first is live.
+        let mut bytes = Vec::new();
+        for v in [canvas_op::CLEAR as f32, canvas_op::CLEAR as f32] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        assert_eq!(decode_canvas_binary(&bytes, 1, &[]).len(), 1);
+    }
+
+    #[test]
+    fn binary_hostile_values_never_panic() {
+        // JS controls every slot: saturating offsets/counts must fail closed.
+        // (These were real overflow panics before checked math was added.)
+        let huge = f32::MAX;
+
+        // fillText with off/len that saturate to usize::MAX.
+        let cmds = Stream::new()
+            .f(canvas_op::FILL_TEXT as f32)
+            .f(0.0).f(0.0).f(14.0).color(RED).f(huge).f(huge)
+            .decode(b"abc");
+        assert_eq!(cmds, vec![CanvasCmd::FillText {
+            text: String::new(), x: 0.0, y: 0.0, font_size: 14.0, color: RED,
+        }]);
+
+        // Path with a count that saturates (count*2 would overflow).
+        let cmds = Stream::new()
+            .f(canvas_op::FILL_PATH as f32).f(huge).color(RED)
+            .decode(&[]);
+        assert!(cmds.is_empty());
+
+        // NaN / negative floats in numeric positions must not panic either.
+        let _ = Stream::new()
+            .f(canvas_op::STROKE_PATH as f32).f(f32::NAN).color(RED).f(-1.0).f(f32::INFINITY)
+            .decode(&[]);
+    }
+
+    #[test]
+    fn binary_text_out_of_range_offset_yields_empty_text() {
+        let cmds = Stream::new()
+            .f(canvas_op::FILL_TEXT as f32)
+            .f(0.0).f(0.0).f(12.0).color(RED).f(100.0).f(5.0)
+            .decode(b"short");
+        assert_eq!(cmds, vec![CanvasCmd::FillText {
+            text: String::new(), x: 0.0, y: 0.0, font_size: 12.0, color: RED,
+        }]);
+    }
+
+    // ── extract_host (network capability gate input) ──────────────────────────
+
+    #[test]
+    fn extract_host_strips_scheme_path_and_port() {
+        assert_eq!(extract_host("https://api.example.com/v1/users"), "api.example.com");
+        assert_eq!(extract_host("http://api.example.com:8080/x"), "api.example.com");
+        assert_eq!(extract_host("api.example.com"), "api.example.com");
+        assert_eq!(extract_host("wss://ws.example.com/socket"), "ws.example.com");
+    }
+
+    #[test]
+    fn extract_host_lowercases() {
+        assert_eq!(extract_host("https://API.Example.COM/x"), "api.example.com");
+    }
+
+    #[test]
+    fn extract_host_hostile_urls_fail_closed() {
+        // Userinfo trick: "allowed.com@evil.com" must NOT extract to allowed.com.
+        assert_ne!(extract_host("https://api.example.com@evil.com/x"), "api.example.com");
+        // Userinfo with a colon yields garbage ("user") — garbage is fine as
+        // long as it can never equal an allowlisted hostname.
+        assert_ne!(extract_host("https://user:pass@api.example.com/x"), "api.example.com");
+    }
 }

@@ -177,7 +177,8 @@ pub trait GlyxExtension: Send + Sync {
 /// the handle is dropped (equivalent to `tokio::spawn` with no handle).
 ///
 /// # Example
-/// ```no_run
+/// ```ignore
+/// // Illustrative — `do_heavy_work` stands in for your own async fn.
 /// // In a JS plugin or Rust extension:
 /// fn start_work(tokio: &tokio::runtime::Handle) -> CancellableTask {
 ///     CancellableTask::spawn(tokio, async {

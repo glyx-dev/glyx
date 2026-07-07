@@ -2288,6 +2288,8 @@ struct AppMeta {
     version:     String,
     publisher:   String,
     description: String,
+    /// Parsed for config parity; not yet embedded in installer metadata.
+    #[allow(dead_code)]
     website:     String,
     /// Path to the app's own license file (relative to project root), e.g. "LICENSE.txt".
     license:     Option<String>,
@@ -2634,6 +2636,9 @@ fn write_file(path: impl AsRef<Path>, content: &str) -> Result<()> {
     std::fs::write(path, content).with_context(|| format!("write {}", path.display()))
 }
 
+// Superseded by the snapshot stubs in glyx-runtime; retained as reference for
+// projects that opt out of snapshots.
+#[allow(dead_code)]
 const POLYFILLS_JS: &str = r#"// V8 environment polyfills
 if (typeof performance === 'undefined') {
   globalThis.performance = { now: () => Number(__glyx_getTime()) };

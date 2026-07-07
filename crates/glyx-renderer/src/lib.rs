@@ -498,6 +498,7 @@ fn bez_path(pts: &[f32], close: bool) -> Option<vello::kurbo::BezPath> {
 /// Which rendering backend to create.
 ///
 /// Resolved from `RenderMode` in glyx-core before calling `AnyRenderer::new`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
     /// Vello GPU compute shaders (`use_cpu = false`) or Cranelift CPU path (`true`).
     Vello { use_cpu: bool },

@@ -220,3 +220,156 @@ pub fn is_initialized() -> bool {
 pub fn get() -> &'static Capabilities {
     CAPS.get_or_init(Capabilities::default)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(json: &str) -> Capabilities {
+        serde_json::from_str(json).expect("capabilities should parse")
+    }
+
+    // ── Deserialization ───────────────────────────────────────────────────────
+
+    #[test]
+    fn empty_config_denies_everything() {
+        let caps = parse("{}");
+        assert!(!caps.can_read_fs());
+        assert!(!caps.can_write_fs());
+        assert!(!caps.can_network("api.example.com"));
+        assert!(!caps.can_get_env("PATH"));
+        assert!(!caps.db);
+        assert!(!caps.shell);
+        assert!(!caps.credentials);
+        assert!(!caps.ai);
+        assert!(caps.deeplink.is_none());
+    }
+
+    #[test]
+    fn default_struct_matches_empty_config() {
+        // `get()` before `init()` hands out Capabilities::default() — it must
+        // deny exactly like a config with no "capabilities" key.
+        let caps = Capabilities::default();
+        assert!(!caps.can_read_fs());
+        assert!(!caps.can_write_fs());
+        assert!(!caps.can_network("anything"));
+        assert!(!caps.can_get_env("ANYTHING"));
+    }
+
+    #[test]
+    fn full_config_parses_with_renamed_fields() {
+        let caps = parse(r#"{
+            "fs": { "read": ["assets/**"], "write": ["data/**"] },
+            "network": { "allow": ["api.example.com"] },
+            "env": { "allow": ["MY_APP_*"] },
+            "db": true,
+            "globalShortcuts": true,
+            "deeplink": { "scheme": "notes", "singleInstance": true }
+        }"#);
+        assert!(caps.can_read_fs());
+        assert!(caps.can_write_fs());
+        assert!(caps.db);
+        assert!(caps.global_shortcuts);
+        let dl = caps.deeplink.as_ref().unwrap();
+        assert_eq!(dl.scheme, "notes");
+        assert!(dl.single_instance);
+    }
+
+    #[test]
+    fn deeplink_single_instance_defaults_false() {
+        let caps = parse(r#"{ "deeplink": { "scheme": "x" } }"#);
+        assert!(!caps.deeplink.unwrap().single_instance);
+    }
+
+    // ── fs ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fs_read_and_write_are_independent() {
+        let read_only = parse(r#"{ "fs": { "read": ["**"] } }"#);
+        assert!(read_only.can_read_fs());
+        assert!(!read_only.can_write_fs());
+
+        let write_only = parse(r#"{ "fs": { "write": ["**"] } }"#);
+        assert!(!write_only.can_read_fs());
+        assert!(write_only.can_write_fs());
+    }
+
+    #[test]
+    fn fs_block_without_lists_grants_nothing() {
+        let caps = parse(r#"{ "fs": {} }"#);
+        assert!(!caps.can_read_fs());
+        assert!(!caps.can_write_fs());
+    }
+
+    // NOTE: fs `read`/`write` glob patterns are currently declaration-only —
+    // can_read_fs()/can_write_fs() gate on presence, not per-path matching.
+    // When per-path scoping lands, add traversal tests here (`../`, absolute
+    // paths outside the globs, symlink escapes).
+
+    // ── network ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn network_allows_exact_host_only() {
+        let caps = parse(r#"{ "network": { "allow": ["api.example.com"] } }"#);
+        assert!(caps.can_network("api.example.com"));
+        assert!(!caps.can_network("example.com"));
+        assert!(!caps.can_network("evil-api.example.com"));
+        // Subdomains are NOT implicitly allowed.
+        assert!(!caps.can_network("sub.api.example.com"));
+    }
+
+    #[test]
+    fn network_wildcard_allows_all() {
+        let caps = parse(r#"{ "network": { "allow": ["*"] } }"#);
+        assert!(caps.can_network("anything.example.com"));
+        assert!(caps.can_network("127.0.0.1"));
+    }
+
+    #[test]
+    fn network_empty_allowlist_denies_all() {
+        let caps = parse(r#"{ "network": { "allow": [] } }"#);
+        assert!(!caps.can_network("api.example.com"));
+    }
+
+    #[test]
+    fn network_match_is_case_sensitive_expecting_lowercase() {
+        // Binding-side extract_host() lowercases before checking, so config
+        // entries must be lowercase. An uppercase config entry never matches.
+        let caps = parse(r#"{ "network": { "allow": ["API.EXAMPLE.COM"] } }"#);
+        assert!(!caps.can_network("api.example.com"));
+    }
+
+    // ── env ───────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn env_exact_match() {
+        let caps = parse(r#"{ "env": { "allow": ["HOME"] } }"#);
+        assert!(caps.can_get_env("HOME"));
+        assert!(!caps.can_get_env("HOMEDRIVE"));
+        assert!(!caps.can_get_env("PATH"));
+    }
+
+    #[test]
+    fn env_trailing_wildcard_matches_prefix() {
+        let caps = parse(r#"{ "env": { "allow": ["MY_APP_*"] } }"#);
+        assert!(caps.can_get_env("MY_APP_TOKEN"));
+        assert!(caps.can_get_env("MY_APP_"));
+        assert!(!caps.can_get_env("MY_APP"));   // prefix itself, without the underscore run
+        assert!(!caps.can_get_env("OTHER_MY_APP_X"));
+    }
+
+    #[test]
+    fn env_bare_star_matches_everything() {
+        let caps = parse(r#"{ "env": { "allow": ["*"] } }"#);
+        assert!(caps.can_get_env("PATH"));
+        assert!(caps.can_get_env(""));
+    }
+
+    #[test]
+    fn env_wildcard_only_at_end() {
+        // '*' anywhere but the end is treated as a literal character.
+        let caps = parse(r#"{ "env": { "allow": ["MY_*_TOKEN"] } }"#);
+        assert!(!caps.can_get_env("MY_APP_TOKEN"));
+        assert!(caps.can_get_env("MY_*_TOKEN"));
+    }
+}

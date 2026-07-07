@@ -252,7 +252,6 @@ fn edge_cursor_icon(dir: ResizeDirection) -> CursorIcon {
         ResizeDirection::East      => CursorIcon::EResize,
         ResizeDirection::North     => CursorIcon::NResize,
         ResizeDirection::South     => CursorIcon::SResize,
-        _ => CursorIcon::Default,
     }
 }
 

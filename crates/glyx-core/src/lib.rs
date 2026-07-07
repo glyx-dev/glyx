@@ -107,6 +107,7 @@ struct PluginConfigJson {
     name: Option<String>,
     /// Capability declarations (informational — used for docs/tooling; not enforced at runtime).
     #[serde(default)]
+    #[allow(dead_code)]
     capabilities: Vec<String>,
 }
 
@@ -268,6 +269,46 @@ fn bundle_plugin(entry: &str, safe_name: &str) -> Option<String> {
     }
 }
 
+/// Map the `renderMode` config string to a `RenderMode`.
+/// Unknown values fall back to `Gpu` (the pre-`renderMode` default).
+fn parse_render_mode(s: &str) -> RenderMode {
+    match s {
+        "cpu"     => RenderMode::Cpu,
+        "skia"    => RenderMode::TinySkia,
+        "femtovg" => RenderMode::Femtovg,
+        "auto"    => RenderMode::Auto,
+        _         => RenderMode::Gpu,
+    }
+}
+
+/// Resolve the configured render mode + detected GPU tier to a concrete backend.
+///
+/// `force_cpu` is `GLYX_CPU_RENDER=1` (CI, headless, unsupported GPU). Under
+/// `Auto` it forces the cheapest CPU path (TinySkia); under an explicit `Gpu`
+/// pin it downgrades Vello to its CPU path. Explicit backend pins always win
+/// over auto-detection.
+fn resolve_backend(mode: RenderMode, tier: GpuTier, force_cpu: bool) -> BackendKind {
+    match mode {
+        RenderMode::Auto => {
+            // Three-tier heuristic driven by adapter device type:
+            //   No/software GPU  → TinySkia  (~97 MB)
+            //   iGPU / virtual   → TinySkia  (~97 MB)
+            //   Intel Arc dGPU   → FemtoVG   (~103–153 MB)
+            //   NVIDIA/AMD dGPU  → Vello     (~285–328 MB)
+            let tier = if force_cpu { GpuTier::None } else { tier };
+            match tier {
+                GpuTier::None | GpuTier::Integrated => BackendKind::TinySkia,
+                GpuTier::DiscreteIntel              => BackendKind::FemtoVg,
+                GpuTier::Discrete                   => BackendKind::Vello { use_cpu: false },
+            }
+        }
+        RenderMode::Cpu      => BackendKind::Vello { use_cpu: true },
+        RenderMode::Gpu      => BackendKind::Vello { use_cpu: force_cpu },
+        RenderMode::TinySkia => BackendKind::TinySkia,
+        RenderMode::Femtovg  => BackendKind::FemtoVg,
+    }
+}
+
 /// Parse a glyx config JSON string, apply window overrides, and return capabilities + plugins.
 fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabilities, Vec<JsPlugin>) {
     let file: Option<GlyxConfigFile> = serde_json::from_str::<GlyxConfigFile>(json)
@@ -293,13 +334,7 @@ fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabilities, Vec<J
         };
 
         if let Some(rm) = w.render_mode.as_deref() {
-            cfg.render_mode = match rm {
-                "cpu"     => RenderMode::Cpu,
-                "skia"    => RenderMode::TinySkia,
-                "femtovg" => RenderMode::Femtovg,
-                "auto"    => RenderMode::Auto,
-                _         => RenderMode::Gpu,
-            };
+            cfg.render_mode = parse_render_mode(rm);
         }
 
         if let Some(mb) = w.max_js_heap_mb {
@@ -635,12 +670,15 @@ pub struct AppConfig {
     /// Use `include_str!` in your example or application crate to embed a
     /// `.js` file at compile time:
     ///
-    /// ```no_run
+    /// ```ignore
+    /// // Illustrative — the include_str! path is relative to your crate.
     /// glyx_core::run(glyx_core::AppConfig {
     ///     window: glyx_core::WindowConfig::default(),
     ///     js_src: Some(include_str!("../js/app.js").to_string()),
     ///     snapshot_blob: None,
     ///     dev_mode: None,
+    ///     extensions: vec![],
+    ///     js_plugins: vec![],
     /// });
     /// ```
     pub js_src: Option<String>,
@@ -735,8 +773,6 @@ struct CachedLabel {
     layout: TextLayout,
     /// Pre-computed advance width for horizontal centering.
     width:       f64,
-    /// Pre-computed ascent for *visual* vertical centering (single-line).
-    ascent:      f64,
     /// Parley's full line-box height including all wrapped lines.
     /// Used to detect whether the layout box was auto-sized to the text —
     /// in which case we top-align rather than center-align vertically.
@@ -763,13 +799,11 @@ impl CachedLabel {
             Some(ts.label_centered("M", font_size, max_width))
         };
         let _ = color; // used at draw time via frame.draw_text
-        let src    = ref_layout.as_ref().unwrap_or(&layout);
-        let ascent = src.ascent() as f64;
+        let src = ref_layout.as_ref().unwrap_or(&layout);
         let (cursor_top_raw, cursor_height_raw) = src.cursor_metrics();
         Self {
             layout,
             width,
-            ascent,
             text_height,
             cursor_top:    cursor_top_raw    as f64,
             cursor_height: cursor_height_raw as f64,
@@ -819,7 +853,9 @@ struct CameraStream {
     /// Latest peniko::Image built from the most recent frame.
     latest_image: Option<peniko::ImageData>,
     /// Actual FPS negotiated with the camera hardware (written by capture thread
-    /// shortly after open_stream; read by StartCameraRecord for the encoder).
+    /// shortly after open_stream). Kept for the camera-recording encoder path,
+    /// which is not wired to read it yet.
+    #[allow(dead_code)]
     capture_fps:  Arc<std::sync::atomic::AtomicU32>,
     // ── Recording ─────────────────────────────────────────────────────────────
     /// When recording is active, the capture thread clones each RGBA frame and
@@ -1485,6 +1521,7 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut AnyFrame) {
 /// Draw the JS error overlay — a panel at the bottom of the window.
 ///
 /// Layout:
+/// ```text
 ///   ─ red top border ─────────────────────────────────────────────────────
 ///   ⚠ JavaScript Error  —  fix source and save to dismiss
 ///   ─ dim separator ──────────────────────────────────────────────────────
@@ -1494,6 +1531,7 @@ fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut AnyFrame) {
 ///     at renderWithHooks (app.js:...) ← dim    (framework frame)
 ///     … N more frames
 ///   ─ footer ─────────────────────────────────────────────────────────────
+/// ```
 ///
 /// Requires `--source-map=inline` in bun dev build and V8 `--enable_source_maps`
 /// (set in glyx-runtime for dev feature) so that .jsx file names and original
@@ -1953,36 +1991,19 @@ pub fn run(mut config: AppConfig) -> bool {
                 // CI, headless testing, or machines without a supported GPU.
                 let force_cpu = std::env::var("GLYX_CPU_RENDER")
                     .map(|v| v.trim() == "1").unwrap_or(false);
-                let backend_kind = match render_mode_config {
-                    RenderMode::Auto => {
-                        // Three-tier heuristic driven by adapter device type:
-                        //   No/software GPU  → TinySkia  (~97 MB)
-                        //   iGPU / virtual   → TinySkia  (~97 MB)
-                        //   Intel Arc dGPU   → FemtoVG   (~103–153 MB)
-                        //   NVIDIA/AMD dGPU  → Vello     (~285–328 MB)
-                        let tier = if force_cpu { GpuTier::None } else { gpu_ctx.gpu_tier() };
-                        let kind = match tier {
-                            GpuTier::None | GpuTier::Integrated => BackendKind::TinySkia,
-                            GpuTier::DiscreteIntel              => BackendKind::FemtoVg,
-                            GpuTier::Discrete                   => BackendKind::Vello { use_cpu: false },
-                        };
-                        log::info!(
-                            "[glyx] renderMode=auto → {} ({})",
-                            match &kind {
-                                BackendKind::TinySkia                 => "skia",
-                                BackendKind::FemtoVg                  => "femtovg",
-                                BackendKind::Vello { use_cpu: false } => "vello",
-                                BackendKind::Vello { use_cpu: true  } => "vello/cpu",
-                            },
-                            gpu_ctx.adapter_name(),
-                        );
-                        kind
-                    }
-                    RenderMode::Cpu      => BackendKind::Vello { use_cpu: true },
-                    RenderMode::Gpu      => BackendKind::Vello { use_cpu: force_cpu },
-                    RenderMode::TinySkia => BackendKind::TinySkia,
-                    RenderMode::Femtovg  => BackendKind::FemtoVg,
-                };
+                let backend_kind = resolve_backend(render_mode_config, gpu_ctx.gpu_tier(), force_cpu);
+                if render_mode_config == RenderMode::Auto {
+                    log::info!(
+                        "[glyx] renderMode=auto → {} ({})",
+                        match &backend_kind {
+                            BackendKind::TinySkia                 => "skia",
+                            BackendKind::FemtoVg                  => "femtovg",
+                            BackendKind::Vello { use_cpu: false } => "vello",
+                            BackendKind::Vello { use_cpu: true  } => "vello/cpu",
+                        },
+                        gpu_ctx.adapter_name(),
+                    );
+                }
                 let mut renderer = AnyRenderer::new(&gpu_ctx, backend_kind)
                     .expect("Failed to initialise renderer");
                 // Apply window background color so the GPU clear matches the
@@ -2889,4 +2910,150 @@ pub fn run(mut config: AppConfig) -> bool {
 
     drop(tokio_rt);
     restart
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Backend selection (renderMode + GPU tier → concrete backend) ──────────
+
+    #[test]
+    fn auto_selects_tinyskia_for_no_gpu_and_integrated() {
+        // Integrated GPUs share system RAM, so GPU buffer pools inflate RSS —
+        // the heuristic must route both tiers to the CPU rasterizer.
+        assert_eq!(resolve_backend(RenderMode::Auto, GpuTier::None, false), BackendKind::TinySkia);
+        assert_eq!(resolve_backend(RenderMode::Auto, GpuTier::Integrated, false), BackendKind::TinySkia);
+    }
+
+    #[test]
+    fn auto_selects_femtovg_for_intel_arc() {
+        assert_eq!(resolve_backend(RenderMode::Auto, GpuTier::DiscreteIntel, false), BackendKind::FemtoVg);
+    }
+
+    #[test]
+    fn auto_selects_vello_gpu_for_discrete() {
+        assert_eq!(
+            resolve_backend(RenderMode::Auto, GpuTier::Discrete, false),
+            BackendKind::Vello { use_cpu: false },
+        );
+    }
+
+    #[test]
+    fn explicit_pin_beats_auto_detection() {
+        // Even on a discrete GPU, an explicit backend pin must win.
+        assert_eq!(resolve_backend(RenderMode::TinySkia, GpuTier::Discrete, false), BackendKind::TinySkia);
+        assert_eq!(resolve_backend(RenderMode::Femtovg, GpuTier::Discrete, false), BackendKind::FemtoVg);
+        assert_eq!(
+            resolve_backend(RenderMode::Cpu, GpuTier::Discrete, false),
+            BackendKind::Vello { use_cpu: true },
+        );
+    }
+
+    #[test]
+    fn force_cpu_downgrades_auto_and_gpu_but_not_pins() {
+        // GLYX_CPU_RENDER=1: Auto behaves as if there were no GPU...
+        assert_eq!(resolve_backend(RenderMode::Auto, GpuTier::Discrete, true), BackendKind::TinySkia);
+        // ...an explicit Gpu pin falls back to Vello's CPU path...
+        assert_eq!(
+            resolve_backend(RenderMode::Gpu, GpuTier::Discrete, true),
+            BackendKind::Vello { use_cpu: true },
+        );
+        // ...and explicit CPU-safe pins are unaffected.
+        assert_eq!(resolve_backend(RenderMode::TinySkia, GpuTier::None, true), BackendKind::TinySkia);
+    }
+
+    // ── renderMode string parsing ──────────────────────────────────────────────
+
+    #[test]
+    fn render_mode_strings_map_to_variants() {
+        assert_eq!(parse_render_mode("auto"), RenderMode::Auto);
+        assert_eq!(parse_render_mode("skia"), RenderMode::TinySkia);
+        assert_eq!(parse_render_mode("femtovg"), RenderMode::Femtovg);
+        assert_eq!(parse_render_mode("cpu"), RenderMode::Cpu);
+        assert_eq!(parse_render_mode("gpu"), RenderMode::Gpu);
+        // Unknown values fall back to Gpu rather than erroring.
+        assert_eq!(parse_render_mode("not-a-mode"), RenderMode::Gpu);
+    }
+
+    // ── glyx.config.json → WindowConfig ───────────────────────────────────────
+
+    fn apply(json: &str) -> (WindowConfig, Capabilities) {
+        let mut cfg = WindowConfig::default();
+        let (caps, _plugins) = apply_config_json(json, &mut cfg);
+        (cfg, caps)
+    }
+
+    #[test]
+    fn config_window_overrides_apply() {
+        let (cfg, _) = apply(r#"{
+            "window": {
+                "title": "My App", "width": 900, "height": 600,
+                "renderMode": "skia", "decorations": false
+            }
+        }"#);
+        assert_eq!(cfg.title, "My App");
+        assert_eq!(cfg.width, 900);
+        assert_eq!(cfg.height, 600);
+        assert_eq!(cfg.render_mode, RenderMode::TinySkia);
+        assert!(!cfg.decorations);
+    }
+
+    #[test]
+    fn config_no_size_implies_maximized() {
+        let (cfg, _) = apply(r#"{ "window": { "title": "x" } }"#);
+        assert_eq!(cfg.startup_mode, glyx_shell::StartupMode::Maximized);
+
+        let (cfg, _) = apply(r#"{ "window": { "width": 800, "height": 500 } }"#);
+        assert_eq!(cfg.startup_mode, glyx_shell::StartupMode::Windowed);
+
+        let (cfg, _) = apply(r#"{ "window": { "startupMode": "fullscreen" } }"#);
+        assert_eq!(cfg.startup_mode, glyx_shell::StartupMode::Fullscreen);
+    }
+
+    #[test]
+    fn config_heap_cap_is_clamped() {
+        let (cfg, _) = apply(r#"{ "window": { "maxJsHeapMb": 4 } }"#);
+        assert_eq!(cfg.max_js_heap_mb, Some(16));
+        let (cfg, _) = apply(r#"{ "window": { "maxJsHeapMb": 9999 } }"#);
+        assert_eq!(cfg.max_js_heap_mb, Some(512));
+        let (cfg, _) = apply(r#"{ "window": {} }"#);
+        assert_eq!(cfg.max_js_heap_mb, None);
+    }
+
+    #[test]
+    fn config_canvas_transport_defaults_and_clamps() {
+        // Unknown protocol → binary (the default).
+        let (cfg, _) = apply(r#"{ "canvas": { "protocol": "carrier-pigeon" } }"#);
+        assert_eq!(cfg.canvas_protocol, "binary");
+        let (cfg, _) = apply(r#"{ "canvas": { "protocol": "json" } }"#);
+        assert_eq!(cfg.canvas_protocol, "json");
+        // bufferKB clamped to [16, 4096].
+        let (cfg, _) = apply(r#"{ "canvas": { "bufferKB": 1 } }"#);
+        assert_eq!(cfg.canvas_buffer_kb, Some(16));
+        let (cfg, _) = apply(r#"{ "canvas": { "bufferKB": 100000 } }"#);
+        assert_eq!(cfg.canvas_buffer_kb, Some(4096));
+    }
+
+    #[test]
+    fn config_capabilities_pass_through() {
+        let (_, caps) = apply(r#"{
+            "capabilities": {
+                "db": true,
+                "network": { "allow": ["api.example.com"] }
+            }
+        }"#);
+        assert!(caps.db);
+        assert!(caps.can_network("api.example.com"));
+        assert!(!caps.can_network("other.example.com"));
+    }
+
+    #[test]
+    fn config_invalid_json_yields_defaults() {
+        // A corrupt config must not panic — it logs and leaves defaults intact.
+        let (cfg, caps) = apply("{ this is not json");
+        assert_eq!(cfg.render_mode, RenderMode::default());
+        assert!(!caps.db);
+        assert!(!caps.can_read_fs());
+    }
 }

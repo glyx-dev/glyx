@@ -2322,8 +2322,15 @@ export function Radio({ value, label, disabled = false, style, ...rest }) {
  *
  * Requires `dialog: true` capability in glyx.config.json.
  *
- * @param {{ onFilesSelected?: function, accept?: string, multiple?: boolean,
- *           label?: string, disabled?: boolean, style?: object }} props
+ * `accept` constrains the native dialog's file-type filter. Two forms:
+ *   accept=".png,.jpg"                                  \u2014 extension shorthand
+ *   accept={[{ name: 'Images', extensions: ['png'] }]}  \u2014 named filter groups,
+ *     shown as the dropdown labels in the OS dialog (dialog.openFile shape)
+ *
+ * @param {{ onFilesSelected?: function,
+ *           accept?: string | {name:string,extensions:string[]}[],
+ *           multiple?: boolean, label?: string, disabled?: boolean,
+ *           style?: object }} props
  */
 export function FileInput({
   onFilesSelected,
@@ -2336,9 +2343,17 @@ export function FileInput({
 }) {
   const handlePress = () => {
     if (disabled) return;
-    const filters = accept
-      ? accept.split(',').map(e => e.trim().replace(/^\./, ''))
-      : [];
+    let filters = [];
+    if (Array.isArray(accept)) {
+      filters = accept; // already [{ name, extensions }]
+    } else if (typeof accept === 'string' && accept.trim()) {
+      const extensions = accept.split(',')
+        .map(e => e.trim().replace(/^\./, ''))
+        .filter(Boolean);
+      if (extensions.length > 0) {
+        filters = [{ name: `Accepted (${extensions.map(e => '.' + e).join(', ')})`, extensions }];
+      }
+    }
     dialog.openFile({ filters, multiple })
       .then(paths => {
         if (paths && paths.length > 0 && onFilesSelected) onFilesSelected(paths);

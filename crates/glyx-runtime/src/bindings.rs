@@ -1667,28 +1667,21 @@ fn read_file_callback(
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    // Capability gate — throws a JS Error if fs.read is not declared.
-    if !glyx_security::get().can_read_fs() {
-        let msg = v8::String::new(
-            scope,
-            "Capability required: fs.read — add it to glyx.config.json \
-             under \"capabilities\": { \"fs\": { \"read\": [\"**\"] } }",
-        )
-        .unwrap();
-        let ex = v8::Exception::error(scope, msg);
-        scope.throw_exception(ex);
+    let path = args
+        .get(0)
+        .to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+
+    // Capability gate — per-path glob check; throws a JS Error when denied.
+    if !glyx_security::get().can_read_path(&path) {
+        throw_js_error(scope, &fs_denied_msg("read", &path));
         return;
     }
 
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-
-    let path = args
-        .get(0)
-        .to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
-        .unwrap_or_default();
 
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
@@ -1717,21 +1710,18 @@ fn read_file_bytes_callback(
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    if !glyx_security::get().can_read_fs() {
-        let msg = v8::String::new(scope,
-            "Capability required: fs.read — add it to glyx.config.json").unwrap();
-        let ex = v8::Exception::error(scope, msg);
-        scope.throw_exception(ex);
+    let path = args.get(0).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+
+    if !glyx_security::get().can_read_path(&path) {
+        throw_js_error(scope, &fs_denied_msg("read", &path));
         return;
     }
 
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-
-    let path = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
-        .unwrap_or_default();
 
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
@@ -1994,15 +1984,15 @@ fn write_file_callback(
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    if !glyx_security::get().can_write_fs() {
-        rv.set(reject_cap_promise(scope, "fs.write").into());
+    let path = v8_arg_to_string(scope, &args, 0);
+    if !glyx_security::get().can_write_path(&path) {
+        rv.set(reject_promise_with_error(scope, &fs_denied_msg("write", &path)).into());
         return;
     }
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let path    = v8_arg_to_string(scope, &args, 0);
     let content = v8_arg_to_string(scope, &args, 1);
 
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
@@ -2023,15 +2013,15 @@ fn append_file_callback(
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    if !glyx_security::get().can_write_fs() {
-        rv.set(reject_cap_promise(scope, "fs.write").into());
+    let path = v8_arg_to_string(scope, &args, 0);
+    if !glyx_security::get().can_write_path(&path) {
+        rv.set(reject_promise_with_error(scope, &fs_denied_msg("write", &path)).into());
         return;
     }
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let path    = v8_arg_to_string(scope, &args, 0);
     let content = v8_arg_to_string(scope, &args, 1);
 
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
@@ -2059,15 +2049,14 @@ fn list_dir_callback(
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    if !glyx_security::get().can_read_fs() {
-        rv.set(reject_cap_promise(scope, "fs.read").into());
+    let path = v8_arg_to_string(scope, &args, 0);
+    if !glyx_security::get().can_read_path(&path) {
+        rv.set(reject_promise_with_error(scope, &fs_denied_msg("read", &path)).into());
         return;
     }
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-
-    let path = v8_arg_to_string(scope, &args, 0);
 
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
@@ -2097,15 +2086,14 @@ fn delete_file_callback(
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    if !glyx_security::get().can_write_fs() {
-        rv.set(reject_cap_promise(scope, "fs.write").into());
+    let path = v8_arg_to_string(scope, &args, 0);
+    if !glyx_security::get().can_write_path(&path) {
+        rv.set(reject_promise_with_error(scope, &fs_denied_msg("write", &path)).into());
         return;
     }
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-
-    let path = v8_arg_to_string(scope, &args, 0);
 
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
@@ -2125,15 +2113,14 @@ fn mkdirp_callback(
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    if !glyx_security::get().can_write_fs() {
-        rv.set(reject_cap_promise(scope, "fs.write").into());
+    let path = v8_arg_to_string(scope, &args, 0);
+    if !glyx_security::get().can_write_path(&path) {
+        rv.set(reject_promise_with_error(scope, &fs_denied_msg("write", &path)).into());
         return;
     }
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-
-    let path = v8_arg_to_string(scope, &args, 0);
 
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
@@ -5750,6 +5737,16 @@ fn backend_call_callback(
         });
         if let Some(r) = redraw { r(); }
     }
+}
+
+/// Denial message for a per-path fs capability failure. Names the exact path
+/// so the developer knows which glob to add.
+fn fs_denied_msg(kind: &str, path: &str) -> String {
+    format!(
+        "Capability denied: fs.{kind} does not cover {path:?}. Add a matching \
+         glob to glyx.config.json under \"capabilities\": {{ \"fs\": {{ \"{kind}\": \
+         [\"...\"] }} }} — e.g. \"assets/**\" (app-relative) or \"**\" (all paths)."
+    )
 }
 
 /// Throw a generic JS Error with the given message.

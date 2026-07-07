@@ -21,12 +21,96 @@ use serde::Deserialize;
 // ── Capability definitions ────────────────────────────────────────────────────
 
 /// File-system access declarations.
+///
+/// Patterns are globs (`*`, `**`, `?`), matched per path at every fs binding:
+/// - Relative patterns (`"assets/**"`, `"data/*.json"`) anchor at the app's
+///   working directory (the project root in dev, the install dir packaged).
+/// - Absolute patterns match absolute paths.
+/// - `"**"` alone matches everything, including paths outside the app root
+///   (needed for OS file-picker results).
+///
+/// Requested paths are lexically normalized before matching, so
+/// `assets/../secrets.txt` is checked as `secrets.txt` — `..` cannot escape
+/// a granted glob.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct FsCapability {
     /// Glob patterns the app may read. `None` = no read access.
     pub read:  Option<Vec<String>>,
     /// Glob patterns the app may write. `None` = no write access.
     pub write: Option<Vec<String>>,
+    /// Compiled matcher for `read`, built lazily on first check.
+    #[serde(skip)]
+    read_set:  OnceLock<Option<globset::GlobSet>>,
+    /// Compiled matcher for `write`, built lazily on first check.
+    #[serde(skip)]
+    write_set: OnceLock<Option<globset::GlobSet>>,
+}
+
+impl FsCapability {
+    fn set_for<'a>(&self, patterns: &Option<Vec<String>>, cache: &'a OnceLock<Option<globset::GlobSet>>) -> Option<&'a globset::GlobSet> {
+        cache.get_or_init(|| {
+            let pats = patterns.as_ref()?;
+            let mut b = globset::GlobSetBuilder::new();
+            for p in pats {
+                // Normalize config separators so "assets\\icons\\**" works too.
+                let p = p.replace('\\', "/");
+                match globset::GlobBuilder::new(&p)
+                    .literal_separator(true)   // `*` stays within one segment; use `**` to recurse
+                    .case_insensitive(cfg!(windows))
+                    .build()
+                {
+                    Ok(g)  => { b.add(g); }
+                    Err(e) => log::error!("[security] invalid fs glob {p:?} ignored: {e}"),
+                }
+            }
+            b.build().map_err(|e| log::error!("[security] fs glob set failed: {e}")).ok()
+        }).as_ref()
+    }
+
+    fn allows(&self, patterns: &Option<Vec<String>>, cache: &OnceLock<Option<globset::GlobSet>>, path: &str) -> bool {
+        let Some(set) = self.set_for(patterns, cache) else { return false };
+        for candidate in match_candidates(path) {
+            if set.is_match(candidate.as_str()) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Lexically resolve `.` and `..` (no filesystem access — works for paths
+/// that don't exist yet, and never follows symlinks during the *check*).
+fn normalize_lexical(path: &std::path::Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => { out.pop(); }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Candidate strings a path is matched under (forward-slash form):
+/// 1. the absolute normalized path, and
+/// 2. its app-root-relative form when it lives under the working directory —
+///    this is what relative config patterns like `"assets/**"` anchor to.
+fn match_candidates(path: &str) -> Vec<String> {
+    let p = std::path::Path::new(path);
+    let abs = if p.is_absolute() {
+        normalize_lexical(p)
+    } else {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        normalize_lexical(&cwd.join(p))
+    };
+    let mut out = vec![abs.to_string_lossy().replace('\\', "/")];
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(rel) = abs.strip_prefix(normalize_lexical(&cwd)) {
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    out
 }
 
 /// Network access declarations.
@@ -156,6 +240,17 @@ impl Capabilities {
     /// True if the app has declared at least some `fs.write` access.
     pub fn can_write_fs(&self) -> bool {
         self.fs.as_ref().and_then(|f| f.write.as_ref()).is_some()
+    }
+
+    /// True if `path` matches one of the declared `fs.read` globs.
+    /// The path is lexically normalized first, so `..` cannot escape a glob.
+    pub fn can_read_path(&self, path: &str) -> bool {
+        self.fs.as_ref().is_some_and(|f| f.allows(&f.read, &f.read_set, path))
+    }
+
+    /// True if `path` matches one of the declared `fs.write` globs.
+    pub fn can_write_path(&self, path: &str) -> bool {
+        self.fs.as_ref().is_some_and(|f| f.allows(&f.write, &f.write_set, path))
     }
 
     /// True if `host` is in the network allowlist, or `"*"` is listed.
@@ -301,10 +396,76 @@ mod tests {
         assert!(!caps.can_write_fs());
     }
 
-    // NOTE: fs `read`/`write` glob patterns are currently declaration-only —
-    // can_read_fs()/can_write_fs() gate on presence, not per-path matching.
-    // When per-path scoping lands, add traversal tests here (`../`, absolute
-    // paths outside the globs, symlink escapes).
+    // ── fs per-path scoping ───────────────────────────────────────────────────
+
+    #[test]
+    fn fs_relative_glob_scopes_to_matching_paths() {
+        let caps = parse(r#"{ "fs": { "read": ["assets/**"] } }"#);
+        assert!(caps.can_read_path("assets/logo.png"));
+        assert!(caps.can_read_path("assets/deep/nested/file.bin"));
+        assert!(caps.can_read_path("./assets/logo.png"));
+        assert!(!caps.can_read_path("secrets.txt"));
+        assert!(!caps.can_read_path("data/assets/logo.png"));
+    }
+
+    #[test]
+    fn fs_traversal_cannot_escape_a_glob() {
+        let caps = parse(r#"{ "fs": { "read": ["assets/**"] } }"#);
+        assert!(!caps.can_read_path("assets/../Cargo.toml"));
+        assert!(!caps.can_read_path("assets/../../etc/passwd"));
+        assert!(!caps.can_read_path("assets/./../secrets.txt"));
+        // Traversal that stays inside the granted tree is fine.
+        assert!(caps.can_read_path("assets/a/../b.png"));
+    }
+
+    #[test]
+    fn fs_double_star_alone_matches_everything() {
+        // "**" is the documented allow-all — including absolute paths outside
+        // the app root (OS file-picker results).
+        let caps = parse(r#"{ "fs": { "read": ["**"] } }"#);
+        assert!(caps.can_read_path("anything.txt"));
+        assert!(caps.can_read_path("deep/nested/file"));
+        #[cfg(windows)]
+        assert!(caps.can_read_path("C:\\Users\\someone\\Pictures\\photo.jpg"));
+        #[cfg(not(windows))]
+        assert!(caps.can_read_path("/home/someone/photo.jpg"));
+    }
+
+    #[test]
+    fn fs_single_star_stays_within_one_segment() {
+        let caps = parse(r#"{ "fs": { "read": ["data/*.json"] } }"#);
+        assert!(caps.can_read_path("data/config.json"));
+        assert!(!caps.can_read_path("data/sub/config.json"));
+        assert!(!caps.can_read_path("data/config.yaml"));
+    }
+
+    #[test]
+    fn fs_read_and_write_scopes_are_independent_per_path() {
+        let caps = parse(r#"{ "fs": { "read": ["**"], "write": ["out/**"] } }"#);
+        assert!(caps.can_read_path("anywhere/file.txt"));
+        assert!(caps.can_write_path("out/report.pdf"));
+        assert!(!caps.can_write_path("anywhere/file.txt"));
+    }
+
+    #[test]
+    fn fs_absolute_pattern_matches_absolute_path() {
+        let cwd = std::env::current_dir().unwrap();
+        let pattern = format!("{}/data/**", cwd.to_string_lossy().replace('\\', "/"));
+        let caps = parse(&format!(r#"{{ "fs": {{ "read": [{:?}] }} }}"#, pattern));
+        // Both the relative and the absolute spelling of the same file match.
+        assert!(caps.can_read_path("data/file.txt"));
+        let abs = format!("{}/data/file.txt", cwd.to_string_lossy());
+        assert!(caps.can_read_path(&abs));
+    }
+
+    #[test]
+    fn fs_no_capability_denies_every_path() {
+        let caps = parse("{}");
+        assert!(!caps.can_read_path("anything"));
+        assert!(!caps.can_write_path("anything"));
+        let caps = parse(r#"{ "fs": {} }"#);
+        assert!(!caps.can_read_path("anything"));
+    }
 
     // ── network ───────────────────────────────────────────────────────────────
 

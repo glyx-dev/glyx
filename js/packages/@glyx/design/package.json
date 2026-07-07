@@ -4,5 +4,8 @@
   "type": "module",
   "main": "src/index.js",
   "types": "src/index.d.ts",
-  "description": "Design tokens, theming, and base styles for Glyx apps"
+  "description": "Design tokens, theming, and base styles for Glyx apps",
+  "scripts": {
+    "test": "bun test"
+  }
 }

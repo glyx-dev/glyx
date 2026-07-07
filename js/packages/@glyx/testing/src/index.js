@@ -75,6 +75,8 @@ export function installStubs() {
   globalThis.__glyx_request_frame = stub;
   globalThis.__glyx_log          = (...a) => {};
   globalThis.__glyx_createImage  = () => _nextId++;
+  globalThis.__glyx_measure_text = (text, fontSize = 14) =>
+    ({ width: String(text ?? '').length * fontSize * 0.6, height: fontSize * 1.2 });
 
   // Window
   globalThis.__glyx_getWindowSize  = () => ({ width: 1280, height: 800 });

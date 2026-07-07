@@ -9,8 +9,21 @@
     "js/packages/@glyx/store",
     "js/packages/@glyx/three",
     "js/packages/@glyx/testing",
-    "js/packages/@glyx/design"
+    "js/packages/@glyx/design",
+    "js/packages/@glyx/auth",
+    "js/packages/@glyx/charts",
+    "js/packages/@glyx/command",
+    "js/packages/@glyx/config",
+    "js/packages/@glyx/context-menu",
+    "js/packages/@glyx/drag-drop",
+    "js/packages/@glyx/form",
+    "js/packages/@glyx/markdown",
+    "js/packages/@glyx/split-pane",
+    "js/packages/@glyx/table"
   ],
+  "scripts": {
+    "test": "bun test js/packages"
+  },
   "dependencies": {
     "@glyx/react":    "workspace:*",
     "@glyx/router":   "workspace:*",
@@ -20,8 +33,19 @@
     "@glyx/three":    "workspace:*",
     "@glyx/testing":  "workspace:*",
     "@glyx/design":   "workspace:*",
+    "@glyx/auth":         "workspace:*",
+    "@glyx/charts":       "workspace:*",
+    "@glyx/command":      "workspace:*",
+    "@glyx/config":       "workspace:*",
+    "@glyx/context-menu": "workspace:*",
+    "@glyx/drag-drop":    "workspace:*",
+    "@glyx/form":         "workspace:*",
+    "@glyx/markdown":     "workspace:*",
+    "@glyx/split-pane":   "workspace:*",
+    "@glyx/table":        "workspace:*",
     "drizzle-orm": "^0.36.4",
     "react": "^18.2.0",
+    "react-dom": "^18.2.0",
     "react-reconciler": "^0.29.0"
   }
 }

@@ -3,5 +3,16 @@
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",
-  "description": "Test utilities for Glyx apps — compatible with Bun's test runner"
+  "exports": {
+    ".": "./src/index.js",
+    "./setup": "./setup.js"
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "description": "Test utilities for Glyx apps — compatible with Bun's test runner",
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  }
 }

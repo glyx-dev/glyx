@@ -6,5 +6,8 @@
   "types": "src/index.d.ts",
   "peerDependencies": {
     "react": "^18.2.0"
+  },
+  "scripts": {
+    "test": "bun test"
   }
 }

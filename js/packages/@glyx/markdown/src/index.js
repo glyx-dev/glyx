@@ -21,7 +21,7 @@ const DEFAULT = {
 };
 
 // Strip inline emphasis to plain text (no rich spans yet).
-function inline(s) {
+export function inline(s) {
   return s
     .replace(/\*\*(.+?)\*\*/g, '$1')
     .replace(/(^|[^*])\*(?!\*)(.+?)\*/g, '$1$2')
@@ -30,7 +30,7 @@ function inline(s) {
 }
 
 // Tokenize markdown into block tokens.
-function lex(src) {
+export function lex(src) {
   const lines = src.replace(/\r\n/g, '\n').split('\n');
   const toks = [];
   let i = 0;

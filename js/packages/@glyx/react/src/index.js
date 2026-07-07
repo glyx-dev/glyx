@@ -1579,6 +1579,9 @@ class GlyxHeaders {
 }
 export { GlyxHeaders as Headers };
 
+// Event-registry helpers used by companion packages (@glyx/context-menu, …).
+export { addGlobalClickListener, removeGlobalClickListener, addKeyListener };
+
 // Build a Response-like object from the native fetch result. `clone()` re-derives
 // a fresh, independently-consumable body from the same captured data.
 function _makeResponse(data, url) {

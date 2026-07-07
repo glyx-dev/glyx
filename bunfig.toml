@@ -1,0 +1,7 @@
+# Bun configuration for the Glyx workspace.
+
+[test]
+# Install __glyx_* binding stubs before any test file runs, so packages that
+# call native bindings at import time work in a plain Bun process (no window,
+# no GPU). See js/packages/@glyx/testing.
+preload = ["./js/packages/@glyx/testing/setup.js"]

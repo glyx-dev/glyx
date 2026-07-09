@@ -7,10 +7,10 @@
 //
 // Column: { key, label, width?, minWidth?, sortable?, align?, render?(value,row) }
 
-import React from 'react';
+import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { View, Text, Pressable, VirtualizedList, measureText, useDraggable } from '@glyx/react';
 
-const { useState, useMemo, useCallback } = React;
+const { useState, useMemo, useCallback, useEffect } = React;
 
 const HEADER_FS = 12;
 const CELL_FS   = 13;
@@ -56,6 +56,12 @@ export function DataTable({
   const idOf = getRowId || ((r, i) => (r?.id ?? i));
 
   const [widths, setWidths] = useState(() => columns.map((c) => autoWidth(c, rows)));
+  // Recompute widths when the column list length changes or column keys change.
+  const colKey = columns.map((c) => c.key).join(',');
+  useEffect(() => {
+    setWidths(columns.map((c) => autoWidth(c, rows)));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [colKey]);
   const [sortKey, setSortKey] = useState(null);
   const [sortDir, setSortDir] = useState('asc');
   const [selected, setSelected] = useState(() => new Set());

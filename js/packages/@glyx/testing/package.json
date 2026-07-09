@@ -13,6 +13,7 @@
   "description": "Test utilities for Glyx apps — compatible with Bun's test runner",
   "peerDependencies": {
     "react": ">=18",
-    "react-dom": ">=18"
+    "react-dom": ">=18",
+    "react-reconciler": ">=0.29"
   }
 }

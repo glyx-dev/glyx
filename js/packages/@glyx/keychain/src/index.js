@@ -59,13 +59,10 @@ export function createKeychain(namespace, { service = 'glyx' } = {}) {
      * @returns {Promise<*>}
      */
     async get(key) {
-      // credentials.get already does JSON.parse once (unwrapping the Rust JSON wrapper).
-      // Since we stored JSON.stringify(value), the result of credentials.get is a plain
-      // JS string containing the JSON representation. We parse it once more to get the
-      // original value back.
+      // credentials.get already does one JSON.parse (unwrapping the Rust JSON envelope).
+      // Since set() stored JSON.stringify(value), credentials.get returns the original value.
       const raw = await credentials.get(_key(key), { service });
-      if (raw === null) return null;
-      try { return JSON.parse(raw); } catch { return raw; }
+      return raw;
     },
 
     /**

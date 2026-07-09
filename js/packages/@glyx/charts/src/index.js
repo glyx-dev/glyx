@@ -125,7 +125,7 @@ export function LineChart({
   lineWidth = 2, showGrid = true, showDots = true, showLabels = true,
 }) {
   const draw = _lineLike({ data, width, height, color, lineWidth, area: false, showGrid, showDots, showLabels });
-  return React.createElement(_ChartCanvas, { width, height, draw, deps: [data, width, height, color] });
+  return React.createElement(_ChartCanvas, { width, height, draw, deps: [data, width, height, color, lineWidth, showGrid, showDots, showLabels] });
 }
 
 export function AreaChart({
@@ -133,7 +133,7 @@ export function AreaChart({
   lineWidth = 2, showGrid = true, showLabels = true,
 }) {
   const draw = _lineLike({ data, width, height, color, lineWidth, area: true, showGrid, showDots: false, showLabels });
-  return React.createElement(_ChartCanvas, { width, height, draw, deps: [data, width, height, color] });
+  return React.createElement(_ChartCanvas, { width, height, draw, deps: [data, width, height, color, lineWidth, showGrid, showLabels] });
 }
 
 // ── BarChart ──────────────────────────────────────────────────────────────────
@@ -176,7 +176,7 @@ export function BarChart({
       }
     });
   };
-  return React.createElement(_ChartCanvas, { width, height, draw, deps: [data, width, height, color] });
+  return React.createElement(_ChartCanvas, { width, height, draw, deps: [data, width, height, color, showGrid, showLabels] });
 }
 
 // ── PieChart / Donut ──────────────────────────────────────────────────────────
@@ -208,7 +208,7 @@ export function PieChart({
       ctx.fillCircle(cx, cy, r * Math.min(0.95, innerRadius));
     }
   };
-  return React.createElement(_ChartCanvas, { width, height, draw, deps: [data, width, height, innerRadius] });
+  return React.createElement(_ChartCanvas, { width, height, draw, deps: [data, width, height, innerRadius, palette] });
 }
 
 export { DEFAULT_PALETTE };

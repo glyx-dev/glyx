@@ -9,7 +9,7 @@
 //   useToast       — { showToast, dismiss } hook
 
 import React, {
-  useState, useEffect, useCallback,
+  useState, useEffect, useCallback, useRef,
   createContext, useContext,
 } from 'react';
 import { View, Text, Pressable } from '@glyx/react';
@@ -281,6 +281,12 @@ const ToastCtx = createContext(null);
 
 export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
+  const timersRef = useRef(new Map()); // id → timer handle
+
+  useEffect(() => {
+    const timers = timersRef.current;
+    return () => { for (const h of timers.values()) clearTimeout(h); timers.clear(); };
+  }, []);
 
   const showToast = useCallback(({
     message,
@@ -292,12 +298,18 @@ export function ToastProvider({ children }) {
     const id = Date.now() + Math.random();
     setToasts(t => [...t, { id, message, variant, duration, action, actionLabel }]);
     if (duration > 0) {
-      setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), duration);
+      const h = setTimeout(() => {
+        setToasts(t => t.filter(x => x.id !== id));
+        timersRef.current.delete(id);
+      }, duration);
+      timersRef.current.set(id, h);
     }
     return id;
   }, []);
 
   const dismiss = useCallback((id) => {
+    const h = timersRef.current.get(id);
+    if (h != null) { clearTimeout(h); timersRef.current.delete(id); }
     setToasts(t => t.filter(x => x.id !== id));
   }, []);
 

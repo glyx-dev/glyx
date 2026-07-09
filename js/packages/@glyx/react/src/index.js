@@ -2695,6 +2695,7 @@ export const updater = {
 // handleId → { onEnded, onMetadata, onTimeUpdate, onError }
 const _videoCallbacks = new Map();
 function _pollVideo() {
+  if (typeof __glyx_video_poll === 'undefined') return;
   const events = JSON.parse(__glyx_video_poll());
   for (const ev of events) {
     const cbs = _videoCallbacks.get(ev.id);

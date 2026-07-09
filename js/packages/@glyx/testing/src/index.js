@@ -6,8 +6,8 @@
 //   // In your test file:
 //   import { render, screen, act, fireEvent } from '@glyx/testing';
 //
-//   test('Counter increments', () => {
-//     const { getByText } = render(<Counter />);
+//   test('Counter increments', async () => {
+//     const { getByText } = await render(<Counter />);
 //     fireEvent.press(getByText('+'));
 //     expect(screen.getByText('1')).toBeTruthy();
 //   });
@@ -20,37 +20,103 @@
 // Architecture:
 //   • All __glyx_* native bindings are mocked so React components that call
 //     Glyx APIs can run in a plain Bun/Node process without a running Glyx window.
-//   • React is rendered synchronously using react-dom/server (SSR) or a custom
-//     minimal reconciler, producing a JSON node tree you can query.
+//   • React is rendered using react-reconciler with a lightweight in-memory host,
+//     so components receive real state/effects and event handlers are accessible.
 //   • No actual GPU / wgpu / winit is required.
 
 // ── Mock registry ─────────────────────────────────────────────────────────────
 
 const _mocks = new Map();
+const _mockOriginals = new Map();
 
 /**
  * Register a custom mock for a `__glyx_*` binding.
- * The mock replaces the auto-generated stub for the duration of the test file.
+ * The original value is saved and can be restored via `unmockBinding` or `restoreAllBindings`.
  *
  * @param {string}   name  The binding name (e.g. `"__glyx_fetch"`)
  * @param {function} impl  Mock implementation
  */
 export function mockBinding(name, impl) {
+  if (!_mockOriginals.has(name)) _mockOriginals.set(name, globalThis[name]);
   _mocks.set(name, impl);
   globalThis[name] = impl;
 }
 
-// ── Node tree ─────────────────────────────────────────────────────────────────
+/**
+ * Restore a single binding to its value before the most recent `mockBinding` call.
+ * @param {string} name
+ */
+export function unmockBinding(name) {
+  if (_mockOriginals.has(name)) {
+    globalThis[name] = _mockOriginals.get(name);
+    _mockOriginals.delete(name);
+  }
+  _mocks.delete(name);
+}
 
-// Simple in-memory node tree used as Glyx's scene graph in tests.
-let _nodes = new Map();
-let _root   = null;
+/**
+ * Restore all bindings that were overridden via `mockBinding`.
+ * Call this in `afterEach` / `afterAll` to prevent test pollution.
+ */
+export function restoreAllBindings() {
+  for (const [name, orig] of _mockOriginals) globalThis[name] = orig;
+  _mockOriginals.clear();
+  _mocks.clear();
+}
+
+// ── In-memory node tree ───────────────────────────────────────────────────────
+
 let _nextId = 1;
+// id → { id, type, props, children: id[] }
+const _nodeTree = new Map();
 
 function _resetTree() {
-  _nodes.clear();
-  _root = null;
+  _nodeTree.clear();
   _nextId = 1;
+}
+
+function _mkNode(type, props) {
+  const id = _nextId++;
+  _nodeTree.set(id, { id, type, props: Object.assign({}, props), children: [] });
+  return id;
+}
+
+// Walk the tree depth-first, calling visitor(node). Return early on truthy result.
+function _walk(rootId, visitor) {
+  if (rootId == null) return undefined;
+  const node = _nodeTree.get(rootId);
+  if (!node) return undefined;
+  const found = visitor(node);
+  if (found !== undefined) return found;
+  for (const childId of node.children) {
+    const r = _walk(childId, visitor);
+    if (r !== undefined) return r;
+  }
+  return undefined;
+}
+
+function _findAllNodes(rootId, predicate) {
+  const results = [];
+  _walk(rootId, (node) => { if (predicate(node)) results.push(node); });
+  return results;
+}
+
+function _textContent(node) {
+  if (!node) return '';
+  const p = node.props;
+  if (p && typeof p.children === 'string') return p.children;
+  if (p && typeof p.children === 'number') return String(p.children);
+  if (p && Array.isArray(p.children)) return p.children.map((c) => (typeof c === 'string' || typeof c === 'number') ? String(c) : '').join('');
+  return '';
+}
+
+function _nodeContainsText(node, text) {
+  const direct = _textContent(node);
+  if (direct.includes(text)) return true;
+  // Also accumulate all descendant text
+  let acc = '';
+  _walk(node.id, (n) => { acc += _textContent(n); });
+  return acc.includes(text);
 }
 
 // ── Install default stubs ─────────────────────────────────────────────────────
@@ -63,17 +129,31 @@ export function installStubs() {
   const sp    = (v) => Promise.resolve(v);
   const spArr = () => Promise.resolve('[]');
 
-  // Core scene graph
-  globalThis.__glyx_createNode  = () => _nextId++;
-  globalThis.__glyx_appendChild  = stub;
-  globalThis.__glyx_updateNode   = stub;
-  globalThis.__glyx_removeNode   = stub;
-  globalThis.__glyx_setRoot      = (id) => { _root = id; };
+  // Core scene graph — stubs capture props into _nodeTree
+  globalThis.__glyx_createNode   = (type) => _mkNode(type ?? 'View', {});
+  globalThis.__glyx_appendChild  = (parentId, childId) => {
+    const p = _nodeTree.get(parentId);
+    if (p && !p.children.includes(childId)) p.children.push(childId);
+  };
+  globalThis.__glyx_insertBefore = (parentId, childId, beforeId) => {
+    const p = _nodeTree.get(parentId);
+    if (!p) return;
+    p.children = p.children.filter((c) => c !== childId);
+    const idx = p.children.indexOf(beforeId);
+    if (idx >= 0) p.children.splice(idx, 0, childId);
+    else p.children.push(childId);
+  };
+  globalThis.__glyx_updateNode   = (id, props) => {
+    const n = _nodeTree.get(id);
+    if (n) n.props = Object.assign({}, n.props, props);
+  };
+  globalThis.__glyx_removeNode   = (id) => { _nodeTree.delete(id); };
+  globalThis.__glyx_setRoot      = (id) => { globalThis.__glyx_rootId = id; };
   globalThis.__glyx_pollEvents   = () => [];
   globalThis.__glyx_getLayout    = () => ({ x: 0, y: 0, width: 0, height: 0 });
   globalThis.__glyx_getTime      = () => Date.now();
   globalThis.__glyx_request_frame = stub;
-  globalThis.__glyx_log          = (...a) => {};
+  globalThis.__glyx_log          = () => {};
   globalThis.__glyx_createImage  = () => _nextId++;
   globalThis.__glyx_measure_text = (text, fontSize = 14) =>
     ({ width: String(text ?? '').length * fontSize * 0.6, height: fontSize * 1.2 });
@@ -122,7 +202,7 @@ export function installStubs() {
 
   // Credentials
   globalThis.__glyx_credentials_set    = () => sp(null);
-  globalThis.__glyx_credentials_get    = () => sp('null');
+  globalThis.__glyx_credentials_get    = () => sp(null);
   globalThis.__glyx_credentials_delete = () => sp(null);
 
   // Clipboard, dialog, notifications
@@ -217,11 +297,7 @@ export function installStubs() {
   // console passthrough
   if (typeof globalThis.console === 'undefined') {
     globalThis.console = {
-      log: (...a) => {},
-      info: (...a) => {},
-      warn: (...a) => {},
-      error: (...a) => {},
-      debug: (...a) => {},
+      log: () => {}, info: () => {}, warn: () => {}, error: () => {}, debug: () => {},
     };
   }
 }
@@ -229,64 +305,186 @@ export function installStubs() {
 // ── Render ────────────────────────────────────────────────────────────────────
 
 let _React = null;
-let _ReactDOMServer = null;
+let _Reconciler = null;
+let _glyxReconciler = null;
+
+// Lazy-initialize the in-memory react-reconciler instance.
+async function _getReconciler() {
+  if (_glyxReconciler) return _glyxReconciler;
+
+  if (!_React) _React = (await import('react')).default;
+
+  try {
+    _Reconciler = (await import('react-reconciler')).default;
+  } catch {
+    return null;
+  }
+
+  const HostConfig = {
+    supportsMutation: true,
+    supportsPersistence: false,
+    supportsHydration: false,
+    isPrimaryRenderer: false,
+    noTimeout: -1,
+    scheduleTimeout: setTimeout,
+    cancelTimeout: clearTimeout,
+    queueMicrotask: typeof queueMicrotask !== 'undefined' ? queueMicrotask : (cb) => Promise.resolve().then(cb),
+
+    createInstance(type, props) {
+      const id = _mkNode(type, props);
+      return id;
+    },
+    createTextInstance(text) {
+      const id = _mkNode('#text', { children: text });
+      return id;
+    },
+    appendInitialChild(parentId, childId) {
+      const p = _nodeTree.get(parentId);
+      if (p) p.children.push(childId);
+    },
+    appendChild(parentId, childId) {
+      const p = _nodeTree.get(parentId);
+      if (p && !p.children.includes(childId)) p.children.push(childId);
+    },
+    appendChildToContainer(container, childId) { container.rootId = childId; },
+    insertBefore(parentId, childId, beforeId) {
+      const p = _nodeTree.get(parentId);
+      if (!p) return;
+      const idx = p.children.indexOf(beforeId);
+      if (idx >= 0) p.children.splice(idx, 0, childId);
+      else p.children.push(childId);
+    },
+    insertInContainerBefore(container, childId) { container.rootId = childId; },
+    removeChild(parentId, childId) {
+      const p = _nodeTree.get(parentId);
+      if (p) p.children = p.children.filter((c) => c !== childId);
+    },
+    removeChildFromContainer(container) { container.rootId = null; },
+    clearContainer(container) { container.rootId = null; },
+
+    finalizeInitialChildren: () => false,
+    prepareUpdate: (_inst, _type, _old, newProps) => newProps,
+    commitUpdate(id, newProps) {
+      const n = _nodeTree.get(id);
+      if (n) n.props = Object.assign({}, newProps);
+    },
+    commitTextUpdate(id, _old, text) {
+      const n = _nodeTree.get(id); if (n) n.props.children = text;
+    },
+    resetTextContent: () => {},
+    shouldSetTextContent: () => false,
+    getRootHostContext: () => null,
+    getChildHostContext: (_ctx, _type) => null,
+    getPublicInstance: (id) => id,
+    prepareForCommit: () => null,
+    resetAfterCommit: () => {},
+    commitMount: () => {},
+    detachDeletedInstance: (id) => { _nodeTree.delete(id); },
+    getCurrentEventPriority: () => 0,
+    getInstanceFromNode: () => null,
+    beforeActiveInstanceBlur: () => {},
+    afterActiveInstanceBlur: () => {},
+    prepareScopeUpdate: () => {},
+    getInstanceFromScope: () => null,
+  };
+
+  _glyxReconciler = _Reconciler(HostConfig);
+  return _glyxReconciler;
+}
+
+// Build query helpers for a given tree root.
+function _buildQueries(rootId) {
+  function getByText(text) {
+    const matches = _findAllNodes(rootId, (n) => _nodeContainsText(n, text));
+    if (matches.length === 0) throw new Error(`[glyx/testing] getByText("${text}"): not found`);
+    // Return the innermost match (deepest node whose text matches).
+    return matches[matches.length - 1].props;
+  }
+  function queryByText(text) {
+    const matches = _findAllNodes(rootId, (n) => _nodeContainsText(n, text));
+    return matches.length > 0 ? matches[matches.length - 1].props : null;
+  }
+  function getAllByText(text) {
+    const matches = _findAllNodes(rootId, (n) => _nodeContainsText(n, text));
+    if (matches.length === 0) throw new Error(`[glyx/testing] getAllByText("${text}"): not found`);
+    return matches.map((n) => n.props);
+  }
+  function debug() {
+    function _dump(id, depth) {
+      const n = _nodeTree.get(id);
+      if (!n) return;
+      const pad = '  '.repeat(depth);
+      const text = _textContent(n);
+      console.log(`${pad}<${n.type}${text ? ` text="${text}"` : ''}>`);
+      for (const c of n.children) _dump(c, depth + 1);
+    }
+    _dump(rootId, 0);
+  }
+  return { getByText, queryByText, getAllByText, debug };
+}
 
 /**
  * Render a React element and return query utilities.
- * Uses react-dom/server for SSR-style rendering — no DOM or GPU required.
+ * Uses react-reconciler with a lightweight in-memory host so event handlers are accessible.
  *
  * @param {React.ReactElement} element
- * @returns {{ container: string, getByText, queryByText, getAllByText, debug }}
+ * @returns {Promise<{ container, getByText, queryByText, getAllByText, debug, unmount }>}
  */
 export async function render(element) {
-  if (!_React) {
-    // Lazy import to avoid requiring React in every test file.
-    _React = (await import('react')).default;
-    try {
-      _ReactDOMServer = (await import('react-dom/server')).default;
-    } catch {
-      _ReactDOMServer = null;
-    }
+  _resetTree();
+  globalThis.__glyx_rootId = null;
+
+  const reconciler = await _getReconciler();
+
+  if (reconciler) {
+    const container = { rootId: null };
+    const root = reconciler.createContainer(
+      container, /* tag=Concurrent */ 1, null, false, null, '', {}, null,
+    );
+    await new Promise((resolve) => {
+      reconciler.updateContainer(element, root, null, resolve);
+    });
+    // Flush sync work
+    reconciler.flushSync(() => {});
+
+    const rootId = container.rootId;
+    const queries = _buildQueries(rootId);
+
+    const result = {
+      container,
+      ...queries,
+      unmount() { reconciler.updateContainer(null, root, null, () => {}); _resetTree(); },
+    };
+    _lastRender = result;
+    return result;
   }
 
-  let html = '';
-  if (_ReactDOMServer) {
-    html = _ReactDOMServer.renderToStaticMarkup(element);
-  }
+  // Fallback: SSR via react-dom/server (no event handlers).
+  if (!_React) _React = (await import('react')).default;
+  let _ReactDOMServer = null;
+  try { _ReactDOMServer = (await import('react-dom/server')).default; } catch {}
+
+  let html = _ReactDOMServer ? _ReactDOMServer.renderToStaticMarkup(element) : '';
 
   function getByText(text) {
     if (html.includes(text)) return { textContent: text };
     throw new Error(`[glyx/testing] getByText("${text}"): not found in rendered output`);
   }
-
-  function queryByText(text) {
-    if (html.includes(text)) return { textContent: text };
-    return null;
-  }
-
+  function queryByText(text) { return html.includes(text) ? { textContent: text } : null; }
   function getAllByText(text) {
-    const results = [];
-    let idx = 0;
-    while ((idx = html.indexOf(text, idx)) !== -1) {
-      results.push({ textContent: text, index: idx });
-      idx += text.length;
-    }
-    if (results.length === 0) {
-      throw new Error(`[glyx/testing] getAllByText("${text}"): not found in rendered output`);
-    }
-    return results;
+    if (!html.includes(text)) throw new Error(`[glyx/testing] getAllByText("${text}"): not found`);
+    return [{ textContent: text }];
   }
+  function debug() { console.log('[glyx/testing] rendered HTML:', html); }
 
-  function debug() {
-    console.log('[glyx/testing] rendered HTML:', html);
-  }
-
-  return { container: html, getByText, queryByText, getAllByText, debug };
+  const result = { container: html, getByText, queryByText, getAllByText, debug, unmount: () => {} };
+  _lastRender = result;
+  return result;
 }
 
 // ── screen ────────────────────────────────────────────────────────────────────
 
-// Shorthand for the most recent render result — updated by render().
+// Always reflects the most recently rendered tree (set by render()).
 let _lastRender = null;
 
 /**
@@ -294,19 +492,17 @@ let _lastRender = null;
  * Mirrors @testing-library/react's `screen` object.
  */
 export const screen = {
-  getByText:   (text) => _lastRender?.getByText(text),
-  queryByText: (text) => _lastRender?.queryByText(text),
-  getAllByText: (text) => _lastRender?.getAllByText(text),
-  debug:       ()     => _lastRender?.debug(),
+  getByText:   (text) => {
+    if (!_lastRender) throw new Error('[glyx/testing] screen: no component has been rendered yet');
+    return _lastRender.getByText(text);
+  },
+  queryByText: (text) => _lastRender?.queryByText(text) ?? null,
+  getAllByText: (text) => {
+    if (!_lastRender) throw new Error('[glyx/testing] screen: no component has been rendered yet');
+    return _lastRender.getAllByText(text);
+  },
+  debug: () => _lastRender?.debug(),
 };
-
-// Patch render() to update screen
-const _originalRender = render;
-export async function renderAndTrack(element) {
-  const result = await _originalRender(element);
-  _lastRender = result;
-  return result;
-}
 
 // ── act ───────────────────────────────────────────────────────────────────────
 
@@ -317,21 +513,21 @@ export async function renderAndTrack(element) {
  */
 export async function act(callback) {
   await callback();
-  // In a real environment, React would flush updates here.
-  // Since we render server-side, this is a no-op that future improvements can extend.
+  // Give React a microtask tick to flush pending state updates.
+  await new Promise((r) => setTimeout(r, 0));
 }
 
 // ── fireEvent ─────────────────────────────────────────────────────────────────
 
 /**
- * Simulate user interactions. Each method accepts the node returned by `getByText()`
- * and optional event data. Events are dispatched via React's synthetic event system
- * if available, or trigger onPress/onChange/etc. props directly.
+ * Simulate user interactions. Each method accepts the props object returned by
+ * `getByText()` / `screen.getByText()`. Because `render()` uses an in-memory
+ * reconciler, the returned props include real event handler functions.
  */
 export const fireEvent = {
   /**
    * Simulate a press (tap / click).
-   * @param {{ onPress?: function }} node
+   * @param {object} node  Props object from getByText()
    */
   press(node) {
     if (node && typeof node.onPress === 'function') node.onPress();
@@ -339,7 +535,7 @@ export const fireEvent = {
 
   /**
    * Simulate a text change.
-   * @param {{ onChangeText?: function, onChange?: function }} node
+   * @param {object} node
    * @param {string} text  New text value
    */
   changeText(node, text) {
@@ -349,10 +545,19 @@ export const fireEvent = {
 
   /**
    * Simulate a submit (Enter key in TextInput).
-   * @param {{ onSubmitEditing?: function }} node
+   * @param {object} node
    */
   submitEditing(node) {
     if (node && typeof node.onSubmitEditing === 'function') node.onSubmitEditing();
+  },
+
+  /**
+   * Simulate a scroll.
+   * @param {object} node
+   * @param {{ x?: number, y?: number }} offset
+   */
+  scroll(node, offset = {}) {
+    if (node && typeof node.onScroll === 'function') node.onScroll({ nativeEvent: { contentOffset: offset } });
   },
 };
 

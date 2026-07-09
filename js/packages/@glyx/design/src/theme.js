@@ -70,7 +70,8 @@ export function ThemeProvider({ colorScheme = 'system', overrides, children }) {
     const id = setInterval(() => {
       try {
         if (typeof __glyx_system_getDarkMode !== 'undefined') {
-          setIsDark(__glyx_system_getDarkMode() === 'dark');
+          const next = __glyx_system_getDarkMode() === 'dark';
+          setIsDark((prev) => (prev === next ? prev : next));
         }
       } catch {}
     }, 2000);

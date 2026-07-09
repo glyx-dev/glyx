@@ -41,7 +41,7 @@
 //   }
 
 import React, {
-  createContext, useContext, useRef, useLayoutEffect, useEffect,
+  createContext, useContext, useRef, useId, useLayoutEffect, useEffect,
 } from 'react';
 
 export {
@@ -65,40 +65,41 @@ const SceneCtx = createContext(null);
  * }} props
  */
 export function Scene({ canvasRef, background, children }) {
-  // Mutable accumulator — reset in the render body (before children render),
-  // filled by child components during the same synchronous render pass,
-  // committed in useLayoutEffect (after all children commit).
-  const pending = useRef({ camera: null, lights: [], meshes: [] });
+  // Stable registry Map: child-id → { type, data }.
+  // Children register/update themselves via useLayoutEffect (bottom-up), so by
+  // the time Scene's own useLayoutEffect runs, every child has already written
+  // its latest data.  This avoids the render-phase mutation that broke memoized
+  // children (they never re-rendered → never re-filled the old accumulator).
+  const registryRef = useRef(new Map());
 
-  // Reset accumulator NOW (during render, before children) so each render
-  // starts clean.  Mutating a ref in the render body is intentional here.
-  pending.current = { camera: null, lights: [], meshes: [] };
-
-  // Stable register function — wrapped in a ref so it doesn't change identity
-  // between renders (avoids unnecessary re-renders of consumer children).
-  const registerRef = useRef(null);
-  registerRef.current = function register(type, data) {
-    switch (type) {
-      case 'camera': pending.current.camera = data;          break;
-      case 'light':  pending.current.lights.push(data);      break;
-      case 'mesh':   pending.current.meshes.push(data);      break;
-    }
-  };
-
-  // Stable context value: stable wrapper calls mutable registerRef.current.
-  const ctxRef = useRef({
-    register:  (type, data) => registerRef.current?.(type, data),
-    canvasRef: null,
-  });
-  // Update canvasRef every render so Model can call loadGltf.
+  // Stable context value — identity never changes between renders so memoized
+  // children are not forced to re-render just because Scene re-rendered.
+  const ctxRef = useRef(null);
+  if (!ctxRef.current) {
+    ctxRef.current = {
+      register:   (key, type, data) => { registryRef.current.set(key, { type, data }); },
+      unregister: (key) => { registryRef.current.delete(key); },
+      canvasRef:  null,
+    };
+  }
+  // Keep canvasRef current so Model can call loadGltf.
   ctxRef.current.canvasRef = canvasRef;
 
-  // After each render (no dep array = always), push the assembled scene.
+  // Runs after every render, AFTER all children's useLayoutEffect have fired
+  // (React calls effects bottom-up: deepest children first, then parents).
   useLayoutEffect(() => {
     const ctx3d = canvasRef?.current;
     if (!ctx3d) return;
 
-    const { camera, lights, meshes } = pending.current;
+    let camera = null;
+    const lights = [];
+    const meshes = [];
+
+    for (const { type, data } of registryRef.current.values()) {
+      if      (type === 'camera') camera = data;
+      else if (type === 'light')  lights.push(data);
+      else if (type === 'mesh')   meshes.push(data);
+    }
 
     const scene = {
       camera: camera ?? {
@@ -114,9 +115,8 @@ export function Scene({ canvasRef, background, children }) {
     };
 
     if (background != null) scene.background = background;
-
     ctx3d.updateScene(scene);
-  });  // runs after every render — deliberate, no dep array
+  });  // no dep array — deliberate; runs after every render
 
   return React.createElement(
     SceneCtx.Provider,
@@ -125,14 +125,17 @@ export function Scene({ canvasRef, background, children }) {
   );
 }
 
-// ── Internal: register during render ─────────────────────────────────────────
+// ── Internal: register via useLayoutEffect ────────────────────────────────────
 
 function useRegister(type, data) {
   const ctx = useContext(SceneCtx);
-  if (!ctx) throw new Error(`@glyx/three: <${type}> must be a descendant of <Scene>`);
-  // Register synchronously during the render phase.
-  // Valid because Glyx uses synchronous LegacyRoot rendering.
-  ctx.register(type, data);
+  if (!ctx) throw new Error(`@glyx/three: must be a descendant of <Scene>`);
+  // Stable per-instance key so the registry entry survives prop changes.
+  const id = useId();
+  useLayoutEffect(() => {
+    ctx.register(id, type, data);
+    return () => ctx.unregister(id);
+  }); // no dep array — re-register on every render so data stays fresh
 }
 
 // ── Camera ────────────────────────────────────────────────────────────────────

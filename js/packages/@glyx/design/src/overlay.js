@@ -41,7 +41,7 @@ export function Modal({
 
   if (!visible) return null;
 
-  const hasHeader = title != null || !hideCloseButton;
+  const hasHeader = title != null || (!hideCloseButton && onClose != null);
 
   return (
     // Scrim / backdrop
@@ -59,9 +59,9 @@ export function Modal({
       }}
     >
       {/* Backdrop tap target */}
-      {dismissOnBackdrop && onClose != null && (
+      {dismissOnBackdrop && (
         <Pressable
-          onPress={onClose}
+          onPress={() => onClose?.()}
           style={{
             position: 'absolute',
             top:      0,
@@ -100,7 +100,7 @@ export function Modal({
             )}
 
             {!hideCloseButton && onClose != null && (
-              <Pressable onPress={onClose}>
+              <Pressable onPress={() => onClose?.()}>
                 <Text
                   fontSize={fontSize.xl}
                   style={{ color: colors.textMuted }}
@@ -248,9 +248,9 @@ export function Sheet({
       }}
     >
       {/* Backdrop */}
-      {onClose != null && (
+      {(
         <Pressable
-          onPress={onClose}
+          onPress={() => onClose?.()}
           style={{
             position: 'absolute',
             top:      0,

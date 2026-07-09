@@ -23,7 +23,11 @@ import { createKeychain } from '@glyx/keychain';
 
 function randomState() {
   const a = new Uint8Array(16);
-  (globalThis.crypto?.getRandomValues || ((x) => x.map(() => (Math.random() * 256) | 0)))(a);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(a);
+  } else {
+    for (let i = 0; i < a.length; i++) a[i] = (Math.random() * 256) | 0;
+  }
   return Array.from(a, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
@@ -51,30 +55,38 @@ function waitForDeepLink(prefix, timeoutMs = 180000) {
 
 export function createAuth({ redirect, providers = {}, storage } = {}) {
   const store = storage || createKeychain('auth');
+  let _signInFlight = null;
 
-  async function signIn(name) {
-    const p = providers[name];
-    if (!p) throw new Error(`auth: unknown provider "${name}"`);
+  function signIn(name) {
+    if (_signInFlight) return _signInFlight;
 
-    const state = randomState();
-    const params = new URLSearchParams({
-      client_id:     p.clientId,
-      redirect_uri:  redirect,
-      response_type: 'code',
-      scope:         p.scope || '',
-      state,
-    });
-    glyxWindow.openExternal(`${p.authUrl}?${params.toString()}`);
+    _signInFlight = (async () => {
+      const p = providers[name];
+      if (!p) throw new Error(`auth: unknown provider "${name}"`);
 
-    const url = await waitForDeepLink(redirect);
-    const cb  = parseCallback(url);
-    if (cb.state !== state) throw new Error('auth: state mismatch (possible CSRF)');
-    if (cb.error) throw new Error(`auth: ${cb.error}`);
-    if (!cb.code) throw new Error('auth: no authorization code returned');
+      const state = randomState();
+      const params = new URLSearchParams({
+        client_id:     p.clientId,
+        redirect_uri:  redirect,
+        response_type: 'code',
+        scope:         p.scope || '',
+        state,
+      });
+      glyxWindow.openExternal(`${p.authUrl}?${params.toString()}`);
 
-    const tokens = await p.exchange(cb.code);
-    await store.set(`${name}.tokens`, tokens);
-    return tokens;
+      const url = await waitForDeepLink(redirect);
+      const cb  = parseCallback(url);
+      if (cb.state !== state) throw new Error('auth: state mismatch (possible CSRF)');
+      if (cb.error) throw new Error(`auth: ${cb.error}`);
+      if (!cb.code) throw new Error('auth: no authorization code returned');
+
+      const tokens = await p.exchange(cb.code);
+      await store.set(`${name}.tokens`, tokens);
+      return tokens;
+    })();
+
+    _signInFlight.finally(() => { _signInFlight = null; });
+    return _signInFlight;
   }
 
   async function getTokens(name)  { return store.get(`${name}.tokens`); }

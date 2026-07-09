@@ -21,11 +21,16 @@ function layoutOf(nodeId) {
 }
 
 export function DropZone({ children, onDrop, accepts, style, width, height }) {
-  const idRef = useRef(null);
+  const idRef  = useRef(null);
+  // Always-current ref so Draggable reads the latest onDrop/accepts at drop time,
+  // even if DropZone hasn't re-rendered since the last prop change.
+  const cbRef  = useRef({ onDrop, accepts });
+  cbRef.current = { onDrop, accepts };
+
   const onMount = useCallback((id) => {
     idRef.current = id;
-    dropRegistry.set(id, { onDrop, accepts });
-  }, [onDrop, accepts]);
+    dropRegistry.set(id, cbRef);
+  }, []); // stable — cbRef identity is constant
   useEffect(() => () => { if (idRef.current !== null) dropRegistry.delete(idRef.current); }, []);
 
   return React.createElement(View, { _glyxOnMount: onMount, width, height, style }, children);
@@ -45,7 +50,9 @@ export function Draggable({ children, data, type, style, width, height, onDragSt
         const r = layoutOf(nodeId);
         if (!r) continue;
         if (x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height) {
-          if (!zone.accepts || zone.accepts === type) { zone.onDrop?.(data, { x, y, type }); break; }
+          const z = zone.current;
+          const ok = !z.accepts || (Array.isArray(z.accepts) ? z.accepts.includes(type) : z.accepts === type);
+          if (ok) { z.onDrop?.(data, { x, y, type }); break; }
         }
       }
     },

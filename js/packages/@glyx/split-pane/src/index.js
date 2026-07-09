@@ -23,7 +23,8 @@ export function SplitPane({
 }) {
   const horizontal = direction === 'horizontal';
   const total = horizontal ? width : height;
-  const [split, setSplit] = useState((defaultSizes[0] / 100) * total);
+  // Store split as a fraction (0–1) so it survives container resize.
+  const [fraction, setFraction] = useState(defaultSizes[0] / 100);
   const [dragging, setDragging] = useState(false);
 
   const onDivider = useDraggable({
@@ -31,12 +32,15 @@ export function SplitPane({
     onDragEnd:   () => setDragging(false),
     onDragMove: ({ dx, dy }) => {
       const delta = horizontal ? dx : dy;
-      setSplit((prev) => Math.max(minSizes[0], Math.min(total - minSizes[1] - dividerSize, prev + delta)));
+      setFraction((prev) => {
+        const px = Math.max(minSizes[0], Math.min(total - minSizes[1] - dividerSize, prev * total + delta));
+        return px / total;
+      });
     },
   });
 
-  const size1 = split;
-  const size2 = total - split - dividerSize;
+  const size1 = Math.round(fraction * total);
+  const size2 = total - size1 - dividerSize;
   const [a, b] = React.Children.toArray(children);
 
   return React.createElement(

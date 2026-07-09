@@ -20,9 +20,12 @@
 
 import React, { createContext, useContext, useState, useCallback, Children, useMemo } from 'react';
 
-// ── Context ────────────────────────────────────────────────────────────────────
+// ── Contexts ───────────────────────────────────────────────────────────────────
+// Split into two contexts so consumers that only need `navigate` don't re-render
+// on every route change (RouteStateCtx changes; RouterActionsCtx is stable).
 
-const RouterCtx = createContext(null);
+const RouteStateCtx   = createContext(null);
+const RouterActionsCtx = createContext(null);
 
 // ── Router ────────────────────────────────────────────────────────────────────
 //
@@ -55,24 +58,21 @@ export function Router({ children, initialRoute }) {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Memoize context so consumers only re-render when history actually changes.
-  const ctx = useMemo(() => {
+  const routeState = useMemo(() => {
     const current = history[history.length - 1] ?? { name: null, params: {} };
-    return {
-      routeName: current.name,
-      params:    current.params,
-      navigate,
-      canGoBack: history.length > 1,
-      history,
-    };
-  }, [history, navigate]);
+    return { routeName: current.name, params: current.params, canGoBack: history.length > 1 };
+  }, [history]);
 
-  const Screen = ctx.routeName ? routeMap[ctx.routeName] : null;
+  const Screen = routeState.routeName ? routeMap[routeState.routeName] : null;
 
   return React.createElement(
-    RouterCtx.Provider,
-    { value: ctx },
-    Screen ? React.createElement(Screen) : null,
+    RouterActionsCtx.Provider,
+    { value: navigate },
+    React.createElement(
+      RouteStateCtx.Provider,
+      { value: routeState },
+      Screen ? React.createElement(Screen) : null,
+    ),
   );
 }
 
@@ -89,9 +89,9 @@ export function Route(_props) {
 
 /** Returns the navigate(name, params?, opts?) function. Stable across renders. */
 export function useNavigate() {
-  const ctx = useContext(RouterCtx);
-  if (!ctx) throw new Error('useNavigate must be used inside <Router>');
-  return ctx.navigate;
+  const navigate = useContext(RouterActionsCtx);
+  if (!navigate) throw new Error('useNavigate must be used inside <Router>');
+  return navigate;
 }
 
 /**
@@ -99,7 +99,7 @@ export function useNavigate() {
  * @returns {{ name: string|null, params: object, canGoBack: boolean }}
  */
 export function useRoute() {
-  const ctx = useContext(RouterCtx);
-  if (!ctx) throw new Error('useRoute must be used inside <Router>');
-  return { name: ctx.routeName, params: ctx.params, canGoBack: ctx.canGoBack };
+  const state = useContext(RouteStateCtx);
+  if (!state) throw new Error('useRoute must be used inside <Router>');
+  return state;
 }

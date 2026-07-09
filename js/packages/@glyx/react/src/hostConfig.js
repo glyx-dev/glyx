@@ -71,11 +71,13 @@ function appendChildToContainer(_container, child) {
   }
 }
 
-function insertBefore(parentInstance, child, _beforeChild) {
-  // Full ordering support is a Week 12+ concern.
-  // For now, treat as a regular append.
+function insertBefore(parentInstance, child, beforeChild) {
   if (child.id !== -1) {
-    __glyx_appendChild(parentInstance.id, child.id);
+    if (beforeChild && beforeChild.id !== -1) {
+      __glyx_insertBefore(parentInstance.id, child.id, beforeChild.id);
+    } else {
+      __glyx_appendChild(parentInstance.id, child.id);
+    }
     setNodeParent(child.id, parentInstance.id);
   }
 }
@@ -115,8 +117,17 @@ function detachDeletedInstance(instance) {
 // ── Updates ───────────────────────────────────────────────────────────────────
 
 // Return a payload to commit, or null to skip commitUpdate.
-function prepareUpdate(_instance, _type, _oldProps, newProps) {
-  return newProps;
+// Shallow-compare old and new props so that parent re-renders don't cascade
+// a native updateNode call to every child whose visual props didn't change.
+function prepareUpdate(_instance, _type, oldProps, newProps) {
+  const skip = ['children', 'ref', '_glyxOnMount', 'glyxDraggable'];
+  const oldKeys = Object.keys(oldProps).filter((k) => !skip.includes(k));
+  const newKeys = Object.keys(newProps).filter((k) => !skip.includes(k));
+  if (oldKeys.length !== newKeys.length) return newProps;
+  for (const k of newKeys) {
+    if (oldProps[k] !== newProps[k]) return newProps;
+  }
+  return null; // no visual change — skip commitUpdate
 }
 
 function commitUpdate(instance, updatePayload) {

@@ -236,6 +236,19 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 layout_changed   = true;
                 structure_changed = true;
             }
+            SceneCommand::InsertBefore { parent_id, child_id, before_id } => {
+                if let Some(parent) = state.js_nodes.get_mut(&parent_id) {
+                    parent.children.retain(|&c| c != child_id);
+                    if let Some(pos) = parent.children.iter().position(|&c| c == before_id) {
+                        parent.children.insert(pos, child_id);
+                    } else {
+                        parent.children.push(child_id);
+                    }
+                }
+                state.dirty_nodes.insert(parent_id);
+                layout_changed   = true;
+                structure_changed = true;
+            }
             SceneCommand::UpdateNode { id, props } => {
                 // Check layout-prop changes before mutating — need old props for comparison.
                 // Also detect prop changes that must cascade dirty state to all descendants:

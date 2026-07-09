@@ -581,6 +581,7 @@ pub enum SceneCommand {
     CreateNode    { id: u32, node_type: NodeType, props: NodeProps },
     CreateImage   { id: u32, path: String, width: Option<f32>, height: Option<f32> },
     AppendChild   { parent_id: u32, child_id: u32 },
+    InsertBefore  { parent_id: u32, child_id: u32, before_id: u32 },
     UpdateNode    { id: u32, props: NodeProps },
     RemoveNode    { id: u32 },
     SetRoot       { id: u32 },
@@ -796,8 +797,9 @@ pub fn register_all(
     register!("__glyx_readFileBytes", read_file_bytes_callback);
     register!("__glyx_createImage",   create_image_callback);
     register!("__glyx_createNode",  create_node_callback);
-    register!("__glyx_appendChild", append_child_callback);
-    register!("__glyx_updateNode",  update_node_callback);
+    register!("__glyx_appendChild",   append_child_callback);
+    register!("__glyx_insertBefore",  insert_before_callback);
+    register!("__glyx_updateNode",    update_node_callback);
     register!("__glyx_removeNode",  remove_node_callback);
     register!("__glyx_setRoot",     set_root_callback);
     register!("__glyx_pollEvents",  poll_events_callback);
@@ -1797,6 +1799,25 @@ fn append_child_callback(
 
     state.scene.lock()
         .push_back(SceneCommand::AppendChild { parent_id, child_id });
+
+    rv.set(v8::Boolean::new(scope, true).into());
+}
+
+fn insert_before_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let parent_id = args.get(0).number_value(scope).unwrap_or_default() as u32;
+    let child_id  = args.get(1).number_value(scope).unwrap_or_default() as u32;
+    let before_id = args.get(2).number_value(scope).unwrap_or_default() as u32;
+
+    state.scene.lock()
+        .push_back(SceneCommand::InsertBefore { parent_id, child_id, before_id });
 
     rv.set(v8::Boolean::new(scope, true).into());
 }

@@ -416,11 +416,11 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
 
             // LabelKey::new() is allocation-free (hashes text, packs fields).
             // Derive it twice instead of cloning — cheaper than a String clone.
-            if ctx.label_cache.peek(&LabelKey::new(text, font_size, max_width, color)).is_none() {
+            if ctx.label_cache.peek(&LabelKey::new(text, font_size, max_width)).is_none() {
                 let lbl = CachedLabel::new(ctx.text_sys, text, font_size, max_width, color);
-                ctx.label_cache.put(LabelKey::new(text, font_size, max_width, color), lbl);
+                ctx.label_cache.put(LabelKey::new(text, font_size, max_width), lbl);
             }
-            let label = ctx.label_cache.get(&LabelKey::new(text, font_size, max_width, color)).unwrap();
+            let label = ctx.label_cache.get(&LabelKey::new(text, font_size, max_width)).unwrap();
 
             let bw = rw;
             let bh = rh;

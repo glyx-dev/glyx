@@ -931,6 +931,9 @@ struct PerWindowState {
     cursor_blink_on:       bool,
     /// When to flip the blink phase next.
     cursor_blink_deadline: Instant,
+    /// Whether any TextInput with an active cursor was rendered last frame.
+    /// Used to skip blink ticks entirely when no text input is focused.
+    cursor_was_active: bool,
     /// Rolling performance metrics — shared with the JS binding via Arc.
     perf: Arc<Mutex<glyx_perf::PerfState>>,
     /// Process RSS bytes — written by a background tokio task every 2 s.
@@ -2209,6 +2212,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     request_redraw: Arc::clone(&request_redraw),
                     cursor_blink_on:       true,
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
+                    cursor_was_active:     false,
                     perf:          shared_perf,
                     rss_bytes:     {
                         // Spawn a background task that polls RSS every 2 s via sysinfo.
@@ -2482,9 +2486,9 @@ pub fn run(mut config: AppConfig) -> bool {
                 let post_commands = s.runtime.drain_scene_commands();
                 let post_changed  = apply_scene_commands(s, post_commands);
 
-                // 5a. Pull latest camera frames and build peniko::ImageData.
-                let mut media_changed = false;
-                for stream in s.camera_streams.values_mut() {
+                // 5a. Pull latest camera frames and dirty only the nodes displaying them.
+                let mut updated_camera_handles: Vec<u32> = Vec::new();
+                for (handle_id, stream) in s.camera_streams.iter_mut() {
                     if let Some((w, h, data)) = stream.frame_buf.lock().take() {
                         stream.latest_image = Some(peniko::ImageData {
                             data: peniko::Blob::from(data),
@@ -2492,13 +2496,13 @@ pub fn run(mut config: AppConfig) -> bool {
                             alpha_type: peniko::ImageAlphaType::Alpha,
                             width: w, height: h,
                         });
-                        media_changed = true;
+                        updated_camera_handles.push(*handle_id);
                     }
                 }
-
-                // 5b. Pull latest video frames and build peniko::ImageData.
+                // 5b. Pull latest video frames and dirty only the nodes displaying them.
                 // Also drain video events into the runtime's video_events queue.
-                for stream in s.video_streams.values_mut() {
+                let mut updated_video_handles: Vec<u32> = Vec::new();
+                for (handle_id, stream) in s.video_streams.iter_mut() {
                     if let Some((w, h, data)) = stream.frame_buf.lock().take() {
                         stream.latest_image = Some(peniko::ImageData {
                             data: peniko::Blob::from(data),
@@ -2506,13 +2510,28 @@ pub fn run(mut config: AppConfig) -> bool {
                             alpha_type: peniko::ImageAlphaType::Alpha,
                             width: w, height: h,
                         });
-                        media_changed = true;
+                        updated_video_handles.push(*handle_id);
                     }
                     let pending: Vec<_> = stream.events.lock().drain(..).collect();
                     if !pending.is_empty() {
                         let mut ve = s.runtime.video_events.lock();
                         ve.extend(pending);
                     }
+                }
+                let media_changed = !updated_camera_handles.is_empty() || !updated_video_handles.is_empty();
+                // Collect media-node IDs into a local vec first to avoid a simultaneous
+                // shared borrow of js_nodes and mutable borrow of dirty_nodes.
+                if media_changed {
+                    let media_dirty: Vec<u32> = s.js_nodes.iter()
+                        .filter_map(|(&nid, node)| {
+                            let cam_hit = node.props.camera_handle
+                                .map_or(false, |h| updated_camera_handles.contains(&h));
+                            let vid_hit = node.props.video_handle
+                                .map_or(false, |h| updated_video_handles.contains(&h));
+                            if cam_hit || vid_hit { Some(nid) } else { None }
+                        })
+                        .collect();
+                    for nid in media_dirty { s.dirty_nodes.insert(nid); }
                 }
 
                 // 5. Single layout pass.
@@ -2531,10 +2550,11 @@ pub fn run(mut config: AppConfig) -> bool {
                 // 6. Scroll-adjusted positions for next frame's hit-testing.
                 update_scroll_positions(s);
 
-                // 6b. Cursor blink phase — evaluated before the gate so blink flips
-                //     are included in the dirty check.
+                // 6b. Cursor blink phase — only relevant when a TextInput was visible
+                //     last frame.  Skipping when no cursor is active avoids a forced
+                //     full GPU render every 500 ms for apps with no focused text field.
                 let now = Instant::now();
-                let blink_changed = if now >= s.cursor_blink_deadline {
+                let blink_changed = if s.cursor_was_active && now >= s.cursor_blink_deadline {
                     s.cursor_blink_on       = !s.cursor_blink_on;
                     s.cursor_blink_deadline = now + Duration::from_millis(500);
                     true
@@ -2851,6 +2871,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     s.perf.lock().last_frame_at = Some(frame_start);
                 }
 
+                s.cursor_was_active = any_cursor_active;
                 if any_cursor_active {
                     let redraw   = Arc::clone(&s.request_redraw);
                     let deadline = s.cursor_blink_deadline;

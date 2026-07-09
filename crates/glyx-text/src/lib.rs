@@ -186,6 +186,32 @@ impl TextSystem {
         self.shape(text, font_size, f32::MAX, FontWeight::BOLD, Alignment::Start)
     }
 
+    /// Shape with explicit bold + italic flags and optional max_width.
+    pub fn styled_label(
+        &mut self,
+        text:      &str,
+        font_size: f32,
+        max_width: f32,
+        bold:      bool,
+        italic:    bool,
+    ) -> TextLayout {
+        use parley::style::{FontStyle};
+        let weight = if bold { FontWeight::BOLD } else { FontWeight::NORMAL };
+        let mut builder = self.layout_cx.ranged_builder(&mut self.font_cx, text, 1.0, false);
+        builder.push_default(StyleProperty::FontSize(font_size));
+        builder.push_default(StyleProperty::FontWeight(weight));
+        if italic {
+            builder.push_default(StyleProperty::FontStyle(FontStyle::Italic));
+        }
+        builder.push_default(StyleProperty::FontFamily(FontFamily::Source(
+            std::borrow::Cow::Borrowed("Segoe UI, Helvetica Neue, DejaVu Sans, sans-serif"),
+        )));
+        let mut layout = builder.build(text);
+        layout.break_all_lines(Some(max_width));
+        layout.align(Alignment::Start, AlignmentOptions::default());
+        TextLayout { inner: layout }
+    }
+
     /// Deprecated alias kept for back-compat with early call sites.
     #[deprecated(note = "use bold_label()")]
     pub fn bold(&mut self, text: &str, font_size: f32) -> TextLayout {

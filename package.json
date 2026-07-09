@@ -20,7 +20,8 @@
     "js/packages/@glyx/markdown",
     "js/packages/@glyx/split-pane",
     "js/packages/@glyx/table",
-    "js/packages/@glyx/icons"
+    "js/packages/@glyx/icons",
+    "js/packages/@glyx/rich-text"
   ],
   "scripts": {
     "test": "bun test js/packages"
@@ -44,6 +45,7 @@
     "@glyx/markdown":     "workspace:*",
     "@glyx/split-pane":   "workspace:*",
     "@glyx/table":        "workspace:*",
+    "@glyx/rich-text":    "workspace:*",
     "drizzle-orm": "^0.36.4",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",

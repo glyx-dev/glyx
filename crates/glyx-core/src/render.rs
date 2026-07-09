@@ -404,6 +404,9 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             let text       = node.props.text.as_deref().unwrap_or("Text");
             let font_size  = node.props.font_size.unwrap_or(16.0);
             let color      = node.props.color.unwrap_or([255, 255, 255, 255]);
+            let bold   = node.props.font_weight.as_deref() == Some("bold");
+            let italic = node.props.font_style.as_deref()  == Some("italic");
+            let underline = node.props.text_decoration_line.as_deref() == Some("underline");
             // +1px guards against Taffy rounding shaving a sub-pixel off the
             // measured width and wrapping the last word of an auto-sized Text.
             let max_width  = (rw as f32).max(1.0) + 1.0;
@@ -416,11 +419,11 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
 
             // LabelKey::new() is allocation-free (hashes text, packs fields).
             // Derive it twice instead of cloning — cheaper than a String clone.
-            if ctx.label_cache.peek(&LabelKey::new(text, font_size, max_width)).is_none() {
-                let lbl = CachedLabel::new(ctx.text_sys, text, font_size, max_width, color);
-                ctx.label_cache.put(LabelKey::new(text, font_size, max_width), lbl);
+            if ctx.label_cache.peek(&LabelKey::new(text, font_size, max_width, bold, italic)).is_none() {
+                let lbl = CachedLabel::new(ctx.text_sys, text, font_size, max_width, color, bold, italic);
+                ctx.label_cache.put(LabelKey::new(text, font_size, max_width, bold, italic), lbl);
             }
-            let label = ctx.label_cache.get(&LabelKey::new(text, font_size, max_width)).unwrap();
+            let label = ctx.label_cache.get(&LabelKey::new(text, font_size, max_width, bold, italic)).unwrap();
 
             let bw = rw;
             let bh = rh;
@@ -465,6 +468,15 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
 
             // 2. Draw shaped text.
             ctx.frame.draw_text(&label.layout, tx, ty, apply_opacity(rgba_to_vello(color), child_opacity));
+
+            // 2a. Underline — drawn as a thin rect 1px below the baseline.
+            if underline && label.width > 0.0 {
+                let ul_y = ty + label.text_height + 1.0;
+                ctx.frame.fill_rounded_rect(
+                    tx, ul_y, label.width, 1.0, 0.0,
+                    apply_opacity(rgba_to_vello(color), child_opacity),
+                );
+            }
 
             // 3. Blinking cursor line — uses same metrics as selection highlight.
             if show_cursor {

@@ -642,13 +642,15 @@ struct LabelKey {
     text_hash:      u64,
     font_size_bits: u32,
     max_width_bits: u32,
+    bold:           bool,
+    italic:         bool,
     // Color is intentionally NOT part of the key: CachedLabel stores only the
     // shaped layout, not color.  Color is applied at draw time via frame.draw_text,
     // so the same shaped result can be reused across all color variants of a string.
 }
 
 impl LabelKey {
-    fn new(text: &str, font_size: f32, max_width: f32) -> Self {
+    fn new(text: &str, font_size: f32, max_width: f32, bold: bool, italic: bool) -> Self {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut h);
@@ -656,6 +658,8 @@ impl LabelKey {
             text_hash:      h.finish(),
             font_size_bits: font_size.to_bits(),
             max_width_bits: max_width.to_bits(),
+            bold,
+            italic,
         }
     }
 }
@@ -788,8 +792,8 @@ struct CachedLabel {
 }
 
 impl CachedLabel {
-    fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4]) -> Self {
-        let layout      = ts.label_centered(text, font_size, max_width);
+    fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4], bold: bool, italic: bool) -> Self {
+        let layout      = ts.styled_label(text, font_size, max_width, bold, italic);
         let width       = layout.width() as f64;
         let text_height = layout.height() as f64;
         // For an empty string Parley produces no glyph runs, so ascent() = 0.

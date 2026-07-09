@@ -201,6 +201,12 @@ pub struct NodeProps {
     // ── Text ────────────────────────────────────────────────────────────────
     pub text:            Option<String>,
     pub font_size:       Option<f32>,
+    /// `"bold"` or `"normal"` (default). Maps to Parley FontWeight.
+    pub font_weight:     Option<String>,
+    /// `"italic"` or `"normal"` (default). Maps to Parley FontStyle.
+    pub font_style:      Option<String>,
+    /// `"underline"` draws a line beneath the text; `"none"` or absent = no decoration.
+    pub text_decoration_line: Option<String>,
     /// Maximum number of visible lines before clipping (like CSS `overflow: hidden` + height cap).
     pub number_of_lines: Option<u32>,
     /// Text / foreground colour as RGBA [r, g, b, a] 0–255.
@@ -1305,7 +1311,10 @@ fn parse_props(
 
     props.width       = get_length_prop(scope, obj, "width");
     props.height      = get_length_prop(scope, obj, "height");
-    props.font_size   = get_num_prop(scope, obj, "fontSize");
+    props.font_size             = get_num_prop(scope, obj, "fontSize");
+    props.font_weight           = get_str_prop(scope, obj, "fontWeight").map(|s| s.to_string());
+    props.font_style            = get_str_prop(scope, obj, "fontStyle").map(|s| s.to_string());
+    props.text_decoration_line  = get_str_prop(scope, obj, "textDecorationLine").map(|s| s.to_string());
     props.border_radius = get_num_prop(scope, obj, "borderRadius");
     props.padding     = get_length_prop(scope, obj, "padding");
     props.gap         = get_length_prop(scope, obj, "gap");
@@ -1644,8 +1653,17 @@ fn measure_text_callback(
     let font_size = args.get(1).number_value(scope).unwrap_or(14.0) as f32;
     let mw = args.get(2).number_value(scope).unwrap_or(0.0);
     let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
+    // Optional 4th arg: "bold" | "italic" | "bold italic" | omit for normal
+    let style_str = args.get(3).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let bold   = style_str.contains("bold");
+    let italic = style_str.contains("italic");
 
-    let (w, h) = state.text_measure.borrow_mut().measure(&text, font_size, max_width);
+    let (w, h) = if bold || italic {
+        let layout = state.text_measure.borrow_mut().styled_label(&text, font_size, max_width, bold, italic);
+        (layout.width(), layout.height())
+    } else {
+        state.text_measure.borrow_mut().measure(&text, font_size, max_width)
+    };
 
     let obj = v8::Object::new(scope);
     let wk = v8::String::new(scope, "width").unwrap();

@@ -42,3 +42,4 @@ nokhwa         = { workspace = true }
 rodio          = { workspace = true }
 glyx-media    = { path = "../glyx-media" }
 mimalloc       = { workspace = true }
+base64         = { workspace = true }

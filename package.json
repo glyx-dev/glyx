@@ -19,7 +19,8 @@
     "js/packages/@glyx/form",
     "js/packages/@glyx/markdown",
     "js/packages/@glyx/split-pane",
-    "js/packages/@glyx/table"
+    "js/packages/@glyx/table",
+    "js/packages/@glyx/icons"
   ],
   "scripts": {
     "test": "bun test js/packages"

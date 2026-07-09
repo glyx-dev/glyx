@@ -104,6 +104,28 @@ fn broken_image_placeholder() -> peniko::ImageData {
 }
 
 fn load_image_from_path(path: &str, width: Option<f32>, height: Option<f32>) -> Option<peniko::ImageData> {
+    // ── Data URI (e.g. from @glyx/icons inline SVGs) ─────────────────────────
+    if path.starts_with("data:") {
+        let rest = &path["data:".len()..];
+        if let Some(comma) = rest.find(',') {
+            let meta    = &rest[..comma];
+            let payload = &rest[comma + 1..];
+            let is_svg  = meta.starts_with("image/svg+xml");
+            let svg_bytes = if meta.contains(";base64") {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.decode(payload).ok()?
+            } else {
+                // URL-encoded plain text (encodeURIComponent from JS)
+                let decoded = percent_decode(payload);
+                decoded.into_owned().into_bytes()
+            };
+            if is_svg {
+                return load_svg_from_bytes(&svg_bytes, width, height);
+            }
+        }
+        log::warn!("[image] unsupported data URI scheme, skipping");
+        return None;
+    }
     let lower = path.to_ascii_lowercase();
     if lower.ends_with(".svg") {
         return load_svg_from_path(path, width, height);
@@ -114,18 +136,41 @@ fn load_image_from_path(path: &str, width: Option<f32>, height: Option<f32>) -> 
     rgba_to_peniko(rgba.into_raw(), w, h)
 }
 
+/// Decode a `%xx` percent-encoded string (output of JS `encodeURIComponent`).
+fn percent_decode(s: &str) -> std::borrow::Cow<str> {
+    if !s.contains('%') { return std::borrow::Cow::Borrowed(s); }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hi) = u8::from_str_radix(std::str::from_utf8(&bytes[i+1..i+2]).unwrap_or(""), 16) {
+                if let Ok(lo) = u8::from_str_radix(std::str::from_utf8(&bytes[i+2..i+3]).unwrap_or(""), 16) {
+                    out.push(hi << 4 | lo);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    std::borrow::Cow::Owned(String::from_utf8_lossy(&out).into_owned())
+}
+
 fn load_svg_from_path(path: &str, width: Option<f32>, height: Option<f32>) -> Option<peniko::ImageData> {
     let svg_data = std::fs::read(path).ok()?;
+    load_svg_from_bytes(&svg_data, width, height)
+}
+
+fn load_svg_from_bytes(svg_data: &[u8], width: Option<f32>, height: Option<f32>) -> Option<peniko::ImageData> {
     let opts = resvg::usvg::Options::default();
-    let tree = resvg::usvg::Tree::from_data(&svg_data, &opts).ok()?;
+    let tree = resvg::usvg::Tree::from_data(svg_data, &opts).ok()?;
     let size = tree.size();
     let (iw, ih) = (size.width(), size.height());
     if iw <= 0.0 || ih <= 0.0 {
-        log::warn!("[svg] zero-size SVG: {path}");
         return None;
     }
-    // Rasterize at the requested display size when given; a missing axis keeps
-    // the intrinsic aspect ratio. No hint at all → intrinsic viewBox size.
     let (tw, th) = match (width, height) {
         (Some(w), Some(h)) => (w, h),
         (Some(w), None)    => (w, w * ih / iw),

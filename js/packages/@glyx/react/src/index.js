@@ -2453,6 +2453,13 @@ export const ai = {
       throw new Error('ai.transcribe: binding unavailable — add ai:true to glyx.config.json');
     return __glyx_ai_transcribe(String(audioPath), JSON.stringify({ language }));
   },
+
+  /** Unload API — free model RAM immediately without restarting the app. */
+  unload: {
+    embed()      { if (typeof __glyx_ai_unload_embed      !== 'undefined') __glyx_ai_unload_embed(); },
+    generate()   { if (typeof __glyx_ai_unload_generate   !== 'undefined') __glyx_ai_unload_generate(); },
+    transcribe() { if (typeof __glyx_ai_unload_transcribe !== 'undefined') __glyx_ai_unload_transcribe(); },
+  },
 };
 
 // ── Camera API ────────────────────────────────────────────────────────────────
@@ -3722,6 +3729,11 @@ class GlyxCanvas3DContext {
     } catch (e) {
       __glyx_log('[canvas3d] loadGltf error: ' + e);
     }
+  }
+
+  unloadGltf(path) {
+    if (typeof __glyx_canvas3d_unload_gltf === 'undefined') return;
+    __glyx_canvas3d_unload_gltf(path);
   }
 }
 

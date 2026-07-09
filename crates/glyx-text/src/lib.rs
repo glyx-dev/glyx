@@ -99,7 +99,21 @@ impl TextSystem {
             for dir in &dirs {
                 if let Ok(entries) = std::fs::read_dir(dir) {
                     for entry in entries.flatten() {
-                        if register_font_file(&mut font_cx, &entry.path()) {
+                        let name = entry.file_name()
+                            .to_string_lossy()
+                            .to_ascii_lowercase();
+                        // Load only the fonts needed for our primary stack:
+                        //   SF Pro / SF Display (macOS 13+), Helvetica Neue (fallback),
+                        //   Arial (broad Unicode coverage), Menlo (monospace).
+                        // Excluded: CJK collections (~200 MB), symbol fonts, Arabic,
+                        //   Hebrew, and 300+ language-specific supplemental fonts.
+                        let wanted =
+                            name.starts_with("sfns")          ||  // SF Pro text + display
+                            name.starts_with("helveticaneue") ||  // Helvetica Neue family
+                            name.starts_with("arial")         ||  // Arial + bold
+                            name.starts_with("menlo")         ||  // Menlo monospace
+                            name.starts_with("sfmono");           // SF Mono (code)
+                        if wanted && register_font_file(&mut font_cx, &entry.path()) {
                             count += 1;
                         }
                     }
@@ -113,7 +127,7 @@ impl TextSystem {
             let dirs = ["/usr/share/fonts", "/usr/local/share/fonts"];
             let mut count = 0usize;
             for dir in &dirs {
-                count += register_dir_recursive(&mut font_cx, std::path::Path::new(dir));
+                count += register_dir_filtered(&mut font_cx, std::path::Path::new(dir));
             }
             log::info!("glyx-text: registered {} fonts from Linux font dirs", count);
         }
@@ -320,17 +334,31 @@ fn register_font_file(font_cx: &mut FontContext, path: &std::path::Path) -> bool
     false
 }
 
-/// Recursively register all fonts under a directory.  Returns count registered.
+/// Recursively register a curated subset of fonts under a directory.
+/// Loads DejaVu, Liberation, and Noto Sans families — the standard Linux
+/// UI stack. Excludes CJK, symbol, and language-specific supplemental
+/// fonts (which can total 500 MB+ on a full desktop install).
 #[cfg(target_os = "linux")]
-fn register_dir_recursive(font_cx: &mut FontContext, dir: &std::path::Path) -> usize {
+fn register_dir_filtered(font_cx: &mut FontContext, dir: &std::path::Path) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
     let mut count = 0usize;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            count += register_dir_recursive(font_cx, &path);
+            count += register_dir_filtered(font_cx, &path);
         } else {
-            if register_font_file(font_cx, &path) {
+            let name = path.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.to_ascii_lowercase())
+                .unwrap_or_default();
+            let wanted =
+                name.starts_with("dejavusans")       ||  // DejaVu Sans (regular + bold + mono)
+                name.starts_with("dejavumono")       ||  // DejaVu Sans Mono variants
+                name.starts_with("liberationsans")   ||  // Liberation Sans (Arial metric-compat)
+                name.starts_with("liberationmono")   ||  // Liberation Mono
+                name.starts_with("notosans-regular") ||  // Noto Sans regular weight only
+                name.starts_with("notosans-bold");        // Noto Sans bold weight only
+            if wanted && register_font_file(font_cx, &path) {
                 count += 1;
             }
         }

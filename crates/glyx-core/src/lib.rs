@@ -891,6 +891,48 @@ struct VideoStream {
     url:          String,
 }
 
+/// Image cache with a byte budget instead of an entry count.
+/// Wraps `lru::LruCache` (unbounded entry count) and evicts LRU entries
+/// whenever `total_bytes` would exceed `budget`. Default budget: 256 MB.
+struct ByteBudgetImageCache {
+    inner:       lru::LruCache<String, peniko::ImageData>,
+    total_bytes: usize,
+    budget:      usize,
+}
+
+impl ByteBudgetImageCache {
+    fn new(budget_bytes: usize) -> Self {
+        Self {
+            inner:       lru::LruCache::unbounded(),
+            total_bytes: 0,
+            budget:      budget_bytes,
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<&peniko::ImageData> {
+        self.inner.get(key)
+    }
+
+    fn put(&mut self, key: String, img: peniko::ImageData) {
+        let cost = img.data.len();
+        if let Some(old) = self.inner.peek(&key) {
+            self.total_bytes = self.total_bytes.saturating_sub(old.data.len());
+        }
+        while self.total_bytes + cost > self.budget {
+            if let Some((_, evicted)) = self.inner.pop_lru() {
+                self.total_bytes = self.total_bytes.saturating_sub(evicted.data.len());
+            } else {
+                break;
+            }
+        }
+        self.total_bytes += cost;
+        self.inner.put(key, img);
+    }
+
+    fn len(&self) -> usize { self.inner.len() }
+    fn clear(&mut self) { self.inner.clear(); self.total_bytes = 0; }
+}
+
 /// Per-window rendering + runtime state.
 /// One instance per open window; keyed by `window_handle` (0 = main window).
 struct PerWindowState {
@@ -911,7 +953,7 @@ struct PerWindowState {
     images:       std::collections::HashMap<u32, peniko::ImageData>,
     /// Path-keyed image cache — decoded images reused across remounts without re-decoding.
     /// Capped at 64 entries (LRU eviction) so long sessions don't accumulate stale decoded bitmaps.
-    images_by_path: lru::LruCache<String, peniko::ImageData>,
+    images_by_path: ByteBudgetImageCache,
     image_cache_hits: u64,
     image_cache_misses: u64,
     /// Shaped text cache — keyed by (text, font_size_bits, max_width_bits, color).
@@ -2200,7 +2242,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     js_nodes:     std::collections::HashMap::with_capacity(256),
                     js_root:      None,
                     images:       std::collections::HashMap::with_capacity(32),
-                    images_by_path: lru::LruCache::new(std::num::NonZeroUsize::new(64).unwrap()),
+                    images_by_path: ByteBudgetImageCache::new(256 * 1024 * 1024),
                     image_cache_hits: 0,
                     image_cache_misses: 0,
                     label_cache:  lru::LruCache::new(std::num::NonZeroUsize::new(256).unwrap()),

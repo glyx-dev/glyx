@@ -170,12 +170,16 @@ globalThis.__glyx_canvas_update      = function() {};
 globalThis.__glyx_canvas_flush       = function() {};
 globalThis.__glyx_canvas_protocol    = 'json';
 globalThis.__glyx_canvas3d_update    = function() {};
-globalThis.__glyx_canvas3d_load_gltf = function() {};
+globalThis.__glyx_canvas3d_load_gltf   = function() {};
+globalThis.__glyx_canvas3d_unload_gltf = function() {};
 
 // Local AI bindings (Candle — embed, generate, transcribe)
-globalThis.__glyx_ai_embed      = function() { return stubPromise('[]'); };
-globalThis.__glyx_ai_generate   = function() { return stubPromise(''); };
-globalThis.__glyx_ai_transcribe = function() { return stubPromise(''); };
+globalThis.__glyx_ai_embed             = function() { return stubPromise('[]'); };
+globalThis.__glyx_ai_generate          = function() { return stubPromise(''); };
+globalThis.__glyx_ai_transcribe        = function() { return stubPromise(''); };
+globalThis.__glyx_ai_unload_embed      = function() {};
+globalThis.__glyx_ai_unload_generate   = function() {};
+globalThis.__glyx_ai_unload_transcribe = function() {};
 
 // Camera + Microphone bindings
 globalThis.__glyx_camera_list         = function() { return stubPromise('[]'); };

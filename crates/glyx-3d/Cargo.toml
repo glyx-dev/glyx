@@ -11,4 +11,5 @@ gltf       = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 log        = { workspace = true }
+lru        = { workspace = true }
 glyx-gpu  = { path = "../glyx-gpu" }

@@ -8,6 +8,7 @@
 //!   using LoadOp::Load so Vello's output is preserved.
 
 use std::collections::HashMap;
+use lru::LruCache;
 use std::num::NonZeroU64;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
@@ -459,10 +460,10 @@ pub struct Renderer3D {
     box_geom:    Geometry,
     sphere_geom: Geometry,
     plane_geom:  Geometry,
-    /// Loaded GLTF models, keyed by path. Each model is its full set of
-    /// primitives (all meshes × all primitives). Freed when the renderer is
-    /// dropped (last Canvas3D node removed) or via `unload_gltf`.
-    gltf_cache:  HashMap<String, Vec<Primitive>>,
+    /// Loaded GLTF models, keyed by path. Capped at 16 models (LRU eviction).
+    /// Each evicted model's wgpu buffers are freed when its Arc refcount hits 0.
+    /// Call `unload_gltf` to evict a specific model ahead of the LRU limit.
+    gltf_cache:  LruCache<String, Vec<Primitive>>,
 
     targets:  HashMap<u32, Canvas3DTarget>,
 
@@ -702,7 +703,7 @@ impl Renderer3D {
             box_geom:    upload_geometry(device, &bv, &bi),
             sphere_geom: upload_geometry(device, &sv, &si),
             plane_geom:  upload_geometry(device, &pv, &pi),
-            gltf_cache:  HashMap::new(),
+            gltf_cache:  LruCache::new(std::num::NonZeroUsize::new(16).unwrap()),
             targets:     HashMap::new(),
             overlay_pipeline,
             overlay_sampler,
@@ -962,7 +963,7 @@ impl Renderer3D {
     /// is released when the renderer is dropped (last Canvas3D node removed) or
     /// via [`unload_gltf`](Self::unload_gltf).
     pub fn load_gltf(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, path: &str) -> Result<(), String> {
-        if self.gltf_cache.contains_key(path) { return Ok(()); }
+        if self.gltf_cache.contains(path) { return Ok(()); }
         let (doc, buffers, images) = gltf::import(path).map_err(|e| e.to_string())?;
 
         // Per-model texture cache: image source index → uploaded view. Ensures a
@@ -1000,7 +1001,7 @@ impl Renderer3D {
         }
 
         if prims_out.is_empty() { return Err("gltf: no drawable primitives".into()); }
-        self.gltf_cache.insert(path.to_string(), prims_out);
+        self.gltf_cache.put(path.to_string(), prims_out);
         Ok(())
     }
 
@@ -1037,7 +1038,7 @@ impl Renderer3D {
     /// Drop a loaded GLTF model, freeing its geometry + textures. Useful for
     /// games that stream assets between levels.
     pub fn unload_gltf(&mut self, path: &str) {
-        self.gltf_cache.remove(path);
+        self.gltf_cache.pop(path);
     }
 
     pub fn remove_canvas(&mut self, id: u32) { self.targets.remove(&id); }

@@ -238,7 +238,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
             }
             SceneCommand::InsertBefore { parent_id, child_id, before_id } => {
                 if let Some(parent) = state.js_nodes.get_mut(&parent_id) {
-                    parent.children.retain(|&c| c != child_id);
+                    parent.children.retain(|c| *c != child_id);
                     if let Some(pos) = parent.children.iter().position(|&c| c == before_id) {
                         parent.children.insert(pos, child_id);
                     } else {
@@ -361,6 +361,11 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 state.dirty_nodes.insert(id);
                 state.canvas3d_dirty.insert(id);
                 // 3D scenes don't affect layout — they blit on top of Vello.
+            }
+            SceneCommand::Canvas3DUnloadGltf { path } => {
+                if let Some(r3d) = state.renderer_3d.as_mut() {
+                    r3d.unload_gltf(&path);
+                }
             }
             SceneCommand::OpenCamera { handle_id, device_index } => {
                 let frame_buf       = Arc::new(Mutex::new(None::<(u32, u32, Vec<u8>)>));

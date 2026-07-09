@@ -590,6 +590,8 @@ pub enum SceneCommand {
     CanvasUpdate  { id: u32, cmds: Vec<CanvasCmd>, append: bool },
     #[cfg(feature = "canvas3d")]
     Canvas3DUpdate { id: u32, scene: glyx_3d::Scene3D },
+    #[cfg(feature = "canvas3d")]
+    Canvas3DUnloadGltf { path: String },
     /// Open a camera device and start the capture loop in glyx-core.
     OpenCamera  { handle_id: u32, device_index: u32 },
     /// Stop the capture loop and release the camera device.
@@ -940,15 +942,23 @@ pub fn register_all(
     #[cfg(feature = "canvas3d")]
     register!("__glyx_canvas3d_update", canvas3d_update_callback);
     #[cfg(feature = "canvas3d")]
-    register!("__glyx_canvas3d_load_gltf", canvas3d_load_gltf_callback);
+    register!("__glyx_canvas3d_load_gltf",   canvas3d_load_gltf_callback);
+    #[cfg(feature = "canvas3d")]
+    register!("__glyx_canvas3d_unload_gltf", canvas3d_unload_gltf_callback);
 
     // ── Local AI (Candle) ────────────────────────────────────────────────────
     #[cfg(feature = "ai")]
-    register!("__glyx_ai_embed",      ai_embed_callback);
+    register!("__glyx_ai_embed",             ai_embed_callback);
     #[cfg(feature = "ai")]
-    register!("__glyx_ai_generate",   ai_generate_callback);
+    register!("__glyx_ai_generate",          ai_generate_callback);
     #[cfg(feature = "ai")]
-    register!("__glyx_ai_transcribe", ai_transcribe_callback);
+    register!("__glyx_ai_transcribe",        ai_transcribe_callback);
+    #[cfg(feature = "ai")]
+    register!("__glyx_ai_unload_embed",      ai_unload_embed_callback);
+    #[cfg(feature = "ai")]
+    register!("__glyx_ai_unload_generate",   ai_unload_generate_callback);
+    #[cfg(feature = "ai")]
+    register!("__glyx_ai_unload_transcribe", ai_unload_transcribe_callback);
 
     // ── Camera + Microphone ───────────────────────────────────────────────────
     register!("__glyx_camera_list",         camera_list_callback);
@@ -4704,6 +4714,25 @@ fn canvas3d_load_gltf_callback(
     state.scene.lock().push_back(SceneCommand::Canvas3DUpdate { id, scene });
 }
 
+/// `__glyx_canvas3d_unload_gltf(path)` — drop a GLTF model from the LRU cache.
+/// Useful before loading a large new model to reclaim GPU memory immediately.
+#[cfg(feature = "canvas3d")]
+fn canvas3d_unload_gltf_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let path = args.get(0).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+
+    state.scene.lock().push_back(SceneCommand::Canvas3DUnloadGltf { path });
+}
+
 // ── Local AI bindings (Candle) ────────────────────────────────────────────────
 
 /// `__glyx_ai_embed(text) → Promise<string>`
@@ -4843,6 +4872,47 @@ fn ai_transcribe_callback(
         }).await.map_err(|e| e.to_string()).and_then(|r| r);
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
+}
+
+// ── AI unload bindings ────────────────────────────────────────────────────────
+
+/// `__glyx_ai_unload_embed() → undefined` — drops the embed model from RAM immediately.
+#[cfg(feature = "ai")]
+fn ai_unload_embed_callback(
+    _scope: &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    *state.ai_embed_model.lock() = None;
+}
+
+/// `__glyx_ai_unload_generate() → undefined` — drops the generate model (~1.7 GB) from RAM.
+#[cfg(feature = "ai")]
+fn ai_unload_generate_callback(
+    _scope: &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    *state.ai_generate_model.lock() = None;
+}
+
+/// `__glyx_ai_unload_transcribe() → undefined` — drops the Whisper model from RAM.
+#[cfg(feature = "ai")]
+fn ai_unload_transcribe_callback(
+    _scope: &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    *state.ai_whisper_model.lock() = None;
 }
 
 // ── Camera bindings ───────────────────────────────────────────────────────────

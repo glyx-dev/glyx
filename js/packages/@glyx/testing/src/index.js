@@ -230,12 +230,16 @@ export function installStubs() {
   // Canvas
   globalThis.__glyx_canvas_update      = stub;
   globalThis.__glyx_canvas3d_update    = stub;
-  globalThis.__glyx_canvas3d_load_gltf = stub;
+  globalThis.__glyx_canvas3d_load_gltf   = stub;
+  globalThis.__glyx_canvas3d_unload_gltf = stub;
 
   // AI
-  globalThis.__glyx_ai_embed      = () => sp('[]');
-  globalThis.__glyx_ai_generate   = () => sp('');
-  globalThis.__glyx_ai_transcribe = () => sp('');
+  globalThis.__glyx_ai_embed             = () => sp('[]');
+  globalThis.__glyx_ai_generate          = () => sp('');
+  globalThis.__glyx_ai_transcribe        = () => sp('');
+  globalThis.__glyx_ai_unload_embed      = stub;
+  globalThis.__glyx_ai_unload_generate   = stub;
+  globalThis.__glyx_ai_unload_transcribe = stub;
 
   // Camera + microphone
   globalThis.__glyx_camera_list         = () => spArr();

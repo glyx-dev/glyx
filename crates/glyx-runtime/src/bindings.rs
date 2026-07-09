@@ -279,6 +279,10 @@ pub struct NodeProps {
     /// the cursor inside a `glyxDraggable` region.
     pub pressable: Option<bool>,
 
+    // ── Testing ───────────────────────────────────────────────────────────────
+    /// Stable identifier used by `@glyx/testing` `getByTestId` queries.
+    pub test_id: Option<String>,
+
     // ── Camera ────────────────────────────────────────────────────────────────
     /// Handle ID returned by `__glyx_camera_open`. The render loop maps this
     /// to a `CameraStream` in `PerWindowState` and renders the live frame.
@@ -806,7 +810,8 @@ pub fn register_all(
     register!("__glyx_setRoot",     set_root_callback);
     register!("__glyx_pollEvents",  poll_events_callback);
     register!("__glyx_getLayout",   get_layout_callback);
-    register!("__glyx_measure_text", measure_text_callback);
+    register!("__glyx_measure_text",    measure_text_callback);
+    register!("__glyx_text_char_at_x", text_char_at_x_callback);
 
     register!("__glyx_getWindowSize", get_window_size_callback);
     register!("__glyx_getScreenSize", get_screen_size_callback);
@@ -1339,6 +1344,7 @@ fn parse_props(
     props.z_index         = get_num_prop(scope, obj, "zIndex").map(|v| v as i32);
     props.draggable       = get_bool_prop(scope, obj, "draggable");
     props.pressable       = get_bool_prop(scope, obj, "pressable");
+    props.test_id         = get_str_prop(scope, obj, "testID").map(|s| s.to_string());
     props.camera_handle   = get_num_prop(scope, obj, "cameraHandle").map(|v| v as u32);
     props.mirror          = get_bool_prop(scope, obj, "mirror");
     props.video_handle    = get_num_prop(scope, obj, "videoHandle").map(|v| v as u32);
@@ -1642,6 +1648,33 @@ fn measure_text_callback(
     let hv = v8::Number::new(scope, h as f64);
     obj.set(scope, hk.into(), hv.into());
     rv.set(obj.into());
+}
+
+// ── __glyx_text_char_at_x ─────────────────────────────────────────────────────
+//
+// Returns the character index (0-based) nearest to `x` pixels from the left
+// edge of `text` shaped at `fontSize` / `maxWidth`. Used by SelectableText for
+// pointer hit-testing (mouse-down / drag → selection range).
+//
+// Signature: __glyx_text_char_at_x(text, fontSize, maxWidth, x) → number
+
+fn text_char_at_x_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let text      = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let font_size = args.get(1).number_value(scope).unwrap_or(16.0) as f32;
+    let mw        = args.get(2).number_value(scope).unwrap_or(0.0);
+    let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
+    let target_x  = args.get(3).number_value(scope).unwrap_or(0.0) as f32;
+
+    let idx = state.text_measure.borrow_mut().char_at_x(&text, font_size, max_width, target_x);
+    rv.set(v8::Number::new(scope, idx as f64).into());
 }
 
 // ── Sync binding: __glyx_getEnv ──────────────────────────────────────────────

@@ -60,7 +60,8 @@ globalThis.__glyx_removeNode = function() {};
 globalThis.__glyx_setRoot = function() {};
 globalThis.__glyx_pollEvents = function() { return []; };
 globalThis.__glyx_getLayout = function() { return null; };
-globalThis.__glyx_measure_text = function() { return { width: 0, height: 0 }; };
+globalThis.__glyx_measure_text    = function() { return { width: 0, height: 0 }; };
+globalThis.__glyx_text_char_at_x  = function() { return 0; };
 
 // Image binding
 globalThis.__glyx_createImage = function() { return __glyx_nextImageId++; };

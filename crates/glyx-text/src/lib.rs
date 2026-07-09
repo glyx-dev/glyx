@@ -217,6 +217,38 @@ impl TextSystem {
         }
     }
 
+    /// Return the character index (0-based) whose left edge is closest to `target_x`
+    /// pixels from the start of the text.  Used for pointer hit-testing in SelectableText.
+    ///
+    /// Binary-searches over `measure_to_cursor` calls so shaping work is O(n log n)
+    /// in character count — acceptable for single-line labels up to a few thousand chars.
+    pub fn char_at_x(&mut self, text: &str, font_size: f32, max_width: f32, target_x: f32) -> usize {
+        let char_count = text.chars().count();
+        if char_count == 0 { return 0; }
+
+        // Total text width — clamp target to [0, width].
+        let total_w = self.measure_to_cursor(text, font_size, max_width, char_count);
+        if target_x <= 0.0       { return 0; }
+        if target_x >= total_w   { return char_count; }
+
+        // Binary search: find the largest i where measure_to_cursor(i) <= target_x.
+        let (mut lo, mut hi) = (0usize, char_count);
+        while lo + 1 < hi {
+            let mid = (lo + hi) / 2;
+            let x   = self.measure_to_cursor(text, font_size, max_width, mid);
+            if x <= target_x { lo = mid; } else { hi = mid; }
+        }
+
+        // Snap to the closer char boundary (lo or lo+1).
+        let x_lo   = self.measure_to_cursor(text, font_size, max_width, lo);
+        let x_next = if lo + 1 <= char_count {
+            self.measure_to_cursor(text, font_size, max_width, lo + 1)
+        } else {
+            total_w
+        };
+        if (target_x - x_lo) < (x_next - target_x) { lo } else { lo + 1 }
+    }
+
     /// Measure the natural (width, height) of `text` at `font_size` wrapped to
     /// `max_width` pixels.
     ///

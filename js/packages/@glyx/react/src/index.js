@@ -1066,6 +1066,133 @@ export function measureText(text, fontSize = 14, maxWidth = Infinity) {
   return __glyx_measure_text(String(text), fontSize, Number.isFinite(maxWidth) ? maxWidth : 1e6);
 }
 
+// ── SelectableText ────────────────────────────────────────────────────────────
+//
+// User-selectable text with pointer-driven selection and Ctrl/Cmd+C copy.
+//
+// Usage:
+//   <SelectableText fontSize={16} color="#fff">Hello world</SelectableText>
+//
+// Disable for a subtree:
+//   <SelectionArea enabled={false}><ReadOnlyPanel /></SelectionArea>
+//
+// Disable one element inside an enabled area:
+//   <SelectableText selectable={false}>not copyable</SelectableText>
+
+const _SelectionCtx = createContext(true);
+
+export function SelectionArea({ enabled = true, children }) {
+  return React.createElement(_SelectionCtx.Provider, { value: enabled }, children);
+}
+
+export function SelectableText({
+  children,
+  style,
+  selectable: selectableProp,
+  fontSize = 16,
+  color,
+  textAlign,
+  numberOfLines,
+  ...rest
+}) {
+  const areaEnabled    = useContext(_SelectionCtx);
+  const isSelectable   = selectableProp !== undefined ? selectableProp : areaEnabled;
+
+  const text = typeof children === 'string' ? children
+             : Array.isArray(children) ? children.join('') : String(children ?? '');
+
+  const nodeIdRef   = useRef(null);
+  const dragAnchor  = useRef(null);
+  const [selStart, setSelStart] = useState(null);
+  const [selEnd,   setSelEnd]   = useState(null);
+
+  // Stale-closure refs so event callbacks always see current values.
+  const isSelectableRef = useRef(isSelectable);
+  const textRef         = useRef({ text, fontSize, selStart, selEnd });
+  useEffect(() => {
+    isSelectableRef.current = isSelectable;
+    textRef.current         = { text, fontSize, selStart, selEnd };
+  });
+
+  // Convert window-absolute x → character index.
+  function charAtAbsX(absX) {
+    if (typeof __glyx_text_char_at_x === 'undefined') return 0;
+    const id = nodeIdRef.current;
+    if (id === null) return 0;
+    const layout = __glyx_getLayout(id);
+    const localX = Math.max(0, absX - (layout ? layout.x : 0));
+    const { text: t, fontSize: fs } = textRef.current;
+    return __glyx_text_char_at_x(t, fs, 1e6, localX) | 0;
+  }
+
+  // Mount: register both drag and pressable handlers once.
+  const _veloxOnMount = useCallback((id) => {
+    nodeIdRef.current = id;
+
+    registerDraggable(id, {
+      onDragStart({ x }) {
+        if (!isSelectableRef.current) return;
+        const idx = charAtAbsX(x);
+        dragAnchor.current = idx;
+        setSelStart(idx);
+        setSelEnd(idx);
+      },
+      onDragMove({ x }) {
+        if (!isSelectableRef.current) return;
+        const idx    = charAtAbsX(x);
+        const anchor = dragAnchor.current ?? idx;
+        setSelStart(Math.min(anchor, idx));
+        setSelEnd(Math.max(anchor, idx));
+      },
+      onDragEnd() { dragAnchor.current = null; },
+    });
+
+    registerPressable(id, {
+      onPress({ x }) {
+        if (!isSelectableRef.current) return;
+        const idx = charAtAbsX(x);
+        setSelStart(idx);
+        setSelEnd(idx);
+      },
+      onPressIn() {}, onPressOut() {}, onHoverIn() {}, onHoverOut() {},
+    });
+  }, []); // No deps — reads from refs at call time.
+
+  // Ctrl/Cmd+C: copy selected text to clipboard.
+  useEffect(() => {
+    if (!isSelectable) return;
+    const combo = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform ?? '')
+      ? 'meta+c' : 'ctrl+c';
+    const stop = input.shortcut(combo, () => {
+      const { text: t, selStart: ss, selEnd: se } = textRef.current;
+      if (ss !== null && se !== null && se > ss) {
+        const selected = Array.from(t).slice(ss, se).join('');
+        clipboard.writeText(selected);
+      }
+    });
+    return stop;
+  }, [isSelectable]);
+
+  const hasSelection = selStart !== null && selEnd !== null && selEnd > selStart;
+
+  return React.createElement(
+    View,
+    { _veloxOnMount, style, ...rest },
+    React.createElement(
+      Text,
+      {
+        fontSize,
+        color,
+        textAlign,
+        numberOfLines,
+        selectionStart: hasSelection ? selStart : undefined,
+        selectionEnd:   hasSelection ? selEnd   : undefined,
+      },
+      children
+    )
+  );
+}
+
 // ── File system API ───────────────────────────────────────────────────────────
 //
 // All methods return Promises. Requires `fs.read` / `fs.write` capabilities

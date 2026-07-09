@@ -157,6 +157,11 @@ export function installStubs() {
   globalThis.__glyx_createImage  = () => _nextId++;
   globalThis.__glyx_measure_text = (text, fontSize = 14) =>
     ({ width: String(text ?? '').length * fontSize * 0.6, height: fontSize * 1.2 });
+  globalThis.__glyx_text_char_at_x = (text, _fontSize, _maxWidth, x) => {
+    // Approximate: assume monospace 0.6em per char for testing purposes.
+    const charW = (_fontSize ?? 14) * 0.6;
+    return Math.min(Math.max(0, Math.round(x / charW)), String(text ?? '').length);
+  };
 
   // Window
   globalThis.__glyx_getWindowSize  = () => ({ width: 1280, height: 800 });
@@ -416,18 +421,33 @@ function _buildQueries(rootId) {
     if (matches.length === 0) throw new Error(`[glyx/testing] getAllByText("${text}"): not found`);
     return matches.map((n) => n.props);
   }
+  function getByTestId(testId) {
+    const matches = _findAllNodes(rootId, (n) => n.props.testID === testId);
+    if (matches.length === 0) throw new Error(`[glyx/testing] getByTestId("${testId}"): not found`);
+    return matches[0].props;
+  }
+  function queryByTestId(testId) {
+    const matches = _findAllNodes(rootId, (n) => n.props.testID === testId);
+    return matches.length > 0 ? matches[0].props : null;
+  }
+  function getAllByTestId(testId) {
+    const matches = _findAllNodes(rootId, (n) => n.props.testID === testId);
+    if (matches.length === 0) throw new Error(`[glyx/testing] getAllByTestId("${testId}"): not found`);
+    return matches.map((n) => n.props);
+  }
   function debug() {
     function _dump(id, depth) {
       const n = _nodeTree.get(id);
       if (!n) return;
       const pad = '  '.repeat(depth);
       const text = _textContent(n);
-      console.log(`${pad}<${n.type}${text ? ` text="${text}"` : ''}>`);
+      const tid = n.props.testID ? ` testID="${n.props.testID}"` : '';
+      console.log(`${pad}<${n.type}${tid}${text ? ` text="${text}"` : ''}>`);
       for (const c of n.children) _dump(c, depth + 1);
     }
     _dump(rootId, 0);
   }
-  return { getByText, queryByText, getAllByText, debug };
+  return { getByText, queryByText, getAllByText, getByTestId, queryByTestId, getAllByTestId, debug };
 }
 
 /**
@@ -482,9 +502,12 @@ export async function render(element) {
     if (!html.includes(text)) throw new Error(`[glyx/testing] getAllByText("${text}"): not found`);
     return [{ textContent: text }];
   }
+  function getByTestId(testId) { throw new Error(`[glyx/testing] getByTestId: not available in SSR fallback`); }
+  function queryByTestId(_testId) { return null; }
+  function getAllByTestId(testId) { throw new Error(`[glyx/testing] getAllByTestId: not available in SSR fallback`); }
   function debug() { console.log('[glyx/testing] rendered HTML:', html); }
 
-  const result = { container: html, getByText, queryByText, getAllByText, debug, unmount: () => {} };
+  const result = { container: html, getByText, queryByText, getAllByText, getByTestId, queryByTestId, getAllByTestId, debug, unmount: () => {} };
   _lastRender = result;
   return result;
 }
@@ -507,6 +530,15 @@ export const screen = {
   getAllByText: (text) => {
     if (!_lastRender) throw new Error('[glyx/testing] screen: no component has been rendered yet');
     return _lastRender.getAllByText(text);
+  },
+  getByTestId: (testId) => {
+    if (!_lastRender) throw new Error('[glyx/testing] screen: no component has been rendered yet');
+    return _lastRender.getByTestId(testId);
+  },
+  queryByTestId: (testId) => _lastRender?.queryByTestId(testId) ?? null,
+  getAllByTestId: (testId) => {
+    if (!_lastRender) throw new Error('[glyx/testing] screen: no component has been rendered yet');
+    return _lastRender.getAllByTestId(testId);
   },
   debug: () => _lastRender?.debug(),
 };
@@ -588,4 +620,17 @@ export async function waitFor(assertion, { timeout = 1000, interval = 50 } = {})
       await new Promise((r) => setTimeout(r, interval));
     }
   }
+}
+
+// ── getNodeTree ───────────────────────────────────────────────────────────────
+
+/**
+ * Return a plain-object snapshot of the current in-memory node tree.
+ * Each entry: `{ id, type, props, children: id[] }`.
+ * Useful for snapshot tests or inspecting tree structure.
+ *
+ * @returns {Map<number, {id:number, type:string, props:object, children:number[]}>}
+ */
+export function getNodeTree() {
+  return new Map(_nodeTree);
 }

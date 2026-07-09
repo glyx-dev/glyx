@@ -160,6 +160,36 @@ enum Commands {
         #[command(subcommand)]
         cmd: GenerateCommands,
     },
+    /// Check the project for errors without building
+    ///
+    /// Runs fast type-checking and config validation:
+    ///   - Validates glyx.config.ts (resolves + checks required fields)
+    ///   - TypeScript type check via `bun x tsc --noEmit` (if tsconfig.json exists)
+    ///   - `cargo check` for native projects (type-checks Rust without linking)
+    ///
+    /// Much faster than `glyx build` — use this in CI or as a pre-commit check.
+    Check {
+        /// Only validate glyx.config.ts — skip TS and Rust checks
+        #[arg(long)]
+        config_only: bool,
+    },
+    /// Run tests
+    ///
+    /// For JS projects:   `bun test` (uses @glyx/testing stubs)
+    /// For native projects: `cargo test` + `bun test`
+    ///
+    /// Pass --js or --rust to run only one side.
+    Test {
+        /// Run only the JS test suite (bun test)
+        #[arg(long, conflicts_with = "rust")]
+        js: bool,
+        /// Run only the Rust test suite (cargo test)
+        #[arg(long, conflicts_with = "js")]
+        rust: bool,
+        /// Extra args passed through to bun test (e.g. -- --watch)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -221,6 +251,8 @@ fn run() -> Result<()> {
         Commands::Package { target, installer } => cmd_package(target.as_deref(), installer),
         Commands::Runtime { cmd }         => cmd_runtime(cmd),
         Commands::Generate { cmd }        => cmd_generate(cmd),
+        Commands::Check { config_only }   => cmd_check(config_only),
+        Commands::Test { js, rust, args } => cmd_test(js, rust, &args),
     }
 }
 
@@ -1992,6 +2024,192 @@ fn build_app_bundle(project_name: &str, entry: &str) -> Result<PathBuf> {
         .context("Failed to run `bun build`")?;
     if !status.success() { bail!("bun build failed"); }
     Ok(PathBuf::from(bundle_out))
+}
+
+// ── glyx check ───────────────────────────────────────────────────────────────
+
+fn cmd_check(config_only: bool) -> Result<()> {
+    let mut errors: Vec<String> = Vec::new();
+    let mut ok_count = 0;
+
+    // ── 1. glyx.config validation ────────────────────────────────────────────
+    println!("Checking glyx config...");
+    match resolve_config_json() {
+        Err(e) => {
+            errors.push(format!("glyx.config: {e}"));
+        }
+        Ok(json) => {
+            match serde_json::from_str::<serde_json::Value>(&json) {
+                Err(e) => {
+                    errors.push(format!("glyx.config: invalid JSON — {e}"));
+                }
+                Ok(cfg) => {
+                    let mut cfg_ok = true;
+                    // Check required dev.entry exists on disk
+                    if let Some(entry) = cfg.pointer("/dev/entry").and_then(|v| v.as_str()) {
+                        if !std::path::Path::new(entry).exists() {
+                            errors.push(format!("glyx.config: dev.entry '{entry}' not found"));
+                            cfg_ok = false;
+                        }
+                    } else {
+                        errors.push("glyx.config: missing dev.entry".to_string());
+                        cfg_ok = false;
+                    }
+                    if cfg_ok {
+                        println!("  ✓ glyx.config valid");
+                        ok_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if config_only {
+        return finish_check(ok_count, &errors);
+    }
+
+    // ── 2. TypeScript check ───────────────────────────────────────────────────
+    if std::path::Path::new("tsconfig.json").exists() {
+        println!("Type-checking TypeScript...");
+        let status = if cfg!(target_os = "windows") {
+            Command::new("cmd")
+                .args(["/C", "bun", "x", "tsc", "--noEmit"])
+                .status()
+        } else {
+            Command::new("bun")
+                .args(["x", "tsc", "--noEmit"])
+                .status()
+        };
+        match status {
+            Ok(s) if s.success() => {
+                println!("  ✓ TypeScript OK");
+                ok_count += 1;
+            }
+            Ok(_) => errors.push("TypeScript: type errors found (see above)".to_string()),
+            Err(e) => errors.push(format!("TypeScript: could not run tsc — {e}")),
+        }
+    } else {
+        println!("  (no tsconfig.json — skipping TS check)");
+    }
+
+    // ── 3. Rust check (native projects only) ─────────────────────────────────
+    if is_native_project() {
+        let project_name = read_project_name().unwrap_or_else(|| "app".into());
+        println!("Checking Rust ({project_name})...");
+        let status = Command::new("cargo")
+            .args(["check", "-p", &project_name, "--message-format=short"])
+            .env("RUST_LOG", "off")
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                println!("  ✓ Rust OK");
+                ok_count += 1;
+            }
+            Ok(_) => errors.push("Rust: cargo check failed (see above)".to_string()),
+            Err(e) => errors.push(format!("Rust: could not run cargo — {e}")),
+        }
+    }
+
+    finish_check(ok_count, &errors)
+}
+
+fn finish_check(ok_count: usize, errors: &[String]) -> Result<()> {
+    println!();
+    if errors.is_empty() {
+        println!("✓ All checks passed ({ok_count} check{s})", s = if ok_count == 1 { "" } else { "s" });
+        Ok(())
+    } else {
+        for e in errors {
+            eprintln!("✗ {e}");
+        }
+        println!();
+        bail!("{} check{s} failed", errors.len(), s = if errors.len() == 1 { "" } else { "s" });
+    }
+}
+
+// ── glyx test ─────────────────────────────────────────────────────────────────
+
+fn cmd_test(js_only: bool, rust_only: bool, extra_args: &[String]) -> Result<()> {
+    let native = is_native_project();
+    let run_js   = !rust_only;
+    let run_rust = !js_only && native;
+
+    if !run_js && !run_rust {
+        println!("Nothing to test (--rust requires a native project with Cargo.toml).");
+        return Ok(());
+    }
+
+    let mut any_failed = false;
+
+    // ── JS tests ─────────────────────────────────────────────────────────────
+    if run_js {
+        println!("Running JS tests (bun test)...");
+        println!();
+
+        // Look for a test directory — prefer js/src, then js, then src, then current dir.
+        let test_root = ["js/src", "js", "src"]
+            .into_iter()
+            .find(|d| std::path::Path::new(d).exists())
+            .unwrap_or(".");
+
+        let mut cmd = if cfg!(target_os = "windows") {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "bun", "test", test_root]);
+            c
+        } else {
+            let mut c = Command::new("bun");
+            c.args(["test", test_root]);
+            c
+        };
+        for arg in extra_args { cmd.arg(arg); }
+
+        let status = cmd.status().context("Failed to run `bun test`; is Bun installed? https://bun.sh")?;
+        if !status.success() {
+            any_failed = true;
+            if run_rust {
+                eprintln!();
+                eprintln!("JS tests failed — continuing to Rust tests...");
+                eprintln!();
+            }
+        } else {
+            println!();
+            println!("✓ JS tests passed");
+        }
+    }
+
+    // ── Rust tests ────────────────────────────────────────────────────────────
+    if run_rust {
+        let project_name = read_project_name().unwrap_or_else(|| "app".into());
+        println!("Running Rust tests (cargo test -p {project_name})...");
+        println!();
+
+        let mut cmd = Command::new("cargo");
+        cmd.args(["test", "-p", &project_name])
+            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()));
+        // Pass extra args after the `--` separator only when running Rust-only
+        // (mixing extra_args into cargo test when also running bun test is ambiguous).
+        if js_only == false && run_js == false {
+            if !extra_args.is_empty() {
+                cmd.arg("--");
+                for arg in extra_args { cmd.arg(arg); }
+            }
+        }
+
+        let status = cmd.status().context("Failed to run `cargo test`")?;
+        if !status.success() {
+            any_failed = true;
+        } else {
+            println!();
+            println!("✓ Rust tests passed");
+        }
+    }
+
+    println!();
+    if any_failed {
+        bail!("Some tests failed");
+    }
+    println!("All tests passed.");
+    Ok(())
 }
 
 // ── glyx generate ────────────────────────────────────────────────────────────

@@ -1,0 +1,9 @@
+[package]
+name    = "glyx-cap-abi"
+version = "0.1.0"
+edition = "2021"
+description = "Stable C ABI contract for optional Glyx capabilities (audio, AI, camera, gamepad, HID)."
+
+# No deps — must remain dependency-free so both static impls and dynamic DLLs
+# can link against it without pulling in the full Glyx stack.
+[dependencies]

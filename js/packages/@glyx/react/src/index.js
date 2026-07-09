@@ -721,6 +721,8 @@ export function TextInput({
   // When anchor === focus_: no selection, cursor blinks at that position.
   const [anchor, setAnchor]   = useState(() => value.length);
   const [focus_,  setFocus_]  = useState(() => value.length);
+  const [scrollX, setScrollX] = useState(0);
+  const scrollXRef = useRef(0);
 
   // Derived selection range (always ordered).
   const selStart = Math.min(anchor, focus_);
@@ -737,6 +739,23 @@ export function TextInput({
   const extendTo = (pos) => {
     setFocus_(Math.max(0, Math.min(pos, value.length)));
   };
+
+  // Recompute horizontal scroll offset so the caret stays visible.
+  // Only applies to single-line mode (multiline scrolls vertically via ScrollView).
+  useEffect(() => {
+    if (multiline) return;
+    if (typeof __glyx_measure_text === 'undefined') return;
+    const visibleW   = (typeof width === 'number' ? width : 240) - (multiline ? 10 : 8) * 2;
+    const caretX     = __glyx_measure_text(value.slice(0, focus_), fontSize, 1e6).width;
+    let sx = scrollXRef.current;
+    if (caretX - sx > visibleW) sx = caretX - visibleW;
+    if (caretX - sx < 0)        sx = caretX;
+    sx = Math.max(0, sx);
+    if (sx !== scrollXRef.current) {
+      scrollXRef.current = sx;
+      setScrollX(sx);
+    }
+  }, [focus_, value, fontSize, width, multiline]);
 
   // Keep handlersRef current so it always captures the latest state/props.
   handlersRef.current = {
@@ -888,22 +907,29 @@ export function TextInput({
       }
     },
     onClickAt: (relX, relY) => {
-      // Estimate character index from click position using avg char width heuristic.
       const padding = multiline ? 10 : 8;
       const textX   = relX - padding;
-      const avgW    = fontSize * 0.55; // rough avg glyph advance for most sans-serif fonts
 
       if (multiline) {
-        const lineHeight   = fontSize * 1.4;
-        const lineIdx      = Math.max(0, Math.floor((relY - padding) / lineHeight));
-        const lines        = value.split('\n');
-        const clampedLine  = Math.min(lineIdx, lines.length - 1);
-        const col          = Math.max(0, Math.min(Math.round(Math.max(0, textX) / avgW), lines[clampedLine].length));
+        // Multiline: find line by Y, then char by X within that line.
+        const lineHeight = fontSize * 1.4;
+        const lineIdx    = Math.max(0, Math.floor((relY - padding) / lineHeight));
+        const lines      = value.split('\n');
+        const clampedLine = Math.min(lineIdx, lines.length - 1);
+        const lineText   = lines[clampedLine];
+        const col = (typeof __glyx_text_char_at_x !== 'undefined')
+          ? __glyx_text_char_at_x(lineText, fontSize, 1e6, Math.max(0, textX))
+          : Math.max(0, Math.min(Math.round(Math.max(0, textX) / (fontSize * 0.55)), lineText.length));
         let pos = 0;
         for (let i = 0; i < clampedLine; i++) pos += lines[i].length + 1;
         moveCursor(pos + col);
       } else {
-        const col = Math.max(0, Math.min(Math.round(Math.max(0, textX) / avgW), value.length));
+        // Single-line: add scrollX offset so click maps to the correct character
+        // even when the text is shifted left.
+        const localX = Math.max(0, textX) + scrollXRef.current;
+        const col = (typeof __glyx_text_char_at_x !== 'undefined')
+          ? __glyx_text_char_at_x(value, fontSize, 1e6, localX)
+          : Math.max(0, Math.min(Math.round(localX / (fontSize * 0.55)), value.length));
         moveCursor(col);
       }
     },
@@ -958,6 +984,7 @@ export function TextInput({
       selectionStart: (focused && selStart < selEnd) ? selStart : undefined,
       selectionEnd:   (focused && selStart < selEnd) ? selEnd   : undefined,
       textAlign:      'left',
+      textScrollX:    multiline ? undefined : scrollX,
     })
   );
 }

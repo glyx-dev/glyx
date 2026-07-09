@@ -29,11 +29,13 @@ use std::sync::Once;
 use thiserror::Error;
 
 pub mod bindings;
+pub mod cap_loader;
 pub mod runtime;
 pub mod runtime_trait;
 pub mod snapshot;
 #[cfg(feature = "dev")]
 pub mod inspector;
+
 
 pub use runtime::{V8Runtime, HeapStats};
 pub use runtime_trait::JsRuntime;
@@ -46,6 +48,8 @@ pub use bindings::{
     IpcBus, IpcInbox, new_ipc_bus,
 };
 pub use snapshot::{SnapshotBlob, create_stub_bindings_script};
+pub use cap_loader::load_caps;
+pub use glyx_cap_abi::CapSet;
 
 // ── JS plugin type ────────────────────────────────────────────────────────────
 

@@ -23,6 +23,7 @@ members = [
     "examples/calculator",
     "crates/glyx-snapshot",
     "crates/glyx-media",
+    "crates/glyx-cap-abi",
 ]
 
 [workspace.dependencies]

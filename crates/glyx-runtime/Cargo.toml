@@ -40,6 +40,8 @@ glyx-media         = { path = "../glyx-media" }
 serde               = { workspace = true }
 glyx-3d            = { path = "../glyx-3d", optional = true }
 glyx-ai            = { path = "../glyx-ai", optional = true }
+glyx-cap-abi       = { path = "../glyx-cap-abi" }
+libloading         = { workspace = true }
 
 [features]
 default = ["v8", "full"]

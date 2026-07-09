@@ -2848,6 +2848,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "glyx-cap-abi"
+version = "0.1.0"
+
+[[package]]
 name = "glyx-cli"
 version = "0.1.0"
 dependencies = [
@@ -2998,6 +3002,7 @@ dependencies = [
  "global-hotkey",
  "glyx-3d",
  "glyx-ai",
+ "glyx-cap-abi",
  "glyx-db",
  "glyx-media",
  "glyx-perf",
@@ -3006,6 +3011,7 @@ dependencies = [
  "glyx-text",
  "hidapi",
  "keepawake",
+ "libloading",
  "log",
  "mdns-sd",
  "notify-rust",

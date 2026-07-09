@@ -424,11 +424,13 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
 
             let bw = rw;
             let bh = rh;
+            // text_scroll_x > 0 shifts text left (caret-follow for single-line inputs).
+            let scroll_x = node.props.text_scroll_x.unwrap_or(0.0) as f64;
             let tx = match align {
                 Some("center") => rx + (bw - label.width).max(0.0) / 2.0,
                 Some("right")  => rx + (bw - label.width).max(0.0),
                 _              => rx,   // left (CSS default)
-            };
+            } - scroll_x;
             // Vertically center the text's line box within the node box. `draw_text`
             // treats ty as the layout top (glyphs at ty + baseline), so standard
             // line-box centering is (bh - text_height)/2. For content-sized boxes

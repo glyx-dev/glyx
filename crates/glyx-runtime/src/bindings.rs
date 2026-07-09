@@ -283,6 +283,11 @@ pub struct NodeProps {
     /// Stable identifier used by `@glyx/testing` `getByTestId` queries.
     pub test_id: Option<String>,
 
+    // ── Text input scroll ─────────────────────────────────────────────────────
+    /// Horizontal scroll offset (px) for single-line text nodes inside a clipped
+    /// input.  Positive values shift the text left so the caret stays in view.
+    pub text_scroll_x: Option<f32>,
+
     // ── Camera ────────────────────────────────────────────────────────────────
     /// Handle ID returned by `__glyx_camera_open`. The render loop maps this
     /// to a `CameraStream` in `PerWindowState` and renders the live frame.
@@ -1345,6 +1350,7 @@ fn parse_props(
     props.draggable       = get_bool_prop(scope, obj, "draggable");
     props.pressable       = get_bool_prop(scope, obj, "pressable");
     props.test_id         = get_str_prop(scope, obj, "testID").map(|s| s.to_string());
+    props.text_scroll_x   = get_num_prop(scope, obj, "textScrollX").map(|v| v as f32);
     props.camera_handle   = get_num_prop(scope, obj, "cameraHandle").map(|v| v as u32);
     props.mirror          = get_bool_prop(scope, obj, "mirror");
     props.video_handle    = get_num_prop(scope, obj, "videoHandle").map(|v| v as u32);

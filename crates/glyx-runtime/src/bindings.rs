@@ -820,6 +820,9 @@ pub fn register_all(
     register!("__glyx_listDir",    list_dir_callback);
     register!("__glyx_deleteFile", delete_file_callback);
     register!("__glyx_mkdirp",     mkdirp_callback);
+    register!("__glyx_stat",       stat_callback);
+    register!("__glyx_rename",     rename_callback);
+    register!("__glyx_copyFile",   copy_file_callback);
 
     // ── SQLite database ─────────────────────────────────────────────────────
     register!("__glyx_db_open",        db_open_callback);
@@ -2148,6 +2151,110 @@ fn mkdirp_callback(
 
     state.tokio.spawn(async move {
         let result = tokio::fs::create_dir_all(&path)
+            .await
+            .map(|_| String::new())
+            .map_err(|e| e.to_string());
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__glyx_stat(path) -> Promise<string>` — JSON `{ size, mtime, isDir, isFile }`.
+fn stat_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let path = v8_arg_to_string(scope, &args, 0);
+    if !glyx_security::get().can_read_path(&path) {
+        rv.set(reject_promise_with_error(scope, &fs_denied_msg("read", &path)).into());
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result: Result<String, String> = async {
+            let meta  = tokio::fs::metadata(&path).await.map_err(|e| e.to_string())?;
+            let mtime = meta.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            serde_json::to_string(&serde_json::json!({
+                "size":   meta.len(),
+                "mtime":  mtime,
+                "isDir":  meta.is_dir(),
+                "isFile": meta.is_file(),
+            })).map_err(|e| e.to_string())
+        }
+        .await;
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__glyx_rename(src, dst) -> Promise<void>`
+fn rename_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let src = v8_arg_to_string(scope, &args, 0);
+    let dst = v8_arg_to_string(scope, &args, 1);
+    let sec = glyx_security::get();
+    if !sec.can_read_path(&src) {
+        rv.set(reject_promise_with_error(scope, &fs_denied_msg("read", &src)).into());
+        return;
+    }
+    if !sec.can_write_path(&dst) {
+        rv.set(reject_promise_with_error(scope, &fs_denied_msg("write", &dst)).into());
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::fs::rename(&src, &dst)
+            .await
+            .map(|_| String::new())
+            .map_err(|e| e.to_string());
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__glyx_copyFile(src, dst) -> Promise<void>`
+fn copy_file_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let src = v8_arg_to_string(scope, &args, 0);
+    let dst = v8_arg_to_string(scope, &args, 1);
+    let sec = glyx_security::get();
+    if !sec.can_read_path(&src) {
+        rv.set(reject_promise_with_error(scope, &fs_denied_msg("read", &src)).into());
+        return;
+    }
+    if !sec.can_write_path(&dst) {
+        rv.set(reject_promise_with_error(scope, &fs_denied_msg("write", &dst)).into());
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = tokio::fs::copy(&src, &dst)
             .await
             .map(|_| String::new())
             .map_err(|e| e.to_string());

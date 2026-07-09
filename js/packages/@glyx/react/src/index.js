@@ -1098,6 +1098,16 @@ export const fs = {
   deleteFile: (path)          => typeof __glyx_deleteFile !== 'undefined' ? __glyx_deleteFile(path)         : _noBinding('deleteFile'),
   /** Create a directory and all missing parents. Requires `fs.write`. */
   mkdirp:     (path)          => typeof __glyx_mkdirp     !== 'undefined' ? __glyx_mkdirp(path)             : _noBinding('mkdirp'),
+  /** Stat a file or directory. Resolves with `{ size, mtime, isDir, isFile }`. Requires `fs.read`. */
+  stat:       (path)          => typeof __glyx_stat       !== 'undefined' ? __glyx_stat(path).then(JSON.parse)   : _noBinding('stat'),
+  /** Rename (move) a file. Requires `fs.read` on src and `fs.write` on dst. */
+  rename:     (src, dst)      => typeof __glyx_rename     !== 'undefined' ? __glyx_rename(src, dst)         : _noBinding('rename'),
+  /** Copy a file. Requires `fs.read` on src and `fs.write` on dst. */
+  copy:       (src, dst)      => typeof __glyx_copyFile   !== 'undefined' ? __glyx_copyFile(src, dst)       : _noBinding('copy'),
+  /** Read a file as UTF-8 and parse as JSON. Requires `fs.read`. */
+  readJSON:   async (path)          => JSON.parse(await fs.readFile(path)),
+  /** Serialize `value` to JSON and write to a file. Requires `fs.write`. */
+  writeJSON:  async (path, val, indent = 2) => fs.writeFile(path, JSON.stringify(val, null, indent)),
 };
 
 // ── SQLite database API ───────────────────────────────────────────────────────

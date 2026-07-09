@@ -184,6 +184,9 @@ export function installStubs() {
   globalThis.__glyx_listDir        = () => spArr();
   globalThis.__glyx_deleteFile     = () => sp(undefined);
   globalThis.__glyx_mkdirp         = () => sp(undefined);
+  globalThis.__glyx_stat           = () => sp('{"size":0,"mtime":0,"isDir":false,"isFile":true}');
+  globalThis.__glyx_rename         = () => sp(undefined);
+  globalThis.__glyx_copyFile       = () => sp(undefined);
 
   // DB
   let _dbHandle = 1;

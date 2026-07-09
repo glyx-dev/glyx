@@ -694,6 +694,9 @@ fn cmd_dev(inspect: Option<u16>) -> Result<()> {
         println!("✓ JS built");
     }
 
+    // --inspect flag takes priority; fall back to dev.inspect from config.
+    let inspect = inspect.or_else(read_dev_inspect_port);
+
     if let Some(port) = inspect {
         println!("Starting dev server for '{project_name}' (hot reload + CDP inspector on :{port})...");
         println!("  Open chrome://inspect and add 127.0.0.1:{port} under Discover network targets.");
@@ -2453,6 +2456,24 @@ fn read_dev_config() -> Option<(String, String)> {
     let cfg: Cfg = serde_json::from_str(&src).ok()?;
     let dev = cfg.dev?;
     Some((dev.entry?, dev.output?))
+}
+
+/// Read `dev.inspect` from glyx.config.ts/.json.
+/// Returns `Some(port)` if inspect is enabled, `None` otherwise.
+fn read_dev_inspect_port() -> Option<u16> {
+    #[derive(serde::Deserialize)]
+    struct Cfg { dev: Option<DevSection> }
+    #[derive(serde::Deserialize)]
+    struct DevSection { inspect: Option<serde_json::Value> }
+    let src = resolve_config_json().ok()?;
+    let cfg: Cfg = serde_json::from_str(&src).ok()?;
+    let inspect = cfg.dev?.inspect?;
+    match inspect {
+        serde_json::Value::Bool(true)    => Some(9229),
+        serde_json::Value::Bool(false)   => None,
+        serde_json::Value::Number(n)     => n.as_u64().map(|p| p as u16),
+        _                                => None,
+    }
 }
 
 fn bun_build(entry: &str, output: &str) -> Result<()> {

@@ -101,9 +101,13 @@ export interface PluginConfig {
 }
 
 export interface DevConfig {
-  entry?:  string;
-  output?: string;
-  watch?:  string[];
+  entry?:   string;
+  output?:  string;
+  watch?:   string[];
+  /** Enable the Chrome DevTools Protocol inspector in `glyx dev`.
+   *  `true` uses the default port (9229). Pass a number to use a custom port.
+   *  Equivalent to `glyx dev --inspect` on the command line. */
+  inspect?: boolean | number;
 }
 
 export interface GlyxConfig {

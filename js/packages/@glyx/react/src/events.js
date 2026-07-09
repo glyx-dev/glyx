@@ -353,6 +353,27 @@ function isDisabled(nodeId) {
   return disabledRegistry.has(nodeId);
 }
 
+/**
+ * Find the scroll view that should receive keyboard scroll keys.
+ * Walks up from `fromNodeId` (if set) to find the nearest scroll ancestor,
+ * then falls back to the topmost scroll view the cursor is over.
+ * @param {number|null} fromNodeId
+ * @returns {number|null}
+ */
+function findScrollTarget(fromNodeId) {
+  if (fromNodeId !== null) {
+    let id = parentMap.get(fromNodeId);
+    while (id !== undefined) {
+      if (scrollRegistry.has(id)) return id;
+      id = parentMap.get(id);
+    }
+  }
+  for (const [nodeId] of [...scrollRegistry].reverse()) {
+    if (hitTest(nodeId, cursorX, cursorY)) return nodeId;
+  }
+  return null;
+}
+
 /** Returns true when `ancestorId` is a direct or indirect parent of `descendantId`. */
 function isAncestorOf(ancestorId, descendantId) {
   let id = parentMap.get(descendantId);
@@ -499,7 +520,36 @@ export function dispatchEvents() {
           for (const fn of keyListeners) try { fn(kev); } catch {}
         }
 
-        if (!ev.pressed || focusedNodeId === null) break;
+        if (!ev.pressed) break;
+
+        // Scroll-navigation keys: route to nearest scroll ancestor of the focused node,
+        // or the topmost scroll view the cursor is over when nothing is focused.
+        // PageUp/Down and Ctrl+Home/End always scroll (TextInput doesn't use them).
+        // ArrowUp/Down only scroll when no text input is focused.
+        {
+          const k = ev.key;
+          const isPageKey  = k === 'PageUp' || k === 'PageDown';
+          const isJumpKey  = ctrlHeld && (k === 'Home' || k === 'End');
+          const isArrowKey = (k === 'ArrowUp' || k === 'ArrowDown') && focusedNodeId === null;
+          if (isPageKey || isJumpKey || isArrowKey) {
+            const target = findScrollTarget(focusedNodeId);
+            if (target !== null) {
+              const sh     = scrollRegistry.get(target);
+              const layout = __glyx_getLayout(target);
+              const viewH  = layout ? layout.height : 200;
+              const LINE   = 24;
+              if      (k === 'ArrowUp')   sh.onScroll?.(-(LINE));
+              else if (k === 'ArrowDown') sh.onScroll?.(LINE);
+              else if (k === 'PageUp')    sh.onScroll?.(-(viewH - LINE));
+              else if (k === 'PageDown')  sh.onScroll?.(viewH - LINE);
+              else if (k === 'Home')      sh.onAbsoluteScroll?.(0);
+              else if (k === 'End')       sh.onAbsoluteScroll?.(999999);
+            }
+            break;
+          }
+        }
+
+        if (focusedNodeId === null) break;
 
         const handlers = inputRegistry.get(focusedNodeId);
         if (!handlers) break;

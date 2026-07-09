@@ -1294,6 +1294,41 @@ export const fs = {
 //     await db.run('INSERT INTO logs ...', []);         // uses default (h2)
 
 let _defaultHandle = null;
+const _dbBackupTimers = new Map(); // handle → intervalId
+
+function _parseInterval(s) {
+  const map = { '1h': 3600000, '6h': 21600000, '12h': 43200000, '24h': 86400000, 'daily': 86400000 };
+  if (map[s]) return map[s];
+  const m = String(s).match(/^(\d+)(ms|s|m|h|d)$/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  const unit = { ms: 1, s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2]];
+  return n * unit;
+}
+
+async function _runBackup(handle, dir, keep) {
+  // Build a filename like: app-2026-07-09T14-00-00.sqlite
+  const now = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+  const destPath = `${dir}/backup-${now}.sqlite`;
+  await db.backup(handle, destPath);
+  console.log(`[db] backup written to "${destPath}"`);
+
+  // Prune old backups: list dir, filter backup-*.sqlite, delete oldest.
+  if (typeof __glyx_listDir !== 'undefined' && keep > 0) {
+    try {
+      const entries = JSON.parse(await __glyx_listDir(dir));
+      const backups = entries
+        .filter(e => /^backup-\d{4}-\d{2}-\d{2}T[\d-]+\.sqlite$/.test(e.name ?? e))
+        .map(e => e.name ?? e)
+        .sort();
+      const toDelete = backups.slice(0, Math.max(0, backups.length - keep));
+      for (const name of toDelete) {
+        await __glyx_deleteFile(`${dir}/${name}`);
+        console.log(`[db] pruned old backup "${name}"`);
+      }
+    } catch (_) {}
+  }
+}
 
 /** Resolve the handle: explicit number > default > error. */
 function _dbHandle(h) {
@@ -1495,6 +1530,76 @@ export const db = {
    *                ['Welcome','Hello from Glyx!']);
    * });
    */
+  /**
+   * Create an atomic online backup of the database.
+   * Uses SQLite's `VACUUM INTO` — works with WAL mode, does not block reads/writes.
+   *
+   * Overloaded — handle is optional when a default is set:
+   *   await db.backup('./backups/app-2026-07-09.sqlite')
+   *   await db.backup(handle, './backups/app.sqlite')
+   *
+   * The destination directory is created automatically.
+   * Any existing file at destPath is overwritten atomically.
+   *
+   * @returns {Promise<void>}
+   */
+  backup: (handleOrPath, pathOrUndef) => {
+    const isExplicit = typeof handleOrPath === 'number';
+    const handle = isExplicit ? handleOrPath : _dbHandle(null);
+    const path   = isExplicit ? pathOrUndef  : handleOrPath;
+    if (!path) throw new Error('db.backup: destination path is required');
+    return typeof __glyx_db_backup !== 'undefined'
+      ? __glyx_db_backup(handle, path)
+      : _noBinding('db.backup');
+  },
+
+  /**
+   * Configure automatic backups for an open database.
+   *
+   * Options:
+   *   dir      — backup directory (relative to app data dir, or absolute)
+   *   interval — schedule: '1h', '6h', '12h', '24h', or milliseconds
+   *   keep     — number of backup files to retain (oldest pruned, default 5)
+   *   compress — not yet supported (reserved)
+   *
+   * Backups are named: `<basename>-<ISO8601>.sqlite`
+   *   e.g. `app-2026-07-09T02-00-00.sqlite`
+   *
+   * Overloaded — handle is optional when a default is set:
+   *   db.config({ backup: { dir: './backups', interval: '1h', keep: 5 } })
+   *   db.config(handle, { backup: { dir: './backups', interval: '24h' } })
+   *
+   * Call `db.config()` with the same handle to cancel the existing schedule.
+   */
+  config: (handleOrOpts, optsOrUndef) => {
+    const isExplicit = typeof handleOrOpts === 'number';
+    const handle = isExplicit ? handleOrOpts : _dbHandle(null);
+    const opts   = isExplicit ? optsOrUndef  : handleOrOpts;
+
+    // Cancel any previous auto-backup timer for this handle.
+    if (_dbBackupTimers.has(handle)) {
+      clearInterval(_dbBackupTimers.get(handle));
+      _dbBackupTimers.delete(handle);
+    }
+
+    if (!opts?.backup) return;
+    const { dir = './backups', interval = '24h', keep = 5 } = opts.backup;
+
+    const ms = typeof interval === 'number' ? interval : _parseInterval(interval);
+    if (!ms || ms <= 0) throw new Error(`db.config: invalid interval "${interval}"`);
+
+    const timer = setInterval(async () => {
+      try {
+        await _runBackup(handle, dir, keep);
+      } catch (e) {
+        console.warn('[db] auto-backup failed:', e?.message ?? e);
+      }
+    }, ms);
+
+    _dbBackupTimers.set(handle, timer);
+    console.log(`[db] auto-backup scheduled every ${interval}, dir="${dir}", keep=${keep}`);
+  },
+
   seed: async (handleOrNameOrFn, nameOrFnOrUndef, fnOrUndef) => {
     let handle, name, fn;
 

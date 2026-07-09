@@ -842,6 +842,7 @@ pub fn register_all(
     register!("__glyx_db_run",         db_run_callback);
     register!("__glyx_db_close",       db_close_callback);
     register!("__glyx_db_transaction", db_transaction_callback);
+    register!("__glyx_db_backup",      db_backup_callback);
 
     // ── Vector database ─────────────────────────────────────────────────────
     register!("__glyx_vectorDb_open",   vectordb_open_callback);
@@ -2564,6 +2565,62 @@ fn db_transaction_callback(
             Ok(String::new())
         }
         .await;
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+/// `__glyx_db_backup(handle, destPath) → Promise<void>`
+///
+/// Creates an atomic online backup of the database at `destPath` using
+/// SQLite's `VACUUM INTO` pragma.  Works correctly with WAL mode and
+/// does not block reads/writes on the source database.
+/// The destination file is created if it does not exist; any existing file
+/// is overwritten atomically (VACUUM INTO writes a temp file then renames).
+fn db_backup_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !glyx_security::get().db {
+        rv.set(reject_cap_promise(scope, "db").into());
+        return;
+    }
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let handle   = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let dest_path = v8_arg_to_string(scope, &args, 1);
+
+    let pool = match state.db_pools.lock().get(&handle).cloned() {
+        Some(p) => p,
+        None    => {
+            rv.set(reject_promise_with_error(scope, "db.backup: unknown handle").into());
+            return;
+        }
+    };
+
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    state.tokio.spawn(async move {
+        let result = async {
+            // Ensure the destination directory exists.
+            if let Some(parent) = std::path::Path::new(&dest_path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    tokio::fs::create_dir_all(parent).await
+                        .map_err(|e| format!("db.backup: mkdir '{dest_path}': {e}"))?;
+                }
+            }
+            // VACUUM INTO creates an atomic, defragmented copy of the database.
+            // It works with WAL mode and doesn't block the source.
+            let escaped = dest_path.replace('\'', "''");
+            let sql = format!("VACUUM INTO '{escaped}'");
+            glyx_db::run(&pool, &sql, vec![])
+                .await
+                .map_err(|e| format!("db.backup: {e}"))?;
+            Ok(String::new())
+        }.await;
         enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }

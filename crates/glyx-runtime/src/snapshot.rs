@@ -72,6 +72,7 @@ globalThis.__glyx_db_query = function() { return stubPromise('[]'); };
 globalThis.__glyx_db_run = function() { return stubPromise('{\"rowsAffected\":0,\"lastInsertId\":0}'); };
 globalThis.__glyx_db_close = function() { return stubPromise(undefined); };
 globalThis.__glyx_db_transaction = function() { return stubPromise(undefined); };
+globalThis.__glyx_db_backup      = function() { return stubPromise(undefined); };
 
 // Vector database bindings
 globalThis.__glyx_vectorDb_open = function() { return stubPromise(String(__glyx_nextVectorHandle++)); };

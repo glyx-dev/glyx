@@ -2780,6 +2780,58 @@ fn copy_runtime_files(dest_root: &Path) -> Result<()> {
     if assets_dir.exists() { copy_dir_all(&assets_dir, &dest_root.join("assets"))?; }
     let migrations_dir = PathBuf::from("migrations");
     if migrations_dir.exists() { copy_dir_all(&migrations_dir, &dest_root.join("migrations"))?; }
+
+    // Hash any capability modules present in the project root and write
+    // glyx-caps.lock next to the exe so the runtime can verify them at startup.
+    write_caps_lock(dest_root)?;
+
+    Ok(())
+}
+
+/// Scan for `glyx_cap_*.{dll,so,dylib}` in the current directory (where the
+/// developer placed their capability modules), compute SHA-256 for each, and
+/// write `glyx-caps.lock` into `dest_root` (next to the final binary).
+fn write_caps_lock(dest_root: &Path) -> Result<()> {
+    use sha2::{Sha256, Digest};
+
+    let extensions: &[&str] = if cfg!(target_os = "windows") { &["dll"] }
+        else if cfg!(target_os = "macos") { &["dylib"] }
+        else { &["so"] };
+
+    let cap_names = ["audio", "ai", "camera", "gamepad", "hid"];
+    let mut hashes = serde_json::Map::new();
+
+    for cap in &cap_names {
+        let stem = format!("glyx_cap_{cap}");
+        for ext in extensions {
+            // On macOS/Linux the lib prefix is optional depending on how the
+            // developer built their module; check both.
+            for prefix in &["", "lib"] {
+                let filename = format!("{prefix}{stem}.{ext}");
+                let path = PathBuf::from(&filename);
+                if path.exists() {
+                    let bytes = std::fs::read(&path)
+                        .with_context(|| format!("read {filename}"))?;
+                    let hex = format!("{:x}", Sha256::digest(&bytes));
+                    hashes.insert(cap.to_string(), serde_json::Value::String(hex));
+                    // Copy the module into the dist dir alongside the binary.
+                    std::fs::copy(&path, dest_root.join(&filename))
+                        .with_context(|| format!("copy {filename} to dist"))?;
+                    println!("Capability module: {filename} (hash pinned in glyx-caps.lock)");
+                    break;
+                }
+            }
+        }
+    }
+
+    if !hashes.is_empty() {
+        let count = hashes.len();
+        let lock = serde_json::to_string_pretty(&serde_json::Value::Object(hashes))?;
+        std::fs::write(dest_root.join("glyx-caps.lock"), lock)
+            .context("write glyx-caps.lock")?;
+        println!("glyx-caps.lock written ({count} module(s) pinned)");
+    }
+
     Ok(())
 }
 

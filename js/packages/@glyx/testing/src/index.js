@@ -200,6 +200,7 @@ export function installStubs() {
   globalThis.__glyx_db_run         = () => sp('{"rowsAffected":0,"lastInsertId":0}');
   globalThis.__glyx_db_close       = () => sp(undefined);
   globalThis.__glyx_db_transaction = () => sp(undefined);
+  globalThis.__glyx_db_backup      = () => sp(undefined);
 
   // Network
   globalThis.__glyx_fetch          = () => sp('{"status":200,"ok":true,"body":"","headers":{}}');

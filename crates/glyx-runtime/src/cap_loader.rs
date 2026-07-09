@@ -17,6 +17,9 @@
 //! The loader runs once at startup (called from `GlyxRuntime::new`).  The
 //! resulting `CapSet` is immutable for the lifetime of the process.
 
+use std::collections::HashMap;
+use sha2::{Sha256, Digest};
+use serde_json::Value;
 use glyx_cap_abi::{
     ABI_VERSION, ABI_VERSION_MIN,
     AudioCap, AiCap, CameraCap, GamepadCap, HidCap,
@@ -24,9 +27,41 @@ use glyx_cap_abi::{
     CapSet,
 };
 
+// ── Hash verification ─────────────────────────────────────────────────────────
+
+/// Compute the lowercase hex SHA-256 of a file.
+fn sha256_file(path: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let hash = Sha256::digest(&bytes);
+    Some(format!("{hash:x}"))
+}
+
+/// Verify the file at `path` against `expected` (lowercase hex).
+/// Returns `true` if the hashes match, `false` with a warning otherwise.
+fn verify_hash(path: &std::path::Path, cap_name: &str, expected: &str) -> bool {
+    match sha256_file(path) {
+        None => {
+            log::warn!("[cap] Could not read {:?} for hash verification", path);
+            false
+        }
+        Some(actual) if actual != expected.to_lowercase() => {
+            log::error!(
+                "[cap] SHA-256 mismatch for capability '{cap_name}' — \
+                 expected {expected}, got {actual}. Refusing to load."
+            );
+            false
+        }
+        Some(_) => true,
+    }
+}
+
 // ── Loader ────────────────────────────────────────────────────────────────────
 
 /// Try to load a capability DLL next to the running executable.
+///
+/// - If `expected_hash` is `Some`, the file's SHA-256 must match before loading.
+/// - If `expected_hash` is `None`, the file loads unchecked (a warning is
+///   logged in non-debug builds so developers know to pin the hash).
 ///
 /// Returns `Some(&'static Cap)` if the DLL is present and its ABI version is
 /// compatible; logs a warning and returns `None` otherwise.
@@ -35,7 +70,12 @@ use glyx_cap_abi::{
 /// The loaded library is intentionally leaked so the vtable pointer is
 /// `'static`.  Safe because capability DLLs are never unloaded.
 #[allow(dead_code)]
-unsafe fn try_load_dynamic<Cap>(lib_stem: &str, symbol: &[u8]) -> Option<&'static Cap> {
+unsafe fn try_load_dynamic<Cap>(
+    cap_name: &str,
+    lib_stem: &str,
+    symbol: &[u8],
+    expected_hash: Option<&str>,
+) -> Option<&'static Cap> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
 
@@ -45,6 +85,24 @@ unsafe fn try_load_dynamic<Cap>(lib_stem: &str, symbol: &[u8]) -> Option<&'stati
 
     let path = dir.join(format!("{lib_stem}{ext}"));
     if !path.exists() { return None; }
+
+    // ── Hash verification ────────────────────────────────────────────────────
+    match expected_hash {
+        Some(hash) => {
+            if !verify_hash(&path, cap_name, hash) {
+                return None;
+            }
+        }
+        None => {
+            // No hash declared — allow but warn in release builds so
+            // developers are reminded to pin the hash before shipping.
+            #[cfg(not(debug_assertions))]
+            log::warn!(
+                "[cap] No SHA-256 hash declared for capability '{cap_name}'. \
+                 Set cap_hashes[\"{cap_name}\"] in glyx.config.json before shipping."
+            );
+        }
+    }
 
     let lib = match libloading::Library::new(&path) {
         Ok(l)  => l,
@@ -59,7 +117,6 @@ unsafe fn try_load_dynamic<Cap>(lib_stem: &str, symbol: &[u8]) -> Option<&'stati
             Ok(s)  => s,
             Err(e) => { log::warn!("[cap] Symbol missing in {:?}: {e}", path); return None; }
         };
-        // Copy the fn pointer out of the Symbol (fn ptrs are Copy).
         *sym
     }; // Symbol dropped here — borrow on `lib` ends.
 
@@ -82,57 +139,77 @@ unsafe fn try_load_dynamic<Cap>(lib_stem: &str, symbol: &[u8]) -> Option<&'stati
         return None;
     }
 
-    log::info!("[cap] Loaded dynamic capability from {:?}", path);
+    log::info!("[cap] Loaded dynamic capability '{cap_name}' from {:?}", path);
     Some(&*cap_ptr)
+}
+
+/// Load pinned hashes from `glyx-caps.lock` next to the executable.
+///
+/// The lock file is generated automatically by `glyx package`. Its absence is
+/// fine in dev mode; in release builds the loader warns per-module if a hash
+/// is missing.
+fn load_lock_file() -> HashMap<String, String> {
+    let Ok(exe) = std::env::current_exe() else { return HashMap::new() };
+    let Some(dir) = exe.parent() else { return HashMap::new() };
+    let lock_path = dir.join("glyx-caps.lock");
+    let Ok(contents) = std::fs::read_to_string(&lock_path) else { return HashMap::new() };
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&contents) else {
+        log::warn!("[cap] glyx-caps.lock is malformed — ignoring");
+        return HashMap::new();
+    };
+    map.into_iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+        .collect()
 }
 
 /// Resolve all capabilities and return a `CapSet`.
 ///
-/// Called once at process startup.  For each capability the static
-/// implementation (if compiled in) takes precedence over the dynamic DLL.
+/// Hashes are read automatically from `glyx-caps.lock` (generated by
+/// `glyx package`) — no manual configuration required.
+///
+/// Called once at process startup.  The static implementation (if compiled in)
+/// takes precedence over any dynamic DLL for the same capability.
 pub fn load_caps() -> CapSet {
+    let hashes = load_lock_file();
     CapSet {
-        audio:   load_audio(),
-        ai:      load_ai(),
-        camera:  load_camera(),
-        gamepad: load_gamepad(),
-        hid:     load_hid(),
+        audio:   load_audio(hashes.get("audio").map(String::as_str)),
+        ai:      load_ai(hashes.get("ai").map(String::as_str)),
+        camera:  load_camera(hashes.get("camera").map(String::as_str)),
+        gamepad: load_gamepad(hashes.get("gamepad").map(String::as_str)),
+        hid:     load_hid(hashes.get("hid").map(String::as_str)),
     }
 }
 
 // ── Per-capability loaders ────────────────────────────────────────────────────
 
-fn load_audio() -> Option<&'static AudioCap> {
-    // Static implementation lives in bindings.rs (#[cfg(feature="audio")]).
-    // When not compiled in, try to load a dynamic module.
+fn load_audio(hash: Option<&str>) -> Option<&'static AudioCap> {
     #[cfg(feature = "audio")]
-    { return None; } // static path active; no vtable routing yet (Phase 2)
+    { let _ = hash; return None; } // static path active
     #[cfg(not(feature = "audio"))]
-    unsafe { try_load_dynamic::<AudioCap>("glyx_cap_audio", SYM_AUDIO) }
+    unsafe { try_load_dynamic::<AudioCap>("audio", "glyx_cap_audio", SYM_AUDIO, hash) }
 }
 
-fn load_ai() -> Option<&'static AiCap> {
+fn load_ai(hash: Option<&str>) -> Option<&'static AiCap> {
     #[cfg(feature = "ai")]
-    { return None; }
+    { let _ = hash; return None; }
     #[cfg(not(feature = "ai"))]
-    unsafe { try_load_dynamic::<AiCap>("glyx_cap_ai", SYM_AI) }
+    unsafe { try_load_dynamic::<AiCap>("ai", "glyx_cap_ai", SYM_AI, hash) }
 }
 
-fn load_camera() -> Option<&'static CameraCap> {
-    // No static camera feature yet — always try dynamic.
-    unsafe { try_load_dynamic::<CameraCap>("glyx_cap_camera", SYM_CAMERA) }
+fn load_camera(hash: Option<&str>) -> Option<&'static CameraCap> {
+    unsafe { try_load_dynamic::<CameraCap>("camera", "glyx_cap_camera", SYM_CAMERA, hash) }
 }
 
-fn load_gamepad() -> Option<&'static GamepadCap> {
+fn load_gamepad(hash: Option<&str>) -> Option<&'static GamepadCap> {
     #[cfg(feature = "gamepad")]
-    { return None; }
+    { let _ = hash; return None; }
     #[cfg(not(feature = "gamepad"))]
-    unsafe { try_load_dynamic::<GamepadCap>("glyx_cap_gamepad", SYM_GAMEPAD) }
+    unsafe { try_load_dynamic::<GamepadCap>("gamepad", "glyx_cap_gamepad", SYM_GAMEPAD, hash) }
 }
 
-fn load_hid() -> Option<&'static HidCap> {
+fn load_hid(hash: Option<&str>) -> Option<&'static HidCap> {
     #[cfg(feature = "hid")]
-    { return None; }
+    { let _ = hash; return None; }
     #[cfg(not(feature = "hid"))]
-    unsafe { try_load_dynamic::<HidCap>("glyx_cap_hid", SYM_HID) }
+    unsafe { try_load_dynamic::<HidCap>("hid", "glyx_cap_hid", SYM_HID, hash) }
 }

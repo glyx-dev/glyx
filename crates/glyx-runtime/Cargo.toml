@@ -34,7 +34,7 @@ global-hotkey       = { workspace = true }
 rodio               = { workspace = true, optional = true }
 hidapi              = { workspace = true, optional = true }
 self_update         = { workspace = true, optional = true }
-sha2                = { workspace = true, optional = true }
+sha2                = { workspace = true }
 ed25519-dalek       = { workspace = true, optional = true }
 glyx-media         = { path = "../glyx-media" }
 serde               = { workspace = true }
@@ -55,6 +55,6 @@ gamepad  = ["dep:gilrs"]
 canvas3d = ["dep:glyx-3d"]
 ai       = ["dep:glyx-ai"]
 hid      = ["dep:hidapi"]
-updater  = ["dep:self_update", "dep:sha2", "dep:ed25519-dalek"]
+updater  = ["dep:self_update", "dep:ed25519-dalek"]
 # jsc = []    # future: JavaScriptCore (iOS/macOS)
 # quickjs = [] # future: QuickJS (embedded/WASM)

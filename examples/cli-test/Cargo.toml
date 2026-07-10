@@ -1,9 +1,0 @@
-[package]
-name    = "cli-test"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-glyx-core  = { path = "../../crates/glyx-core" }
-glyx-shell = { path = "../../crates/glyx-shell" }
-env_logger  = { workspace = true }

@@ -41,22 +41,28 @@ serde               = { workspace = true }
 glyx-3d            = { path = "../glyx-3d", optional = true }
 glyx-ai            = { path = "../glyx-ai", optional = true }
 glyx-cap-abi       = { path = "../glyx-cap-abi" }
+glyx-cap-audio     = { path = "../glyx-cap-audio", optional = true }
+glyx-cap-ai        = { path = "../glyx-cap-ai", optional = true }
+glyx-cap-gamepad   = { path = "../glyx-cap-gamepad", optional = true }
+glyx-cap-hid       = { path = "../glyx-cap-hid", optional = true }
+glyx-cap-camera    = { path = "../glyx-cap-camera", optional = true }
 glyx-macros        = { path = "../glyx-macros" }
 libloading         = { workspace = true }
 notify             = { workspace = true }
 
 [features]
-default = ["v8", "full"]
+default = ["v8"]
 v8 = []       # V8 backend (current only backend; rusty_v8 dep is always required for now)
 dev = []      # dev overlay, hot-reload, CDP inspector
 full     = ["audio", "gamepad", "canvas3d", "ai", "hid", "updater", "fetch", "websocket"]
 fetch     = ["dep:reqwest"]
 websocket = ["dep:tokio-tungstenite", "dep:futures-util"]
-audio    = ["dep:rodio"]
-gamepad  = ["dep:gilrs"]
+audio    = ["dep:rodio", "dep:glyx-cap-audio"]
+gamepad  = ["dep:gilrs", "dep:glyx-cap-gamepad"]
 canvas3d = ["dep:glyx-3d"]
-ai       = ["dep:glyx-ai"]
-hid      = ["dep:hidapi"]
+ai       = ["dep:glyx-ai", "dep:glyx-cap-ai"]
+hid      = ["dep:hidapi", "dep:glyx-cap-hid"]
+camera   = ["dep:glyx-cap-camera"]
 updater  = ["dep:self_update", "dep:ed25519-dalek"]
 # jsc = []    # future: JavaScriptCore (iOS/macOS)
 # quickjs = [] # future: QuickJS (embedded/WASM)

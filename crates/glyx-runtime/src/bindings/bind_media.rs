@@ -1,4 +1,6 @@
-﻿use super::*;
+use super::*;
+
+#[cfg(feature = "audio")]
 pub fn audio_play_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -329,7 +331,214 @@ pub fn audio_seek_callback(
     rv.set(promise.into());
 }
 
+#[cfg(not(feature = "audio"))]
+pub fn audio_play_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !glyx_security::get().audio {
+        rv.set(reject_cap_promise(scope, "audio").into()); return;
+    }
+    let cap = match state.caps.audio {
+        Some(c) => c,
+        None => { rv.set(reject_promise_with_error(scope, "audio capability not loaded").into()); return; }
+    };
+    let src = args.get(0).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+    let opts_raw = args.get(1).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_else(|| "{}".into());
+    let volume: f32 = serde_json::from_str::<serde_json::Value>(&opts_raw)
+        .ok()
+        .and_then(|v| v.get("volume").and_then(|v| v.as_f64()).map(|f| f as f32))
+        .unwrap_or(1.0);
+    let looping: u8 = serde_json::from_str::<serde_json::Value>(&opts_raw)
+        .ok()
+        .and_then(|v| v.get("loop").and_then(|v| v.as_bool()))
+        .map(|b| b as u8)
+        .unwrap_or(0);
+    let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let path_b = src.as_bytes();
+            let id = unsafe { (cap.play)(path_b.as_ptr(), path_b.len(), volume, looping) };
+            if id == 0 { return Err("audio.play vtable error".to_string()); }
+            Ok(id.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result });
+    });
+}
+
+#[cfg(not(feature = "audio"))]
+pub fn audio_pause_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    if let Some(cap) = state.caps.audio { unsafe { (cap.pause)(id) }; }
+}
+
+#[cfg(not(feature = "audio"))]
+pub fn audio_resume_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    if let Some(cap) = state.caps.audio { unsafe { (cap.resume)(id) }; }
+}
+
+#[cfg(not(feature = "audio"))]
+pub fn audio_stop_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    if let Some(cap) = state.caps.audio { unsafe { (cap.stop)(id) }; }
+}
+
+#[cfg(not(feature = "audio"))]
+pub fn audio_set_volume_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let id  = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let vol = args.get(1).number_value(scope).unwrap_or(1.0) as f32;
+    if let Some(cap) = state.caps.audio { unsafe { (cap.set_volume)(id, vol.clamp(0.0, 2.0)) }; }
+}
+
+#[cfg(not(feature = "audio"))]
+pub fn audio_get_volume_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let id  = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let vol = state.caps.audio
+        .map(|cap| unsafe { (cap.get_volume)(id) })
+        .unwrap_or(1.0);
+    rv.set(v8::Number::new(scope, vol as f64).into());
+}
+
+#[cfg(not(feature = "audio"))]
+pub fn audio_poll_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let _ = args;
+    let json = if let Some(cap) = state.caps.audio {
+        let mut buf = vec![0u8; 4096];
+        let mut out_len: usize = 0;
+        unsafe { (cap.poll)(buf.as_mut_ptr(), &mut out_len, buf.len()) };
+        if out_len > 0 {
+            String::from_utf8_lossy(&buf[..out_len]).into_owned()
+        } else {
+            "[]".to_string()
+        }
+    } else {
+        "[]".to_string()
+    };
+    let s = v8::String::new(scope, &json).unwrap();
+    rv.set(s.into());
+}
+
+#[cfg(not(feature = "audio"))]
+pub fn audio_get_time_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let t  = state.caps.audio
+        .map(|cap| unsafe { (cap.get_time)(id) })
+        .unwrap_or(0.0);
+    rv.set(v8::Number::new(scope, t).into());
+}
+
+#[cfg(not(feature = "audio"))]
+pub fn audio_duration_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let id  = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let cap = match state.caps.audio {
+        Some(c) => c,
+        None => { rv.set(reject_promise_with_error(scope, "audio capability not loaded").into()); return; }
+    };
+    let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let dur = unsafe { (cap.duration)(id) };
+            Ok(dur.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result });
+    });
+}
+
+#[cfg(not(feature = "audio"))]
+pub fn audio_seek_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let id   = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let secs = args.get(1).number_value(scope).unwrap_or(0.0).max(0.0);
+    let cap = match state.caps.audio {
+        Some(c) => c,
+        None => { rv.set(reject_promise_with_error(scope, "audio capability not loaded").into()); return; }
+    };
+    let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            unsafe { (cap.seek)(id, secs) };
+            Ok("null".to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result });
+    });
+}
+
 /// Parse `"ctrl+shift+v"` into a `global_hotkey::hotkey::HotKey`.
+#[cfg(feature = "camera")]
 pub fn camera_list_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -358,6 +567,7 @@ pub fn camera_list_callback(
 }
 
 /// `__glyx_camera_open(deviceIndex) â†’ Promise<string>` â€” resolves with handle ID string.
+#[cfg(feature = "camera")]
 pub fn camera_open_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -393,6 +603,7 @@ pub fn camera_open_callback(
 }
 
 /// `__glyx_camera_close(handleId)` â€” sync. Pushes CloseCamera scene command.
+#[cfg(feature = "camera")]
 pub fn camera_close_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -412,6 +623,7 @@ pub fn camera_close_callback(
 
 /// `__glyx_camera_capture(handleId) â†’ Promise<string>` â€” saves current frame as PNG.
 /// Resolves with the absolute path to the saved PNG file.
+#[cfg(feature = "camera")]
 pub fn camera_capture_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -446,6 +658,7 @@ pub fn camera_capture_callback(
 }
 
 /// `__glyx_camera_record_start(handleId, outputPath)` â€” sync. Starts MP4 recording via ffmpeg.
+#[cfg(feature = "camera")]
 pub fn camera_record_start_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -466,6 +679,7 @@ pub fn camera_record_start_callback(
 
 /// `__glyx_camera_record_stop(handleId) â†’ Promise<string>` â€” stops recording.
 /// Resolves with the absolute path to the finished MP4 file.
+#[cfg(feature = "camera")]
 pub fn camera_record_stop_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -491,6 +705,165 @@ pub fn camera_record_stop_callback(
 
     state.tokio.spawn(async move {
         let result = rx.await.unwrap_or_else(|_| Err("record-stop channel closed".to_string()));
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+#[cfg(not(feature = "camera"))]
+pub fn camera_list_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !glyx_security::get().camera {
+        rv.set(reject_cap_promise(scope, "camera").into()); return;
+    }
+    let cap = match state.caps.camera {
+        Some(c) => c,
+        None => { rv.set(reject_promise_with_error(scope, "camera capability not loaded").into()); return; }
+    };
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut buf = vec![0u8; 65536];
+            let mut out_len: usize = 0;
+            let rc = unsafe { (cap.list)(buf.as_mut_ptr(), &mut out_len, buf.len()) };
+            if rc != 0 { return Err(format!("camera.list vtable error: {rc}")); }
+            Ok(String::from_utf8_lossy(&buf[..out_len]).into_owned())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+#[cfg(not(feature = "camera"))]
+pub fn camera_open_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !glyx_security::get().camera {
+        rv.set(reject_cap_promise(scope, "camera").into()); return;
+    }
+    let cap = match state.caps.camera {
+        Some(c) => c,
+        None => { rv.set(reject_promise_with_error(scope, "camera capability not loaded").into()); return; }
+    };
+    let device_index = args.get(0).number_value(scope).unwrap_or_default() as u32;
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let id = unsafe { (cap.open)(device_index) };
+            if id == 0 { return Err(format!("camera.open device {device_index} failed")); }
+            Ok(id.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+#[cfg(not(feature = "camera"))]
+pub fn camera_close_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let handle_id = args.get(0).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default()
+        .parse::<u32>().unwrap_or(0);
+    if let Some(cap) = state.caps.camera { unsafe { (cap.close)(handle_id) }; }
+}
+
+#[cfg(not(feature = "camera"))]
+pub fn camera_capture_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !glyx_security::get().camera {
+        rv.set(reject_cap_promise(scope, "camera").into()); return;
+    }
+    let cap = match state.caps.camera {
+        Some(c) => c,
+        None => { rv.set(reject_promise_with_error(scope, "camera capability not loaded").into()); return; }
+    };
+    let handle_id = args.get(0).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default()
+        .parse::<u32>().unwrap_or(0);
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            // Write JPEG bytes to a temp file and return the path.
+            let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8 MB max JPEG
+            let n = unsafe { (cap.capture)(handle_id, buf.as_mut_ptr(), buf.len()) };
+            if n == 0 { return Err("no frame available yet".to_string()); }
+            let path = format!("{}/glyx_photo_{}.jpg",
+                std::env::temp_dir().display(), handle_id);
+            std::fs::write(&path, &buf[..n]).map_err(|e| format!("save: {e}"))?;
+            Ok(path)
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+#[cfg(not(feature = "camera"))]
+pub fn camera_record_start_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let handle_id = args.get(0).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default()
+        .parse::<u32>().unwrap_or(0);
+    if let Some(cap) = state.caps.camera { unsafe { (cap.record_start)(handle_id) }; }
+}
+
+#[cfg(not(feature = "camera"))]
+pub fn camera_record_stop_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let cap = match state.caps.camera {
+        Some(c) => c,
+        None => { rv.set(reject_promise_with_error(scope, "camera capability not loaded").into()); return; }
+    };
+    let handle_id = args.get(0).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_default()
+        .parse::<u32>().unwrap_or(0);
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut buf = vec![0u8; 4096];
+            let mut out_len: usize = 0;
+            let rc = unsafe { (cap.record_stop)(handle_id, buf.as_mut_ptr(), &mut out_len, buf.len()) };
+            if rc != 0 { return Err("record_stop failed (not supported via DLL — use --features camera)".to_string()); }
+            Ok(String::from_utf8_lossy(&buf[..out_len]).into_owned())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
@@ -730,13 +1103,145 @@ pub fn hid_close_callback(
     state.hid_devices.lock().remove(&handle_id);
 }
 
+#[cfg(not(feature = "hid"))]
+pub fn hid_enumerate_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !glyx_security::get().hid {
+        rv.set(reject_cap_promise(scope, "hid").into()); return;
+    }
+    let cap = match state.caps.hid {
+        Some(c) => c,
+        None => { rv.set(reject_promise_with_error(scope, "hid capability not loaded").into()); return; }
+    };
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut buf = vec![0u8; 65536];
+            let mut out_len: usize = 0;
+            let rc = unsafe { (cap.enumerate)(buf.as_mut_ptr(), &mut out_len, buf.len()) };
+            if rc != 0 { return Err(format!("hid.enumerate vtable error: {rc}")); }
+            Ok(String::from_utf8_lossy(&buf[..out_len]).into_owned())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+#[cfg(not(feature = "hid"))]
+pub fn hid_open_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !glyx_security::get().hid {
+        rv.set(reject_cap_promise(scope, "hid").into()); return;
+    }
+    let cap = match state.caps.hid {
+        Some(c) => c,
+        None => { rv.set(reject_promise_with_error(scope, "hid capability not loaded").into()); return; }
+    };
+    let vendor_id  = args.get(0).number_value(scope).unwrap_or(0.0) as u16;
+    let product_id = args.get(1).number_value(scope).unwrap_or(0.0) as u16;
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let id = unsafe { (cap.open)(vendor_id, product_id) };
+            if id == 0 { return Err("hid.open vtable error".to_string()); }
+            Ok(id.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+#[cfg(not(feature = "hid"))]
+pub fn hid_read_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !glyx_security::get().hid {
+        rv.set(reject_cap_promise(scope, "hid").into()); return;
+    }
+    let cap = match state.caps.hid {
+        Some(c) => c,
+        None => { rv.set(reject_promise_with_error(scope, "hid capability not loaded").into()); return; }
+    };
+    let handle_id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut buf = vec![0u8; 256];
+            let n = unsafe { (cap.read)(handle_id, buf.as_mut_ptr(), buf.len()) };
+            serde_json::to_string(&buf[..n]).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+#[cfg(not(feature = "hid"))]
+pub fn hid_write_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    if !glyx_security::get().hid {
+        rv.set(reject_cap_promise(scope, "hid").into()); return;
+    }
+    let cap = match state.caps.hid {
+        Some(c) => c,
+        None => { rv.set(reject_promise_with_error(scope, "hid capability not loaded").into()); return; }
+    };
+    let handle_id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let data_json = v8_arg_to_string(scope, &args, 1);
+    let (resolver, promise, queue, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+    state.tokio.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let bytes: Vec<u8> = serde_json::from_str(&data_json)
+                .map_err(|e| format!("Invalid data JSON: {e}"))?;
+            let n = unsafe { (cap.write)(handle_id, bytes.as_ptr(), bytes.len()) };
+            Ok(n.to_string())
+        }).await.map_err(|e| e.to_string()).and_then(|r| r);
+        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
+    });
+}
+
+#[cfg(not(feature = "hid"))]
+pub fn hid_close_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let handle_id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    if let Some(cap) = state.caps.hid { unsafe { (cap.close)(handle_id) }; }
+}
+
 // â”€â”€ Updater callbacks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// `__glyx_updater_check(owner, repo, currentVersion) â†’ Promise<JSON>`
 ///
 /// Fetches the latest GitHub release and returns:
 ///   `{ hasUpdate: bool, latestVersion: string, body: string }`
-#[cfg(feature = "updater")]
 pub fn video_open_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,

@@ -39,6 +39,7 @@ impl SplashState {
 // ── Camera / Video streams ────────────────────────────────────────────────────
 
 /// Live camera capture stream. Owned by `PerWindowState`.
+#[cfg(feature = "camera")]
 pub(super) struct CameraStream {
     pub(super) frame_buf:      Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>,
     pub(super) last_raw_frame: Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>,
@@ -137,9 +138,13 @@ pub(super) struct PerWindowState {
     pub(super) rss_bytes: Arc<std::sync::atomic::AtomicU64>,
     pub(super) gc_frame_counter: u32,
     pub(super) canvas_cmds: std::collections::HashMap<u32, Vec<CanvasCmd>>,
+    #[cfg(feature = "canvas3d")]
     pub(super) canvas3d_scenes: std::collections::HashMap<u32, glyx_3d::Scene3D>,
+    #[cfg(feature = "canvas3d")]
     pub(super) canvas3d_dirty: std::collections::HashSet<u32>,
+    #[cfg(feature = "canvas3d")]
     pub(super) renderer_3d: Option<glyx_3d::Renderer3D>,
+    #[cfg(feature = "camera")]
     pub(super) camera_streams: std::collections::HashMap<u32, CameraStream>,
     pub(super) video_streams: std::collections::HashMap<u32, VideoStream>,
     pub(super) splash_state: Option<SplashState>,

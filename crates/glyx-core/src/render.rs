@@ -9,11 +9,13 @@ pub(crate) struct RenderCtx<'a> {
     pub label_cache: &'a mut lru::LruCache<LabelKey, CachedLabel>,
     pub canvas_cmds: &'a std::collections::HashMap<u32, Vec<CanvasCmd>>,
     /// Accumulated (canvas3d_id, x, y, w, h) for post-Vello 3D overlay rendering.
+    #[cfg(feature = "canvas3d")]
     pub canvas3d_overlays: &'a mut Vec<(u32, f32, f32, f32, f32)>,
     /// Window dimensions in physical pixels — used for viewport culling.
     pub win_w: f64,
     pub win_h: f64,
     /// Live camera streams — read-only; latest_image drawn directly via Vello.
+    #[cfg(feature = "camera")]
     pub camera_streams: &'a std::collections::HashMap<u32, CameraStream>,
     /// Video playback streams — read-only; latest_image drawn directly via Vello.
     pub video_streams: &'a std::collections::HashMap<u32, VideoStream>,
@@ -526,17 +528,16 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
         }
 
         NodeType::Canvas3D => {
-            // Draw optional background fill in the 2D scene so the layout box is
-            // visible even before the first 3D render completes.
-            if let Some(bg) = node.props.background_color.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
-                ctx.frame.fill_rect(rx, ry, rw, rh, bg);
+            #[cfg(feature = "canvas3d")]
+            {
+                if let Some(bg) = node.props.background_color.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
+                    ctx.frame.fill_rect(rx, ry, rw, rh, bg);
+                }
+                ctx.canvas3d_overlays.push((id, rx as f32, ry as f32, rw as f32, rh as f32));
             }
-            // Register this canvas for post-Vello 3D rendering.
-            ctx.canvas3d_overlays.push((id, rx as f32, ry as f32, rw as f32, rh as f32));
         }
         NodeType::Camera => {
-            // Draw the latest camera frame using the same Vello image path as NodeType::Image.
-            // Frames are updated each tick by the capture thread → frame_buf → peniko::Image.
+            #[cfg(feature = "camera")]
             if let Some(handle_id) = node.props.camera_handle {
                 if let Some(stream) = ctx.camera_streams.get(&handle_id) {
                     if let Some(img) = &stream.latest_image {
@@ -545,9 +546,6 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                         let ih = img.height as f64;
                         let sx = rw / iw;
                         let sy = rh / ih;
-                        // Mirror: negate X scale, shift origin to right edge.
-                        // Normal:    Affine [sx,  0, 0, sy, rx,    ry]
-                        // Mirrored:  Affine [-sx, 0, 0, sy, rx+rw, ry]
                         let transform = if mirror {
                             glyx_renderer::peniko::kurbo::Affine::new([-sx, 0.0, 0.0, sy, rx + rw, ry])
                         } else {
@@ -557,7 +555,6 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                         ctx.frame.draw_image_with_transform(img, transform);
                         ctx.frame.pop_layer();
                     } else {
-                        // No frame yet — draw a placeholder background.
                         ctx.frame.fill_rect(rx, ry, rw, rh,
                             apply_opacity(peniko::Color::from_rgba8(0, 0, 0, 255), child_opacity));
                     }

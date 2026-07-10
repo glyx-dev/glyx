@@ -12,7 +12,9 @@ use std::process::Command;
 
 use glyx_renderer::{peniko, AnyFrame};
 
-use crate::state::{DevBuildEvent, DevModeState, PerWindowState};
+#[cfg(feature = "dev")]
+use crate::state::{DevBuildEvent, DevModeState};
+use crate::state::PerWindowState;
 use crate::DevModeConfig;
 use crate::scene::apply_scene_commands;
 
@@ -319,7 +321,9 @@ pub(super) fn handle_dev_build_events(state: &mut PerWindowState) {
                 state.layout = glyx_layout::LayoutTree::new();
                 state.runtime.layout_cache.lock().clear();
                 state.canvas_cmds.clear();
+                #[cfg(feature = "canvas3d")]
                 state.canvas3d_scenes.clear();
+                #[cfg(feature = "canvas3d")]
                 state.canvas3d_dirty.clear();
                 let _ = state.runtime.drain_scene_commands();
                 match state.runtime.eval(&js) {

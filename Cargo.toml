@@ -24,6 +24,11 @@ members = [
     "crates/glyx-snapshot",
     "crates/glyx-media",
     "crates/glyx-cap-abi",
+    "crates/glyx-cap-audio",
+    "crates/glyx-cap-ai",
+    "crates/glyx-cap-gamepad",
+    "crates/glyx-cap-hid",
+    "crates/glyx-cap-camera",
     "crates/glyx-macros",
 ]
 

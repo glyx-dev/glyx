@@ -7,8 +7,17 @@ edition = "2021"
 # "dev" gates hot-reload: file watcher, bun subprocess, dev overlay.
 # Production builds (glyx build --mode snapshot/bundle) disable this feature
 # so notify and std::process::Command are never compiled in.
-default = ["dev"]
-dev = ["notify", "glyx-runtime/dev", "ffmpeg-sidecar", "arboard"]
+default = ["dev", "camera", "canvas3d", "audio", "gamepad", "hid", "ai", "fetch", "websocket", "updater"]
+dev      = ["notify", "glyx-runtime/dev", "ffmpeg-sidecar", "arboard"]
+camera   = ["dep:nokhwa", "glyx-runtime/camera"]
+canvas3d = ["dep:glyx-3d", "glyx-runtime/canvas3d"]
+audio    = ["glyx-runtime/audio", "dep:rodio"]
+gamepad  = ["glyx-runtime/gamepad"]
+hid      = ["glyx-runtime/hid"]
+ai       = ["glyx-runtime/ai"]
+fetch    = ["glyx-runtime/fetch"]
+websocket = ["glyx-runtime/websocket"]
+updater  = ["glyx-runtime/updater"]
 
 [dependencies]
 glyx-gpu      = { path = "../glyx-gpu" }
@@ -17,7 +26,7 @@ glyx-shell    = { path = "../glyx-shell" }
 glyx-renderer = { path = "../glyx-renderer" }
 glyx-text     = { path = "../glyx-text" }
 glyx-layout   = { path = "../glyx-layout" }
-glyx-runtime  = { path = "../glyx-runtime" }
+glyx-runtime  = { path = "../glyx-runtime", default-features = false, features = ["v8"] }
 glyx-perf     = { path = "../glyx-perf" }
 winit          = { workspace = true }
 tokio          = { workspace = true }
@@ -38,9 +47,9 @@ dotenvy        = { workspace = true }
 sysinfo        = { workspace = true }
 lru            = { workspace = true }
 smallvec       = { workspace = true }
-glyx-3d       = { path = "../glyx-3d" }
-nokhwa         = { workspace = true }
-rodio          = { workspace = true }
+glyx-3d        = { path = "../glyx-3d", optional = true }
+nokhwa         = { workspace = true, optional = true }
 glyx-media    = { path = "../glyx-media" }
+rodio          = { workspace = true, optional = true }
 mimalloc       = { workspace = true }
 base64         = { workspace = true }

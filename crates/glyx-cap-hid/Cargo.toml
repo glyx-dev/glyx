@@ -1,0 +1,14 @@
+[package]
+name    = "glyx-cap-hid"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+glyx-cap-abi = { path = "../glyx-cap-abi" }
+hidapi       = "2"
+parking_lot  = "0.12"
+log          = "0.4"
+serde_json   = "1"

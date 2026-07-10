@@ -112,6 +112,14 @@ pub(super) fn build_snapshot_mode(target: Option<&str>, project_name: &str) -> R
         append_trailer_snapshot(target, project_name, &snap, &abs_bundle, &abs_config)?
     };
 
+    // Build cap DLLs declared in glyx.config and place them next to the binary.
+    let caps = super::read_capabilities_from_config();
+    if !caps.is_empty() {
+        let bin_dir = bin_path.parent().unwrap_or(Path::new("target/release"));
+        build_cap_dlls(&caps, target, bin_dir).context("cap DLL build failed")?;
+        super::write_caps_lock(bin_dir).context("failed to write glyx-caps.lock")?;
+    }
+
     let _ = std::fs::write("target/glyx/build-mode", "snapshot");
 
     println!();
@@ -140,6 +148,14 @@ pub(super) fn build_bundle_mode(target: Option<&str>, project_name: &str) -> Res
         copy_prod_runner_as(target, project_name)?
     };
 
+    // Build cap DLLs and place them next to the binary.
+    let caps = super::read_capabilities_from_config();
+    if !caps.is_empty() {
+        let bin_dir = bin_path.parent().unwrap_or(Path::new("target/release"));
+        build_cap_dlls(&caps, target, bin_dir).context("cap DLL build failed")?;
+        super::write_caps_lock(bin_dir).context("failed to write glyx-caps.lock")?;
+    }
+
     let _ = std::fs::create_dir_all("target/glyx");
     let _ = std::fs::write("target/glyx/build-mode", "bundle");
     println!();
@@ -166,6 +182,14 @@ pub(super) fn build_portable_mode(target: Option<&str>, project_name: &str) -> R
     } else {
         copy_prod_runner_as(target, project_name)?
     };
+
+    // Build cap DLLs and place them next to the binary.
+    let caps = super::read_capabilities_from_config();
+    if !caps.is_empty() {
+        let bin_dir = bin_path.parent().unwrap_or(Path::new("target/release"));
+        build_cap_dlls(&caps, target, bin_dir).context("cap DLL build failed")?;
+        super::write_caps_lock(bin_dir).context("failed to write glyx-caps.lock")?;
+    }
 
     let _ = std::fs::create_dir_all("target/glyx");
     let _ = std::fs::write("target/glyx/build-mode", "portable");
@@ -331,6 +355,64 @@ pub(super) fn cargo_build_release(
     } else {
         PathBuf::from(format!("target/release/{}", binary_name(project_name)))
     })
+}
+
+/// Build all capability DLLs declared in glyx.config and copy them next to `dest`.
+///
+/// Each cap crate (`glyx-cap-audio`, `glyx-cap-camera`, etc.) is built as a
+/// `cdylib` via `cargo build --release -p glyx-cap-<name>`.  The resulting
+/// shared library is copied into `dest` so the runner can find it at startup.
+pub fn build_cap_dlls(caps: &[String], target: Option<&str>, dest: &Path) -> Result<()> {
+    if caps.is_empty() { return Ok(()); }
+
+    let rust_target = target.map(super::platform_to_rust_target).transpose()?;
+    let (dll_prefix, dll_ext) = if cfg!(target_os = "windows") {
+        ("", "dll")
+    } else if cfg!(target_os = "macos") {
+        ("lib", "dylib")
+    } else {
+        ("lib", "so")
+    };
+
+    for cap in caps {
+        let pkg = format!("glyx-cap-{cap}");
+        // cdylib stem: glyx_cap_<name>  (hyphens → underscores)
+        let stem = pkg.replace('-', "_");
+
+        let mut args = vec!["build", "--release", "-p", pkg.as_str()];
+        let target_str;
+        if let Some(ref t) = rust_target {
+            target_str = t.to_string();
+            args.push("--target");
+            args.push(&target_str);
+        }
+
+        println!("Building cap DLL: {pkg}...");
+        let status = Command::new("cargo")
+            .args(&args)
+            .env("RUST_LOG", "warn")
+            .status()
+            .with_context(|| format!("Failed to run cargo build for {pkg}"))?;
+        if !status.success() { bail!("cargo build for {pkg} failed"); }
+
+        let lib_name = format!("{dll_prefix}{stem}.{dll_ext}");
+        let src = if let Some(ref t) = rust_target {
+            PathBuf::from(format!("target/{t}/release/{lib_name}"))
+        } else {
+            PathBuf::from(format!("target/release/{lib_name}"))
+        };
+
+        if !src.exists() {
+            bail!("Expected DLL at {} but not found after build", src.display());
+        }
+
+        std::fs::create_dir_all(dest)?;
+        let dst = dest.join(&lib_name);
+        std::fs::copy(&src, &dst)
+            .with_context(|| format!("copy {} → {}", src.display(), dst.display()))?;
+        println!("  ✓ {} → {}", src.display(), dst.display());
+    }
+    Ok(())
 }
 
 /// Create a V8 snapshot containing ONLY stubs + polyfills.

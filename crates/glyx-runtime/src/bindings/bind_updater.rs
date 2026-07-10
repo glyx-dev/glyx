@@ -1,4 +1,6 @@
-﻿use super::*;
+use super::*;
+
+#[cfg(feature = "updater")]
 pub fn updater_check_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,

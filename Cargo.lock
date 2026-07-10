@@ -2852,6 +2852,59 @@ name = "glyx-cap-abi"
 version = "0.1.0"
 
 [[package]]
+name = "glyx-cap-ai"
+version = "0.1.0"
+dependencies = [
+ "glyx-ai",
+ "glyx-cap-abi",
+ "log",
+ "parking_lot",
+ "serde_json",
+]
+
+[[package]]
+name = "glyx-cap-audio"
+version = "0.1.0"
+dependencies = [
+ "glyx-cap-abi",
+ "log",
+ "parking_lot",
+ "rodio",
+]
+
+[[package]]
+name = "glyx-cap-camera"
+version = "0.1.0"
+dependencies = [
+ "glyx-cap-abi",
+ "image",
+ "log",
+ "nokhwa",
+ "parking_lot",
+]
+
+[[package]]
+name = "glyx-cap-gamepad"
+version = "0.1.0"
+dependencies = [
+ "gilrs",
+ "glyx-cap-abi",
+ "log",
+ "parking_lot",
+]
+
+[[package]]
+name = "glyx-cap-hid"
+version = "0.1.0"
+dependencies = [
+ "glyx-cap-abi",
+ "hidapi",
+ "log",
+ "parking_lot",
+ "serde_json",
+]
+
+[[package]]
 name = "glyx-cli"
 version = "0.1.0"
 dependencies = [
@@ -3014,6 +3067,11 @@ dependencies = [
  "glyx-3d",
  "glyx-ai",
  "glyx-cap-abi",
+ "glyx-cap-ai",
+ "glyx-cap-audio",
+ "glyx-cap-camera",
+ "glyx-cap-gamepad",
+ "glyx-cap-hid",
  "glyx-db",
  "glyx-macros",
  "glyx-media",

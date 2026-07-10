@@ -208,6 +208,35 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Build capability DLLs declared in glyx.config
+    ///
+    /// Reads `capabilities` from glyx.config, builds the matching
+    /// `glyx-cap-<name>` crate as a shared library, copies it to `dest`
+    /// (default: current directory), and regenerates glyx-caps.lock.
+    ///
+    /// Use this after first clone or whenever you update a cap crate without
+    /// doing a full `glyx build`.  The DLLs must live next to the glyx-runner
+    /// binary at runtime.
+    ///
+    /// Example:
+    ///   glyx caps build              # builds all declared caps → ./
+    ///   glyx caps build --dest dist  # put DLLs in ./dist/
+    Caps {
+        #[command(subcommand)]
+        cmd: CapsCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CapsCommands {
+    /// Build all cap DLLs declared in glyx.config and copy them to dest
+    Build {
+        /// Directory to copy DLLs into (default: current directory)
+        #[arg(long, default_value = ".")]
+        dest: std::path::PathBuf,
+        /// Target OS to cross-compile for (windows, macos, linux)
+        target: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -271,6 +300,21 @@ fn run() -> Result<()> {
         Commands::Generate { cmd }        => cmd_generate(cmd),
         Commands::Check { config_only }   => cmd_check(config_only),
         Commands::Test { js, rust, args } => cmd_test(js, rust, &args),
+        Commands::Caps { cmd } => match cmd {
+            CapsCommands::Build { dest, target } => {
+                let caps = read_capabilities_from_config();
+                if caps.is_empty() {
+                    println!("No capabilities declared in glyx.config — nothing to build.");
+                    return Ok(());
+                }
+                println!("Building {} cap DLL(s): {}", caps.len(), caps.join(", "));
+                cmd_build::build_cap_dlls(&caps, target.as_deref(), &dest)
+                    .context("cap DLL build failed")?;
+                write_caps_lock(&dest).context("failed to write glyx-caps.lock")?;
+                println!("Done. DLLs and glyx-caps.lock written to {}", dest.display());
+                Ok(())
+            }
+        },
     }
 }
 
@@ -767,9 +811,24 @@ fn copy_runtime_files(dest_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Scan for `glyx_cap_*.{dll,so,dylib}` in the current directory (where the
-/// developer placed their capability modules), compute SHA-256 for each, and
-/// write `glyx-caps.lock` into `dest_root` (next to the final binary).
+/// Read the `capabilities` object from glyx.config (e.g. `{ "audio": true, "camera": false }`).
+/// Returns the full known set when the config has no capabilities key.
+fn read_capabilities_from_config() -> Vec<String> {
+    let known = ["audio", "ai", "camera", "gamepad", "hid"];
+    let src = resolve_config_json().unwrap_or_default();
+    let v: serde_json::Value = serde_json::from_str(&src).unwrap_or_default();
+    match v.get("capabilities").and_then(|c| c.as_object()) {
+        Some(obj) => known.iter()
+            .filter(|k| obj.get(**k).and_then(|v| v.as_bool()).unwrap_or(false))
+            .map(|k| k.to_string())
+            .collect(),
+        None => known.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// For each capability declared in glyx.config `capabilities[]`, look for the
+/// matching `glyx_cap_<name>.{dll,so,dylib}` in the current directory, compute
+/// SHA-256, and write `glyx-caps.lock` into `dest_root` (next to the binary).
 fn write_caps_lock(dest_root: &Path) -> Result<()> {
     use sha2::{Sha256, Digest};
 
@@ -777,7 +836,7 @@ fn write_caps_lock(dest_root: &Path) -> Result<()> {
         else if cfg!(target_os = "macos") { &["dylib"] }
         else { &["so"] };
 
-    let cap_names = ["audio", "ai", "camera", "gamepad", "hid"];
+    let cap_names = read_capabilities_from_config();
     let mut hashes = serde_json::Map::new();
 
     for cap in &cap_names {

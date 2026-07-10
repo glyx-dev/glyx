@@ -963,9 +963,13 @@ pub fn run(mut config: AppConfig) -> bool {
                     },
                     gc_frame_counter: 0,
                     canvas_cmds:     std::collections::HashMap::new(),
+                    #[cfg(feature = "canvas3d")]
                     canvas3d_scenes: std::collections::HashMap::new(),
+                    #[cfg(feature = "canvas3d")]
                     canvas3d_dirty:  std::collections::HashSet::new(),
+                    #[cfg(feature = "canvas3d")]
                     renderer_3d:     None,
+                    #[cfg(feature = "camera")]
                     camera_streams:  std::collections::HashMap::new(),
                     video_streams:   std::collections::HashMap::new(),
                     // Splash only applies to the main window; secondary windows get None.
@@ -1227,7 +1231,9 @@ pub fn run(mut config: AppConfig) -> bool {
                 let post_changed  = apply_scene_commands(s, post_commands);
 
                 // 5a. Pull latest camera frames and dirty only the nodes displaying them.
+                #[cfg(feature = "camera")]
                 let mut updated_camera_handles: Vec<u32> = Vec::new();
+                #[cfg(feature = "camera")]
                 for (handle_id, stream) in s.camera_streams.iter_mut() {
                     if let Some((w, h, data)) = stream.frame_buf.lock().take() {
                         stream.latest_image = Some(peniko::ImageData {
@@ -1239,6 +1245,8 @@ pub fn run(mut config: AppConfig) -> bool {
                         updated_camera_handles.push(*handle_id);
                     }
                 }
+                #[cfg(not(feature = "camera"))]
+                let updated_camera_handles: Vec<u32> = Vec::new();
                 // 5b. Pull latest video frames and dirty only the nodes displaying them.
                 // Also drain video events into the runtime's video_events queue.
                 let mut updated_video_handles: Vec<u32> = Vec::new();
@@ -1393,6 +1401,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 s.renderer.notify_resize(s.gpu.width().max(1), s.gpu.height().max(1));
                 let mut frame = s.renderer.begin_frame();
                 let mut any_cursor_active = false;
+                #[cfg(feature = "canvas3d")]
                 let mut canvas3d_overlays: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
 
                 if let Some(root_id) = s.js_root {
@@ -1404,7 +1413,9 @@ pub fn run(mut config: AppConfig) -> bool {
                         text_sys:          &mut s.text_sys,
                         label_cache:       &mut s.label_cache,
                         canvas_cmds:       &s.canvas_cmds,
+                        #[cfg(feature = "canvas3d")]
                         canvas3d_overlays: &mut canvas3d_overlays,
+                        #[cfg(feature = "camera")]
                         camera_streams:    &s.camera_streams,
                         video_streams:     &s.video_streams,
                         cursor_blink_on:   s.cursor_blink_on,
@@ -1457,6 +1468,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 }
 
                 // 3D overlays — blitted on top of Vello with LoadOp::Load.
+                #[cfg(feature = "canvas3d")]
                 if !canvas3d_overlays.is_empty() {
                     let surface_view = texture.texture.create_view(&Default::default());
                     let sw = s.gpu.width()  as f32;

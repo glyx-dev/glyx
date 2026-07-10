@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 pub fn set_fullscreen_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -579,6 +579,32 @@ pub fn gamepad_poll_callback(
     rv.set(s.into());
 }
 
+#[cfg(not(feature = "gamepad"))]
+pub fn gamepad_poll_callback(
+    scope: &mut v8::HandleScope,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let _ = args;
+    let json = if let Some(cap) = state.caps.gamepad {
+        let mut buf = vec![0u8; 8192];
+        let mut out_len: usize = 0;
+        unsafe { (cap.poll)(buf.as_mut_ptr(), &mut out_len, buf.len()) };
+        if out_len > 0 {
+            String::from_utf8_lossy(&buf[..out_len]).into_owned()
+        } else {
+            "[]".to_string()
+        }
+    } else {
+        "[]".to_string()
+    };
+    let s = v8::String::new(scope, &json).unwrap_or_else(|| v8::String::empty(scope));
+    rv.set(s.into());
+}
+
 /// `__glyx_shortcut_register(accelerator)` â†’ string id (sync)
 pub fn shortcut_register_callback(
     scope: &mut v8::HandleScope,
@@ -753,11 +779,6 @@ pub fn credentials_delete_callback(
 
 // â”€â”€ Audio playback bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// `__glyx_audio_play(src, optsJson)` â†’ Promise<handle_id>
-///
-/// `optsJson` shape: `{ volume?: f32, loop?: bool }` (loop not yet implemented).
-/// Returns the integer handle ID as a JSON string.
-#[cfg(feature = "audio")]
 pub fn parse_accelerator(acc: &str) -> Option<global_hotkey::hotkey::HotKey> {
     use global_hotkey::hotkey::{HotKey, Modifiers};
     let mut mods     = Modifiers::empty();

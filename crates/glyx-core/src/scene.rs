@@ -344,16 +344,15 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 }
                 // Also clean up canvas data for this node.
                 state.canvas_cmds.remove(&id);
-                state.canvas3d_scenes.remove(&id);
-                state.canvas3d_dirty.remove(&id);
-                if let Some(r3d) = &mut state.renderer_3d {
-                    r3d.remove_canvas(id);
-                    // When the last Canvas3D node leaves the tree, drop the
-                    // Renderer3D entirely so its compiled wgpu pipelines and
-                    // geometry buffers are freed (~5–10 MB of GPU resources).
-                    // It will be lazily re-created on the next Canvas3D visit.
-                    if state.canvas3d_scenes.is_empty() {
-                        state.renderer_3d = None;
+                #[cfg(feature = "canvas3d")]
+                {
+                    state.canvas3d_scenes.remove(&id);
+                    state.canvas3d_dirty.remove(&id);
+                    if let Some(r3d) = &mut state.renderer_3d {
+                        r3d.remove_canvas(id);
+                        if state.canvas3d_scenes.is_empty() {
+                            state.renderer_3d = None;
+                        }
                     }
                 }
                 state.js_nodes.remove(&id);
@@ -401,17 +400,19 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 state.dirty_nodes.insert(id);
                 // Canvas draw commands don't affect layout.
             }
+            #[cfg(feature = "canvas3d")]
             SceneCommand::Canvas3DUpdate { id, scene } => {
                 state.canvas3d_scenes.insert(id, scene);
                 state.dirty_nodes.insert(id);
                 state.canvas3d_dirty.insert(id);
-                // 3D scenes don't affect layout — they blit on top of Vello.
             }
+            #[cfg(feature = "canvas3d")]
             SceneCommand::Canvas3DUnloadGltf { path } => {
                 if let Some(r3d) = state.renderer_3d.as_mut() {
                     r3d.unload_gltf(&path);
                 }
             }
+            #[cfg(feature = "camera")]
             SceneCommand::OpenCamera { handle_id, device_index } => {
                 let frame_buf       = Arc::new(Mutex::new(None::<(u32, u32, Vec<u8>)>));
                 let last_raw_frame  = Arc::new(Mutex::new(None::<(u32, u32, Vec<u8>)>));
@@ -480,11 +481,13 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     record_done_rx: None,
                 });
             }
+            #[cfg(feature = "camera")]
             SceneCommand::CloseCamera { handle_id } => {
                 if let Some(stream) = state.camera_streams.remove(&handle_id) {
                     stream.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
+            #[cfg(feature = "camera")]
             SceneCommand::CaptureCamera { handle_id, tx } => {
                 let result = if let Some(stream) = state.camera_streams.get(&handle_id) {
                     // Read last_raw_frame — never taken by render loop, always available.
@@ -504,6 +507,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 };
                 let _ = tx.0.send(result);
             }
+            #[cfg(feature = "camera")]
             SceneCommand::StartCameraRecord { handle_id, output_path } => {
                 if let Some(stream) = state.camera_streams.get_mut(&handle_id) {
                     // Buffer enough frames for FPS calibration before the encoder opens.
@@ -632,6 +636,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     });
                 }
             }
+            #[cfg(feature = "camera")]
             SceneCommand::StopCameraRecord { handle_id, tx } => {
                 if let Some(stream) = state.camera_streams.get_mut(&handle_id) {
                     // Drop the sender — signals recording thread to stop.
@@ -951,6 +956,7 @@ pub(crate) fn build_dirty_subtrees(state: &mut PerWindowState) {
     state.descendant_cascade_nodes.clear();
 }
 
+#[cfg(feature = "audio")]
 /// Spawn a self-contained audio thread for a video file.
 ///
 /// Uses the glyx-media C library (ffmpeg) to decode the audio track, feeding
@@ -1053,6 +1059,7 @@ fn spawn_video_audio(
 /// A `rodio::Source` backed by the glyx-media C audio decoder (ffmpeg).
 /// Calls `vm_audio_decoder_next_samples` in 4096-sample chunks, so ffmpeg
 /// runs in rodio's audio thread — never blocks the main render loop.
+#[cfg(feature = "audio")]
 struct FfmpegAudioSource {
     media:      std::sync::Arc<glyx_media::GlyxMedia>,
     dec:        Option<glyx_media::VmAudioDecoder>,  // Some until dropped
@@ -1066,8 +1073,10 @@ struct FfmpegAudioSource {
 
 // SAFETY: FfmpegAudioSource owns a VmAudioDecoder (opaque C pointer, no TLS).
 // It is only ever accessed from rodio's single audio thread.
+#[cfg(feature = "audio")]
 unsafe impl Send for FfmpegAudioSource {}
 
+#[cfg(feature = "audio")]
 impl Drop for FfmpegAudioSource {
     fn drop(&mut self) {
         if let Some(dec) = self.dec.take() {
@@ -1076,6 +1085,7 @@ impl Drop for FfmpegAudioSource {
     }
 }
 
+#[cfg(feature = "audio")]
 impl FfmpegAudioSource {
     fn fill_buf(&mut self) {
         if self.done { return; }
@@ -1092,6 +1102,7 @@ impl FfmpegAudioSource {
     }
 }
 
+#[cfg(feature = "audio")]
 impl Iterator for FfmpegAudioSource {
     type Item = i16;
     fn next(&mut self) -> Option<i16> {
@@ -1107,9 +1118,22 @@ impl Iterator for FfmpegAudioSource {
     }
 }
 
+#[cfg(feature = "audio")]
 impl rodio::Source for FfmpegAudioSource {
     fn current_frame_len(&self) -> Option<usize> { None }
     fn channels(&self)         -> u16  { self.channels }
     fn sample_rate(&self)      -> u32  { self.sample_rate }
     fn total_duration(&self)   -> Option<std::time::Duration> { None }
+}
+
+#[cfg(not(feature = "audio"))]
+fn spawn_video_audio(
+    _url:             &str,
+    _stop_flag:       Arc<std::sync::atomic::AtomicBool>,
+    _audio_stop_flag: Arc<std::sync::atomic::AtomicBool>,
+    _pause_flag:      Arc<std::sync::atomic::AtomicBool>,
+    _volume:          Arc<Mutex<f32>>,
+    _start_secs:      f64,
+) {
+    // audio feature not enabled — video plays without sound
 }

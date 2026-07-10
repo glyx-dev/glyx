@@ -629,14 +629,19 @@ pub enum SceneCommand {
     #[cfg(feature = "canvas3d")]
     Canvas3DUnloadGltf { path: String },
     /// Open a camera device and start the capture loop in glyx-core.
+    #[cfg(feature = "camera")]
     OpenCamera  { handle_id: u32, device_index: u32 },
     /// Stop the capture loop and release the camera device.
+    #[cfg(feature = "camera")]
     CloseCamera { handle_id: u32 },
     /// Capture the current frame to a PNG file. Resolves with the file path.
+    #[cfg(feature = "camera")]
     CaptureCamera { handle_id: u32, tx: OneshotSender<Result<String, String>> },
     /// Start recording the camera feed to an MP4 file via ffmpeg.
+    #[cfg(feature = "camera")]
     StartCameraRecord { handle_id: u32, output_path: String },
     /// Stop recording and flush the MP4. Resolves with the final file path.
+    #[cfg(feature = "camera")]
     StopCameraRecord { handle_id: u32, tx: OneshotSender<Result<String, String>> },
     //  Video player €€€
     /// Open a video file/URL for playback. glyx-core spawns a decode thread.
@@ -753,6 +758,7 @@ pub fn register_all(
         cdp_log_tx,
         backend_commands,
         js_backend_commands: HashMap::new(),
+        caps: crate::cap_loader::load_caps(),
     });
 
     //  Evaluate JS plugins and register their exported functions 
@@ -819,6 +825,12 @@ pub fn register_all(
             }
         }
     }
+
+    // Capture cap presence flags before moving `state` into the raw pointer.
+    let has_audio   = state.caps.audio.is_some();
+    let has_ai      = state.caps.ai.is_some();
+    let has_gamepad = state.caps.gamepad.is_some();
+    let has_hid     = state.caps.hid.is_some();
 
     let raw   = Box::into_raw(state);
     let ptr   = raw as *mut std::ffi::c_void;
@@ -941,8 +953,9 @@ pub fn register_all(
     register!("__glyx_power_preventSleep",     power_prevent_sleep_callback);
     register!("__glyx_power_allowSleep",    power_allow_sleep_callback);
     register!("__glyx_storage_getDrives",   storage_get_drives_callback);
-    #[cfg(feature = "gamepad")]
-    register!("__glyx_gamepad_poll",        gamepad_poll_callback);
+    if has_gamepad {
+        register!("__glyx_gamepad_poll", gamepad_poll_callback);
+    }
     register!("__glyx_shortcut_register",   shortcut_register_callback);
     register!("__glyx_shortcut_unregister", shortcut_unregister_callback);
     register!("__glyx_shortcut_poll",       shortcut_poll_callback);
@@ -952,27 +965,19 @@ pub fn register_all(
     register!("__glyx_credentials_get",    credentials_get_callback);
     register!("__glyx_credentials_delete", credentials_delete_callback);
 
-    //  Audio playback 
-    #[cfg(feature = "audio")]
-    register!("__glyx_audio_play",      audio_play_callback);
-    #[cfg(feature = "audio")]
-    register!("__glyx_audio_pause",     audio_pause_callback);
-    #[cfg(feature = "audio")]
-    register!("__glyx_audio_resume",    audio_resume_callback);
-    #[cfg(feature = "audio")]
-    register!("__glyx_audio_stop",      audio_stop_callback);
-    #[cfg(feature = "audio")]
-    register!("__glyx_audio_setVolume", audio_set_volume_callback);
-    #[cfg(feature = "audio")]
-    register!("__glyx_audio_getVolume", audio_get_volume_callback);
-    #[cfg(feature = "audio")]
-    register!("__glyx_audio_poll",      audio_poll_callback);
-    #[cfg(feature = "audio")]
-    register!("__glyx_audio_get_time",  audio_get_time_callback);
-    #[cfg(feature = "audio")]
-    register!("__glyx_audio_duration",  audio_duration_callback);
-    #[cfg(feature = "audio")]
-    register!("__glyx_audio_seek",      audio_seek_callback);
+    //  Audio playback — registered when audio cap is available (static or DLL)
+    if has_audio {
+        register!("__glyx_audio_play",      audio_play_callback);
+        register!("__glyx_audio_pause",     audio_pause_callback);
+        register!("__glyx_audio_resume",    audio_resume_callback);
+        register!("__glyx_audio_stop",      audio_stop_callback);
+        register!("__glyx_audio_setVolume", audio_set_volume_callback);
+        register!("__glyx_audio_getVolume", audio_get_volume_callback);
+        register!("__glyx_audio_poll",      audio_poll_callback);
+        register!("__glyx_audio_get_time",  audio_get_time_callback);
+        register!("__glyx_audio_duration",  audio_duration_callback);
+        register!("__glyx_audio_seek",      audio_seek_callback);
+    }
 
     //  App lifecycle €€€
     register!("__glyx_quit",            quit_callback);
@@ -996,26 +1001,28 @@ pub fn register_all(
     #[cfg(feature = "canvas3d")]
     register!("__glyx_canvas3d_unload_gltf", canvas3d_unload_gltf_callback);
 
-    //  Local AI (Candle) 
-    #[cfg(feature = "ai")]
-    register!("__glyx_ai_embed",             ai_embed_callback);
-    #[cfg(feature = "ai")]
-    register!("__glyx_ai_generate",          ai_generate_callback);
-    #[cfg(feature = "ai")]
-    register!("__glyx_ai_transcribe",        ai_transcribe_callback);
-    #[cfg(feature = "ai")]
-    register!("__glyx_ai_unload_embed",      ai_unload_embed_callback);
-    #[cfg(feature = "ai")]
-    register!("__glyx_ai_unload_generate",   ai_unload_generate_callback);
-    #[cfg(feature = "ai")]
-    register!("__glyx_ai_unload_transcribe", ai_unload_transcribe_callback);
+    //  Local AI — registered when AI cap is available (static or DLL)
+    if has_ai {
+        register!("__glyx_ai_embed",             ai_embed_callback);
+        register!("__glyx_ai_generate",          ai_generate_callback);
+        register!("__glyx_ai_transcribe",        ai_transcribe_callback);
+        register!("__glyx_ai_unload_embed",      ai_unload_embed_callback);
+        register!("__glyx_ai_unload_generate",   ai_unload_generate_callback);
+        register!("__glyx_ai_unload_transcribe", ai_unload_transcribe_callback);
+    }
 
-    //  Camera + Microphone 
+    //  Camera + Microphone
+    #[cfg(feature = "camera")]
     register!("__glyx_camera_list",         camera_list_callback);
+    #[cfg(feature = "camera")]
     register!("__glyx_camera_open",         camera_open_callback);
+    #[cfg(feature = "camera")]
     register!("__glyx_camera_close",        camera_close_callback);
+    #[cfg(feature = "camera")]
     register!("__glyx_camera_capture",      camera_capture_callback);
+    #[cfg(feature = "camera")]
     register!("__glyx_camera_record_start", camera_record_start_callback);
+    #[cfg(feature = "camera")]
     register!("__glyx_camera_record_stop",  camera_record_stop_callback);
     register!("__glyx_microphone_list",     microphone_list_callback);
     register!("__glyx_microphone_record",   microphone_record_callback);
@@ -1029,17 +1036,14 @@ pub fn register_all(
     register!("__glyx_video_close",      video_close_callback);
     register!("__glyx_video_poll",       video_poll_callback);
 
-    //  HID devices €€€
-    #[cfg(feature = "hid")]
-    register!("__glyx_hid_enumerate", hid_enumerate_callback);
-    #[cfg(feature = "hid")]
-    register!("__glyx_hid_open",      hid_open_callback);
-    #[cfg(feature = "hid")]
-    register!("__glyx_hid_read",      hid_read_callback);
-    #[cfg(feature = "hid")]
-    register!("__glyx_hid_write",     hid_write_callback);
-    #[cfg(feature = "hid")]
-    register!("__glyx_hid_close",     hid_close_callback);
+    //  HID devices — registered when HID cap is available (static or DLL)
+    if has_hid {
+        register!("__glyx_hid_enumerate", hid_enumerate_callback);
+        register!("__glyx_hid_open",      hid_open_callback);
+        register!("__glyx_hid_read",      hid_read_callback);
+        register!("__glyx_hid_write",     hid_write_callback);
+        register!("__glyx_hid_close",     hid_close_callback);
+    }
     //  Updater €€€
     #[cfg(feature = "updater")]
     register!("__glyx_updater_check",            updater_check_callback);
@@ -1173,6 +1177,8 @@ struct AsyncState {
     /// Named JS plugin commands collected at startup (from `glyx.config.json` plugins).
     /// These are called synchronously in V8 (they return Promises)  no Tokio bridge needed.
     js_backend_commands: HashMap<String, v8::Global<v8::Function>>,
+    //  Capability vtables ── resolved once at startup by cap_loader
+    caps: glyx_cap_abi::CapSet,
 }
 
 /// Re-eval a bundled plugin IIFE and update `js_backend_commands` for its exports.

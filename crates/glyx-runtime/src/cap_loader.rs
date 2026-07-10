@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use sha2::{Sha256, Digest};
 use serde_json::Value;
+#[allow(unused_imports)]
 use glyx_cap_abi::{
     ABI_VERSION, ABI_VERSION_MIN,
     AudioCap, AiCap, CameraCap, GamepadCap, HidCap,
@@ -184,32 +185,35 @@ pub fn load_caps() -> CapSet {
 
 fn load_audio(hash: Option<&str>) -> Option<&'static AudioCap> {
     #[cfg(feature = "audio")]
-    { let _ = hash; return None; } // static path active
+    { let _ = hash; return Some(glyx_cap_audio::static_cap()); }
     #[cfg(not(feature = "audio"))]
     unsafe { try_load_dynamic::<AudioCap>("audio", "glyx_cap_audio", SYM_AUDIO, hash) }
 }
 
 fn load_ai(hash: Option<&str>) -> Option<&'static AiCap> {
     #[cfg(feature = "ai")]
-    { let _ = hash; return None; }
+    { let _ = hash; return Some(glyx_cap_ai::static_cap()); }
     #[cfg(not(feature = "ai"))]
     unsafe { try_load_dynamic::<AiCap>("ai", "glyx_cap_ai", SYM_AI, hash) }
 }
 
 fn load_camera(hash: Option<&str>) -> Option<&'static CameraCap> {
+    #[cfg(feature = "camera")]
+    { let _ = hash; return Some(glyx_cap_camera::static_cap()); }
+    #[cfg(not(feature = "camera"))]
     unsafe { try_load_dynamic::<CameraCap>("camera", "glyx_cap_camera", SYM_CAMERA, hash) }
 }
 
 fn load_gamepad(hash: Option<&str>) -> Option<&'static GamepadCap> {
     #[cfg(feature = "gamepad")]
-    { let _ = hash; return None; }
+    { let _ = hash; return Some(glyx_cap_gamepad::static_cap()); }
     #[cfg(not(feature = "gamepad"))]
     unsafe { try_load_dynamic::<GamepadCap>("gamepad", "glyx_cap_gamepad", SYM_GAMEPAD, hash) }
 }
 
 fn load_hid(hash: Option<&str>) -> Option<&'static HidCap> {
     #[cfg(feature = "hid")]
-    { let _ = hash; return None; }
+    { let _ = hash; return Some(glyx_cap_hid::static_cap()); }
     #[cfg(not(feature = "hid"))]
     unsafe { try_load_dynamic::<HidCap>("hid", "glyx_cap_hid", SYM_HID, hash) }
 }

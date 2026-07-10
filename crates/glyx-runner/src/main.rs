@@ -118,8 +118,7 @@ fn read_trailer() -> Option<TrailerPayload> {
     Some(TrailerPayload { snapshot, js_src, config_json })
 }
 
-/// Returns the path where a pending JS-only update is staged.
-/// Mirrors the helper in `glyx-runtime` — must stay in sync.
+/// `~/.glyx/updates/<exe_stem>/pending.js`
 fn pending_js_staging_path() -> Option<std::path::PathBuf> {
     let exe  = std::env::current_exe().ok()?;
     let stem = exe.file_stem()?.to_string_lossy().into_owned();
@@ -129,6 +128,55 @@ fn pending_js_staging_path() -> Option<std::path::PathBuf> {
         .join(".glyx").join("updates").join(stem).join("pending.js"))
 }
 
+/// Load and verify a staged JS update.
+///
+/// Reads `pending.js` and its `.sig` sidecar, verifies the Ed25519 signature
+/// against the embedded `UPDATE_PUBKEY`, and returns the JS source on success.
+///
+/// On any failure (missing sig, bad sig, I/O error) both files are deleted
+/// and `None` is returned so the normal embedded bundle is used instead.
+/// A tampered or unsigned `pending.js` is never executed.
+fn load_verified_pending_js() -> Option<String> {
+    let js_path  = pending_js_staging_path()?;
+    if !js_path.exists() { return None; }
+
+    // Derive sig path: pending.js → pending.js.sig
+    let mut sig_path = js_path.clone();
+    sig_path.set_extension("js.sig");
+
+    let cleanup = |reason: &str| {
+        eprintln!("[glyx] pending.js rejected ({reason}) — deleting staged update.");
+        let _ = std::fs::remove_file(&js_path);
+        let _ = std::fs::remove_file(&sig_path);
+    };
+
+    // Sig file must exist.
+    if !sig_path.exists() {
+        cleanup("no .sig sidecar");
+        return None;
+    }
+
+    // Verify signature over the raw bytes before decoding to String.
+    match glyx_verify::verify_signed_file(&js_path, &sig_path, &glyx_verify::UPDATE_PUBKEY) {
+        Ok(()) => {}
+        Err(e) => {
+            cleanup(&format!("signature invalid: {e}"));
+            return None;
+        }
+    }
+
+    match std::fs::read_to_string(&js_path) {
+        Ok(src) => {
+            eprintln!("[glyx] Applying verified pending JS update.");
+            Some(src)
+        }
+        Err(e) => {
+            cleanup(&format!("read error: {e}"));
+            None
+        }
+    }
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
@@ -136,9 +184,11 @@ fn main() {
         .init();
 
     // Check for a staged JS-only update before loading the normal bundle.
-    let pending_js = pending_js_staging_path()
-        .filter(|p| p.exists())
-        .and_then(|p| std::fs::read_to_string(&p).ok());
+    // The update is only applied if its Ed25519 signature (written alongside
+    // by updater_download_js) verifies against the embedded UPDATE_PUBKEY.
+    // A missing or invalid sig deletes both files and falls back to the
+    // embedded bundle — a tampered pending.js is never executed.
+    let pending_js = load_verified_pending_js();
 
     let mut config = if let Some(payload) = read_trailer() {
         eprintln!("[glyx] Loading app from embedded binary trailer.");

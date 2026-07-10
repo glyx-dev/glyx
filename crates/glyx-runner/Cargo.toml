@@ -12,7 +12,8 @@ default = ["dev"]
 dev     = ["glyx-core/dev"]
 
 [dependencies]
-glyx-core  = { path = "../glyx-core", default-features = false }
-glyx-shell = { path = "../glyx-shell" }
+glyx-core   = { path = "../glyx-core", default-features = false }
+glyx-shell  = { path = "../glyx-shell" }
+glyx-verify = { path = "../glyx-verify" }
 env_logger  = { workspace = true }
 crc32fast   = { workspace = true }

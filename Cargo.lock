@@ -3040,6 +3040,7 @@ dependencies = [
  "env_logger",
  "glyx-core",
  "glyx-shell",
+ "glyx-verify",
 ]
 
 [[package]]
@@ -3071,6 +3072,7 @@ dependencies = [
  "glyx-sysapi",
  "glyx-text",
  "glyx-verify",
+ "hex",
  "hidapi",
  "keepawake",
  "libloading",

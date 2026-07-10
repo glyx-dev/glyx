@@ -116,6 +116,7 @@ sha2                = "0.10"
 ed25519-dalek       = { version = "2", default-features = false, features = ["std", "pkcs8"] }
 cpal                = "0.15"
 hound               = "3"
+hex                 = "0.4"
 windows-sys         = { version = "0.59", features = [] }
 
 # AI / ML — Candle (Hugging Face minimalist ML framework, CPU-only by default)

@@ -49,6 +49,7 @@ glyx-cap-camera    = { path = "../glyx-cap-camera", optional = true }
 glyx-macros        = { path = "../glyx-macros" }
 glyx-verify        = { path = "../glyx-verify" }
 libloading         = { workspace = true }
+hex                = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader"] }

@@ -69,7 +69,7 @@ pub fn is_maximized_callback(
     rv.set(v8::Boolean::new(scope, result).into());
 }
 
-// â”€â”€ File system bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ File system bindings â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 //
 // All async, all return Promise<string> (empty string for void operations).
 // fs.write capability is required for all mutation operations.
@@ -105,12 +105,12 @@ pub fn set_title_callback(
     }
 }
 
-// â”€â”€ File dialog callbacks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ File dialog callbacks â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 //
 // All async. Gated by `dialog: true` capability.
-// `dialog_openFile`   â†’ Promise<string>   â€” JSON array of paths, or JSON null.
-// `dialog_saveFile`   â†’ Promise<string>   â€” JSON path string, or JSON null.
-// `dialog_openFolder` â†’ Promise<string>   â€” JSON path string, or JSON null.
+// `dialog_openFile`   â†' Promise<string>   â€" JSON array of paths, or JSON null.
+// `dialog_saveFile`   â†' Promise<string>   â€" JSON path string, or JSON null.
+// `dialog_openFolder` â†' Promise<string>   â€" JSON path string, or JSON null.
 //
 // Filter format: JSON array of `{ name: string, extensions: string[] }`.
 
@@ -126,7 +126,7 @@ pub fn parse_dialog_filters(json: &str) -> Vec<(String, Vec<String>)> {
     }).collect()
 }
 
-/// `__glyx_dialog_openFile(filtersJson, multiple) -> Promise<string>` â€” JSON path[].
+/// `__glyx_dialog_openFile(filtersJson, multiple) -> Promise<string>` â€" JSON path[].
 pub fn dialog_open_file_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -180,7 +180,7 @@ pub fn dialog_open_file_callback(
     });
 }
 
-/// `__glyx_dialog_saveFile(defaultName, filtersJson) -> Promise<string>` â€” JSON path | null.
+/// `__glyx_dialog_saveFile(defaultName, filtersJson) -> Promise<string>` â€" JSON path | null.
 pub fn dialog_save_file_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -219,7 +219,7 @@ pub fn dialog_save_file_callback(
     });
 }
 
-/// `__glyx_dialog_openFolder() -> Promise<string>` â€” JSON path | null.
+/// `__glyx_dialog_openFolder() -> Promise<string>` â€" JSON path | null.
 pub fn dialog_open_folder_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -251,11 +251,11 @@ pub fn dialog_open_folder_callback(
     });
 }
 
-// â”€â”€ Clipboard callbacks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Clipboard callbacks â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 //
 // Gated by `clipboard: true` capability.
 
-/// `__glyx_clipboard_readText() -> Promise<string>` â€” clipboard text content.
+/// `__glyx_clipboard_readText() -> Promise<string>` â€" clipboard text content.
 pub fn clipboard_read_text_callback(
     scope:  &mut v8::HandleScope,
     _args:  v8::FunctionCallbackArguments,
@@ -266,7 +266,7 @@ pub fn clipboard_read_text_callback(
         return;
     }
     // Read synchronously on the V8 thread. clipboard_win calls Win32 OpenClipboard/
-    // GetClipboardData which require a thread with a message pump â€” the main thread
+    // GetClipboardData which require a thread with a message pump â€" the main thread
     // qualifies, but spawn_blocking worker threads do not (causes silent failures when
     // pasting from external apps). The clipboard read is ~0ms so blocking is fine.
     let text = clipboard_win::get_clipboard::<String, _>(clipboard_win::formats::Unicode)
@@ -292,7 +292,7 @@ pub fn clipboard_write_text_callback(
     let text     = v8_arg_to_string(scope, &args, 0);
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise  = resolver.get_promise(scope);
-    // Write synchronously â€” same reason as readText (Win32 clipboard needs message pump thread).
+    // Write synchronously â€" same reason as readText (Win32 clipboard needs message pump thread).
     if let Err(e) = clipboard_win::set_clipboard(clipboard_win::formats::Unicode, &text) {
         log::warn!("[clipboard] write failed: {e}");
     }
@@ -301,7 +301,7 @@ pub fn clipboard_write_text_callback(
     rv.set(promise.into());
 }
 
-// â”€â”€ Notification callback â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Notification callback â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// `__glyx_notification_send(title, body) -> Promise<void>`
 ///
@@ -357,15 +357,15 @@ pub fn notification_send_callback(
     });
 }
 
-// â”€â”€ Vector database callbacks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Vector database callbacks â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 //
 // All async. Gated by `db: true` capability (vector stores are local DB storage).
-// `vectorDb_open`   â†’ Promise<string>  â€” resolves with handle number as a string.
-// `vectorDb_upsert` â†’ Promise<string>  â€” resolves with "" on success.
-// `vectorDb_search` â†’ Promise<string>  â€” resolves with JSON array of {id,score,metadata}.
-// `vectorDb_close`  â†’ Promise<string>  â€” resolves with "" on success.
+// `vectorDb_open`   â†' Promise<string>  â€" resolves with handle number as a string.
+// `vectorDb_upsert` â†' Promise<string>  â€" resolves with "" on success.
+// `vectorDb_search` â†' Promise<string>  â€" resolves with JSON array of {id,score,metadata}.
+// `vectorDb_close`  â†' Promise<string>  â€" resolves with "" on success.
 
-/// `__glyx_vectorDb_open(path) -> Promise<string>` â€” handle number.
+/// `__glyx_vectorDb_open(path) -> Promise<string>` â€" handle number.
 pub fn battery_get_status_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -394,7 +394,7 @@ pub fn battery_get_status_callback(
     rv.set(promise.into());
 }
 
-/// `__glyx_system_getInfo()` â†’ Promise<JSON>
+/// `__glyx_system_getInfo()` â†' Promise<JSON>
 pub fn system_get_info_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -420,9 +420,9 @@ pub fn system_get_info_callback(
     rv.set(promise.into());
 }
 
-/// `__glyx_system_getDarkMode()` â†’ `"dark" | "light" | "unknown"` (sync, ~1 Âµs)
+/// `__glyx_system_getDarkMode()` â†' `"dark" | "light" | "unknown"` (sync, ~1 Âµs)
 ///
-/// Reads the OS appearance preference directly â€” Windows registry key, macOS
+/// Reads the OS appearance preference directly â€" Windows registry key, macOS
 /// NSUserDefaults, Linux gsettings.  No blocking I/O; safe to call every frame
 /// if needed (though polling once per second is sufficient for most apps).
 pub fn system_get_dark_mode_callback(
@@ -440,7 +440,7 @@ pub fn system_get_dark_mode_callback(
     rv.set(s.into());
 }
 
-/// `__glyx_system_getBatterySaver()` â†’ boolean (sync, ~1 Âµs on Windows)
+/// `__glyx_system_getBatterySaver()` â†' boolean (sync, ~1 Âµs on Windows)
 ///
 /// Returns `true` if battery-saver / power-saver mode is active.
 /// Uses `GetSystemPowerStatus()` on Windows (one kernel call, no extra crate).
@@ -458,7 +458,7 @@ pub fn system_get_battery_saver_callback(
     rv.set(v8::Boolean::new(scope, active).into());
 }
 
-/// `__glyx_power_preventSleep(reason)` â†’ string guard-id (sync)
+/// `__glyx_power_preventSleep(reason)` â†' string guard-id (sync)
 pub fn power_prevent_sleep_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -487,7 +487,7 @@ pub fn power_prevent_sleep_callback(
     }
 }
 
-/// `__glyx_power_allowSleep(id)` â€” sync, drops the guard
+/// `__glyx_power_allowSleep(id)` â€" sync, drops the guard
 pub fn power_allow_sleep_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -502,7 +502,7 @@ pub fn power_allow_sleep_callback(
     }
 }
 
-/// `__glyx_storage_getDrives()` â†’ Promise<JSON>
+/// `__glyx_storage_getDrives()` â†' Promise<JSON>
 pub fn storage_get_drives_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -529,7 +529,7 @@ pub fn storage_get_drives_callback(
     rv.set(promise.into());
 }
 
-/// `__glyx_gamepad_poll()` â†’ JSON string (sync, drain gilrs events)
+/// `__glyx_gamepad_poll()` â†' JSON string (sync, drain gilrs events)
 #[cfg(feature = "gamepad")]
 pub fn gamepad_poll_callback(
     scope: &mut v8::HandleScope,
@@ -605,7 +605,7 @@ pub fn gamepad_poll_callback(
     rv.set(s.into());
 }
 
-/// `__glyx_shortcut_register(accelerator)` â†’ string id (sync)
+/// `__glyx_shortcut_register(accelerator)` â†' string id (sync)
 pub fn shortcut_register_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -643,7 +643,7 @@ pub fn shortcut_register_callback(
     rv.set(s.into());
 }
 
-/// `__glyx_shortcut_unregister(id)` â€” sync
+/// `__glyx_shortcut_unregister(id)` â€" sync
 pub fn shortcut_unregister_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -662,7 +662,7 @@ pub fn shortcut_unregister_callback(
     }
 }
 
-/// `__glyx_shortcut_poll()` â†’ JSON string array of fired glyx IDs (sync)
+/// `__glyx_shortcut_poll()` â†' JSON string array of fired glyx IDs (sync)
 pub fn shortcut_poll_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -692,9 +692,9 @@ pub fn shortcut_poll_callback(
     rv.set(s.into());
 }
 
-// â”€â”€ Credentials (OS keychain) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Credentials (OS keychain) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-/// `__glyx_credentials_set(service, key, value)` â†’ Promise<void>
+/// `__glyx_credentials_set(service, key, value)` â†' Promise<void>
 ///
 /// Stores `value` in the OS credential store under `service`+`key`.
 /// Encrypted by the OS, tied to the logged-in user account.
@@ -723,7 +723,7 @@ pub fn credentials_set_callback(
     rv.set(promise.into());
 }
 
-/// `__glyx_credentials_get(service, key)` â†’ Promise<string | null>
+/// `__glyx_credentials_get(service, key)` â†' Promise<string | null>
 ///
 /// Returns the stored secret, or JSON `null` if no entry exists.
 pub fn credentials_get_callback(
@@ -752,7 +752,7 @@ pub fn credentials_get_callback(
     rv.set(promise.into());
 }
 
-/// `__glyx_credentials_delete(service, key)` â†’ Promise<void>
+/// `__glyx_credentials_delete(service, key)` â†' Promise<void>
 pub fn credentials_delete_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -777,7 +777,7 @@ pub fn credentials_delete_callback(
     rv.set(promise.into());
 }
 
-// â”€â”€ Audio playback bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Audio playback bindings â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 pub fn parse_accelerator(acc: &str) -> Option<global_hotkey::hotkey::HotKey> {
     use global_hotkey::hotkey::{HotKey, Modifiers};
@@ -835,9 +835,9 @@ pub fn str_to_code(key: &str) -> Option<global_hotkey::hotkey::Code> {
     })
 }
 
-// â”€â”€ Performance metrics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Performance metrics â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-/// `__glyx_perf_snapshot()` â†’ JSON string with current perf metrics.
+/// `__glyx_perf_snapshot()` â†' JSON string with current perf metrics.
 pub fn perf_snapshot_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -869,7 +869,7 @@ pub fn perf_snapshot_callback(
     rv.set(s.into());
 }
 
-/// `__glyx_perf_set_budget(ms)` â€” sync, sets the frame-budget threshold.
+/// `__glyx_perf_set_budget(ms)` â€" sync, sets the frame-budget threshold.
 pub fn perf_set_budget_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -883,7 +883,7 @@ pub fn perf_set_budget_callback(
     state.perf_state.lock().budget_ms = ms;
 }
 
-/// `__glyx_perf_poll_leak_warnings()` â†’ JSON array string; drains leak warnings (dev mode).
+/// `__glyx_perf_poll_leak_warnings()` â†' JSON array string; drains leak warnings (dev mode).
 pub fn perf_poll_leak_warnings_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -905,7 +905,7 @@ pub fn perf_poll_leak_warnings_callback(
     rv.set(s.into());
 }
 
-/// `__glyx_perf_poll_violations()` â†’ JSON array string; drains the violation queue.
+/// `__glyx_perf_poll_violations()` â†' JSON array string; drains the violation queue.
 pub fn perf_poll_violations_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -927,7 +927,7 @@ pub fn perf_poll_violations_callback(
     rv.set(s.into());
 }
 
-/// `__glyx_quit()` â€” sync, requests application exit.
+/// `__glyx_quit()` â€" sync, requests application exit.
 ///
 /// Calls the quit closure stored in `WindowController`, which sends
 /// `GlyxUserEvent::Quit` to the winit event loop causing it to exit.
@@ -946,7 +946,7 @@ pub fn quit_callback(
     }
 }
 
-/// `__glyx_collect_memory()` â€” sync, immediately runs V8 GC + mimalloc segment decommit.
+/// `__glyx_collect_memory()` â€" sync, immediately runs V8 GC + mimalloc segment decommit.
 /// The framework calls this automatically on focus loss; developers can call it manually
 /// at natural pause points (level transitions, loading screens, menu opens).
 pub fn collect_memory_callback(
@@ -958,32 +958,95 @@ pub fn collect_memory_callback(
     unsafe { mi_collect(true); }
 }
 
-/// `__glyx_open_external(url)` â€” sync, opens a URL/path in the OS default app
-/// (browser for http/https). Used for OAuth flows, "open in browser" links, etc.
+/// Validate a URL before passing it to the OS shell.
+///
+/// Enforces:
+/// - Scheme must be `http`, `https`, or `mailto` (prevents `file://`, `javascript:`, etc.)
+/// - No ASCII control characters (0x00-0x1F, 0x7F)
+/// - No shell metacharacters that could cause re-interpretation if a platform
+///   handler mis-uses them: `|  &  ;  $  (  )  >  <  \`  {  }`
+///
+/// Returns `Err` with a log-safe reason string on denial.
+fn validate_external_url(url: &str) -> Result<(), &'static str> {
+    // Scheme check - must be one of the three safe schemes.
+    let lower = url.to_ascii_lowercase();
+    let valid_scheme = lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:");
+    if !valid_scheme {
+        return Err("scheme not in allowlist (http, https, mailto)");
+    }
+
+    // Control character check.
+    if url.bytes().any(|b| b < 0x20 || b == 0x7F) {
+        return Err("URL contains control characters");
+    }
+
+    // Shell metacharacter check - defense-in-depth against injection if
+    // any downstream platform handler passes the URL through a shell.
+    const SHELL_META: &[char] = &['|', '&', ';', '$', '(', ')', '>', '<', '`', '{', '}'];
+    if url.chars().any(|c| SHELL_META.contains(&c)) {
+        return Err("URL contains shell metacharacters");
+    }
+
+    Ok(())
+}
+
+/// `__glyx_open_external(url)` - sync, opens a URL in the OS default browser.
+/// Used for OAuth flows, "open in browser" links, mailto: composition, etc.
+///
+/// Requires `capabilities.shell: true` in glyx.config.
+/// Validates scheme (http/https/mailto only) and rejects control chars and
+/// shell metacharacters before dispatch.  Never passes through `cmd /C` or
+/// any other shell - each platform uses the direct OS API/binary.
 pub fn open_external_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    // ── Capability gate ──────────────────────────────────────────────────────
+    if !glyx_security::get().shell {
+        throw_js_error(scope, "open_external requires capabilities.shell: true");
+        return;
+    }
+
     let url = args.get(0).to_string(scope)
         .map(|s| s.to_rust_string_lossy(scope))
         .unwrap_or_default();
-    // Only allow web/mail/explicit schemes â€” never arbitrary local commands.
-    let ok = url.starts_with("http://") || url.starts_with("https://")
-        || url.starts_with("mailto:");
-    if !ok { log::warn!("open_external: refused non-web URL"); return; }
 
+    // ── URL validation ───────────────────────────────────────────────────────
+    if let Err(reason) = validate_external_url(&url) {
+        log::warn!("[open_external] denied {:?}: {reason}", url);
+        throw_js_error(scope, &format!("open_external: {reason}"));
+        return;
+    }
+
+    // ── OS dispatch - no shell involved ──────────────────────────────────────
+    // Windows: ShellExecuteW via rundll32 url.dll,FileProtocolHandler
+    //   (avoids cmd.exe re-parse; rundll32 is argv-separated)
+    // macOS/Linux: `open` / `xdg-open` take a single argument - no shell.
     #[cfg(target_os = "windows")]
-    let r = std::process::Command::new("cmd").args(["/C", "start", "", &url]).spawn();
+    let r = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", &url])
+        .spawn();
     #[cfg(target_os = "macos")]
     let r = std::process::Command::new("open").arg(&url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
     let r = std::process::Command::new("xdg-open").arg(&url).spawn();
 
-    if let Err(e) = r { log::warn!("open_external failed: {e}"); }
+    if let Err(e) = r {
+        log::warn!("[open_external] OS dispatch failed: {e}");
+        throw_js_error(scope, &format!("open_external: OS error: {e}"));
+    }
+
+    let _ = state;
 }
 
-/// `__glyx_restart()` â€” sync, requests app restart (quit + re-launch).
+/// `__glyx_restart()` â€" sync, requests app restart (quit + re-launch).
 pub fn restart_callback(
     _scope: &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -999,7 +1062,7 @@ pub fn restart_callback(
     }
 }
 
-/// `__glyx_platform()` â†’ `"windows"` | `"macos"` | `"linux"` (compile-time constant).
+/// `__glyx_platform()` â†' `"windows"` | `"macos"` | `"linux"` (compile-time constant).
 pub fn platform_callback(
     scope: &mut v8::HandleScope,
     _args: v8::FunctionCallbackArguments,
@@ -1011,9 +1074,9 @@ pub fn platform_callback(
     rv.set(v8::String::new(scope, s).unwrap().into());
 }
 
-// â”€â”€ Deep link bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Deep link bindings â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-/// `__glyx_deeplink_getInitialUrl()` â†’ string
+/// `__glyx_deeplink_getInitialUrl()` â†' string
 ///
 /// Returns the URL that launched the app (e.g. `"notes://note/42"`), or `""`
 /// if the app was opened normally.  The value is set by glyx-core at startup
@@ -1028,7 +1091,7 @@ pub fn deeplink_get_initial_url_callback(
     rv.set(s.into());
 }
 
-/// `__glyx_deeplink_poll()` â†’ JSON string (array of URL strings)
+/// `__glyx_deeplink_poll()` â†' JSON string (array of URL strings)
 ///
 /// Drains the forwarded URL queue (populated by the single-instance listener
 /// when a second process connects and sends a URL).  Called each frame inside

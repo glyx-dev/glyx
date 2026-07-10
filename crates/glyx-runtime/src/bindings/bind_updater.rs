@@ -1,5 +1,63 @@
 use super::*;
 
+// ── Build-time update origin (H2) ─────────────────────────────────────────────
+//
+// Owner, repo and binary name are compiled in from env vars set by the CLI
+// during `glyx build`.  JS cannot override them - callers only trigger
+// check / apply; the trust chain is:
+//
+//   CI signs release binary with UPDATE_SIGNING_KEY (private, never committed)
+//   → .sig sidecar uploaded alongside each GitHub Release asset
+//   → glyx-verify::UPDATE_PUBKEY (embedded) verifies before applying
+//
+// Set in glyx.config: updater: { owner, repo, binName }
+// The CLI sets GLYX_UPDATE_OWNER / GLYX_UPDATE_REPO / GLYX_UPDATE_BIN_NAME.
+
+const UPDATE_OWNER:    Option<&str> = option_env!("GLYX_UPDATE_OWNER");
+const UPDATE_REPO:     Option<&str> = option_env!("GLYX_UPDATE_REPO");
+const UPDATE_BIN_NAME: Option<&str> = option_env!("GLYX_UPDATE_BIN_NAME");
+
+/// Fail fast at runtime if the origin constants were not baked in at build
+/// time and return a user-visible error string.
+fn update_origin() -> Result<(&'static str, &'static str, &'static str), String> {
+    match (UPDATE_OWNER, UPDATE_REPO, UPDATE_BIN_NAME) {
+        (Some(o), Some(r), Some(b)) => Ok((o, r, b)),
+        _ => Err(
+            "Update origin not configured. Set updater.owner, updater.repo, \
+             and updater.binName in glyx.config and rebuild.".to_string()
+        ),
+    }
+}
+
+// ── Pending-JS staging path ───────────────────────────────────────────────────
+
+/// `~/.glyx/updates/<exe_stem>/pending.js`
+#[cfg(feature = "updater")]
+pub fn pending_js_staging_path() -> Option<std::path::PathBuf> {
+    let exe  = std::env::current_exe().ok()?;
+    let stem = exe.file_stem()?.to_string_lossy().into_owned();
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME")).ok()?;
+    Some(std::path::PathBuf::from(home)
+        .join(".glyx").join("updates").join(stem).join("pending.js"))
+}
+
+/// `.sig` sidecar path alongside the staged pending.js.
+#[cfg(feature = "updater")]
+fn pending_js_sig_path() -> Option<std::path::PathBuf> {
+    pending_js_staging_path().map(|p| {
+        let mut sig = p.clone();
+        sig.set_extension("js.sig");
+        sig
+    })
+}
+
+// ── updater_check ─────────────────────────────────────────────────────────────
+
+/// `__glyx_updater_check() → Promise<{ hasUpdate, latestVersion, body }>`
+///
+/// Checks the pinned GitHub repo (compiled in) for a newer release.
+/// JS passes only the current version - it cannot choose the source.
 #[cfg(feature = "updater")]
 pub fn updater_check_callback(
     scope: &mut v8::HandleScope,
@@ -14,22 +72,21 @@ pub fn updater_check_callback(
         rv.set(reject_cap_promise(scope, "updater").into()); return;
     }
 
-    let owner   = v8_arg_to_string(scope, &args, 0);
-    let repo    = v8_arg_to_string(scope, &args, 1);
-    let current = v8_arg_to_string(scope, &args, 2);
+    let current = v8_arg_to_string(scope, &args, 0);
 
     let (resolver, promise, queue, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let (owner, repo, _bin) = update_origin()?;
             let releases = self_update::backends::github::ReleaseList::configure()
-                .repo_owner(&owner)
-                .repo_name(&repo)
+                .repo_owner(owner)
+                .repo_name(repo)
                 .build().map_err(|e| e.to_string())?
                 .fetch().map_err(|e| e.to_string())?;
 
-            let latest = releases.first();
+            let latest     = releases.first();
             let has_update = latest.map(|r| {
                 self_update::version::bump_is_greater(&current, &r.version)
                     .unwrap_or(false)
@@ -47,11 +104,16 @@ pub fn updater_check_callback(
     });
 }
 
-/// `__glyx_updater_update(owner, repo, binName, currentVersion) â†’ Promise<JSON>`
+// ── updater_update ────────────────────────────────────────────────────────────
+
+/// `__glyx_updater_update(currentVersion) → Promise<{ updated, latestVersion }>`
 ///
-/// Downloads the latest GitHub release for this binary and replaces the running executable.
-/// Returns `{ updated: bool, latestVersion: string }`.
-/// The caller should prompt the user to restart.
+/// Downloads the latest release binary + its `.sig` sidecar from the pinned
+/// GitHub repo, verifies the Ed25519 signature against the embedded
+/// `UPDATE_PUBKEY`, then replaces the running executable on success.
+///
+/// Rejects if no `.sig` asset is present or verification fails - a tampered
+/// or unsigned binary is never applied.
 #[cfg(feature = "updater")]
 pub fn updater_update_callback(
     scope: &mut v8::HandleScope,
@@ -66,51 +128,99 @@ pub fn updater_update_callback(
         rv.set(reject_cap_promise(scope, "updater").into()); return;
     }
 
-    let owner    = v8_arg_to_string(scope, &args, 0);
-    let repo     = v8_arg_to_string(scope, &args, 1);
-    let bin_name = v8_arg_to_string(scope, &args, 2);
-    let current  = v8_arg_to_string(scope, &args, 3);
+    let current = v8_arg_to_string(scope, &args, 0);
 
     let (resolver, promise, queue, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let status = self_update::backends::github::Update::configure()
-                .repo_owner(&owner)
-                .repo_name(&repo)
-                .bin_name(&bin_name)
-                .show_output(false)
-                .no_confirm(true)
-                .current_version(&current)
+            let (owner, repo, bin_name) = update_origin()?;
+
+            // 1. Fetch release list and find the latest upgrade.
+            let releases = self_update::backends::github::ReleaseList::configure()
+                .repo_owner(owner)
+                .repo_name(repo)
                 .build().map_err(|e| e.to_string())?
-                .update().map_err(|e| e.to_string())?;
+                .fetch().map_err(|e| e.to_string())?;
+
+            let latest = match releases.first() {
+                Some(r) => r,
+                None    => return Err("no releases found".to_string()),
+            };
+
+            let has_update = self_update::version::bump_is_greater(&current, &latest.version)
+                .unwrap_or(false);
+            if !has_update {
+                return serde_json::to_string(&serde_json::json!({
+                    "updated": false, "latestVersion": latest.version,
+                })).map_err(|e| e.to_string());
+            }
+
+            // 2. Find the binary asset and its .sig sidecar.
+            let target_asset = format!("{bin_name}-{}", std::env::consts::OS);
+            let bin_asset = latest.assets.iter()
+                .find(|a| a.name.contains(&target_asset))
+                .ok_or_else(|| format!("no asset matching '{target_asset}' in release"))?;
+            let sig_asset_name = format!("{}.sig", bin_asset.name);
+            let sig_asset = latest.assets.iter()
+                .find(|a| a.name == sig_asset_name)
+                .ok_or_else(|| format!("no .sig sidecar '{sig_asset_name}' - unsigned release rejected"))?;
+
+            // 3. Download binary + sig to temp files.
+            let tmp_dir  = std::env::temp_dir();
+            let tmp_bin  = tmp_dir.join(format!("glyx_update_{}.bin", std::process::id()));
+            let tmp_sig  = tmp_dir.join(format!("glyx_update_{}.sig", std::process::id()));
+
+            {
+                let mut f = std::fs::File::create(&tmp_bin)
+                    .map_err(|e| format!("create tmp bin: {e}"))?;
+                self_update::Download::from_url(&bin_asset.download_url)
+                    .show_progress(false)
+                    .download_to(&mut f)
+                    .map_err(|e| format!("download failed: {e}"))?;
+            }
+            {
+                let mut f = std::fs::File::create(&tmp_sig)
+                    .map_err(|e| format!("create tmp sig: {e}"))?;
+                self_update::Download::from_url(&sig_asset.download_url)
+                    .show_progress(false)
+                    .download_to(&mut f)
+                    .map_err(|e| format!("sig download failed: {e}"))?;
+            }
+
+            // 4. Verify signature before touching the running exe.
+            let verify_result = glyx_verify::verify_signed_file(
+                &tmp_bin, &tmp_sig, &glyx_verify::UPDATE_PUBKEY,
+            );
+            // Clean up temp sig regardless.
+            let _ = std::fs::remove_file(&tmp_sig);
+
+            if let Err(e) = verify_result {
+                let _ = std::fs::remove_file(&tmp_bin);
+                return Err(format!("signature verification failed - update rejected: {e}"));
+            }
+            log::info!("[updater] signature verified for {}", bin_asset.name);
+
+            // 5. Replace the running executable.
+            let current_exe = std::env::current_exe()
+                .map_err(|e| format!("could not locate current exe: {e}"))?;
+            self_update::Move::from_source(&tmp_bin)
+                .replace_using_temp(&tmp_dir.join("_glyx_replace_tmp"))
+                .to_dest(&current_exe)
+                .map_err(|e| format!("exe replace failed: {e}"))?;
 
             serde_json::to_string(&serde_json::json!({
-                "updated":       status.updated(),
-                "latestVersion": status.version(),
+                "updated": true, "latestVersion": latest.version,
             })).map_err(|e| e.to_string())
         }).await.map_err(|e| e.to_string()).and_then(|r| r);
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
-/// Returns the staging path for a pending JS-only update.
-/// `~/.glyx/updates/<exe_stem>/pending.js`
-#[cfg(feature = "updater")]
-pub fn pending_js_staging_path() -> Option<std::path::PathBuf> {
-    let exe  = std::env::current_exe().ok()?;
-    let stem = exe.file_stem()?.to_string_lossy().into_owned();
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME")).ok()?;
-    Some(std::path::PathBuf::from(home)
-        .join(".glyx").join("updates").join(stem).join("pending.js"))
-}
+// ── updater_get_version ───────────────────────────────────────────────────────
 
-/// `__glyx_updater_get_version() â†’ string`
-///
-/// Returns the app version declared in `glyx.config.json` (`version` field),
-/// or `"0.0.0"` if not set.
+/// `__glyx_updater_get_version() → string`
 #[cfg(feature = "updater")]
 pub fn updater_get_version_callback(
     scope: &mut v8::HandleScope,
@@ -121,36 +231,13 @@ pub fn updater_get_version_callback(
     rv.set(v.into());
 }
 
-/// `__glyx_updater_check_manifest(url, currentVersion) â†’ Promise<manifest_json | "null">`
+// ── updater_check_manifest ────────────────────────────────────────────────────
+
+/// `__glyx_updater_check_manifest(url, currentVersion) → Promise<manifest_json | "null">`
 ///
-/// Fetches a JSON manifest from `url`, then:
-/// 1. Compares `manifest.version` against `currentVersion` â€” returns `"null"` if up to date.
-/// 2. Checks `manifest.platforms` (optional string array) â€” returns `"null"` if the current
-///    OS is not listed.
-/// 3. Injects `"_platform"` into the returned object so JS can pick platform-specific asset
-///    URLs (e.g. `manifest[manifest._platform].runner_url`).
-///
-/// Platform values match Rust's `std::env::consts::OS`: `"windows"`, `"macos"`, `"linux"`.
-///
-/// Manifest shape:
-/// ```json
-/// {
-///   "version":     "2.1.0",
-///   "update_type": "js_only",              // "js_only" | "runner" | "full"
-///   "platforms":   ["windows", "macos"],   // omit = applies to all platforms
-///   "notes":       "Bug fixes",
-///   "js_url":      "https://cdn.example.com/2.1.0/app.js",
-///   "js_sha256":   "abc123...",
-///   "windows": {
-///     "runner_url":    "https://cdn.example.com/2.1.0/myapp-windows.zip",
-///     "runner_sha256": "def..."
-///   },
-///   "macos": {
-///     "runner_url":    "https://cdn.example.com/2.1.0/myapp-macos.tar.gz",
-///     "runner_sha256": "ghi..."
-///   }
-/// }
-/// ```
+/// Fetches a JSON manifest and checks if an update is available for this
+/// platform.  The manifest must include `js_sig` (hex Ed25519) for JS-only
+/// updates - without it `updater_download_js` will reject.
 #[cfg(feature = "updater")]
 pub fn updater_check_manifest_callback(
     scope: &mut v8::HandleScope,
@@ -179,25 +266,18 @@ pub fn updater_check_manifest_callback(
             }
             let mut manifest: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
 
-            // Version check.
             let latest = manifest["version"].as_str().unwrap_or("0.0.0");
             let has_update = self_update::version::bump_is_greater(&current, latest)
                 .unwrap_or(false);
-            if !has_update {
-                return Ok("null".to_string());
-            }
+            if !has_update { return Ok("null".to_string()); }
 
-            // Platform filter: if manifest specifies platforms, skip if ours isn't listed.
-            let current_os = std::env::consts::OS; // "windows" | "macos" | "linux" | ...
+            let current_os = std::env::consts::OS;
             if let Some(platforms) = manifest["platforms"].as_array() {
                 let supported = platforms.iter()
                     .any(|p| p.as_str().map(|s| s == current_os).unwrap_or(false));
-                if !supported {
-                    return Ok("null".to_string());
-                }
+                if !supported { return Ok("null".to_string()); }
             }
 
-            // Inject current platform so JS can resolve platform-specific asset URLs.
             if let Some(obj) = manifest.as_object_mut() {
                 obj.insert("_platform".to_string(), serde_json::Value::String(current_os.to_string()));
             }
@@ -208,14 +288,19 @@ pub fn updater_check_manifest_callback(
     });
 }
 
-/// `__glyx_updater_download_js(url, sha256) â†’ Promise<void>`
+// ── updater_download_js ───────────────────────────────────────────────────────
+
+/// `__glyx_updater_download_js(url, js_sig_hex) → Promise<void>`
 ///
-/// Downloads a JS bundle from `url`, verifies its SHA-256 hex digest against
-/// `sha256` (pass `""` to skip verification), and writes it to the staging
-/// location `~/.glyx/updates/<exe_stem>/pending.js`.
+/// Downloads a JS bundle, verifies its Ed25519 signature (hex-encoded, over
+/// the raw bundle bytes) against the embedded `UPDATE_PUBKEY`, then stages
+/// it as `pending.js` + `pending.js.sig`.
 ///
-/// On the next restart, `glyx-runner` automatically loads this file instead of
-/// the bundled JS from the binary trailer, completing the JS-only update.
+/// Both files are written atomically: if verification fails, neither file is
+/// written and the existing staged update (if any) is untouched.
+///
+/// The `""` shortcut that previously skipped verification has been removed.
+/// A valid `js_sig_hex` is always required.
 #[cfg(feature = "updater")]
 pub fn updater_download_js_callback(
     scope: &mut v8::HandleScope,
@@ -230,15 +315,20 @@ pub fn updater_download_js_callback(
         rv.set(reject_cap_promise(scope, "updater").into()); return;
     }
 
-    let url    = v8_arg_to_string(scope, &args, 0);
-    let sha256 = v8_arg_to_string(scope, &args, 1);
+    let url        = v8_arg_to_string(scope, &args, 0);
+    let sig_hex    = v8_arg_to_string(scope, &args, 1);
 
     let (resolver, promise, queue, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
         let result: Result<String, String> = async {
-            use sha2::{Sha256, Digest};
+            // Decode the hex signature before downloading anything.
+            if sig_hex.is_empty() {
+                return Err("js_sig_hex is required - unsigned JS updates are not allowed".to_string());
+            }
+            let sig_bytes = hex::decode(&sig_hex)
+                .map_err(|e| format!("invalid js_sig_hex: {e}"))?;
 
             let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
             if !resp.status().is_success() {
@@ -246,44 +336,35 @@ pub fn updater_download_js_callback(
             }
             let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
 
-            // Verify SHA-256 if a digest was supplied.
-            if !sha256.is_empty() {
-                let mut hasher = Sha256::new();
-                hasher.update(&bytes);
-                let computed = format!("{:x}", hasher.finalize());
-                if computed != sha256.to_lowercase() {
-                    return Err(format!(
-                        "SHA-256 mismatch: expected {sha256}, got {computed}"
-                    ));
-                }
-            }
+            // Verify signature BEFORE writing anything to disk.
+            glyx_verify::verify_ed25519(&glyx_verify::UPDATE_PUBKEY, &bytes, &sig_bytes)
+                .map_err(|e| format!("JS bundle signature invalid - update rejected: {e}"))?;
 
             let js = String::from_utf8(bytes.to_vec())
                 .map_err(|e| format!("JS bundle is not valid UTF-8: {e}"))?;
 
             let staging = pending_js_staging_path()
                 .ok_or_else(|| "could not determine staging path".to_string())?;
+            let sig_path = pending_js_sig_path()
+                .ok_or_else(|| "could not determine sig staging path".to_string())?;
 
             if let Some(parent) = staging.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            std::fs::write(&staging, &js).map_err(|e| e.to_string())?;
+            // Write JS first, then sig - runner checks for sig presence.
+            std::fs::write(&staging, js.as_bytes()).map_err(|e| e.to_string())?;
+            std::fs::write(&sig_path, &sig_bytes).map_err(|e| e.to_string())?;
 
-            log::info!("[updater] JS update staged at {}", staging.display());
+            log::info!("[updater] JS update staged and verified at {}", staging.display());
             Ok("{}".to_string())
         }.await;
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
-// â”€â”€ Video player bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Crash reporter / other bindings ──────────────────────────────────────────
 
-/// `__glyx_video_open(url) â†’ Promise<handleId: string>`
-///
-/// Opens a video file or URL for playback. glyx-core spawns a decode thread via
-/// the glyx-media DLL. Gracefully degrades: if the DLL is unavailable the promise
-/// rejects with `"GlyxMediaNotAvailable"`.
-/// Requires `video: true` in glyx.config.json.
+/// Returns the path where crash reports are written.
 pub fn crash_reports_dir() -> std::path::PathBuf {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
@@ -292,12 +373,6 @@ pub fn crash_reports_dir() -> std::path::PathBuf {
     home.join(".glyx").join("crashes")
 }
 
-// â”€â”€ Crash reporter bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-/// `__glyx_crash_report_js(json)` â€” sync void.
-///
-/// Writes a JS-side crash report (from `onerror` / `unhandledrejection`) to disk.
-/// Capability-gated: requires `crash: true` in glyx.config.json.
 pub fn crash_report_js_callback(
     scope: &mut v8::HandleScope,
     args:  v8::FunctionCallbackArguments,
@@ -317,10 +392,6 @@ pub fn crash_report_js_callback(
     let _    = std::fs::write(path, json.as_bytes());
 }
 
-/// `__glyx_crash_get_reports() â†’ Promise<JSON>`
-///
-/// Returns an array of crash reports: `[{ file, content }]`.
-/// Reads all `*.json` files from the crash directory.
 pub fn crash_get_reports_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -361,9 +432,6 @@ pub fn crash_get_reports_callback(
     });
 }
 
-/// `__glyx_crash_clear_reports()` â€” sync void.
-///
-/// Deletes all crash dump files from the crash directory.
 pub fn crash_clear_reports_callback(
     scope: &mut v8::HandleScope,
     _args: v8::FunctionCallbackArguments,
@@ -383,13 +451,6 @@ pub fn crash_clear_reports_callback(
     }
 }
 
-// â”€â”€ Splash screen binding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-/// `__glyx_splash_hide()` â€” sync void.
-///
-/// Signals glyx-core to hide the splash screen overlay (if one is configured).
-/// The splash is hidden immediately unless `minimumMs` has not yet elapsed,
-/// in which case it is hidden as soon as the minimum display time expires.
 pub fn splash_hide_callback(
     _scope: &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -400,14 +461,6 @@ pub fn splash_hide_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     state.scene.lock().push_back(SceneCommand::HideSplash);
 }
-
-// â”€â”€ Backend command dispatch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-//
-// JS: `await __glyx_backend_call(name, argsJson)` â†’ Promise<resultJson>
-//
-// Looks up `name` in the BackendRegistry and dispatches to the registered async
-// handler.  Returns a rejected Promise (not a thrown error) for unknown commands
-// so the JS caller can handle the rejection with a normal `.catch()`.
 
 pub fn backend_call_callback(
     scope:  &mut v8::HandleScope,
@@ -421,10 +474,8 @@ pub fn backend_call_callback(
     let name      = v8_arg_to_string(scope, &args, 0);
     let args_json = v8_arg_to_string(scope, &args, 1);
 
-    // â”€â”€ JS plugin commands â€” called synchronously in V8, return their own Promise â”€â”€
     if let Some(global_fn) = state.js_backend_commands.get(&name) {
         let fn_local = v8::Local::new(scope, global_fn);
-        // Parse the JSON args string into a JS value so the plugin receives an object.
         let args_str = v8::String::new(scope, &args_json).unwrap_or_else(|| {
             v8::String::new(scope, "{}").unwrap()
         });
@@ -433,15 +484,11 @@ pub fn backend_call_callback(
         let ctx = scope.get_current_context();
         let global = ctx.global(scope);
         let result = fn_local.call(scope, global.into(), &[parsed_args]);
-        if let Some(ret) = result {
-            rv.set(ret);
-        }
+        if let Some(ret) = result { rv.set(ret); }
         return;
     }
 
-    // â”€â”€ Rust async commands â€” dispatched via Tokio â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let handler = state.backend_commands.get(&name).cloned();
-
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
@@ -452,7 +499,6 @@ pub fn backend_call_callback(
             if let Some(r) = redraw { r(); }
         });
     } else {
-        // Unknown command â€” reject immediately.
         let msg = format!("backend.{name}: no such command registered");
         queue_clone.lock().push_back(Completion {
             resolver_ptr: resolver,

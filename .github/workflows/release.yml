@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_LOG: warn
+
+jobs:
+  # ── Lean glyx-runner binary ────────────────────────────────────────────────
+  runner:
+    name: Runner (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin_suffix: .exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin_suffix: ""
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin_suffix: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-runner
+
+      - name: Build lean runner
+        run: cargo build --release --no-default-features -p glyx-runner --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          cp "target/${{ matrix.target }}/release/glyx-runner${{ matrix.bin_suffix }}" \
+             "glyx-runner-${{ matrix.target }}${{ matrix.bin_suffix }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runner-${{ matrix.target }}
+          path: glyx-runner-${{ matrix.target }}${{ matrix.bin_suffix }}
+
+  # ── Capability DLLs ────────────────────────────────────────────────────────
+  cap-windows:
+    name: Cap DLLs (windows)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cap: [audio, camera, gamepad, hid, ai]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-cap-${{ matrix.cap }}
+      - name: Build
+        run: cargo build --release -p glyx-cap-${{ matrix.cap }}
+      - name: Stage
+        shell: bash
+        run: cp "target/release/glyx_cap_${{ matrix.cap }}.dll" "glyx_cap_${{ matrix.cap }}-windows.dll"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cap-${{ matrix.cap }}-windows
+          path: glyx_cap_${{ matrix.cap }}-windows.dll
+
+  cap-macos:
+    name: Cap DLLs (macos)
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cap: [audio, camera, gamepad, hid, ai]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-cap-${{ matrix.cap }}
+      - name: Build
+        run: cargo build --release -p glyx-cap-${{ matrix.cap }}
+      - name: Stage
+        run: cp "target/release/libglyx_cap_${{ matrix.cap }}.dylib" "glyx_cap_${{ matrix.cap }}-macos.dylib"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cap-${{ matrix.cap }}-macos
+          path: glyx_cap_${{ matrix.cap }}-macos.dylib
+
+  cap-linux:
+    name: Cap DLLs (linux)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cap: [audio, camera, gamepad, hid, ai]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-cap-${{ matrix.cap }}
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libv4l-dev libusb-1.0-0-dev
+      - name: Build
+        run: cargo build --release -p glyx-cap-${{ matrix.cap }}
+      - name: Stage
+        run: cp "target/release/libglyx_cap_${{ matrix.cap }}.so" "glyx_cap_${{ matrix.cap }}-linux.so"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cap-${{ matrix.cap }}-linux
+          path: glyx_cap_${{ matrix.cap }}-linux.so
+
+  # ── Publish GitHub Release ─────────────────────────────────────────────────
+  publish:
+    name: Publish release
+    needs: [runner, cap-windows, cap-macos, cap-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Glyx ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: dist/*

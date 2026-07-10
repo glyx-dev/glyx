@@ -15,8 +15,82 @@
 //! JS cannot bypass it regardless of what npm packages are installed.
 
 use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+// ── Path safety helpers (0.1) ─────────────────────────────────────────────────
+
+/// Why a path was denied by `resolve_and_check_*`.
+#[derive(Debug)]
+pub enum DenyReason {
+    /// The OS refused to canonicalize the path (does not exist or I/O error).
+    Canonicalize(std::io::Error),
+    /// The capability for this operation is not declared at all.
+    CapabilityMissing,
+    /// The canonical path does not match any declared glob.
+    NotAllowed,
+    /// The path is absolute but no absolute grant covers it.
+    AbsolutePathDenied,
+}
+
+impl std::fmt::Display for DenyReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Canonicalize(e)    => write!(f, "cannot canonicalize path: {e}"),
+            Self::CapabilityMissing  => write!(f, "capability not declared"),
+            Self::NotAllowed         => write!(f, "path not covered by any declared glob"),
+            Self::AbsolutePathDenied => write!(f, "absolute path requires an explicit grant"),
+        }
+    }
+}
+
+/// Canonicalize `path` (resolving symlinks), then verify the result against
+/// the declared `fs.read` globs.  Returns the canonical `PathBuf` on success
+/// so callers open **that** path — closing the TOCTOU window between check
+/// and open.
+///
+/// Fails with [`DenyReason::Canonicalize`] if the path does not exist (the
+/// file must already exist for a read check to make sense).
+pub fn resolve_and_check_read(path: &Path) -> Result<PathBuf, DenyReason> {
+    let canonical = path.canonicalize().map_err(DenyReason::Canonicalize)?;
+    let caps = get();
+    let path_str = canonical.to_string_lossy();
+    if caps.can_read_path(&path_str) {
+        Ok(canonical)
+    } else if caps.fs.is_none() {
+        Err(DenyReason::CapabilityMissing)
+    } else {
+        Err(DenyReason::NotAllowed)
+    }
+}
+
+/// Canonicalize the **parent directory** of `path` (the file need not exist
+/// yet for writes), then verify the resolved path against `fs.write` globs.
+/// Returns the resolved `PathBuf` on success.
+///
+/// Uses the parent-canonicalize strategy so new files can be created: if
+/// `path` itself doesn't exist, its parent must exist and be within the grant.
+pub fn resolve_and_check_write(path: &Path) -> Result<PathBuf, DenyReason> {
+    // For writes the target file may not exist yet — canonicalize the parent.
+    let canonical = if path.exists() {
+        path.canonicalize().map_err(DenyReason::Canonicalize)?
+    } else {
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let canon_parent = parent.canonicalize().map_err(DenyReason::Canonicalize)?;
+        let file_name = path.file_name().unwrap_or_default();
+        canon_parent.join(file_name)
+    };
+    let caps = get();
+    let path_str = canonical.to_string_lossy();
+    if caps.can_write_path(&path_str) {
+        Ok(canonical)
+    } else if caps.fs.is_none() {
+        Err(DenyReason::CapabilityMissing)
+    } else {
+        Err(DenyReason::NotAllowed)
+    }
+}
 
 // ── Capability definitions ────────────────────────────────────────────────────
 

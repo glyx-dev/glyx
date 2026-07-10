@@ -28,6 +28,63 @@ use glyx_cap_abi::{
     CapSet,
 };
 
+// ── 0.4: Windows safe DLL load hardening ─────────────────────────────────────
+
+/// Call once at process startup before any `Library::new`.
+///
+/// On Windows:
+/// - `SetDllDirectoryW("")` removes the current working directory from the
+///   DLL search path, preventing CWD-based DLL planting.
+/// - Subsequent `load_dll` calls use `LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+///   LOAD_LIBRARY_SEARCH_SYSTEM32` so only the exe directory and System32
+///   are searched — not CWD, PATH, or user-writable locations.
+///
+/// No-op on non-Windows platforms (system linker controls search paths).
+pub fn harden_dll_search() {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::LibraryLoader::SetDllDirectoryW;
+        // Passing an empty string (not NULL) removes CWD from the search path
+        // without clearing the entire set.
+        let empty: Vec<u16> = vec![0u16]; // null-terminated empty string
+        unsafe { SetDllDirectoryW(empty.as_ptr()); }
+        log::debug!("[cap] DLL search path hardened (CWD removed)");
+    }
+}
+
+/// Load a DLL using safe search flags so only the application directory
+/// and System32 are searched.  Falls back to standard `Library::new` on
+/// non-Windows where the linker controls search order.
+#[allow(dead_code)]
+unsafe fn load_dll(path: &std::path::Path) -> Result<libloading::Library, libloading::Error> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::LibraryLoader::{
+            LoadLibraryExW, LOAD_LIBRARY_SEARCH_APPLICATION_DIR,
+            LOAD_LIBRARY_SEARCH_SYSTEM32,
+        };
+        use std::os::windows::ffi::OsStrExt;
+
+        let wide: Vec<u16> = path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let flags = LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
+        let handle = LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), flags);
+        if handle.is_null() {
+            // LoadLibraryExW failed — let libloading surface the OS error.
+            return libloading::Library::new(path);
+        }
+        // Wrap the HMODULE in a libloading::os::windows::Library then convert.
+        let os_lib = libloading::os::windows::Library::from_raw(handle as _);
+        Ok(libloading::Library::from(os_lib))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        libloading::Library::new(path)
+    }
+}
+
 // ── Hash verification ─────────────────────────────────────────────────────────
 
 /// Compute the lowercase hex SHA-256 of a file.
@@ -105,7 +162,7 @@ unsafe fn try_load_dynamic<Cap>(
         }
     }
 
-    let lib = match libloading::Library::new(&path) {
+    let lib = match load_dll(&path) {
         Ok(l)  => l,
         Err(e) => { log::warn!("[cap] Failed to load {:?}: {e}", path); return None; }
     };
@@ -171,6 +228,7 @@ fn load_lock_file() -> HashMap<String, String> {
 /// Called once at process startup.  The static implementation (if compiled in)
 /// takes precedence over any dynamic DLL for the same capability.
 pub fn load_caps() -> CapSet {
+    harden_dll_search();
     let hashes = load_lock_file();
     CapSet {
         audio:   load_audio(hashes.get("audio").map(String::as_str)),

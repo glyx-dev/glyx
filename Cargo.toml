@@ -17,8 +17,6 @@ members = [
     "crates/glyx-cli",
     "crates/glyx-runner",
     "examples/hello-world",
-    "examples/hello-world-snapshot",
-    "examples/cli-test",
     "examples/notes-app",
     "examples/calculator",
     "crates/glyx-snapshot",
@@ -30,6 +28,7 @@ members = [
     "crates/glyx-cap-hid",
     "crates/glyx-cap-camera",
     "crates/glyx-macros",
+    "crates/glyx-verify",
 ]
 
 [workspace.dependencies]
@@ -114,9 +113,10 @@ proc-macro2         = "1"
 quote               = "1"
 syn                 = { version = "2", features = ["full"] }
 sha2                = "0.10"
-ed25519-dalek       = { version = "2", default-features = false, features = ["std"] }
+ed25519-dalek       = { version = "2", default-features = false, features = ["std", "pkcs8"] }
 cpal                = "0.15"
 hound               = "3"
+windows-sys         = { version = "0.59", features = [] }
 
 # AI / ML — Candle (Hugging Face minimalist ML framework, CPU-only by default)
 candle-core         = { version = "0.8", default-features = false }

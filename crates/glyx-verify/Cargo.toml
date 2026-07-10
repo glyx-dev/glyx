@@ -1,0 +1,12 @@
+[package]
+name    = "glyx-verify"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+signing = []  # enables sign_ed25519(); activate only in test/CI tooling, never in production binaries
+
+[dependencies]
+ed25519-dalek = { workspace = true }
+log           = { workspace = true }
+thiserror     = { workspace = true }

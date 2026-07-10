@@ -968,15 +968,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4bfbf56724aa9eca8afa4fcfadeb479e722935bb2a0900c2d37e0cc477af0688"
 
 [[package]]
-name = "cli-test"
-version = "0.1.0"
-dependencies = [
- "env_logger",
- "glyx-core",
- "glyx-shell",
-]
-
-[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3079,6 +3070,7 @@ dependencies = [
  "glyx-security",
  "glyx-sysapi",
  "glyx-text",
+ "glyx-verify",
  "hidapi",
  "keepawake",
  "libloading",
@@ -3100,6 +3092,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3154,6 +3147,15 @@ dependencies = [
  "log",
  "parley",
  "peniko",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "glyx-verify"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "log",
  "thiserror 1.0.69",
 ]
 
@@ -3295,13 +3297,6 @@ version = "0.1.0"
 dependencies = [
  "glyx-core",
  "glyx-shell",
-]
-
-[[package]]
-name = "hello-world-snapshot"
-version = "0.1.0"
-dependencies = [
- "glyx-core",
 ]
 
 [[package]]

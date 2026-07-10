@@ -1,0 +1,3 @@
+# Private keys — NEVER commit these.
+# Store in CI secrets: CAP_SIGNING_KEY and UPDATE_SIGNING_KEY
+*.pem

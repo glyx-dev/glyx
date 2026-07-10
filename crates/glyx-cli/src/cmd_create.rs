@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 use super::{
-    glyx_home, relpath, write_file, copy_glyx_mark,
+    glyx_home, relpath, write_file, copy_glyx_mark_to,
 };
 
 pub(super) fn cmd_create(name: &str, native: bool, template: &str) -> Result<()> {
@@ -45,17 +45,18 @@ pub(super) fn cmd_create(name: &str, native: bool, template: &str) -> Result<()>
 }
 
 pub(super) fn cmd_create_js(name: &str, dest: &Path, glyx_home: &Path, template: &str) -> Result<()> {
-    std::fs::create_dir_all(dest.join("js"))?;
-    std::fs::create_dir_all(dest.join("assets"))?;
-    copy_glyx_mark(glyx_home, dest);
+    std::fs::create_dir_all(dest.join("src"))?;
+    std::fs::create_dir_all(dest.join("src/components"))?;
+    std::fs::create_dir_all(dest.join("public"))?;
+    copy_glyx_mark_to(glyx_home, dest, "public");
 
     let react_path   = relpath(dest, &glyx_home.join("js/packages/@glyx/react"));
     let router_path  = relpath(dest, &glyx_home.join("js/packages/@glyx/router"));
     let design_path  = relpath(dest, &glyx_home.join("js/packages/@glyx/design"));
     let config_path  = relpath(dest, &glyx_home.join("js/packages/@glyx/config"));
 
-    write_file(dest.join("js/app.jsx"), &app_jsx_for_template(name, template))?;
-    write_file(dest.join("glyx.config.ts"), &glyx_config_ts_template(name))?;
+    write_file(dest.join("src/app.jsx"), &app_jsx_for_template(name, template))?;
+    write_file(dest.join("glyx.config.ts"), &glyx_config_ts_js_template(name))?;
     write_file(dest.join("package.json"), &format!(
         r#"{{
   "name": "{name}",
@@ -72,15 +73,16 @@ pub(super) fn cmd_create_js(name: &str, dest: &Path, glyx_home: &Path, template:
   }}
 }}
 "#))?;
-    write_file(dest.join(".gitignore"), "/node_modules\n/js/dist/\n/target/glyx/glyx.config.resolved.json\n")?;
+    write_file(dest.join(".gitignore"), "/node_modules\n/dist/\n/target/glyx/glyx.config.resolved.json\n")?;
     Ok(())
 }
 
 pub(super) fn cmd_create_native(name: &str, dest: &Path, glyx_home: &Path, template: &str) -> Result<()> {
     std::fs::create_dir_all(dest.join("src"))?;
-    std::fs::create_dir_all(dest.join("js"))?;
-    std::fs::create_dir_all(dest.join("assets"))?;
-    copy_glyx_mark(glyx_home, dest);
+    std::fs::create_dir_all(dest.join("ui"))?;
+    std::fs::create_dir_all(dest.join("ui/components"))?;
+    std::fs::create_dir_all(dest.join("public"))?;
+    copy_glyx_mark_to(glyx_home, dest, "public");
 
     let core_path   = relpath(dest, &glyx_home.join("crates/glyx-core"));
     let shell_path  = relpath(dest, &glyx_home.join("crates/glyx-shell"));
@@ -107,8 +109,8 @@ glyx-shell = {{ path = "{shell_path}" }}
 env_logger  = "0.11"
 "#))?;
     write_file(dest.join("src/main.rs"), "#![cfg_attr(all(target_os = \"windows\", not(debug_assertions)), windows_subsystem = \"windows\")]\n\nfn main() {\n    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(\"info\"))\n        .format_timestamp(None)\n        .format_module_path(false)\n        .init();\n    glyx_core::run(glyx_core::AppConfig::from_config());\n}\n")?;
-    write_file(dest.join("js/app.jsx"), &app_jsx_for_template(name, template))?;
-    write_file(dest.join("glyx.config.ts"), &glyx_config_ts_template(name))?;
+    write_file(dest.join("ui/app.jsx"), &app_jsx_for_template(name, template))?;
+    write_file(dest.join("glyx.config.ts"), &glyx_config_ts_native_template(name))?;
     write_file(dest.join("package.json"), &format!(
         r#"{{
   "name": "{name}",
@@ -125,7 +127,7 @@ env_logger  = "0.11"
   }}
 }}
 "#))?;
-    write_file(dest.join(".gitignore"), "/target\n/node_modules\n/js/dist/\n/target/glyx/glyx.config.resolved.json\n")?;
+    write_file(dest.join(".gitignore"), "/target\n/node_modules\n/dist/\n/target/glyx/glyx.config.resolved.json\n")?;
     Ok(())
 }
 
@@ -152,7 +154,7 @@ function App() {{
       height={{height}}
       style={{{{ backgroundColor: '#0A0A0E', justifyContent: 'center', alignItems: 'center', gap: 20 }}}}
     >
-      <Image src="./assets/glyx-mark.svg" width={{64}} height={{56}} />
+      <Image src="./public/glyx-mark.svg" width={{64}} height={{56}} />
       <Text style={{{{ fontSize: 28, color: '#EDEDF2', fontWeight: '700' }}}}>
         {name}
       </Text>
@@ -180,7 +182,7 @@ import {{ ThemeProvider, useTheme, Button, Card, Label, Heading }} from '@glyx/d
 
 const NOTES = [
   {{ id: 1, title: 'Welcome', body: 'This is your first note in {name}. Click any note to read it, or press New Note to create one.' }},
-  {{ id: 2, title: 'Getting started', body: 'Edit js/app.jsx to customise this template. Import more components from @glyx/react and @glyx/design.' }},
+  {{ id: 2, title: 'Getting started', body: 'Edit src/app.jsx to customise this template. Import more components from @glyx/react and @glyx/design.' }},
 ];
 
 function Sidebar({{ notes, selectedId, onSelect, onNew }}) {{
@@ -428,7 +430,7 @@ render(
 "#)
 }
 
-pub(super) fn glyx_config_ts_template(name: &str) -> String {
+pub(super) fn glyx_config_ts_js_template(name: &str) -> String {
     format!(r#"import {{ defineConfig }} from '@glyx/config';
 
 export default defineConfig({{
@@ -445,17 +447,47 @@ export default defineConfig({{
     startupMode: 'windowed',
   }},
   capabilities: {{
-    fs:           {{ read: [], write: [] }},
+    fs:           {{ read: ['public/**'], write: [] }},
     db:           false,
     dialog:       false,
     clipboard:    false,
     notification: false,
   }},
   dev: {{
-    entry: 'js/app.jsx',
-    output: 'js/dist/app.js',
-    watch: ['js'],
+    entry:  'src/app.jsx',
+    output: 'dist/app.js',
+    watch:  ['src'],
   }},
-}});
-"#)
+}});"#)
+}
+
+pub(super) fn glyx_config_ts_native_template(name: &str) -> String {
+    format!(r#"import {{ defineConfig }} from '@glyx/config';
+
+export default defineConfig({{
+  app: {{
+    version:     '1.0.0',
+    publisher:   '',        // Company or author name (used in installer)
+    description: '',        // Short app description
+    website:     '',        // https://yoursite.com
+  }},
+  window: {{
+    title:       '{name}',
+    width:       1280,
+    height:      800,
+    startupMode: 'windowed',
+  }},
+  capabilities: {{
+    fs:           {{ read: ['public/**'], write: [] }},
+    db:           false,
+    dialog:       false,
+    clipboard:    false,
+    notification: false,
+  }},
+  dev: {{
+    entry:  'ui/app.jsx',
+    output: 'dist/app.js',
+    watch:  ['ui'],
+  }},
+}});"#)
 }

@@ -51,6 +51,12 @@ globalThis.__glyx_appendFile = function() { return stubPromise(undefined); };
 globalThis.__glyx_listDir = function() { return stubPromise('[]'); };
 globalThis.__glyx_deleteFile = function() { return stubPromise(undefined); };
 globalThis.__glyx_mkdirp = function() { return stubPromise(undefined); };
+globalThis.__glyx_stat = function() { return stubPromise('{}'); };
+globalThis.__glyx_rename = function() { return stubPromise(undefined); };
+globalThis.__glyx_copyFile = function() { return stubPromise(undefined); };
+globalThis.__glyx_fs_watch = function() { return stubPromise(0); };
+globalThis.__glyx_fs_unwatch = function() {};
+globalThis.__glyx_fs_watch_poll = function() { return '[]'; };
 
 // Scene graph bindings
 globalThis.__glyx_createNode = function() { return __glyx_nextNodeId++; };

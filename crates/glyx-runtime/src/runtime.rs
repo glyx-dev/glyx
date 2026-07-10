@@ -6,9 +6,9 @@ use tokio::runtime::Handle;
 use crate::{
     bindings::{
         new_completion_queue, new_event_queue, new_layout_cache, new_scene_queue,
-        new_ipc_bus, new_db_pools, new_video_events, register_all,
+        new_ipc_bus, new_db_pools, new_video_events, register_all, reload_plugin_in_scope,
         CompletionQueue, DbPools, EventQueue, InputEvent, IpcBus, LayoutCache, SceneCommand,
-        SceneQueue, VideoEvents, WindowController,
+        SceneQueue, VideoEvents, WindowController, StatePtrUsize,
     },
     runtime_trait::JsRuntime,
     BackendRegistry, RuntimeError, GlyxExtension,
@@ -59,6 +59,9 @@ pub struct V8Runtime {
     pub db_pools: DbPools,
     /// Video events pushed by decode threads and forwarded to JS via `__glyx_video_poll`.
     pub video_events: VideoEvents,
+    /// Opaque pointer to the heap-allocated `AsyncState` created in `register_all`.
+    /// Used by `reload_plugin` to update `js_backend_commands` after a dev-mode rebundle.
+    state_ptr: StatePtrUsize,
 }
 
 pub struct HeapStats {
@@ -116,7 +119,7 @@ impl V8Runtime {
         #[cfg(feature = "dev")]
         let inspect_handle = tokio_handle.clone();
 
-        let (context, queue, scene) = {
+        let (context, queue, scene, state_ptr) = {
             let scope  = &mut v8::HandleScope::new(&mut isolate);
             let queue  = new_completion_queue();
             let scene  = new_scene_queue();
@@ -124,7 +127,7 @@ impl V8Runtime {
             let scope  = &mut v8::ContextScope::new(scope, ctx);
             let global = ctx.global(scope);
 
-            register_all(
+            let state_ptr = register_all(
                 scope, global,
                 Arc::clone(&queue),
                 tokio_handle,
@@ -144,7 +147,7 @@ impl V8Runtime {
                 js_plugins,
             );
 
-            (v8::Global::new(scope, ctx), queue, scene)
+            (v8::Global::new(scope, ctx), queue, scene, state_ptr)
         };
 
         // Attach CDP inspector if GLYX_INSPECT_PORT is set (dev feature only).
@@ -158,7 +161,7 @@ impl V8Runtime {
             #[cfg(feature = "dev")]
             inspector,
             isolate, context, queue, scene, events, layout_cache,
-            perf_state, deeplink_url_queue, db_pools, video_events,
+            perf_state, deeplink_url_queue, db_pools, video_events, state_ptr,
         }
     }
 
@@ -211,7 +214,7 @@ impl V8Runtime {
         #[cfg(feature = "dev")]
         let inspect_handle = tokio_handle.clone();
 
-        let (context, queue, scene) = {
+        let (context, queue, scene, state_ptr) = {
             let scope  = &mut v8::HandleScope::new(&mut isolate);
             let queue  = new_completion_queue();
             let scene  = new_scene_queue();
@@ -222,7 +225,7 @@ impl V8Runtime {
             let global = ctx.global(scope);
 
             // Re-register all binding implementations (stubs are already in snapshot)
-            register_all(
+            let state_ptr = register_all(
                 scope, global,
                 Arc::clone(&queue),
                 tokio_handle,
@@ -242,7 +245,7 @@ impl V8Runtime {
                 js_plugins,
             );
 
-            (v8::Global::new(scope, ctx), queue, scene)
+            (v8::Global::new(scope, ctx), queue, scene, state_ptr)
         };
 
         #[cfg(feature = "dev")]
@@ -255,8 +258,19 @@ impl V8Runtime {
             #[cfg(feature = "dev")]
             inspector,
             isolate, context, queue, scene, events, layout_cache,
-            perf_state, deeplink_url_queue, db_pools, video_events,
+            perf_state, deeplink_url_queue, db_pools, video_events, state_ptr,
         })
+    }
+
+    // ── Plugin hot-reload (dev mode) ──────────────────────────────────────────
+
+    /// Re-eval a plugin IIFE and refresh its exported commands in `js_backend_commands`.
+    /// Called by glyx-core's dev-mode event handler on file-change rebuild.
+    pub fn reload_plugin(&mut self, global_name: &str, prefix: Option<&str>, bundled_js: &str) {
+        let scope = &mut v8::HandleScope::new(&mut self.isolate);
+        let ctx   = v8::Local::new(scope, &self.context);
+        let scope = &mut v8::ContextScope::new(scope, ctx);
+        reload_plugin_in_scope(scope, self.state_ptr, global_name, prefix, bundled_js);
     }
 
     // ── Extensions ────────────────────────────────────────────────────────────

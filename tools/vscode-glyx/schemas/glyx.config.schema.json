@@ -83,8 +83,9 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "read":  { "type": "array", "items": { "type": "string" }, "description": "Glob patterns the app may read." },
-                "write": { "type": "array", "items": { "type": "string" }, "description": "Glob patterns the app may write." }
+                "read":   { "type": "array", "items": { "type": "string" }, "description": "Glob patterns the app may read." },
+                "write":  { "type": "array", "items": { "type": "string" }, "description": "Glob patterns the app may write (create/overwrite/append)." },
+                "delete": { "type": "array", "items": { "type": "string" }, "description": "Glob patterns the app may delete. If absent, falls back to write globs. Set to [] to block all deletion." }
               }
             }
           ],
@@ -239,12 +240,14 @@
         "entry": {
           "type": "string",
           "description": "JS/JSX/TSX entry file for bun build.",
-          "examples": ["js/app.jsx"]
+          "default": "src/app.jsx",
+          "examples": ["src/app.jsx", "ui/app.jsx"]
         },
         "output": {
           "type": "string",
           "description": "Output bundle path (read by the glyx runtime).",
-          "examples": ["js/app.js"]
+          "default": "dist/app.js",
+          "examples": ["dist/app.js"]
         },
         "watch": {
           "type": "array",
@@ -276,7 +279,7 @@
           "capabilities": {
             "type": "array",
             "items": { "type": "string" },
-            "description": "Capability declarations for tooling/docs (not enforced at runtime — the plugin runs in the same V8 context and has access to all registered framework capabilities).",
+            "description": "Capabilities the plugin requires. Each entry must also appear in the top-level capabilities block — the plugin is rejected at load time if it declares a capability the app has not granted.",
             "examples": [["db", "credentials"], ["network", "fs"]]
           }
         }

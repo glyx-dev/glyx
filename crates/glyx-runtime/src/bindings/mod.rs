@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 
 use base64::Engine as _;
 use tokio::runtime::Handle;
+use notify::RecommendedWatcher;
 
 mod bind_core;
 mod bind_fs;
@@ -656,6 +657,10 @@ pub enum SceneCommand {
 
 //  Registration €€€
 
+/// Returned by `register_all`; cast back to `*mut AsyncState` for `reload_plugin`.
+/// Stored as `usize` so it is `Copy + Send + Sync` (V8Runtime is `!Send` regardless).
+pub type StatePtrUsize = usize;
+
 pub fn register_all(
     scope:        &mut v8::HandleScope,
     global:       v8::Local<v8::Object>,
@@ -675,7 +680,7 @@ pub fn register_all(
     cdp_log_tx:   Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
     backend_commands: crate::BackendRegistry,
     js_plugins:   crate::JsPlugins,
-) {
+) -> StatePtrUsize {
     set_func(scope, global, "__glyx_getTime", get_time);
 
     // Audio and gamepad are initialised lazily on first use to avoid
@@ -742,6 +747,9 @@ pub fn register_all(
         ai_generate_model: Arc::new(Mutex::new(None)),
         #[cfg(feature = "ai")]
         ai_whisper_model:  Arc::new(Mutex::new(None)),
+        fs_watch_events:   Arc::new(Mutex::new(VecDeque::new())),
+        fs_watchers:       std::cell::RefCell::new(HashMap::new()),
+        next_fs_watch_id:  std::sync::atomic::AtomicU32::new(1),
         cdp_log_tx,
         backend_commands,
         js_backend_commands: HashMap::new(),
@@ -812,9 +820,11 @@ pub fn register_all(
         }
     }
 
-    let ptr   = Box::into_raw(state) as *mut std::ffi::c_void;
+    let raw   = Box::into_raw(state);
+    let ptr   = raw as *mut std::ffi::c_void;
     // Safety: ptr is valid for the lifetime of the isolate.
     let ext   = v8::External::new(scope, ptr);
+    let state_usize = ptr as usize;
 
     macro_rules! register {
         ($name:literal, $cb:ident) => {
@@ -852,15 +862,18 @@ pub fn register_all(
     register!("__glyx_isFullscreen",  is_fullscreen_callback);
     register!("__glyx_isMaximized",   is_maximized_callback);
 
-    //  File system (write-side) €€
-    register!("__glyx_writeFile",  write_file_callback);
-    register!("__glyx_appendFile", append_file_callback);
-    register!("__glyx_listDir",    list_dir_callback);
-    register!("__glyx_deleteFile", delete_file_callback);
-    register!("__glyx_mkdirp",     mkdirp_callback);
-    register!("__glyx_stat",       stat_callback);
-    register!("__glyx_rename",     rename_callback);
-    register!("__glyx_copyFile",   copy_file_callback);
+    //  File system €€
+    register!("__glyx_writeFile",      write_file_callback);
+    register!("__glyx_appendFile",     append_file_callback);
+    register!("__glyx_listDir",        list_dir_callback);
+    register!("__glyx_deleteFile",     delete_file_callback);
+    register!("__glyx_mkdirp",         mkdirp_callback);
+    register!("__glyx_stat",           stat_callback);
+    register!("__glyx_rename",         rename_callback);
+    register!("__glyx_copyFile",       copy_file_callback);
+    register!("__glyx_fs_watch",       fs_watch_callback);
+    register!("__glyx_fs_unwatch",     fs_unwatch_callback);
+    register!("__glyx_fs_watch_poll",  fs_watch_poll_callback);
 
     //  SQLite database 
     register!("__glyx_db_open",        db_open_callback);
@@ -1046,6 +1059,8 @@ pub fn register_all(
     register!("__glyx_splash_hide", splash_hide_callback);
     //  Backend command dispatch €€
     register!("__glyx_backend_call", backend_call_callback);
+
+    state_usize
 }
 
 struct AsyncState {
@@ -1140,6 +1155,13 @@ struct AsyncState {
     hid_devices: Arc<Mutex<HashMap<u32, hidapi::HidDevice>>>,
     #[cfg(feature = "hid")]
     next_hid_id: std::sync::atomic::AtomicU32,
+    //  File-system watchers (notify) €€
+    /// Events produced by fs.watch — drained each frame by `__glyx_fs_watch_poll`.
+    /// Triple: (watch_id, changed_path, event_kind_str).
+    fs_watch_events: Arc<Mutex<VecDeque<(u32, String, String)>>>,
+    /// Live notify watcher handles keyed by watchId.  Dropping a handle stops the watch.
+    fs_watchers: std::cell::RefCell<HashMap<u32, RecommendedWatcher>>,
+    next_fs_watch_id: std::sync::atomic::AtomicU32,
     //  CDP Inspector console bridge €€
     /// When the CDP inspector is active, this holds the outbox sender so
     /// __glyx_log can forward console messages as Runtime.consoleAPICalled events.
@@ -1151,6 +1173,83 @@ struct AsyncState {
     /// Named JS plugin commands collected at startup (from `glyx.config.json` plugins).
     /// These are called synchronously in V8 (they return Promises)  no Tokio bridge needed.
     js_backend_commands: HashMap<String, v8::Global<v8::Function>>,
+}
+
+/// Re-eval a bundled plugin IIFE and update `js_backend_commands` for its exports.
+///
+/// Called on plugin file-change in dev mode.  The V8 scope must be active.
+/// Clears all old commands for this plugin's prefix before re-registering.
+pub fn reload_plugin_in_scope(
+    scope:      &mut v8::HandleScope,
+    state_ptr:  StatePtrUsize,
+    global_name: &str,
+    prefix:     Option<&str>,
+    bundled_js: &str,
+) {
+    let state = unsafe { &mut *(state_ptr as *mut AsyncState) };
+
+    // Remove old commands for this prefix.
+    match prefix {
+        Some(ns) => {
+            let pfx = format!("{ns}.");
+            state.js_backend_commands.retain(|k, _| !k.starts_with(&pfx));
+        }
+        None => {
+            // Flat prefix: remove keys that don't contain '.'.
+            state.js_backend_commands.retain(|k, _| k.contains('.'));
+        }
+    }
+
+    // Re-eval the IIFE.
+    let ctx = scope.get_current_context();
+    let global_obj = ctx.global(scope);
+    if let Some(code_str) = v8::String::new(scope, bundled_js) {
+        let mut try_catch = v8::TryCatch::new(scope);
+        let origin_name: v8::Local<v8::Value> =
+            v8::String::new(&mut try_catch, &format!("plugin:{}", global_name))
+                .unwrap().into();
+        let empty: v8::Local<v8::Value> = v8::String::new(&mut try_catch, "").unwrap().into();
+        let origin = v8::ScriptOrigin::new(
+            &mut *try_catch, origin_name, 0, 0, false, -1, empty, false, false, false,
+        );
+        if let Some(script) = v8::Script::compile(&mut try_catch, code_str, Some(&origin)) {
+            let _ = script.run(&mut try_catch);
+        }
+        if try_catch.has_caught() {
+            let msg = try_catch.exception()
+                .and_then(|e| e.to_string(&mut try_catch))
+                .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                .unwrap_or_default();
+            log::error!("[plugin HMR] eval error for '{}': {msg}", global_name);
+            return;
+        }
+        drop(try_catch);
+    }
+
+    // Re-collect exports from globalThis.<global_name>.
+    if let Some(gname) = v8::String::new(scope, global_name) {
+        if let Some(exports_val) = global_obj.get(scope, gname.into()) {
+            if let Ok(exports) = v8::Local::<v8::Object>::try_from(exports_val) {
+                let names = exports.get_own_property_names(scope);
+                let names = match names { Some(n) => n, None => return };
+                for i in 0..names.length() {
+                    let key     = match names.get_index(scope, i) { Some(k) => k, None => continue };
+                    let val     = match exports.get(scope, key)   { Some(v) => v, None => continue };
+                    let Ok(fn_local) = v8::Local::<v8::Function>::try_from(val) else { continue };
+                    let key_str = key.to_string(scope)
+                        .map(|s| s.to_rust_string_lossy(scope))
+                        .unwrap_or_default();
+                    if key_str.is_empty() { continue; }
+                    let cmd_name = match prefix {
+                        Some(ns) => format!("{ns}.{key_str}"),
+                        None     => key_str.clone(),
+                    };
+                    state.js_backend_commands.insert(cmd_name, v8::Global::new(scope, fn_local));
+                    log::info!("[plugin HMR] re-registered '{}' from '{}'", key_str, global_name);
+                }
+            }
+        }
+    }
 }
 
 /// Tracks playback position for a rodio audio handle.

@@ -25,6 +25,8 @@
 //! Async:
 //!   - `__glyx_readFile(path)` → Promise<string>
 
+pub use glyx_macros::{glyx_plugin, glyx_command};
+
 use std::sync::Once;
 use thiserror::Error;
 
@@ -45,7 +47,7 @@ pub use runtime_trait::JsRuntime;
 pub type GlyxRuntime = V8Runtime;
 pub use bindings::{
     LengthValue, NodeProps, NodeType, CanvasCmd, SceneCommand, InputEvent, WindowController,
-    IpcBus, IpcInbox, new_ipc_bus,
+    IpcBus, IpcInbox, new_ipc_bus, StatePtrUsize, reload_plugin_in_scope,
 };
 pub use snapshot::{SnapshotBlob, create_stub_bindings_script};
 pub use cap_loader::load_caps;
@@ -65,6 +67,13 @@ pub struct JsPlugin {
     pub bundled_js: String,
     /// The global variable name set by the IIFE (e.g. `"__glyx_plugin_db"`).
     pub global_name: String,
+    /// Capability names declared by the plugin in `glyx.config.json`.
+    /// Validated at load time to be a subset of the app's declared capabilities.
+    /// Logged at startup so operators can audit what each plugin claims.
+    pub capabilities: Vec<String>,
+    /// Original source entry path (e.g. `"./src/plugins/db.ts"`).
+    /// Used by dev-mode HMR to watch the source file and rebundle on change.
+    pub entry: Option<String>,
 }
 
 /// Shared list of bundled JS plugins passed to every V8 runtime instance.

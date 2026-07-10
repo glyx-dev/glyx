@@ -35,15 +35,21 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct FsCapability {
     /// Glob patterns the app may read. `None` = no read access.
-    pub read:  Option<Vec<String>>,
-    /// Glob patterns the app may write. `None` = no write access.
-    pub write: Option<Vec<String>>,
+    pub read:   Option<Vec<String>>,
+    /// Glob patterns the app may write (create/overwrite/append). `None` = no write access.
+    pub write:  Option<Vec<String>>,
+    /// Glob patterns the app may delete. `None` = falls back to `write` globs.
+    /// Set to `[]` to allow write but deny delete entirely.
+    pub delete: Option<Vec<String>>,
     /// Compiled matcher for `read`, built lazily on first check.
     #[serde(skip)]
-    read_set:  OnceLock<Option<globset::GlobSet>>,
+    read_set:   OnceLock<Option<globset::GlobSet>>,
     /// Compiled matcher for `write`, built lazily on first check.
     #[serde(skip)]
-    write_set: OnceLock<Option<globset::GlobSet>>,
+    write_set:  OnceLock<Option<globset::GlobSet>>,
+    /// Compiled matcher for `delete`, built lazily on first check.
+    #[serde(skip)]
+    delete_set: OnceLock<Option<globset::GlobSet>>,
 }
 
 impl FsCapability {
@@ -251,6 +257,19 @@ impl Capabilities {
     /// True if `path` matches one of the declared `fs.write` globs.
     pub fn can_write_path(&self, path: &str) -> bool {
         self.fs.as_ref().is_some_and(|f| f.allows(&f.write, &f.write_set, path))
+    }
+
+    /// True if `path` may be deleted.
+    ///
+    /// If `fs.delete` is declared, matches against those globs.
+    /// If `fs.delete` is absent (`None`), falls back to `fs.write` globs.
+    /// If `fs.delete` is an empty array (`[]`), deletion is denied everywhere.
+    pub fn can_delete_path(&self, path: &str) -> bool {
+        let Some(fs) = self.fs.as_ref() else { return false };
+        match &fs.delete {
+            Some(_) => fs.allows(&fs.delete, &fs.delete_set, path),
+            None    => fs.allows(&fs.write,  &fs.write_set,  path),
+        }
     }
 
     /// True if `host` is in the network allowlist, or `"*"` is listed.

@@ -180,6 +180,12 @@ pub(super) struct ScrollbarDragState {
 pub(super) enum DevBuildEvent {
     BuildOk(String),
     BuildErr(String),
+    /// A plugin was changed, rebundled, and is ready to be hot-reloaded in V8.
+    PluginReload {
+        global_name: String,
+        prefix:      Option<String>,
+        bundled_js:  String,
+    },
 }
 
 #[cfg(feature = "dev")]

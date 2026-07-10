@@ -28,7 +28,6 @@ pub(super) struct PluginConfigJson {
     pub(super) entry: String,
     pub(super) name:  Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub(super) capabilities: Vec<String>,
 }
 
@@ -155,6 +154,49 @@ pub(super) fn bundle_plugin(entry: &str, safe_name: &str) -> Option<String> {
     }
 }
 
+/// All valid capability field names from `glyx_security::Capabilities`.
+fn is_valid_cap_name(cap: &str) -> bool {
+    matches!(cap,
+        "fs" | "network" | "env" | "db" | "dialog" | "clipboard" | "notification"
+        | "battery" | "usb" | "shell" | "mdns" | "system" | "power" | "storage"
+        | "gamepads" | "globalShortcuts" | "credentials" | "audio" | "ai"
+        | "camera" | "microphone" | "hid" | "updater" | "video" | "crash" | "deeplink"
+    )
+}
+
+/// Returns true if the app's capabilities include the named capability.
+fn app_has_cap(caps: &glyx_security::Capabilities, cap: &str) -> bool {
+    match cap {
+        "fs"               => caps.fs.is_some(),
+        "network"          => caps.network.is_some(),
+        "env"              => caps.env.is_some(),
+        "db"               => caps.db,
+        "dialog"           => caps.dialog,
+        "clipboard"        => caps.clipboard,
+        "notification"     => caps.notification,
+        "battery"          => caps.battery,
+        "usb"              => caps.usb,
+        "shell"            => caps.shell,
+        "mdns"             => caps.mdns,
+        "system"           => caps.system,
+        "power"            => caps.power,
+        "storage"          => caps.storage,
+        "gamepads"         => caps.gamepads,
+        "globalShortcuts"  => caps.global_shortcuts,
+        "credentials"      => caps.credentials,
+        "audio"            => caps.audio,
+        "ai"               => caps.ai,
+        "camera"           => caps.camera,
+        "microphone"       => caps.microphone,
+        "hid"              => caps.hid,
+        "updater"          => caps.updater,
+        "video"            => caps.video,
+        "crash"            => caps.crash,
+        "deeplink"         => caps.deeplink.is_some(),
+        _                  => false,
+    }
+}
+
 /// Map the `renderMode` config string to a `RenderMode`.
 pub(super) fn parse_render_mode(s: &str) -> RenderMode {
     match s {
@@ -231,6 +273,8 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
         cfg.icon_rgba = load_icon_from_bytes(DEFAULT_ICON_BYTES);
     }
 
+    let app_caps = file.as_ref().and_then(|f| f.capabilities.as_ref());
+
     let plugins = file.as_ref().map(|f| {
         f.plugins.iter().enumerate().filter_map(|(i, p)| {
             if p.entry.is_empty() { return None; }
@@ -238,11 +282,56 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
                 .map(|n| n.replace(|c: char| !c.is_alphanumeric() && c != '_', "_"))
                 .unwrap_or_else(|| format!("plugin{i}"));
             let global_name = format!("__glyx_plugin_{safe}");
-            let bundled_js = bundle_plugin(&p.entry, &safe)?;
+
+            // Validate declared capability names and check against app capabilities.
+            let declared_caps = &p.capabilities;
+            for cap in declared_caps {
+                if !is_valid_cap_name(cap) {
+                    log::error!(
+                        "[plugins] plugin '{}' declares unknown capability '{}'. \
+                         Valid names: fs, network, env, db, dialog, clipboard, notification, \
+                         battery, usb, shell, mdns, system, power, storage, gamepads, \
+                         globalShortcuts, credentials, audio, ai, camera, microphone, \
+                         hid, updater, video, crash, deeplink",
+                        safe, cap
+                    );
+                    return None;
+                }
+                if let Some(caps) = app_caps {
+                    if !app_has_cap(caps, cap) {
+                        log::error!(
+                            "[plugins] plugin '{}' declares capability '{}' \
+                             but the app does not enable it in glyx.config.json. \
+                             Add it to 'capabilities' or remove it from the plugin declaration.",
+                            safe, cap
+                        );
+                        return None;
+                    }
+                }
+            }
+            if !declared_caps.is_empty() {
+                log::info!("[plugins] '{}' granted capabilities: {}", safe, declared_caps.join(", "));
+            }
+
+            // Hard-fail if bun bundling fails — a missing plugin is a startup error.
+            let bundled_js = match bundle_plugin(&p.entry, &safe) {
+                Some(js) => js,
+                None => {
+                    log::error!(
+                        "[plugins] FATAL: failed to bundle plugin '{}' from '{}'. \
+                         Ensure bun is on PATH and the entry file exists.",
+                        safe, p.entry
+                    );
+                    return None;
+                }
+            };
+
             Some(JsPlugin {
                 prefix: p.name.clone(),
                 bundled_js,
                 global_name,
+                capabilities: declared_caps.clone(),
+                entry: Some(p.entry.clone()),
             })
         }).collect::<Vec<_>>()
     }).unwrap_or_default();
@@ -443,8 +532,8 @@ pub(super) fn build_dev_mode_config() -> Option<DevModeConfig> {
     let cfg: Cfg = serde_json::from_str(&src).ok()?;
     let dev = cfg.dev?;
     let entry  = dev.entry?;
-    let output = dev.output.unwrap_or_else(|| "js/dist/app.js".to_string());
-    let watch  = dev.watch.unwrap_or_else(|| vec!["js".into()]);
+    let output = dev.output.unwrap_or_else(|| "dist/app.js".to_string());
+    let watch  = dev.watch.unwrap_or_else(|| vec!["src".into()]);
 
     Some(DevModeConfig {
         project_root: PathBuf::from("."),

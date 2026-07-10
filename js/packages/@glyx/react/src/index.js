@@ -9,7 +9,7 @@ import { dispatchEvents, addGlobalClickListener, removeGlobalClickListener, addK
 import {
   _pollWebSockets, _pollIpc, _pollDeeplinks, _pollGamepads,
   _pollGlobalShortcuts, _pollPerfViolations, _pollLeakWarnings,
-  _pollAudio, _pollVideo,
+  _pollAudio, _pollVideo, _pollFsWatch,
 } from './api.js';
 import { View } from './core.js';
 import { PopoverHost } from './popover.js';
@@ -57,6 +57,7 @@ globalThis.__glyx_frameCallback = function glyxFrameCallback() {
     _pollLeakWarnings();
     _pollAudio();
     _pollVideo();
+    _pollFsWatch();
     dispatchEvents();
   });
 };

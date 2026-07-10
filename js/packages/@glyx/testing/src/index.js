@@ -192,6 +192,10 @@ export function installStubs() {
   globalThis.__glyx_stat           = () => sp('{"size":0,"mtime":0,"isDir":false,"isFile":true}');
   globalThis.__glyx_rename         = () => sp(undefined);
   globalThis.__glyx_copyFile       = () => sp(undefined);
+  let _fsWatchCounter = 1;
+  globalThis.__glyx_fs_watch       = () => sp(_fsWatchCounter++);
+  globalThis.__glyx_fs_unwatch     = () => undefined;
+  globalThis.__glyx_fs_watch_poll  = () => '[]';
 
   // DB
   let _dbHandle = 1;

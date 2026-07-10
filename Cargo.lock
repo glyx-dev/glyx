@@ -2941,6 +2941,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "glyx-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "glyx-media"
 version = "0.1.0"
 dependencies = [
@@ -3005,6 +3014,7 @@ dependencies = [
  "glyx-ai",
  "glyx-cap-abi",
  "glyx-db",
+ "glyx-macros",
  "glyx-media",
  "glyx-perf",
  "glyx-security",
@@ -3015,6 +3025,7 @@ dependencies = [
  "libloading",
  "log",
  "mdns-sd",
+ "notify",
  "notify-rust",
  "parking_lot",
  "raw-window-handle",

@@ -37,8 +37,9 @@ pub(super) fn dev_mode_config_from_env() -> Option<DevModeConfig> {
 
 #[cfg(feature = "dev")]
 pub(super) fn start_dev_mode_worker(
-    redraw: Arc<dyn Fn() + Send + Sync>,
-    config: Option<DevModeConfig>,
+    redraw:  Arc<dyn Fn() + Send + Sync>,
+    config:  Option<DevModeConfig>,
+    plugins: glyx_runtime::JsPlugins,
 ) -> Option<Receiver<DevBuildEvent>> {
     use std::path::PathBuf;
 
@@ -77,6 +78,10 @@ pub(super) fn start_dev_mode_worker(
             }
         });
     }
+
+    // Clone before the main watcher thread takes ownership.
+    let out_tx_for_plugins = out_tx.clone();
+    let redraw_for_plugins = Arc::clone(&redraw);
 
     std::thread::spawn(move || {
         let out_tx_watch = out_tx.clone();
@@ -186,6 +191,113 @@ pub(super) fn start_dev_mode_worker(
         }
     });
 
+    // ── Plugin file watchers ──────────────────────────────────────────────────
+    //
+    // For each plugin with a known source entry, watch the file and rebundle on change.
+    for plugin in plugins.iter() {
+        let entry = match &plugin.entry {
+            Some(e) if !e.is_empty() => e.clone(),
+            _ => continue,
+        };
+        let global_name  = plugin.global_name.clone();
+        let prefix       = plugin.prefix.clone();
+        let safe_name    = global_name.strip_prefix("__glyx_plugin_")
+            .unwrap_or(&global_name).to_string();
+        let entry_path   = std::path::Path::new(&entry);
+        let abs_entry    = if entry_path.is_absolute() {
+            entry_path.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(entry_path)
+        };
+
+        let out_tx2 = out_tx_for_plugins.clone();
+        let redraw2 = Arc::clone(&redraw_for_plugins);
+
+        std::thread::spawn(move || {
+            let (change_tx, change_rx) = mpsc::channel::<()>();
+            let change_tx2 = change_tx.clone();
+
+            let mut watcher = match notify::recommended_watcher(
+                move |res: notify::Result<notify::Event>| {
+                    if res.is_ok() { let _ = change_tx2.send(()); }
+                }
+            ) {
+                Ok(w)  => w,
+                Err(e) => {
+                    log::warn!("[plugin HMR] watcher error for '{}': {e}", safe_name);
+                    return;
+                }
+            };
+
+            let watch_path = if abs_entry.is_file() {
+                abs_entry.parent().unwrap_or(&abs_entry).to_path_buf()
+            } else {
+                abs_entry.clone()
+            };
+
+            if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
+                log::warn!("[plugin HMR] could not watch '{}': {e}", safe_name);
+                return;
+            }
+            log::info!("[plugin HMR] watching '{}'", abs_entry.display());
+
+            while change_rx.recv().is_ok() {
+                // Debounce — ignore rapid successive saves.
+                while change_rx.recv_timeout(Duration::from_millis(180)).is_ok() {}
+                log::info!("[plugin HMR] '{}' changed — rebundling", safe_name);
+
+                let run_bun = || -> std::io::Result<std::process::Output> {
+                    let entry_str = abs_entry.to_str().unwrap_or("");
+                    let tmp = std::env::temp_dir().join(format!("glyx_plugin_{safe_name}.js"));
+                    let tmp_str = tmp.to_str().unwrap_or("");
+                    let bun_args = [
+                        "build", entry_str, "--outfile", tmp_str,
+                        "--target", "browser", "--format", "iife",
+                        "--global-name", &global_name,
+                    ];
+                    #[cfg(target_os = "windows")]
+                    {
+                        match Command::new("bun").args(&bun_args).output() {
+                            Ok(o) => return Ok(o),
+                            Err(_) => {
+                                let mut cmd = vec!["/C", "bun"];
+                                cmd.extend_from_slice(&bun_args);
+                                return Command::new("cmd").args(&cmd).output();
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    Command::new("bun").args(&bun_args).output()
+                };
+
+                match run_bun() {
+                    Ok(out) if out.status.success() => {
+                        let tmp = std::env::temp_dir().join(format!("glyx_plugin_{safe_name}.js"));
+                        match std::fs::read_to_string(&tmp) {
+                            Ok(js) => {
+                                let _ = std::fs::remove_file(&tmp);
+                                let _ = out_tx2.send(DevBuildEvent::PluginReload {
+                                    global_name: global_name.clone(),
+                                    prefix:      prefix.clone(),
+                                    bundled_js:  js,
+                                });
+                                redraw2();
+                            }
+                            Err(e) => log::warn!("[plugin HMR] could not read bundle: {e}"),
+                        }
+                    }
+                    Ok(out) => {
+                        let msg = String::from_utf8_lossy(&out.stderr);
+                        log::warn!("[plugin HMR] build error for '{}': {msg}", safe_name);
+                    }
+                    Err(e) => {
+                        log::warn!("[plugin HMR] bun failed for '{}': {e}", safe_name);
+                    }
+                }
+            }
+        });
+    }
+
     Some(out_rx)
 }
 
@@ -235,6 +347,13 @@ pub(super) fn handle_dev_build_events(state: &mut PerWindowState) {
             Ok(DevBuildEvent::BuildErr(msg)) => {
                 if let Some(dev) = state.dev_mode.as_mut() {
                     dev.last_build_message = format!("build error: {}", msg);
+                }
+            }
+            Ok(DevBuildEvent::PluginReload { global_name, prefix, bundled_js }) => {
+                log::info!("[plugin HMR] reloading plugin '{}'", global_name);
+                state.runtime.reload_plugin(&global_name, prefix.as_deref(), &bundled_js);
+                if let Some(dev) = state.dev_mode.as_mut() {
+                    dev.last_build_message = format!("plugin '{}' reloaded", global_name);
                 }
             }
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,

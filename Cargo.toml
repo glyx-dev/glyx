@@ -24,6 +24,7 @@ members = [
     "crates/glyx-snapshot",
     "crates/glyx-media",
     "crates/glyx-cap-abi",
+    "crates/glyx-macros",
 ]
 
 [workspace.dependencies]
@@ -104,6 +105,9 @@ zip                 = { version = "2", default-features = false, features = ["de
 flate2              = "1"
 tar                 = "0.4"
 libloading          = "0.8"
+proc-macro2         = "1"
+quote               = "1"
+syn                 = { version = "2", features = ["full"] }
 sha2                = "0.10"
 ed25519-dalek       = { version = "2", default-features = false, features = ["std"] }
 cpal                = "0.15"

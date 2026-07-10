@@ -214,7 +214,38 @@ export const fs = {
   readJSON:   async (path)          => JSON.parse(await fs.readFile(path)),
   /** Serialize `value` to JSON and write to a file. Requires `fs.write`. */
   writeJSON:  async (path, val, indent = 2) => fs.writeFile(path, JSON.stringify(val, null, indent)),
+  /**
+   * Watch `path` for changes. `callback` is called with `{ path, type }` on each event.
+   * `type` is one of `"modified"`, `"created"`, `"removed"`, `"accessed"`, `"other"`.
+   * Returns a Promise<watchId> — pass the id to `fs.unwatch()` to stop watching.
+   * Requires `fs.read` capability.
+   */
+  watch: async (path, callback) => {
+    if (typeof __glyx_fs_watch === 'undefined') return _noBinding('fs.watch');
+    const id = await __glyx_fs_watch(path);
+    _fsWatchCallbacks.set(id, callback);
+    return id;
+  },
+  /** Stop watching the given watchId (returned from `fs.watch`). */
+  unwatch: (id) => {
+    _fsWatchCallbacks.delete(id);
+    if (typeof __glyx_fs_unwatch !== 'undefined') __glyx_fs_unwatch(id);
+  },
 };
+
+const _fsWatchCallbacks = new Map();
+
+export function _pollFsWatch() {
+  if (typeof __glyx_fs_watch_poll === 'undefined') return;
+  const raw = __glyx_fs_watch_poll();
+  if (!raw || raw === '[]') return;
+  let events;
+  try { events = JSON.parse(raw); } catch { return; }
+  for (const ev of events) {
+    const cb = _fsWatchCallbacks.get(ev.id);
+    if (cb) cb({ path: ev.path, type: ev.type });
+  }
+}
 
 // ── SQLite database API ───────────────────────────────────────────────────────
 //

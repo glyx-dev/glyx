@@ -1,14 +1,14 @@
 {
   // ── Imports ────────────────────────────────────────────────────────────────
   "Import @glyx/react primitives": {
-    "prefix": "vimport",
+    "prefix": "gimport",
     "body": [
       "import { View, Text, Pressable, ScrollView, TextInput, Image } from '@glyx/react';"
     ],
     "description": "Import core Glyx primitives"
   },
   "Import @glyx/design components": {
-    "prefix": "vdesign",
+    "prefix": "gdesign",
     "body": [
       "import { ThemeProvider, useTheme, Button, Card, Heading, Label } from '@glyx/design';"
     ],
@@ -17,7 +17,7 @@
 
   // ── Full screen component ─────────────────────────────────────────────────
   "Glyx Screen component": {
-    "prefix": "vscreen",
+    "prefix": "gscreen",
     "body": [
       "import React, { useState } from 'react';",
       "import { View, Text, Pressable } from '@glyx/react';",
@@ -38,7 +38,7 @@
 
   // ── Primitives ────────────────────────────────────────────────────────────
   "View": {
-    "prefix": "vview",
+    "prefix": "gview",
     "body": [
       "<View style={{ $1 }}>",
       "  $0",
@@ -47,7 +47,7 @@
     "description": "Glyx View container"
   },
   "View (flex row)": {
-    "prefix": "vrow",
+    "prefix": "grow",
     "body": [
       "<View style={{ flexDirection: 'row', alignItems: 'center', gap: ${1:8}${2:, flex: 1} }}>",
       "  $0",
@@ -56,7 +56,7 @@
     "description": "Glyx View as flex row"
   },
   "View (flex column)": {
-    "prefix": "vcol",
+    "prefix": "gcol",
     "body": [
       "<View style={{ flexDirection: 'column', gap: ${1:8}${2:, flex: 1} }}>",
       "  $0",
@@ -65,7 +65,7 @@
     "description": "Glyx View as flex column"
   },
   "Text": {
-    "prefix": "vtext",
+    "prefix": "gtext",
     "body": [
       "<Text fontSize={${1:14}} style={{ color: '${2:#000000}' }}>",
       "  ${0:text}",
@@ -74,7 +74,7 @@
     "description": "Glyx Text element"
   },
   "Pressable": {
-    "prefix": "vpress",
+    "prefix": "gpress",
     "body": [
       "<Pressable onPress={() => { $1 }} style={{ $2 }}>",
       "  $0",
@@ -83,7 +83,7 @@
     "description": "Glyx Pressable button"
   },
   "Pressable (with hover style)": {
-    "prefix": "vpressh",
+    "prefix": "gpressh",
     "body": [
       "<Pressable",
       "  onPress={() => { $1 }}",
@@ -98,7 +98,7 @@
     "description": "Glyx Pressable with hover/press state"
   },
   "ScrollView": {
-    "prefix": "vscroll",
+    "prefix": "gscroll",
     "body": [
       "<ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: ${1:16}, gap: ${2:12} }}>",
       "  $0",
@@ -107,7 +107,7 @@
     "description": "Glyx ScrollView"
   },
   "ScrollView (horizontal)": {
-    "prefix": "vscrollh",
+    "prefix": "gscrollh",
     "body": [
       "<ScrollView horizontal showsScrollIndicator={false} style={{ $1 }}>",
       "  $0",
@@ -116,7 +116,7 @@
     "description": "Horizontal Glyx ScrollView"
   },
   "Image": {
-    "prefix": "vimage",
+    "prefix": "gimage",
     "body": [
       "<Image",
       "  src={${1:imagePath}}",
@@ -128,7 +128,7 @@
     "description": "Glyx Image element"
   },
   "TextInput": {
-    "prefix": "vinput",
+    "prefix": "ginput",
     "body": [
       "<TextInput",
       "  value={${1:value}}",
@@ -143,7 +143,7 @@
 
   // ── Canvas ────────────────────────────────────────────────────────────────
   "Canvas 2D": {
-    "prefix": "vcanvas",
+    "prefix": "gcanvas",
     "body": [
       "const canvasRef = React.useRef(null);",
       "",
@@ -163,7 +163,7 @@
     "description": "Glyx Canvas 2D with animation loop"
   },
   "Canvas 3D": {
-    "prefix": "vcanvas3d",
+    "prefix": "gcanvas3d",
     "body": [
       "const sceneRef = React.useRef(null);",
       "",
@@ -178,7 +178,7 @@
 
   // ── @glyx/design components ───────────────────────────────────────────────
   "Button (design)": {
-    "prefix": "vbtn",
+    "prefix": "gbtn",
     "body": [
       "<Button",
       "  label=\"${1:Click me}\"",
@@ -189,7 +189,7 @@
     "description": "Glyx design Button"
   },
   "IconButton (design)": {
-    "prefix": "viconbtn",
+    "prefix": "giconbtn",
     "body": [
       "<IconButton",
       "  icon=\"${1:✕}\"",
@@ -201,7 +201,7 @@
     "description": "Glyx design IconButton"
   },
   "Card (design)": {
-    "prefix": "vcard",
+    "prefix": "gcard",
     "body": [
       "<Card style={{ $1 }}>",
       "  $0",
@@ -210,7 +210,7 @@
     "description": "Glyx design Card"
   },
   "TextField (design)": {
-    "prefix": "vtextfield",
+    "prefix": "gtextfield",
     "body": [
       "<TextField",
       "  label=\"${1:Label}\"",
@@ -223,7 +223,7 @@
     "description": "Glyx design TextField"
   },
   "SwitchRow (design)": {
-    "prefix": "vswitch",
+    "prefix": "gswitch",
     "body": [
       "<SwitchRow",
       "  label=\"${1:Setting}\"",
@@ -235,7 +235,7 @@
     "description": "Glyx design SwitchRow"
   },
   "Alert (design)": {
-    "prefix": "valert",
+    "prefix": "galert",
     "body": [
       "<Alert",
       "  variant=\"${1|info,success,warning,error|}\"",
@@ -247,7 +247,7 @@
     "description": "Glyx design Alert"
   },
   "Modal (design)": {
-    "prefix": "vmodal",
+    "prefix": "gmodal",
     "body": [
       "<Modal",
       "  visible={${1:modalVisible}}",
@@ -264,7 +264,7 @@
     "description": "Glyx design Modal dialog"
   },
   "Tabs (design)": {
-    "prefix": "vtabs",
+    "prefix": "gtabs",
     "body": [
       "<Tabs",
       "  defaultValue=\"${1:tab1}\"",
@@ -278,7 +278,7 @@
     "description": "Glyx design Tabs"
   },
   "Accordion (design)": {
-    "prefix": "vaccordion",
+    "prefix": "gaccordion",
     "body": [
       "<Accordion",
       "  items={[",
@@ -290,7 +290,7 @@
     "description": "Glyx design Accordion"
   },
   "Toast usage": {
-    "prefix": "vtoast",
+    "prefix": "gtoast",
     "body": [
       "const { showToast } = useToast();",
       "",
@@ -305,14 +305,14 @@
 
   // ── Hooks & patterns ──────────────────────────────────────────────────────
   "useState": {
-    "prefix": "vus",
+    "prefix": "gus",
     "body": [
       "const [${1:value}, set${1/(.*)/${1:/capitalize}/}] = useState(${2:null});"
     ],
     "description": "React useState"
   },
   "useEffect": {
-    "prefix": "vue",
+    "prefix": "gue",
     "body": [
       "useEffect(() => {",
       "  $0",
@@ -322,30 +322,38 @@
     "description": "React useEffect"
   },
   "useTheme": {
-    "prefix": "vtheme",
+    "prefix": "gtheme",
     "body": [
       "const { colors, space, radius, fontSize, fontWeight } = useTheme();"
     ],
     "description": "Glyx design useTheme destructuring"
   },
 
-  // ── glyx.config.json ─────────────────────────────────────────────────────
-  "glyx.config.json scaffold": {
-    "prefix": "vconfig",
+  // ── glyx.config.ts ────────────────────────────────────────────────────────
+  "glyx.config.ts scaffold": {
+    "prefix": "gconfig",
     "body": [
-      "{",
-      "  \"name\": \"${1:my-app}\",",
-      "  \"version\": \"${2:0.1.0}\",",
-      "  \"window\": {",
-      "    \"title\": \"${3:My App}\",",
-      "    \"width\": ${4:1280},",
-      "    \"height\": ${5:800}",
+      "import { defineConfig } from '@glyx/config';",
+      "",
+      "export default defineConfig({",
+      "  app: {",
+      "    version: '${1:0.1.0}',",
       "  },",
-      "  \"capabilities\": {",
+      "  window: {",
+      "    title:  '${2:My App}',",
+      "    width:  ${3:1280},",
+      "    height: ${4:800},",
+      "  },",
+      "  capabilities: {",
       "    $0",
-      "  }",
-      "}"
+      "  },",
+      "  dev: {",
+      "    entry:  'src/app.jsx',",
+      "    output: 'dist/app.js',",
+      "    watch:  ['src'],",
+      "  },",
+      "});"
     ],
-    "description": "Scaffold glyx.config.json"
+    "description": "Scaffold glyx.config.ts"
   }
 }

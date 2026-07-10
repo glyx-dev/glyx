@@ -62,7 +62,7 @@ struct Cli {
 enum Commands {
     /// Scaffold a new Glyx project
     ///
-    /// Creates a ready-to-run project: js/app.jsx entry, glyx.config.ts,
+    /// Creates a ready-to-run project: src/app.jsx entry, glyx.config.ts,
     /// package.json wired to the Glyx packages, and .gitignore.
     ///
     /// By default the project is JS-only — it runs on a prebuilt glyx-runner
@@ -892,9 +892,9 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_glyx_mark(glyx_home: &Path, dest: &Path) {
+fn copy_glyx_mark_to(glyx_home: &Path, dest: &Path, subfolder: &str) {
     let src = glyx_home.join("assets/glyx-mark.svg");
-    let dst = dest.join("assets/glyx-mark.svg");
+    let dst = dest.join(subfolder).join("glyx-mark.svg");
     if let Err(e) = std::fs::copy(&src, &dst) {
         log::warn!("[create] could not copy glyx-mark.svg: {e}");
     }

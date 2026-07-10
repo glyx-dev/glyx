@@ -172,7 +172,7 @@ impl AppConfig {
     /// Load configuration from `glyx.config.json` in the current directory.
     ///
     /// JS source is read from the path specified in `glyx.config.json`'s `dev.output`
-    /// field (defaults to `js/dist/app.js`). This is the zero-boilerplate entry point:
+    /// field (defaults to `dist/app.js`). This is the zero-boilerplate entry point:
     /// ```no_run
     /// fn main() {
     ///     glyx_core::run(glyx_core::AppConfig::from_config());
@@ -986,6 +986,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         start_dev_mode_worker(
                             Arc::clone(&request_redraw),
                             _dev_mode.clone(),
+                            Arc::clone(&js_plugins_arc),
                         )
                         .map(|rx| DevModeState {
                             rx,

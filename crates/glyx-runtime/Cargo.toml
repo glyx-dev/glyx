@@ -41,7 +41,9 @@ serde               = { workspace = true }
 glyx-3d            = { path = "../glyx-3d", optional = true }
 glyx-ai            = { path = "../glyx-ai", optional = true }
 glyx-cap-abi       = { path = "../glyx-cap-abi" }
+glyx-macros        = { path = "../glyx-macros" }
 libloading         = { workspace = true }
+notify             = { workspace = true }
 
 [features]
 default = ["v8", "full"]

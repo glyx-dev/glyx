@@ -2865,6 +2865,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "sha2",
  "tar",
  "zip 2.4.2",
 ]

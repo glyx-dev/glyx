@@ -254,6 +254,16 @@ pub fn init_v8() {
         //
         // --no-expose-wasm:
         //   Disable WebAssembly (unused; saves the Wasm engine's own structures).
+        // In release, also pass --disallow-code-generation-from-strings so
+        // eval() and new Function() throw at the V8 flag level (applies to
+        // every context in this process, including any created by extensions).
+        // Debug builds leave this off so hot-reload and devtools work normally.
+        #[cfg(not(debug_assertions))]
+        v8::V8::set_flags_from_string(
+            "--lite-mode --optimize-for-size --no-expose-wasm --expose-gc \
+             --disallow-code-generation-from-strings"
+        );
+        #[cfg(debug_assertions)]
         v8::V8::set_flags_from_string(
             "--lite-mode --optimize-for-size --no-expose-wasm --expose-gc"
         );

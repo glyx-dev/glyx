@@ -91,13 +91,24 @@ pub fn verify_signed_file(
     sig_path: &Path,
     pubkey:   &[u8; 32],
 ) -> Result<(), VerifyError> {
+    verify_signed_file_bytes(path, sig_path, pubkey).map(|_| ())
+}
+
+/// Like `verify_signed_file` but returns the verified bytes so the caller can
+/// use them directly — eliminating the TOCTOU window between verify and re-read.
+pub fn verify_signed_file_bytes(
+    path:     &Path,
+    sig_path: &Path,
+    pubkey:   &[u8; 32],
+) -> Result<Vec<u8>, VerifyError> {
     let msg = std::fs::read(path).map_err(|e| VerifyError::Io {
         path: path.display().to_string(), source: e,
     })?;
     let sig = std::fs::read(sig_path).map_err(|e| VerifyError::Io {
         path: sig_path.display().to_string(), source: e,
     })?;
-    verify_ed25519(pubkey, &msg, &sig)
+    verify_ed25519(pubkey, &msg, &sig)?;
+    Ok(msg)
 }
 
 // ── Convenience: sign bytes (test/CI use only) ────────────────────────────────
@@ -199,5 +210,83 @@ mod tests {
         // Ensure the include_bytes! + strip_spki_header produced parseable keys.
         assert!(VerifyingKey::from_bytes(&CAP_PUBKEY).is_ok());
         assert!(VerifyingKey::from_bytes(&UPDATE_PUBKEY).is_ok());
+    }
+
+    // R6: forged/missing cap .sig rejection tests.
+
+    #[test]
+    fn forged_signature_rejected() {
+        let (_secret, pubkey) = random_keypair();
+        // A different fixed seed — produces a distinct keypair.
+        let bad_secret: [u8; 32] = [
+            0x4c, 0xcd, 0x08, 0x9b, 0x28, 0xff, 0x96, 0xda,
+            0x9d, 0xb6, 0xc3, 0x46, 0xec, 0x11, 0x40, 0x42,
+            0x17, 0x42, 0x19, 0xa8, 0x5a, 0x7e, 0xe9, 0xbb,
+            0x23, 0x0b, 0xc3, 0x72, 0x8e, 0x74, 0xda, 0xb3,
+        ];
+        let bad_sig = sign_ed25519(&bad_secret, b"real content");
+        assert!(verify_ed25519(&pubkey, b"real content", &bad_sig).is_err(),
+            "signature from a different key must be rejected");
+    }
+
+    #[test]
+    fn tampered_content_rejected() {
+        let (secret, pubkey) = random_keypair();
+        let sig = sign_ed25519(&secret, b"original");
+        assert!(verify_ed25519(&pubkey, b"tampered", &sig).is_err(),
+            "signature must not verify against different content");
+    }
+
+    #[test]
+    fn missing_sig_file_rejected() {
+        let dir  = std::env::temp_dir();
+        let file = dir.join("glyx_verify_missing_sig_test.bin");
+        let sig  = dir.join("glyx_verify_missing_sig_test.bin.sig");
+        std::fs::write(&file, b"content").unwrap();
+        let _ = std::fs::remove_file(&sig); // ensure it doesn't exist
+        assert!(verify_signed_file(&file, &sig, &CAP_PUBKEY).is_err(),
+            "missing signature file must be rejected");
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn zero_sig_rejected() {
+        let (_secret, pubkey) = random_keypair();
+        assert!(verify_ed25519(&pubkey, b"msg", &[0u8; 64]).is_err(),
+            "all-zero signature must be rejected");
+    }
+
+    // F5: tampered pending.js must be rejected and same bytes returned on success.
+
+    #[test]
+    fn pending_js_tampered_rejected() {
+        let (secret, pubkey) = random_keypair();
+        let dir     = std::env::temp_dir();
+        let js_path = dir.join("glyx_f5_pending.js");
+        let sig_path = dir.join("glyx_f5_pending.js.sig");
+        let original = b"console.log('update v2');";
+
+        // Write file + valid sig.
+        std::fs::write(&js_path, original).unwrap();
+        let sig = sign_ed25519(&secret, original);
+        std::fs::write(&sig_path, sig).unwrap();
+
+        // Tamper with the file AFTER signing.
+        std::fs::write(&js_path, b"console.log('malicious');").unwrap();
+
+        assert!(verify_signed_file_bytes(&js_path, &sig_path, &pubkey).is_err(),
+            "tampered pending.js must be rejected");
+
+        // Clean up, restore original, verify bytes are returned.
+        std::fs::write(&js_path, original).unwrap();
+        let sig2 = sign_ed25519(&secret, original);
+        std::fs::write(&sig_path, sig2).unwrap();
+
+        let bytes = verify_signed_file_bytes(&js_path, &sig_path, &pubkey)
+            .expect("valid pending.js should succeed");
+        assert_eq!(bytes, original, "returned bytes must match the signed content");
+
+        let _ = std::fs::remove_file(&js_path);
+        let _ = std::fs::remove_file(&sig_path);
     }
 }

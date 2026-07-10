@@ -97,6 +97,109 @@ use arboard;
 
 use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, snapshot_resolved};
 use layout::{recompute_layout, update_scroll_positions};
+
+// ── F1: Windows named-pipe DACL restricted to current user ───────────────────
+//
+// Creates a SECURITY_DESCRIPTOR with a DACL that grants GENERIC_ALL only to
+// the current-user SID.  The raw pointer is passed to
+// `ServerOptions::create_with_security_attributes_raw` so the OS rejects
+// connections from any other local account.
+//
+// Memory: the security descriptor and SID are allocated by the Windows API
+// via `ConvertStringSecurityDescriptorToSecurityDescriptorW` and must be
+// freed with `LocalFree`.  We do this in a RAII guard.
+#[cfg(target_os = "windows")]
+mod pipe_dacl {
+    use std::ptr;
+    use std::ffi::c_void;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// RAII wrapper that frees a `LocalAlloc`-allocated security descriptor.
+    pub struct SecurityDescriptorGuard {
+        pub ptr: *mut c_void,
+    }
+    impl Drop for SecurityDescriptorGuard {
+        fn drop(&mut self) {
+            if !self.ptr.is_null() {
+                unsafe { LocalFree(self.ptr as *mut std::ffi::c_void); }
+            }
+        }
+    }
+    // SAFETY: the pointer is not aliased; we only hold it for Drop.
+    unsafe impl Send for SecurityDescriptorGuard {}
+
+    /// Build a SECURITY_DESCRIPTOR whose DACL grants GENERIC_ALL only to the
+    /// current user's SID.  Returns `None` on any Win32 error (fail-open).
+    pub fn current_user_only_sd() -> Option<SecurityDescriptorGuard> {
+        unsafe {
+            // 1. Open the process token.
+            let mut token: HANDLE = ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return None;
+            }
+            let _token_guard = HandleGuard(token);
+
+            // 2. Query TOKEN_USER (variable-length structure).
+            let mut needed: u32 = 0;
+            GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut needed);
+            if needed == 0 { return None; }
+            let mut buf = vec![0u8; needed as usize];
+            if GetTokenInformation(
+                token, TokenUser,
+                buf.as_mut_ptr() as *mut c_void,
+                needed, &mut needed,
+            ) == 0 { return None; }
+            let tu = &*(buf.as_ptr() as *const TOKEN_USER);
+            let sid = tu.User.Sid; // *mut c_void
+
+            // 3. Convert SID to its string form "S-1-5-21-...".
+            let mut sid_str_ptr: *mut u16 = ptr::null_mut();
+            if ConvertSidToStringSidW(sid, &mut sid_str_ptr) == 0 { return None; }
+            let _sid_str_guard = WstrGuard(sid_str_ptr);
+            let sid_str: String = {
+                let mut len = 0usize;
+                while *sid_str_ptr.add(len) != 0 { len += 1; }
+                String::from_utf16_lossy(std::slice::from_raw_parts(sid_str_ptr, len))
+            };
+
+            // 4. SDDL: DACL granting GENERIC_ALL to this user only.
+            //    (A;;GA;;;<SID>) = Allow, no inherit flags, GENERIC_ALL, object=none, inherit=none, SID.
+            let sddl = format!("D:(A;;GA;;;{})", sid_str);
+            let sddl_wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+
+            // 5. Convert SDDL to a security descriptor (LocalAlloc'd).
+            let mut sd_ptr: *mut c_void = ptr::null_mut();
+            let mut sd_size: u32 = 0;
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl_wide.as_ptr(),
+                SDDL_REVISION_1 as u32,
+                &mut sd_ptr,
+                &mut sd_size,
+            ) == 0 { return None; }
+
+            Some(SecurityDescriptorGuard { ptr: sd_ptr })
+        }
+    }
+
+    struct HandleGuard(HANDLE);
+    impl Drop for HandleGuard {
+        fn drop(&mut self) { unsafe { CloseHandle(self.0); } }
+    }
+
+    struct WstrGuard(*mut u16);
+    impl Drop for WstrGuard {
+        fn drop(&mut self) { unsafe { LocalFree(self.0 as *mut std::ffi::c_void); } }
+    }
+}
 use render::{render_subtree, RenderCtx, compute_scrollbar_thumb};
 
 /// Zero-allocation cache key for shaped text.
@@ -641,7 +744,10 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 // Clean up stale socket file on Unix before binding.
                 #[cfg(not(target_os = "windows"))]
-                { let _ = std::fs::remove_file(&ipc_name); }
+                {
+                    let _ = std::fs::remove_file(&ipc_name);
+                    // chmod 0600 is set after bind in the listener task below.
+                }
 
                 log::info!("glyx: single-instance IPC at {}", ipc_name);
                 Some(ipc_name)
@@ -859,6 +965,16 @@ pub fn run(mut config: AppConfig) -> bool {
                 if window_handle == 0 {
                     if let Some(ipc_name) = single_instance_ipc.take() {
                         let queue_clone = Arc::clone(&rt.deeplink_url_queue);
+
+                        // F1: Build SD before spawning to avoid holding *mut c_void across await.
+                        // Transmit as usize (Send); valid for the lifetime of sd_guard below.
+                        #[cfg(target_os = "windows")]
+                        let (sd_guard, sd_ptr_usize) = {
+                            let g = pipe_dacl::current_user_only_sd();
+                            let p = g.as_ref().map(|sd| sd.ptr as usize).unwrap_or(0);
+                            (g, p)
+                        };
+
                         tokio_handle.spawn(async move {
                             use tokio::io::AsyncBufReadExt;
 
@@ -866,10 +982,27 @@ pub fn run(mut config: AppConfig) -> bool {
                             {
                                 // Windows named pipe listener loop.
                                 loop {
-                                    let server = match tokio::net::windows::named_pipe::ServerOptions::new()
-                                        .first_pipe_instance(false)
-                                        .create(&ipc_name)
-                                    {
+                                    let mut opts = tokio::net::windows::named_pipe::ServerOptions::new();
+                                    opts.first_pipe_instance(false)
+                                        .reject_remote_clients(true);
+
+                                    let server = if sd_ptr_usize != 0 {
+                                        // SAFETY: sd_ptr_usize is the LocalAlloc'd SD kept alive
+                                        // by sd_guard, which is captured by this async block.
+                                        let sa = windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
+                                            nLength: std::mem::size_of::<windows_sys::Win32::Security::SECURITY_ATTRIBUTES>() as u32,
+                                            lpSecurityDescriptor: sd_ptr_usize as *mut std::ffi::c_void,
+                                            bInheritHandle: 0,
+                                        };
+                                        unsafe { opts.create_with_security_attributes_raw(
+                                            &ipc_name,
+                                            &sa as *const _ as *mut _,
+                                        ) }
+                                    } else {
+                                        log::warn!("glyx: could not build user-restricted pipe DACL; pipe accessible to all local users");
+                                        opts.create(&ipc_name)
+                                    };
+                                    let server = match server {
                                         Ok(s)  => s,
                                         Err(e) => { log::warn!("glyx: pipe create error: {e}"); return; }
                                     };
@@ -894,6 +1027,15 @@ pub fn run(mut config: AppConfig) -> bool {
                                     Ok(l)  => l,
                                     Err(e) => { log::warn!("glyx: Unix socket bind error: {e}"); return; }
                                 };
+                                // R2: restrict socket to current user only.
+                                #[cfg(unix)]
+                                {
+                                    use std::os::unix::fs::PermissionsExt;
+                                    let _ = std::fs::set_permissions(
+                                        &ipc_name,
+                                        std::fs::Permissions::from_mode(0o600),
+                                    );
+                                }
                                 loop {
                                     match listener.accept().await {
                                         Ok((stream, _)) => {

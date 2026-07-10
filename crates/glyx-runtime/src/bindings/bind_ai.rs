@@ -22,6 +22,11 @@ pub fn ai_embed_callback(
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             let mut guard = model_cache.lock();
             if guard.is_none() {
+                // R3: block download unless aiModelDownload capability is declared.
+                if !glyx_security::get().can_ai_download() {
+                    return Err("ai.embed: model not cached and 'aiModelDownload' capability is not declared. \
+                        Add \"aiModelDownload\": true to glyx.config capabilities to permit downloads.".into());
+                }
                 *guard = Some(glyx_ai::EmbedModel::load()
                     .map_err(|e| format!("ai.embed model load: {e}"))?);
             }
@@ -97,6 +102,11 @@ pub fn ai_generate_callback(
             if on_battery { log::info!("[ai] on battery — generation with default thread count"); }
             let mut guard = model_cache.lock();
             if guard.is_none() {
+                // R3: block download unless aiModelDownload capability is declared.
+                if !glyx_security::get().can_ai_download() {
+                    return Err("ai.generate: model not cached and 'aiModelDownload' capability is not declared. \
+                        Add \"aiModelDownload\": true to glyx.config capabilities to permit downloads.".into());
+                }
                 *guard = Some(glyx_ai::GenerateModel::load()
                     .map_err(|e| format!("ai.generate model load: {e}"))?);
             }
@@ -171,6 +181,11 @@ pub fn ai_transcribe_callback(
             let language = opts.get("language").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let mut guard = model_cache.lock();
             if guard.is_none() {
+                // R3: block download unless aiModelDownload capability is declared.
+                if !glyx_security::get().can_ai_download() {
+                    return Err("ai.transcribe: model not cached and 'aiModelDownload' capability is not declared. \
+                        Add \"aiModelDownload\": true to glyx.config capabilities to permit downloads.".into());
+                }
                 *guard = Some(glyx_ai::WhisperModel::load()
                     .map_err(|e| format!("ai.transcribe model load: {e}"))?);
             }

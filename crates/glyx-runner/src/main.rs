@@ -156,22 +156,23 @@ fn load_verified_pending_js() -> Option<String> {
         return None;
     }
 
-    // Verify signature over the raw bytes before decoding to String.
-    match glyx_verify::verify_signed_file(&js_path, &sig_path, &glyx_verify::UPDATE_PUBKEY) {
-        Ok(()) => {}
+    // F3: verify_signed_file_bytes reads, verifies, and returns the same bytes
+    // in one step — no second read, so there is no verify→execute TOCTOU window.
+    match glyx_verify::verify_signed_file_bytes(&js_path, &sig_path, &glyx_verify::UPDATE_PUBKEY) {
+        Ok(bytes) => {
+            match String::from_utf8(bytes) {
+                Ok(src) => {
+                    eprintln!("[glyx] Applying verified pending JS update.");
+                    Some(src)
+                }
+                Err(e) => {
+                    cleanup(&format!("invalid UTF-8 in pending.js: {e}"));
+                    None
+                }
+            }
+        }
         Err(e) => {
             cleanup(&format!("signature invalid: {e}"));
-            return None;
-        }
-    }
-
-    match std::fs::read_to_string(&js_path) {
-        Ok(src) => {
-            eprintln!("[glyx] Applying verified pending JS update.");
-            Some(src)
-        }
-        Err(e) => {
-            cleanup(&format!("read error: {e}"));
             None
         }
     }

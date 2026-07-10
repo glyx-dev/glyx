@@ -5,38 +5,30 @@ use std::net::IpAddr;
 
 /// Extract just the hostname (no port, no userinfo, no path) from a URL string.
 ///
-/// Handles:
-/// - Userinfo: `http://user:pass@host/` → `host`
-/// - IPv6 literals: `https://[::1]/` → `::1`
-/// - Port stripping: `https://host:8080/path` → `host`
+/// Uses `reqwest::Url` (which re-exports the `url` crate) for correct parsing,
+/// matching what reqwest itself connects to.  Falls back to an empty string for
+/// URLs that don't parse (non-http schemes, malformed).
 pub fn extract_host(url: &str) -> String {
-    let after_scheme = if let Some(pos) = url.find("://") {
-        &url[pos + 3..]
-    } else {
-        url
-    };
-    // Strip userinfo (everything before '@' in the authority).
-    let authority = if let Some(at) = after_scheme.find('@') {
-        &after_scheme[at + 1..]
-    } else {
-        after_scheme
-    };
-    // Strip path, query and fragment -- they start at the first `/`, `?`, or `#`.
-    let host_port = authority
-        .split(|c| c == '/' || c == '?' || c == '#')
-        .next()
-        .unwrap_or(authority);
-    // IPv6 literal: `[2001:db8::1]` or `[::1]:8080`.
-    let host = if host_port.starts_with('[') {
-        host_port
-            .split(']')
-            .next()
-            .unwrap_or("")
-            .trim_start_matches('[')
-    } else {
-        host_port.split(':').next().unwrap_or(host_port)
-    };
-    host.to_lowercase()
+    #[cfg(feature = "fetch")]
+    {
+        reqwest::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
+            .unwrap_or_default()
+    }
+    #[cfg(not(feature = "fetch"))]
+    {
+        // Minimal fallback when reqwest is not compiled in.
+        let after_scheme = url.find("://").map(|i| &url[i + 3..]).unwrap_or(url);
+        let authority = after_scheme.find('@').map(|i| &after_scheme[i + 1..]).unwrap_or(after_scheme);
+        let host_port = authority.split(['/', '?', '#']).next().unwrap_or(authority);
+        let host = if host_port.starts_with('[') {
+            host_port.split(']').next().unwrap_or("").trim_start_matches('[')
+        } else {
+            host_port.split(':').next().unwrap_or(host_port)
+        };
+        host.to_lowercase()
+    }
 }
 
 /// Returns `true` if `host` is a private, loopback, or link-local address that
@@ -649,4 +641,74 @@ pub fn mdns_discover_callback(
 
         enqueue_completion(&queue_clone, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // R6: SSRF denial regression tests.
+
+    #[test]
+    fn private_ipv4_loopback_blocked() {
+        assert!(is_private_host("127.0.0.1"));
+        assert!(is_private_host("127.255.255.255"));
+    }
+
+    #[test]
+    fn private_ipv4_rfc1918_blocked() {
+        assert!(is_private_host("10.0.0.1"));
+        assert!(is_private_host("172.16.0.1"));
+        assert!(is_private_host("172.31.255.255"));
+        assert!(is_private_host("192.168.1.100"));
+    }
+
+    #[test]
+    fn private_link_local_blocked() {
+        assert!(is_private_host("169.254.169.254")); // AWS IMDS
+        assert!(is_private_host("169.254.0.1"));
+    }
+
+    #[test]
+    fn private_ipv6_blocked() {
+        assert!(is_private_host("::1"));
+        assert!(is_private_host("fc00::1"));
+        assert!(is_private_host("fe80::1"));
+    }
+
+    #[test]
+    fn private_hostname_blocked() {
+        assert!(is_private_host("localhost"));
+        assert!(is_private_host("myservice.local"));
+        assert!(is_private_host("db.internal"));
+        assert!(is_private_host("thing.localhost"));
+    }
+
+    #[test]
+    fn public_hosts_allowed() {
+        assert!(!is_private_host("example.com"));
+        assert!(!is_private_host("8.8.8.8"));
+        assert!(!is_private_host("2001:4860:4860::8888"));
+    }
+
+    #[test]
+    fn extract_host_parses_correctly() {
+        assert_eq!(extract_host("https://example.com/path?q=1"), "example.com");
+        assert_eq!(extract_host("https://[::1]/"), "::1");
+        // reqwest::Url cases only available when fetch feature is compiled in.
+        #[cfg(feature = "fetch")]
+        {
+            assert_eq!(extract_host("http://user:pass@example.com:8080/"), "example.com");
+            assert_eq!(extract_host("not-a-url"), "");
+        }
+    }
+
+    #[test]
+    fn fetch_scheme_rejects_non_http() {
+        assert!(check_fetch_scheme("file:///etc/passwd").is_err());
+        assert!(check_fetch_scheme("ftp://example.com").is_err());
+        assert!(check_fetch_scheme("javascript:alert(1)").is_err());
+        assert!(check_fetch_scheme("https://example.com").is_ok());
+        assert!(check_fetch_scheme("http://example.com").is_ok());
+    }
 }

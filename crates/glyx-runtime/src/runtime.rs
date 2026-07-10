@@ -54,7 +54,33 @@ fn install_import_guard(isolate: &mut v8::OwnedIsolate) {
     #[cfg(not(debug_assertions))]
     isolate.set_host_import_module_dynamically_callback(deny_dynamic_import);
     #[cfg(debug_assertions)]
-    let _ = isolate; // used only to satisfy the borrow
+    let _ = isolate;
+}
+
+/// Per-context callback that denies eval() / new Function() / new GeneratorFunction()
+/// in release builds.  Belt-and-suspenders alongside the V8 flag
+/// `--disallow-code-generation-from-strings` set in lib.rs.
+///
+/// Returning `None` causes V8 to throw `EvalError: Code generation from strings disallowed`.
+#[cfg(not(debug_assertions))]
+fn deny_code_generation<'s>(
+    scope:   &mut v8::HandleScope<'s>,
+    _source: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::String>> {
+    // Log once so developers see it clearly during testing.
+    // The return value is the modified source; returning None = deny.
+    let _ = scope;
+    None
+}
+
+/// Install the code-generation-from-strings denial callback on a context.
+/// Must be called inside a ContextScope while the context is active.
+/// No-op in debug builds.
+fn install_code_gen_guard(scope: &mut v8::ContextScope<v8::HandleScope>, ctx: v8::Local<v8::Context>) {
+    #[cfg(not(debug_assertions))]
+    ctx.set_allow_code_generation_from_strings(scope, false);
+    #[cfg(debug_assertions)]
+    { let _ = (scope, ctx); }
 }
 
 /// V8 isolate params shared by fresh and snapshot-restore paths.
@@ -164,6 +190,8 @@ impl V8Runtime {
             let scene  = new_scene_queue();
             let ctx    = v8::Context::new(scope);
             let scope  = &mut v8::ContextScope::new(scope, ctx);
+            // R1: deny eval() / new Function() in release.
+            install_code_gen_guard(scope, ctx);
             let global = ctx.global(scope);
 
             let state_ptr = register_all(
@@ -262,6 +290,8 @@ impl V8Runtime {
             // Snapshot contains a default context; use it
             let ctx    = v8::Context::new(scope);
             let scope  = &mut v8::ContextScope::new(scope, ctx);
+            // R1: deny eval() / new Function() in release.
+            install_code_gen_guard(scope, ctx);
             let global = ctx.global(scope);
 
             // Re-register all binding implementations (stubs are already in snapshot)

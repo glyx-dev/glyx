@@ -1801,10 +1801,15 @@ mod tests {
 
     #[test]
     fn extract_host_hostile_urls_fail_closed() {
-        // Userinfo trick: "allowed.com@evil.com" must NOT extract to allowed.com.
-        assert_ne!(extract_host("https://api.example.com@evil.com/x"), "api.example.com");
-        // Userinfo with a colon yields garbage ("user")  garbage is fine as
-        // long as it can never equal an allowlisted hostname.
-        assert_ne!(extract_host("https://user:pass@api.example.com/x"), "api.example.com");
+        // Userinfo trick: "http://allowed.com@evil.com/x" — the actual host is
+        // evil.com; allowed.com is the username.  url::Url parses this correctly.
+        let h = extract_host("https://api.example.com@evil.com/x");
+        assert_ne!(h, "api.example.com",
+            "userinfo@host must resolve to the real host (evil.com), not the username");
+        // Standard userinfo (user:pass@host) — host is api.example.com.
+        // The old hand-rolled parser accidentally returned "user" here; the
+        // url::Url parser returns the correct hostname.
+        assert_eq!(extract_host("https://user:pass@api.example.com/x"), "api.example.com",
+            "user:pass@ prefix must be stripped; host is api.example.com");
     }
 }

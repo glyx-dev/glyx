@@ -1128,3 +1128,41 @@ pub fn deeplink_poll_callback(
     let s = v8::String::new(scope, &json).unwrap();
     rv.set(s.into());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::validate_external_url;
+
+    // F5: open_external metacharacter rejection regression tests.
+
+    #[test]
+    fn open_external_allows_safe_urls() {
+        assert!(validate_external_url("https://example.com").is_ok());
+        assert!(validate_external_url("http://example.com/path?q=1&r=2").is_ok());
+        assert!(validate_external_url("mailto:user@example.com").is_ok());
+    }
+
+    #[test]
+    fn open_external_rejects_bad_schemes() {
+        assert!(validate_external_url("file:///etc/passwd").is_err());
+        assert!(validate_external_url("javascript:alert(1)").is_err());
+        assert!(validate_external_url("ftp://files.example.com").is_err());
+        assert!(validate_external_url("data:text/html,<h1>x</h1>").is_err());
+    }
+
+    #[test]
+    fn open_external_rejects_shell_metacharacters() {
+        assert!(validate_external_url("https://example.com|whoami").is_err());
+        assert!(validate_external_url("https://example.com;rm -rf /").is_err());
+        assert!(validate_external_url("https://example.com$(id)").is_err());
+        assert!(validate_external_url("https://example.com`id`").is_err());
+        assert!(validate_external_url("https://example.com&&evil").is_err());
+    }
+
+    #[test]
+    fn open_external_rejects_control_characters() {
+        assert!(validate_external_url("https://example.com/\x00path").is_err());
+        assert!(validate_external_url("https://example.com/\x0apath").is_err());
+        assert!(validate_external_url("https://example.com/\x7fpath").is_err());
+    }
+}

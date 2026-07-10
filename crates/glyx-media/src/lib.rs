@@ -89,9 +89,12 @@ impl GlyxMedia {
     /// Load the glyx-media DLL at `path`.
     ///
     /// Verifies integrity (Ed25519 manifest + SHA-256) before `dlopen`.
+    /// The verified file handle is held open across the dlopen call to
+    /// prevent TOCTOU replacement (R4).
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
-        // Re-verify integrity every launch — the cached file may have been tampered.
-        verify::verify_cached_dll(path)?;
+        // Re-verify integrity every launch.  Returns an open file handle;
+        // we keep it alive until Library::load_with_flags returns.
+        let _verified_handle = verify::verify_cached_dll(path)?;
 
         // On Windows, use LOAD_WITH_ALTERED_SEARCH_PATH so that ffmpeg DLLs
         // sitting next to the glyx-media DLL in the cache dir are found
@@ -106,6 +109,8 @@ impl GlyxMedia {
         let lib = unsafe {
             Library::new(path).map_err(|e| format!("glyx-media: dlopen failed: {e}"))?
         };
+        // _verified_handle drops here — after dlopen, the kernel holds its own
+        // reference to the inode, so the handle is no longer needed.
 
         macro_rules! sym {
             ($lib:expr, $name:literal, $ty:ty) => {{

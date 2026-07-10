@@ -45,6 +45,13 @@ fn find_ffmpeg() -> String {
 /// In dev mode, ensure an ffmpeg binary is available by downloading via ffmpeg-sidecar
 /// if it is not already present in PATH or the sidecar directory.
 /// The download is run on a background thread so it never blocks the render loop.
+///
+/// F4 — Supply-chain acceptance: `ffmpeg_sidecar::download::auto_download()` fetches
+/// ffmpeg from a third-party CDN without a SHA-256 pin.  This is accepted because:
+/// (a) this path is `#[cfg(feature = "dev")]` only — production builds use the
+///     glyx-media DLL (which is Ed25519-signed + SHA-256 verified); (b) dev machines
+///     are not part of the release trust chain; (c) pinning would require forking the
+///     crate.  Documented here as an accepted low-severity residual (F4).
 #[cfg(feature = "dev")]
 pub(crate) fn ensure_dev_ffmpeg() {
     // ffmpeg_sidecar::download::auto_download() checks PATH + sidecar dir itself;

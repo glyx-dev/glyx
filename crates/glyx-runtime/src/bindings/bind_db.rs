@@ -542,3 +542,44 @@ pub fn vectordb_close_callback(
         );
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_db_path_checked;
+
+    // F5: db path denial regression tests.
+    // glyx_security::get() returns Capabilities::default() (all false) when
+    // init() has not been called, which is the conservative deny-by-default
+    // behavior exercised here.  Positive-path tests (db_path cap granted) live
+    // in glyx-security's own integration tests where caps can be wired up cleanly.
+
+    #[test]
+    fn absolute_path_denied_without_cap() {
+        #[cfg(target_os = "windows")]
+        let abs = "C:\\Windows\\System32\\evil.db";
+        #[cfg(not(target_os = "windows"))]
+        let abs = "/etc/evil.db";
+        let err = resolve_db_path_checked(abs).unwrap_err();
+        assert!(err.contains("db.path"), "denial message should mention db.path capability");
+    }
+
+    #[test]
+    fn memory_denied_without_cap() {
+        let err = resolve_db_path_checked(":memory:").unwrap_err();
+        assert!(err.contains("db.path"), "denial message should mention db.path capability");
+    }
+
+    #[test]
+    fn traversal_does_not_escape_app_dir() {
+        // Traversal is rooted under app_db_dir before path resolution.
+        // The join+canonicalize will either stay within the data dir or fail.
+        let result = resolve_db_path_checked("../../etc/passwd.db");
+        if let Ok(path) = &result {
+            // If allowed, it must still be inside the app data dir (not /etc).
+            assert!(!path.to_ascii_lowercase().contains("etc"),
+                "traversal must not escape to /etc");
+        }
+        // Failure (Err) is also acceptable; the point is it must not succeed
+        // with a path pointing outside the app data directory.
+    }
+}

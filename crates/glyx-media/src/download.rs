@@ -58,11 +58,12 @@ fn dirs_or_fallback() -> PathBuf {
 }
 
 /// Return the DLL path to use, searching in order:
-/// 1. Next to the running executable (installed apps — DLL copied by `glyx package`)
+/// 1. Next to the running executable (installed apps -- DLL copied by `glyx package`)
 /// 2. The user cache at `~/.glyx/cache/media/` (dev / auto-downloaded)
 ///
-/// Integrity verification is skipped for the exe-relative path because the
-/// manifest files are not distributed with the installer; we trust installed files.
+/// Integrity is verified for all paths: Ed25519 manifest signature + SHA-256.
+/// Installer-distributed DLLs must ship a manifest sidecar; the manifest is
+/// the trust anchor (not the install location).
 pub fn find_cached_media() -> Option<PathBuf> {
     let stem = dll_stem();
     let ext  = dll_ext();
@@ -72,8 +73,15 @@ pub fn find_cached_media() -> Option<PathBuf> {
         if let Some(exe_dir) = exe.parent() {
             let dll = exe_dir.join(format!("{stem}.{ext}"));
             if dll.exists() {
-                log::debug!("[glyx-media] using DLL next to exe: {}", dll.display());
-                return Some(dll);
+                match crate::verify::verify_cached_dll(&dll) {
+                    Ok(_) => {
+                        log::debug!("[glyx-media] using DLL next to exe: {}", dll.display());
+                        return Some(dll);
+                    }
+                    Err(e) => {
+                        log::warn!("[glyx-media] exe-adjacent DLL failed verification: {e}");
+                    }
+                }
             }
         }
     }
@@ -85,7 +93,9 @@ pub fn find_cached_media() -> Option<PathBuf> {
         return None;
     }
     match crate::verify::verify_cached_dll(&dll) {
-        Ok(()) => {
+        Ok(_handle) => {
+            // _handle dropped here; GlyxMedia::load will re-verify and hold
+            // its own handle across dlopen (see lib.rs).
             log::debug!("[glyx-media] using cached DLL: {}", dll.display());
             Some(dll)
         }

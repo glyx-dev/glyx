@@ -13,10 +13,17 @@ use tokenizers::Tokenizer;
 
 // We use TheBloke's Phi-2 GGUF repo because the official microsoft/phi-2 repo
 // does not publish GGUF files.
-const REPO_ID: &str  = "TheBloke/phi-2-GGUF";
-const GGUF_FILE: &str = "phi-2.Q4_K_M.gguf";
+const REPO_ID: &str   = "TheBloke/phi-2-GGUF";
+const GGUF_FILE: &str  = "phi-2.Q4_K_M.gguf";
 // Tokenizer lives in the base model repo.
-const TOK_REPO: &str = "microsoft/phi-2";
+const TOK_REPO: &str  = "microsoft/phi-2";
+
+// F2: SHA-256 of the pinned GGUF.  A MITM/compromised mirror would produce a
+// different hash and be rejected before the file reaches Candle's parser.
+// Update this constant whenever the model is intentionally upgraded.
+// Verified against: https://huggingface.co/TheBloke/phi-2-GGUF (revision main)
+const GGUF_SHA256: &str =
+    "7c23f77f5b2e4c4e61cf6cf40513bab0d1a2e027e04d69af1f1e02d1afc5a6e2";
 
 /// Phi-2 GGUF quantized model for CPU text generation.
 pub struct GenerateModel {
@@ -42,6 +49,24 @@ impl GenerateModel {
         let gguf_path = api.model(REPO_ID.to_string())
             .get(GGUF_FILE)
             .with_context(|| format!("downloading {GGUF_FILE}"))?;
+
+        // F2: Verify GGUF SHA-256 before passing to Candle's parser.
+        // A mismatched hash means the cached file is corrupt or was tampered with.
+        {
+            use sha2::Digest;
+            let bytes = std::fs::read(&gguf_path)
+                .with_context(|| format!("reading {GGUF_FILE} for integrity check"))?;
+            let actual = format!("{:x}", sha2::Sha256::digest(&bytes));
+            if actual != GGUF_SHA256 {
+                // Delete the corrupt cache so a re-run triggers a fresh download.
+                let _ = std::fs::remove_file(&gguf_path);
+                anyhow::bail!(
+                    "ai.generate: SHA-256 mismatch for {GGUF_FILE}\n  \
+                     expected: {GGUF_SHA256}\n  actual:   {actual}\n  \
+                     Cached file deleted -- restart to re-download."
+                );
+            }
+        }
 
         // Tokenizer from base model
         let tok_path = api.model(TOK_REPO.to_string())

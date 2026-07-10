@@ -2834,6 +2834,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "sha2",
  "tokenizers",
  "zip 2.4.2",
 ]
@@ -2950,6 +2951,7 @@ dependencies = [
  "taffy",
  "thiserror 1.0.69",
  "tokio",
+ "windows-sys 0.59.0",
  "winit",
 ]
 

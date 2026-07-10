@@ -85,33 +85,39 @@ pub fn verify_manifest(manifest_bytes: &[u8], sig_bytes: &[u8]) -> Result<Manife
 }
 
 /// Verify a cached DLL against its sidecar manifest + signature files.
-/// Returns `Ok(())` if the DLL is intact and the manifest is authentic.
-/// On hash mismatch the DLL file is deleted so it will be re-downloaded.
 ///
-/// If the manifest sidecar does not exist the DLL was distributed by the
-/// installer (not downloaded from CDN), so verification is skipped — the
-/// file is already trusted by virtue of the user having run our installer.
-pub fn verify_cached_dll(dll_path: &Path) -> Result<(), String> {
+/// Returns an open `std::fs::File` handle to the DLL on success.  The
+/// caller MUST keep this handle open until `Library::new` / `dlopen`
+/// returns — holding the handle prevents file replacement on Windows
+/// (mandatory locking) and shrinks the TOCTOU window to sub-millisecond
+/// on Unix.
+///
+/// On hash mismatch the DLL file is deleted so it will be re-downloaded.
+pub fn verify_cached_dll(dll_path: &Path) -> Result<std::fs::File, String> {
+    use std::io::Read;
+
     let manifest_path = dll_path.with_extension("manifest.json");
     let sig_path      = dll_path.with_extension("manifest.sig");
 
-    // No manifest sidecar: deny in release (an installer-distributed DLL must
-    // ship its manifest); allow in debug (locally-built DLLs have no manifest).
+    // No manifest sidecar: deny in release; allow in debug.
     if !manifest_path.exists() {
         #[cfg(not(debug_assertions))]
         {
             return Err(format!(
-                "glyx-media: no manifest at {} — refusing to load unsigned DLL in release build",
+                "glyx-media: no manifest at {} -- refusing to load unsigned DLL in release build",
                 manifest_path.display()
             ));
         }
         #[cfg(debug_assertions)]
         {
             log::warn!(
-                "[glyx-media] no manifest for {} — skipping verification (debug build only)",
+                "[glyx-media] no manifest for {} -- skipping verification (debug build only)",
                 dll_path.display()
             );
-            return Ok(());
+            // Return an open handle even in the no-verify path so the call
+            // site is uniform and still holds a handle across dlopen.
+            return std::fs::File::open(dll_path)
+                .map_err(|e| format!("glyx-media: cannot open DLL: {e}"));
         }
     }
 
@@ -122,18 +128,25 @@ pub fn verify_cached_dll(dll_path: &Path) -> Result<(), String> {
 
     let manifest = verify_manifest(&manifest_bytes, &sig_bytes)?;
 
-    let dll_bytes = std::fs::read(dll_path)
+    // R4: open the file ONCE, read bytes for hashing, keep the handle open.
+    // On Windows this holds a shared-read lock preventing replacement.
+    // On Unix it closes the TOCTOU window to near-zero.
+    let mut dll_file = std::fs::File::open(dll_path)
+        .map_err(|e| format!("glyx-media: cannot open DLL: {e}"))?;
+    let mut dll_bytes = Vec::new();
+    dll_file.read_to_end(&mut dll_bytes)
         .map_err(|e| format!("glyx-media: cannot read DLL: {e}"))?;
-    let actual_hash = sha256_hex(&dll_bytes);
 
+    let actual_hash = sha256_hex(&dll_bytes);
     if actual_hash != manifest.sha256 {
-        // Delete corrupted cache — will re-download next launch.
+        drop(dll_file);
         let _ = std::fs::remove_file(dll_path);
         return Err(format!(
-            "glyx-media: SHA-256 mismatch (expected {}, got {}) — cached DLL deleted, re-download required",
+            "glyx-media: SHA-256 mismatch (expected {}, got {}) -- cached DLL deleted, re-download required",
             manifest.sha256, actual_hash
         ));
     }
 
-    Ok(())
+    // Return the still-open handle so the caller can hold it across dlopen.
+    Ok(dll_file)
 }

@@ -3,23 +3,20 @@
 //! Resolves the five optional capabilities (audio, AI, camera, gamepad, HID)
 //! in priority order:
 //!
-//! 1. **Static** — compiled in via Cargo feature flags (e.g. `--features audio`).
+//! 1. **Static** -- compiled in via Cargo feature flags (e.g. `--features audio`).
 //!    The static implementations are plain Rust structs that satisfy the same
 //!    `glyx_cap_abi::*Cap` vtable shapes, so the dispatch path is identical.
 //!
-//! 2. **Dynamic** — a `glyx_cap_<name>.dll`/`.so`/`.dylib` present next to the
+//! 2. **Dynamic** -- a `glyx_cap_<name>.dll`/`.so`/`.dylib` present next to the
 //!    executable at runtime.  Loaded via `libloading`.  The DLL must export the
 //!    well-known symbol defined in `glyx_cap_abi::SYM_*` and return a pointer to
 //!    a vtable whose `version` field is within `[ABI_VERSION_MIN, ABI_VERSION]`.
 //!
-//! 3. **Absent** — `CapSet` field is `None`; bindings return safe stub responses.
+//! 3. **Absent** -- `CapSet` field is `None`; bindings return safe stub responses.
 //!
 //! The loader runs once at startup (called from `GlyxRuntime::new`).  The
 //! resulting `CapSet` is immutable for the lifetime of the process.
 
-use std::collections::HashMap;
-use sha2::{Sha256, Digest};
-use serde_json::Value;
 #[allow(unused_imports)]
 use glyx_cap_abi::{
     ABI_VERSION, ABI_VERSION_MIN,
@@ -37,7 +34,7 @@ use glyx_cap_abi::{
 ///   DLL search path, preventing CWD-based DLL planting.
 /// - Subsequent `load_dll` calls use `LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
 ///   LOAD_LIBRARY_SEARCH_SYSTEM32` so only the exe directory and System32
-///   are searched — not CWD, PATH, or user-writable locations.
+///   are searched -- not CWD, PATH, or user-writable locations.
 ///
 /// No-op on non-Windows platforms (system linker controls search paths).
 pub fn harden_dll_search() {
@@ -72,7 +69,7 @@ unsafe fn load_dll(path: &std::path::Path) -> Result<libloading::Library, libloa
         let flags = LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
         let handle = LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), flags);
         if handle.is_null() {
-            // LoadLibraryExW failed — let libloading surface the OS error.
+            // LoadLibraryExW failed -- let libloading surface the OS error.
             return libloading::Library::new(path);
         }
         // Wrap the HMODULE in a libloading::os::windows::Library then convert.
@@ -85,31 +82,63 @@ unsafe fn load_dll(path: &std::path::Path) -> Result<libloading::Library, libloa
     }
 }
 
-// ── Hash verification ─────────────────────────────────────────────────────────
+// ── H5: Ed25519 cap DLL verification ─────────────────────────────────────────
 
-/// Compute the lowercase hex SHA-256 of a file.
-fn sha256_file(path: &std::path::Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    let hash = Sha256::digest(&bytes);
-    Some(format!("{hash:x}"))
+/// Returns `true` if DLL signature verification should be skipped.
+///
+/// Only possible in debug builds and only when `GLYX_UNSAFE_SKIP_CAP_VERIFY=1`
+/// is set.  The env-var branch is compiled out entirely in release so the
+/// escape hatch cannot be triggered by an attacker at runtime.
+fn skip_cap_verify() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var("GLYX_UNSAFE_SKIP_CAP_VERIFY").as_deref() == Ok("1") {
+            log::warn!("[cap] GLYX_UNSAFE_SKIP_CAP_VERIFY=1 -- Ed25519 check bypassed (dev only)");
+            return true;
+        }
+    }
+    false
 }
 
-/// Verify the file at `path` against `expected` (lowercase hex).
-/// Returns `true` if the hashes match, `false` with a warning otherwise.
-fn verify_hash(path: &std::path::Path, cap_name: &str, expected: &str) -> bool {
-    match sha256_file(path) {
-        None => {
-            log::warn!("[cap] Could not read {:?} for hash verification", path);
-            false
+/// Verify the Ed25519 `.sig` sidecar for a cap DLL.
+///
+/// The sidecar must be at `{dll_path}.sig` (64 raw bytes).
+/// The signature is over the raw DLL bytes, signed with the cap private key
+/// whose public counterpart is compiled into `glyx-verify::CAP_PUBKEY`.
+///
+/// In release builds a missing or invalid sidecar is a hard failure.
+/// In debug builds with `GLYX_UNSAFE_SKIP_CAP_VERIFY=1` the check is skipped.
+fn verify_cap_sig(dll_path: &std::path::Path, cap_name: &str) -> bool {
+    if skip_cap_verify() {
+        return true;
+    }
+    let sig_path = dll_path.with_extension({
+        let ext = dll_path.extension()
+            .map(|e| format!("{}.sig", e.to_string_lossy()))
+            .unwrap_or_else(|| "sig".to_string());
+        ext
+    });
+    if !sig_path.exists() {
+        log::error!(
+            "[cap] No Ed25519 signature for capability '{cap_name}' at {:?}. \
+             Run `glyx caps sign` in CI to generate {}.sig -- refusing to load.",
+            dll_path, dll_path.display()
+        );
+        return false;
+    }
+    match glyx_verify::verify_signed_file(dll_path, &sig_path, &glyx_verify::CAP_PUBKEY) {
+        Ok(()) => {
+            log::debug!("[cap] Ed25519 OK for '{cap_name}'");
+            true
         }
-        Some(actual) if actual != expected.to_lowercase() => {
+        Err(e) => {
             log::error!(
-                "[cap] SHA-256 mismatch for capability '{cap_name}' — \
-                 expected {expected}, got {actual}. Refusing to load."
+                "[cap] Ed25519 verification FAILED for capability '{cap_name}': {e}. \
+                 Refusing to load {:?}.",
+                dll_path
             );
             false
         }
-        Some(_) => true,
     }
 }
 
@@ -117,12 +146,12 @@ fn verify_hash(path: &std::path::Path, cap_name: &str, expected: &str) -> bool {
 
 /// Try to load a capability DLL next to the running executable.
 ///
-/// - If `expected_hash` is `Some`, the file's SHA-256 must match before loading.
-/// - If `expected_hash` is `None`, the file loads unchecked (a warning is
-///   logged in non-debug builds so developers know to pin the hash).
+/// Before loading, the DLL must have a valid Ed25519 `.sig` sidecar signed
+/// with the cap private key (embedded public key in `glyx-verify::CAP_PUBKEY`).
+/// In release builds a missing or invalid signature is a hard failure.
 ///
-/// Returns `Some(&'static Cap)` if the DLL is present and its ABI version is
-/// compatible; logs a warning and returns `None` otherwise.
+/// Returns `Some(&'static Cap)` if the DLL is present, verified, and its ABI
+/// version is compatible; logs a warning and returns `None` otherwise.
 ///
 /// # Safety
 /// The loaded library is intentionally leaked so the vtable pointer is
@@ -132,7 +161,6 @@ unsafe fn try_load_dynamic<Cap>(
     cap_name: &str,
     lib_stem: &str,
     symbol: &[u8],
-    expected_hash: Option<&str>,
 ) -> Option<&'static Cap> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
@@ -144,22 +172,9 @@ unsafe fn try_load_dynamic<Cap>(
     let path = dir.join(format!("{lib_stem}{ext}"));
     if !path.exists() { return None; }
 
-    // ── Hash verification ────────────────────────────────────────────────────
-    match expected_hash {
-        Some(hash) => {
-            if !verify_hash(&path, cap_name, hash) {
-                return None;
-            }
-        }
-        None => {
-            // No hash declared — allow but warn in release builds so
-            // developers are reminded to pin the hash before shipping.
-            #[cfg(not(debug_assertions))]
-            log::warn!(
-                "[cap] No SHA-256 hash declared for capability '{cap_name}'. \
-                 Set cap_hashes[\"{cap_name}\"] in glyx.config.json before shipping."
-            );
-        }
+    // ── H5: Ed25519 signature verification ──────────────────────────────────
+    if !verify_cap_sig(&path, cap_name) {
+        return None;
     }
 
     let lib = match load_dll(&path) {
@@ -168,7 +183,7 @@ unsafe fn try_load_dynamic<Cap>(
     };
 
     // Resolve the init symbol as a raw function pointer (Copy) so we can
-    // drop the Symbol before forgetting the Library — the borrow ends here.
+    // drop the Symbol before forgetting the Library -- the borrow ends here.
     type InitFn<T> = unsafe extern "C" fn() -> *const T;
     let init_fn: InitFn<Cap> = {
         let sym: libloading::Symbol<InitFn<Cap>> = match lib.get(symbol) {
@@ -176,7 +191,7 @@ unsafe fn try_load_dynamic<Cap>(
             Err(e) => { log::warn!("[cap] Symbol missing in {:?}: {e}", path); return None; }
         };
         *sym
-    }; // Symbol dropped here — borrow on `lib` ends.
+    }; // Symbol dropped here -- borrow on `lib` ends.
 
     // Forget the Library to keep the DLL loaded for the process lifetime.
     std::mem::forget(lib);
@@ -201,77 +216,56 @@ unsafe fn try_load_dynamic<Cap>(
     Some(&*cap_ptr)
 }
 
-/// Load pinned hashes from `glyx-caps.lock` next to the executable.
-///
-/// The lock file is generated automatically by `glyx package`. Its absence is
-/// fine in dev mode; in release builds the loader warns per-module if a hash
-/// is missing.
-fn load_lock_file() -> HashMap<String, String> {
-    let Ok(exe) = std::env::current_exe() else { return HashMap::new() };
-    let Some(dir) = exe.parent() else { return HashMap::new() };
-    let lock_path = dir.join("glyx-caps.lock");
-    let Ok(contents) = std::fs::read_to_string(&lock_path) else { return HashMap::new() };
-    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&contents) else {
-        log::warn!("[cap] glyx-caps.lock is malformed — ignoring");
-        return HashMap::new();
-    };
-    map.into_iter()
-        .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
-        .collect()
-}
-
 /// Resolve all capabilities and return a `CapSet`.
 ///
-/// Hashes are read automatically from `glyx-caps.lock` (generated by
-/// `glyx package`) — no manual configuration required.
-///
-/// Called once at process startup.  The static implementation (if compiled in)
-/// takes precedence over any dynamic DLL for the same capability.
+/// Each dynamic DLL is verified via Ed25519 `.sig` sidecar before loading.
+/// Called once at process startup.  Static (compiled-in) capabilities skip
+/// the DLL load and signature check entirely.
 pub fn load_caps() -> CapSet {
     harden_dll_search();
-    let hashes = load_lock_file();
     CapSet {
-        audio:   load_audio(hashes.get("audio").map(String::as_str)),
-        ai:      load_ai(hashes.get("ai").map(String::as_str)),
-        camera:  load_camera(hashes.get("camera").map(String::as_str)),
-        gamepad: load_gamepad(hashes.get("gamepad").map(String::as_str)),
-        hid:     load_hid(hashes.get("hid").map(String::as_str)),
+        audio:   load_audio(),
+        ai:      load_ai(),
+        camera:  load_camera(),
+        gamepad: load_gamepad(),
+        hid:     load_hid(),
     }
 }
 
 // ── Per-capability loaders ────────────────────────────────────────────────────
 
-fn load_audio(hash: Option<&str>) -> Option<&'static AudioCap> {
+fn load_audio() -> Option<&'static AudioCap> {
     #[cfg(feature = "audio")]
-    { let _ = hash; return Some(glyx_cap_audio::static_cap()); }
+    { return Some(glyx_cap_audio::static_cap()); }
     #[cfg(not(feature = "audio"))]
-    unsafe { try_load_dynamic::<AudioCap>("audio", "glyx_cap_audio", SYM_AUDIO, hash) }
+    unsafe { try_load_dynamic::<AudioCap>("audio", "glyx_cap_audio", SYM_AUDIO) }
 }
 
-fn load_ai(hash: Option<&str>) -> Option<&'static AiCap> {
+fn load_ai() -> Option<&'static AiCap> {
     #[cfg(feature = "ai")]
-    { let _ = hash; return Some(glyx_cap_ai::static_cap()); }
+    { return Some(glyx_cap_ai::static_cap()); }
     #[cfg(not(feature = "ai"))]
-    unsafe { try_load_dynamic::<AiCap>("ai", "glyx_cap_ai", SYM_AI, hash) }
+    unsafe { try_load_dynamic::<AiCap>("ai", "glyx_cap_ai", SYM_AI) }
 }
 
-fn load_camera(hash: Option<&str>) -> Option<&'static CameraCap> {
+fn load_camera() -> Option<&'static CameraCap> {
     #[cfg(feature = "camera")]
-    { let _ = hash; return Some(glyx_cap_camera::static_cap()); }
+    { return Some(glyx_cap_camera::static_cap()); }
     #[cfg(not(feature = "camera"))]
-    unsafe { try_load_dynamic::<CameraCap>("camera", "glyx_cap_camera", SYM_CAMERA, hash) }
+    unsafe { try_load_dynamic::<CameraCap>("camera", "glyx_cap_camera", SYM_CAMERA) }
 }
 
-fn load_gamepad(hash: Option<&str>) -> Option<&'static GamepadCap> {
+fn load_gamepad() -> Option<&'static GamepadCap> {
     #[cfg(feature = "gamepad")]
-    { let _ = hash; return Some(glyx_cap_gamepad::static_cap()); }
+    { return Some(glyx_cap_gamepad::static_cap()); }
     #[cfg(not(feature = "gamepad"))]
-    unsafe { try_load_dynamic::<GamepadCap>("gamepad", "glyx_cap_gamepad", SYM_GAMEPAD, hash) }
+    unsafe { try_load_dynamic::<GamepadCap>("gamepad", "glyx_cap_gamepad", SYM_GAMEPAD) }
 }
 
-fn load_hid(hash: Option<&str>) -> Option<&'static HidCap> {
+fn load_hid() -> Option<&'static HidCap> {
     #[cfg(feature = "hid")]
-    { let _ = hash; return Some(glyx_cap_hid::static_cap()); }
+    { return Some(glyx_cap_hid::static_cap()); }
     #[cfg(not(feature = "hid"))]
-    unsafe { try_load_dynamic::<HidCap>("hid", "glyx_cap_hid", SYM_HID, hash) }
+    unsafe { try_load_dynamic::<HidCap>("hid", "glyx_cap_hid", SYM_HID) }
 }
+

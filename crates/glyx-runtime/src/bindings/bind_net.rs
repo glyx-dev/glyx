@@ -1,12 +1,130 @@
 ﻿use super::*;
+use std::net::IpAddr;
+
+// ── H3: Network SSRF hardening ────────────────────────────────────────────────
+
+/// Extract just the hostname (no port, no userinfo, no path) from a URL string.
+///
+/// Handles:
+/// - Userinfo: `http://user:pass@host/` → `host`
+/// - IPv6 literals: `https://[::1]/` → `::1`
+/// - Port stripping: `https://host:8080/path` → `host`
 pub fn extract_host(url: &str) -> String {
-    let rest = if let Some(pos) = url.find("://") {
+    let after_scheme = if let Some(pos) = url.find("://") {
         &url[pos + 3..]
     } else {
         url
     };
-    let host_port = rest.split('/').next().unwrap_or(rest);
-    host_port.split(':').next().unwrap_or(host_port).to_lowercase()
+    // Strip userinfo (everything before '@' in the authority).
+    let authority = if let Some(at) = after_scheme.find('@') {
+        &after_scheme[at + 1..]
+    } else {
+        after_scheme
+    };
+    // Strip path, query and fragment -- they start at the first `/`, `?`, or `#`.
+    let host_port = authority
+        .split(|c| c == '/' || c == '?' || c == '#')
+        .next()
+        .unwrap_or(authority);
+    // IPv6 literal: `[2001:db8::1]` or `[::1]:8080`.
+    let host = if host_port.starts_with('[') {
+        host_port
+            .split(']')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('[')
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    host.to_lowercase()
+}
+
+/// Returns `true` if `host` is a private, loopback, or link-local address that
+/// should never be reachable from JS fetch/WebSocket (SSRF guard).
+///
+/// Checked ranges:
+/// - `127.0.0.0/8`   -- IPv4 loopback
+/// - `10.0.0.0/8`    -- private class A
+/// - `172.16.0.0/12` -- private class B
+/// - `192.168.0.0/16`-- private class C
+/// - `169.254.0.0/16`-- link-local / AWS IMDS
+/// - `0.0.0.0`        -- unspecified
+/// - `::1/128`        -- IPv6 loopback
+/// - `fc00::/7`       -- IPv6 unique-local
+/// - `fe80::/10`      -- IPv6 link-local
+/// - `"localhost"`, `"*.local"`, `"*.internal"`, `"*.localhost"` hostnames
+fn is_private_host(host: &str) -> bool {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.octets()[0] == 0
+            }
+            IpAddr::V6(v6) => {
+                v6.is_loopback() || v6.is_unspecified() || {
+                    let s = v6.segments();
+                    (s[0] & 0xfe00) == 0xfc00   // fc00::/7 unique-local
+                        || (s[0] & 0xffc0) == 0xfe80  // fe80::/10 link-local
+                }
+            }
+        };
+    }
+    // Hostname heuristics.
+    host == "localhost"
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host.ends_with(".localhost")
+}
+
+/// Scheme allowlist for fetch -- only `http://` and `https://`.
+fn check_fetch_scheme(url: &str) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("https://") || lower.starts_with("http://") {
+        Ok(())
+    } else {
+        let scheme = url.split("://").next().unwrap_or(url);
+        Err(format!("fetch: scheme {scheme:?} not allowed; only http/https"))
+    }
+}
+
+/// Scheme allowlist for WebSocket -- only `ws://` and `wss://`.
+fn check_ws_scheme(url: &str) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("wss://") || lower.starts_with("ws://") {
+        Ok(())
+    } else {
+        let scheme = url.split("://").next().unwrap_or(url);
+        Err(format!("ws.connect: scheme {scheme:?} not allowed; only ws/wss"))
+    }
+}
+
+/// Build a reqwest client with a redirect policy that re-checks `can_network`
+/// and blocks private IPs on every redirect hop.
+#[cfg(feature = "fetch")]
+fn safe_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+            let next_host = extract_host(attempt.url().as_str());
+            if is_private_host(&next_host) {
+                return attempt.error(format!(
+                    "redirect to private/loopback host {next_host:?} denied (SSRF)"
+                ));
+            }
+            if !glyx_security::get().can_network(&next_host) {
+                return attempt.error(format!(
+                    "redirect to host {next_host:?} not in network.allow"
+                ));
+            }
+            attempt.follow()
+        }))
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 /// `__glyx_fetch(url, optionsJson) -> Promise<string>`
@@ -42,11 +160,22 @@ pub fn fetch_callback(
     mut rv: v8::ReturnValue,
 ) {
     let url  = v8_arg_to_string(scope, &args, 0);
-    let host = extract_host(&url);
 
+    // ── H3 checks (scheme → private-IP → capability) ─────────────────────────
+    if let Err(e) = check_fetch_scheme(&url) {
+        rv.set(reject_promise_with_error(scope, &e).into());
+        return;
+    }
+    let host = extract_host(&url);
+    if is_private_host(&host) {
+        rv.set(reject_promise_with_error(scope, &format!(
+            "fetch: host {host:?} is a private/loopback address (SSRF denied)"
+        )).into());
+        return;
+    }
     if !glyx_security::get().can_network(&host) {
         rv.set(reject_promise_with_error(scope, &format!(
-            "network.allow[\"{host}\"] â€” add to glyx.config.json \
+            "network.allow[\"{host}\"] -- add to glyx.config.json \
              under \"capabilities\": {{ \"network\": {{ \"allow\": [\"{host}\"] }} }}"
         )).into());
         return;
@@ -71,7 +200,7 @@ pub fn fetch_callback(
                 .unwrap_or("GET")
                 .to_ascii_uppercase();
 
-            let client = reqwest::Client::new();
+            let client = safe_http_client()?;
 
             let mut builder = match method.as_str() {
                 "POST"   => client.post(&url),
@@ -91,7 +220,7 @@ pub fn fetch_callback(
                 }
             }
 
-            // â”€â”€ Multipart body â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // â"€â"€ Multipart body â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
             // `multipart` option: array of part descriptors.
             // Each part: { name, value?, filename?, base64?, contentType? }
             //   - text part:   { name: "field", value: "hello" }
@@ -106,7 +235,7 @@ pub fn fetch_callback(
                         .to_owned();
 
                     if let Some(b64) = part_val.get("base64").and_then(|b| b.as_str()) {
-                        // Binary part â€” decode from base64.
+                        // Binary part â€" decode from base64.
                         let bytes = base64::engine::general_purpose::STANDARD
                             .decode(b64)
                             .map_err(|e| format!("multipart base64 decode: {e}"))?;
@@ -178,7 +307,7 @@ pub fn fetch_callback(
     });
 }
 
-// â”€â”€ WebSocket bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ WebSocket bindings â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// `__glyx_ws_connect(url) -> Promise<string>` (resolves with handle id).
 ///
@@ -192,11 +321,22 @@ pub fn ws_connect_callback(
     mut rv: v8::ReturnValue,
 ) {
     let url  = v8_arg_to_string(scope, &args, 0);
-    let host = extract_host(&url);
 
+    // ── H3 checks (scheme → private-IP → capability) ─────────────────────────
+    if let Err(e) = check_ws_scheme(&url) {
+        rv.set(reject_promise_with_error(scope, &e).into());
+        return;
+    }
+    let host = extract_host(&url);
+    if is_private_host(&host) {
+        rv.set(reject_promise_with_error(scope, &format!(
+            "ws.connect: host {host:?} is a private/loopback address (SSRF denied)"
+        )).into());
+        return;
+    }
     if !glyx_security::get().can_network(&host) {
         rv.set(reject_promise_with_error(scope, &format!(
-            "network.allow[\"{host}\"] â€” add to glyx.config.json \
+            "network.allow[\"{host}\"] -- add to glyx.config.json \
              under \"capabilities\": {{ \"network\": {{ \"allow\": [\"{host}\"] }} }}"
         )).into());
         return;
@@ -263,7 +403,7 @@ pub fn ws_connect_callback(
     });
 }
 
-/// `__glyx_ws_send(handle, message)` â€” sync fire-and-forget.
+/// `__glyx_ws_send(handle, message)` â€" sync fire-and-forget.
 #[cfg(feature = "websocket")]
 pub fn ws_send_callback(
     scope:  &mut v8::HandleScope,
@@ -282,7 +422,7 @@ pub fn ws_send_callback(
     }
 }
 
-/// `__glyx_ws_poll(handle) -> string` â€” sync, drains inbox, returns JSON array.
+/// `__glyx_ws_poll(handle) -> string` â€" sync, drains inbox, returns JSON array.
 ///
 /// Returns `"[]"` if no messages or unknown handle.
 /// Returns `["__GLYX_WS_CLOSED__"]` when the server has closed the connection.
@@ -310,7 +450,7 @@ pub fn ws_poll_callback(
     rv.set(v8_str.into());
 }
 
-/// `__glyx_ws_close(handle)` â€” sync, removes handle (drops outbox tx â†’ write task exits).
+/// `__glyx_ws_close(handle)` â€" sync, removes handle (drops outbox tx â†' write task exits).
 #[cfg(feature = "websocket")]
 pub fn ws_close_callback(
     scope:  &mut v8::HandleScope,
@@ -322,13 +462,13 @@ pub fn ws_close_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let handle = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
-    // Dropping WsHandle drops outbox_tx â†’ write task's recv() returns None â†’ exits.
+    // Dropping WsHandle drops outbox_tx â†' write task's recv() returns None â†' exits.
     state.ws_handles.lock().remove(&handle);
 }
 
-// â”€â”€ Multi-window + IPC bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Multi-window + IPC bindings â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-/// `__glyx_window_create(optsJson) -> Promise<string>` â€” handle as string.
+/// `__glyx_window_create(optsJson) -> Promise<string>` â€" handle as string.
 ///
 /// Creates a secondary window.  `optsJson` is a JSON object:
 ///   `{ title?: string, width?: number, height?: number }`
@@ -336,7 +476,7 @@ pub fn ws_close_callback(
 /// The promise resolves immediately with the pre-assigned window handle.
 /// The window itself appears asynchronously once the event loop processes the
 /// create request.  JS can begin sending IPC messages before the window is
-/// fully initialised â€” they queue in the inbox and are consumed once the
+/// fully initialised â€" they queue in the inbox and are consumed once the
 /// secondary runtime starts polling.
 pub fn window_create_callback(
     scope:  &mut v8::HandleScope,
@@ -380,7 +520,7 @@ pub fn window_create_callback(
         }
     }
 
-    // Resolve the promise immediately with the handle â€” window appears async.
+    // Resolve the promise immediately with the handle â€" window appears async.
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
     enqueue_completion(&queue_clone, redraw.as_ref(), Completion {
@@ -389,7 +529,7 @@ pub fn window_create_callback(
     });
 }
 
-/// `__glyx_ipc_send(targetHandle, message)` â€” sync, fire-and-forget.
+/// `__glyx_ipc_send(targetHandle, message)` â€" sync, fire-and-forget.
 ///
 /// Pushes a string message into the target window's IPC inbox.
 /// The target window drains its inbox each frame via `__glyx_ipc_poll`.
@@ -411,7 +551,7 @@ pub fn ipc_send_callback(
     }
 }
 
-/// `__glyx_ipc_poll() -> string` â€” sync, returns JSON array of pending messages.
+/// `__glyx_ipc_poll() -> string` â€" sync, returns JSON array of pending messages.
 ///
 /// Drains this window's own IPC inbox.  Returns `"[]"` when empty.
 /// Called each frame from the JS frame callback alongside WS polling.
@@ -437,7 +577,7 @@ pub fn ipc_poll_callback(
     rv.set(v8_str.into());
 }
 
-// â”€â”€ mDNS service discovery binding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ mDNS service discovery binding â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// `__glyx_mdns_discover(serviceType, timeoutMs) -> Promise<string>`
 ///
@@ -494,7 +634,7 @@ pub fn mdns_discover_callback(
                     }
                     Ok(ServiceEvent::SearchStopped(_)) => break,
                     Ok(_) => {}
-                    Err(_)  => {} // recv_timeout expired â€” check deadline at top of loop
+                    Err(_)  => {} // recv_timeout expired â€" check deadline at top of loop
                 }
             }
 

@@ -37,13 +37,16 @@ pub fn sha256_hex(data: &[u8]) -> String {
 ///
 /// **Never** skip in release builds without the env var.
 fn skip_verify() -> bool {
-    if std::env::var("GLYX_MEDIA_SKIP_VERIFY").as_deref() == Ok("1") {
-        return true;
-    }
-    if cfg!(debug_assertions) {
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var("GLYX_MEDIA_SKIP_VERIFY").as_deref() == Ok("1") {
+            log::warn!("[glyx-media] GLYX_MEDIA_SKIP_VERIFY=1 — Ed25519 check bypassed (dev only)");
+            return true;
+        }
         log::debug!("[glyx-media] debug build — Ed25519 verification skipped");
         return true;
     }
+    #[cfg(not(debug_assertions))]
     false
 }
 
@@ -92,13 +95,24 @@ pub fn verify_cached_dll(dll_path: &Path) -> Result<(), String> {
     let manifest_path = dll_path.with_extension("manifest.json");
     let sig_path      = dll_path.with_extension("manifest.sig");
 
-    // No manifest → installer-distributed DLL; skip integrity check.
+    // No manifest sidecar: deny in release (an installer-distributed DLL must
+    // ship its manifest); allow in debug (locally-built DLLs have no manifest).
     if !manifest_path.exists() {
-        log::debug!(
-            "[glyx-media] no manifest for {} — skipping verification (installer-distributed)",
-            dll_path.display()
-        );
-        return Ok(());
+        #[cfg(not(debug_assertions))]
+        {
+            return Err(format!(
+                "glyx-media: no manifest at {} — refusing to load unsigned DLL in release build",
+                manifest_path.display()
+            ));
+        }
+        #[cfg(debug_assertions)]
+        {
+            log::warn!(
+                "[glyx-media] no manifest for {} — skipping verification (debug build only)",
+                dll_path.display()
+            );
+            return Ok(());
+        }
     }
 
     let manifest_bytes = std::fs::read(&manifest_path)

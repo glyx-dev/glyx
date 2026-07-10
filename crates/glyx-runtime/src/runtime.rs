@@ -1,4 +1,4 @@
-//! `V8Runtime` — the V8-based implementation of `JsRuntime`.
+//! `V8Runtime` -- the V8-based implementation of `JsRuntime`.
 
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -19,14 +19,52 @@ use crate::inspector::GlyxInspector;
 
 use std::collections::VecDeque;
 
+// ── N1: Deny dynamic import() in release ─────────────────────────────────────
+
+/// V8 callback that rejects all dynamic `import()` calls.
+///
+/// Installed in release builds only.  Debug builds leave the callback unset so
+/// hot-reload and snapshot tooling can still use `import()` during development.
+///
+/// The callback is called whenever JS evaluates `import(specifier)`.  We
+/// immediately reject the resulting promise with a descriptive Error so the
+/// app sees a normal rejected-promise rather than a silent no-op.
+#[cfg(not(debug_assertions))]
+fn deny_dynamic_import<'s>(
+    scope:                &mut v8::HandleScope<'s>,
+    _host_defined_options: v8::Local<'s, v8::Data>,
+    _resource_name:        v8::Local<'s, v8::Value>,
+    specifier:             v8::Local<'s, v8::String>,
+    _import_assertions:    v8::Local<'s, v8::FixedArray>,
+) -> Option<v8::Local<'s, v8::Promise>> {
+    let spec_str = specifier.to_rust_string_lossy(scope);
+    let resolver = v8::PromiseResolver::new(scope)?;
+    let msg = v8::String::new(scope, &format!(
+        "Dynamic import() is disabled in release builds (attempted: {spec_str:?}). \
+         Use static imports bundled at build time."
+    ))?;
+    let error = v8::Exception::error(scope, msg);
+    resolver.reject(scope, error);
+    Some(resolver.get_promise(scope))
+}
+
+/// Install the dynamic-import denial callback on a freshly created isolate.
+/// No-op in debug builds so tooling and hot-reload continue to work.
+fn install_import_guard(isolate: &mut v8::OwnedIsolate) {
+    #[cfg(not(debug_assertions))]
+    isolate.set_host_import_module_dynamically_callback(deny_dynamic_import);
+    #[cfg(debug_assertions)]
+    let _ = isolate; // used only to satisfy the borrow
+}
+
 /// V8 isolate params shared by fresh and snapshot-restore paths.
 ///
 /// `max_heap_mb` is computed by glyx-core from the JS bundle size (auto) or
 /// from the `maxJsHeapMb` key in glyx.config.json (explicit).
 ///
 /// Heap limits:
-///   initial = 2 MB  — V8 starts small; grows on demand.
-///   maximum = max_heap_mb — prevents V8 speculatively reserving the OS-default ~1.5 GB.
+///   initial = 2 MB  -- V8 starts small; grows on demand.
+///   maximum = max_heap_mb -- prevents V8 speculatively reserving the OS-default ~1.5 GB.
 fn glyx_create_params(snapshot: Option<Vec<u8>>, max_heap_mb: usize) -> v8::CreateParams {
     const MB: usize = 1024 * 1024;
     let params = v8::CreateParams::default()
@@ -41,7 +79,7 @@ fn glyx_create_params(snapshot: Option<Vec<u8>>, max_heap_mb: usize) -> v8::Crea
 pub struct V8Runtime {
     // ⚠ DROP ORDER MATTERS: inspector holds V8 references; it must be
     //   dropped before `isolate`. Rust drops fields in declaration order.
-    /// CDP inspector — present only in dev mode when GLYX_INSPECT_PORT is set.
+    /// CDP inspector -- present only in dev mode when GLYX_INSPECT_PORT is set.
     #[cfg(feature = "dev")]
     pub inspector: Option<GlyxInspector>,
     isolate:      v8::OwnedIsolate,
@@ -50,7 +88,7 @@ pub struct V8Runtime {
     scene:        SceneQueue,
     pub events:   EventQueue,
     pub layout_cache: LayoutCache,
-    /// Shared perf ring-buffer — glyx-core writes frames; JS bindings read via snapshot.
+    /// Shared perf ring-buffer -- glyx-core writes frames; JS bindings read via snapshot.
     pub perf_state: Arc<parking_lot::Mutex<glyx_perf::PerfState>>,
     /// Forwarded deep-link URL queue.
     /// glyx-core's single-instance listener pushes URLs here; `__glyx_deeplink_poll` drains them.
@@ -72,7 +110,7 @@ pub struct HeapStats {
 impl V8Runtime {
     /// Create a new V8Runtime with a fresh isolate.
     ///
-    /// Uses a private IPC bus and handle 0 — suitable for single-window apps
+    /// Uses a private IPC bus and handle 0 -- suitable for single-window apps
     /// and for the snapshot tool.  For multi-window use `new_with_ipc`.
     pub fn new(tokio_handle: Handle, window: Option<WindowController>) -> Self {
         let ipc_bus        = new_ipc_bus();
@@ -107,6 +145,7 @@ impl V8Runtime {
             .or_insert_with(|| Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new())));
 
         let mut isolate = v8::Isolate::new(glyx_create_params(None, max_heap_mb));
+        install_import_guard(&mut isolate);
 
         let events             = new_event_queue();
         let layout_cache       = new_layout_cache();
@@ -168,7 +207,7 @@ impl V8Runtime {
     /// Create a new GlyxRuntime from a snapshot blob (pre-executed JS heap).
     ///
     /// The snapshot is restored and its stub bindings are overridden with real Rust implementations.
-    /// Uses a private IPC bus — for multi-window use `new_from_snapshot_with_ipc`.
+    /// Uses a private IPC bus -- for multi-window use `new_from_snapshot_with_ipc`.
     pub fn new_from_snapshot(
         snapshot_blob: &[u8],
         tokio_handle:  Handle,
@@ -202,6 +241,7 @@ impl V8Runtime {
             .or_insert_with(|| Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new())));
 
         let mut isolate = v8::Isolate::new(glyx_create_params(Some(snapshot_blob.to_vec()), max_heap_mb));
+        install_import_guard(&mut isolate);
 
         let events             = new_event_queue();
         let layout_cache       = new_layout_cache();
@@ -340,7 +380,7 @@ impl V8Runtime {
                 }
                 None => {
                     let exc = try_catch.exception().unwrap();
-                    // Prefer Error.stack — it includes message + all frames.
+                    // Prefer Error.stack -- it includes message + all frames.
                     // Fall back to exc.to_string() for non-Error throws.
                     let msg = {
                         let key = v8::String::new(&mut try_catch, "stack").unwrap();
@@ -360,7 +400,7 @@ impl V8Runtime {
             }
         };
         // Release parse-time garbage (AST nodes, bytecode, temp strings).
-        // Notify on both success and error — V8 trims what it can regardless.
+        // Notify on both success and error -- V8 trims what it can regardless.
         self.isolate.low_memory_notification();
         result
     }
@@ -372,9 +412,9 @@ impl V8Runtime {
     /// Called once per window after construction. Allocates one Rust-owned
     /// backing store (external backing stores are NOT moved by V8 GC, so the
     /// pointer is stable) and exposes three views over it as globals:
-    ///   * `__glyx_canvas_cmdbuf_f32` — Float32Array (geometry args)
-    ///   * `__glyx_canvas_cmdbuf_u32` — Uint32Array  (packed RGBA, aliases f32)
-    ///   * `__glyx_canvas_strbuf`     — Uint8Array   (UTF-8 text for fillText)
+    ///   * `__glyx_canvas_cmdbuf_f32` -- Float32Array (geometry args)
+    ///   * `__glyx_canvas_cmdbuf_u32` -- Uint32Array  (packed RGBA, aliases f32)
+    ///   * `__glyx_canvas_strbuf`     -- Uint8Array   (UTF-8 text for fillText)
     /// plus `__glyx_canvas_protocol` = `"binary"` | `"json"`.
     ///
     /// JS feature-detects these globals; if `protocol != "binary"` or buffer
@@ -565,7 +605,7 @@ impl V8Runtime {
     /// Trigger a V8 major GC to reclaim old-generation objects.
     ///
     /// Call periodically (e.g. every 5 seconds) during high-frequency animation
-    /// loops.  React re-renders at 30–60 fps promote short-lived objects into V8's
+    /// loops.  React re-renders at 30-60 fps promote short-lived objects into V8's
     /// old generation faster than the automatic minor-GC can drain them, causing
     /// the V8 heap to grow ~46 KB/s.  `low_memory_notification()` forces a full
     /// collection that reclaims them.  The call typically takes <2 ms for the
@@ -574,7 +614,7 @@ impl V8Runtime {
         self.isolate.low_memory_notification();
     }
 
-    /// Close all open SQLite pools — called by glyx-core when the window is closing.
+    /// Close all open SQLite pools -- called by glyx-core when the window is closing.
     ///
     /// Clearing the map drops the `SqlitePool` values, which triggers SQLx's
     /// graceful pool shutdown (waits for in-flight queries, then closes connections).

@@ -34,7 +34,6 @@ global-hotkey       = { workspace = true }
 rodio               = { workspace = true, optional = true }
 hidapi              = { workspace = true, optional = true }
 self_update         = { workspace = true, optional = true }
-sha2                = { workspace = true }
 ed25519-dalek       = { workspace = true, optional = true }
 glyx-media         = { path = "../glyx-media" }
 serde               = { workspace = true }

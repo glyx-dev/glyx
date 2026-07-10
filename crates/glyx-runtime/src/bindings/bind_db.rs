@@ -41,7 +41,7 @@ fn app_db_dir() -> std::path::PathBuf {
 /// - `:memory:` requires `capabilities.db.path: true` (explicit grant).
 /// - Absolute paths require `capabilities.db.path: true`.
 /// - Relative paths are rooted at the app data dir and verified via
-///   `glyx_security::resolve_and_check_write` — symlinks are resolved and
+///   `glyx_security::resolve_and_check_write` -- symlinks are resolved and
 ///   the result must fall within a declared `fs.write` glob OR the app data
 ///   dir is added to the allowlist implicitly (see note below).
 ///
@@ -50,11 +50,11 @@ fn app_db_dir() -> std::path::PathBuf {
 ///
 /// Note on implicit data-dir grant: apps using `db: true` but no `fs.write`
 /// are the common case. We allow the resolved path if it is a descendant of
-/// `app_db_dir()` — that directory is the intended default scope for db files.
+/// `app_db_dir()` -- that directory is the intended default scope for db files.
 pub fn resolve_db_path_checked(path: &str) -> Result<String, String> {
     let caps = glyx_security::get();
 
-    // ── :memory: — requires explicit db.path grant ───────────────────────────
+    // ── :memory: -- requires explicit db.path grant ───────────────────────────
     if path == ":memory:" {
         if caps.db_path {
             return Ok(":memory:".to_string());
@@ -64,7 +64,7 @@ pub fn resolve_db_path_checked(path: &str) -> Result<String, String> {
 
     let p = std::path::Path::new(path);
 
-    // ── Absolute paths — require explicit db.path grant ──────────────────────
+    // ── Absolute paths -- require explicit db.path grant ──────────────────────
     if p.is_absolute() {
         if !caps.db_path {
             return Err(format!(
@@ -77,7 +77,7 @@ pub fn resolve_db_path_checked(path: &str) -> Result<String, String> {
             .map_err(|e| format!("db path denied: {e}"));
     }
 
-    // ── Relative path — root under app data dir ───────────────────────────────
+    // ── Relative path -- root under app data dir ───────────────────────────────
     let data_dir = app_db_dir();
     let _ = std::fs::create_dir_all(&data_dir);
     let joined = data_dir.join(path);
@@ -104,7 +104,7 @@ pub fn resolve_db_path_checked(path: &str) -> Result<String, String> {
         .map_err(|e| format!("db path outside app data dir and not in fs.write grant: {e}"))
 }
 
-/// `__glyx_db_open(path) -> Promise<string>` â€” handle number.
+/// `__glyx_db_open(path) -> Promise<string>` â€" handle number.
 pub fn db_open_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -138,7 +138,7 @@ pub fn db_open_callback(
     });
 }
 
-/// `__glyx_db_query(handle, sql, paramsJson) -> Promise<string>` â€” JSON rows.
+/// `__glyx_db_query(handle, sql, paramsJson) -> Promise<string>` â€" JSON rows.
 pub fn db_query_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -156,7 +156,7 @@ pub fn db_query_callback(
     let sql         = v8_arg_to_string(scope, &args, 1);
     let params_json = v8_arg_to_string(scope, &args, 2);
 
-    // Resolve the pool before spawning â€” fail fast if handle is invalid.
+    // Resolve the pool before spawning â€" fail fast if handle is invalid.
     let pool = match state.db_pools.lock().get(&handle).cloned() {
         Some(p) => p,
         None => {
@@ -181,7 +181,7 @@ pub fn db_query_callback(
     });
 }
 
-/// `__glyx_db_run(handle, sql, paramsJson) -> Promise<string>` â€” JSON `{ rowsAffected, lastInsertId }`.
+/// `__glyx_db_run(handle, sql, paramsJson) -> Promise<string>` â€" JSON `{ rowsAffected, lastInsertId }`.
 pub fn db_run_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -310,7 +310,7 @@ pub fn db_transaction_callback(
     });
 }
 
-/// `__glyx_db_backup(handle, destPath) â†’ Promise<void>`
+/// `__glyx_db_backup(handle, destPath) â†' Promise<void>`
 ///
 /// Creates an atomic online backup of the database at `destPath` using
 /// SQLite's `VACUUM INTO` pragma.  Works correctly with WAL mode and
@@ -357,7 +357,7 @@ pub fn db_backup_callback(
                 }
             }
             // VACUUM INTO creates an atomic, defragmented copy of the database.
-            // Path is already canonicalized by resolve_db_path_checked — no SQL injection risk.
+            // Path is already canonicalized by resolve_db_path_checked -- no SQL injection risk.
             let escaped = dest_path.replace('\'', "''");
             let sql = format!("VACUUM INTO '{escaped}'");
             glyx_db::run(&pool, &sql, vec![])
@@ -369,7 +369,7 @@ pub fn db_backup_callback(
     });
 }
 
-// â”€â”€ Window extra callbacks (sync) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Window extra callbacks (sync) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// `__glyx_setAlwaysOnTop(on: boolean) -> void`
 pub fn vectordb_open_callback(
@@ -407,8 +407,8 @@ pub fn vectordb_open_callback(
 
 /// `__glyx_vectorDb_upsert(handle, table, id, vectorJson, metadataJson) -> Promise<string>`
 ///
-/// `vectorJson`   â€” JSON array of f32 numbers (the embedding).
-/// `metadataJson` â€” JSON string for the metadata payload, or `""` for none.
+/// `vectorJson`   â€" JSON array of f32 numbers (the embedding).
+/// `metadataJson` â€" JSON string for the metadata payload, or `""` for none.
 pub fn vectordb_upsert_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,
@@ -454,9 +454,9 @@ pub fn vectordb_upsert_callback(
     });
 }
 
-/// `__glyx_vectorDb_search(handle, table, queryJson, limit) -> Promise<string>` â€” JSON results.
+/// `__glyx_vectorDb_search(handle, table, queryJson, limit) -> Promise<string>` â€" JSON results.
 ///
-/// `queryJson` â€” JSON array of f32 numbers (the query embedding).
+/// `queryJson` â€" JSON array of f32 numbers (the query embedding).
 /// Resolves with a JSON array of `{id, score, metadata}` objects.
 pub fn vectordb_search_callback(
     scope:  &mut v8::HandleScope,

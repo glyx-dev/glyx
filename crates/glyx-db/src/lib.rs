@@ -47,6 +47,9 @@ pub async fn open(path: &str) -> Result<SqlitePool> {
     sqlx::query("PRAGMA journal_mode=WAL").execute(&pool).await?;
     // NORMAL: flush at the most critical moments; fast and safe enough for apps
     sqlx::query("PRAGMA synchronous=NORMAL").execute(&pool).await?;
+    // Deny virtual table and view schemas that can execute arbitrary code.
+    // Prevents SQL injection from escalating into code execution via crafted schemas.
+    sqlx::query("PRAGMA trusted_schema=OFF").execute(&pool).await?;
 
     log::info!("glyx-db: opened {:?}", path);
     Ok(pool)

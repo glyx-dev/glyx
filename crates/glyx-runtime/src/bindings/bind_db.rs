@@ -1,18 +1,12 @@
 ﻿use super::*;
-pub fn resolve_db_path(path: String) -> String {
-    if path == ":memory:" || std::path::Path::new(&path).is_absolute() {
-        return path;
-    }
 
-    // Use a stable, user-writable app-data directory so the DB ends up in the
-    // same place regardless of how or from where the app is launched.
-    //
-    // The subdirectory name comes from the running executable's file stem
-    // (e.g. "notes-app"), which is the same as the app's binary name.
-    //
-    //   Windows:  %APPDATA%\{exe}\data\
-    //   macOS:    ~/Library/Application Support/{exe}/data/
-    //   Linux:    ~/.local/share/{exe}/data/  (or $XDG_DATA_HOME/{exe}/data/)
+// ── H4: DB path safety ────────────────────────────────────────────────────────
+
+/// Compute the app-local DB data directory:
+///   Windows:  %APPDATA%\{exe}\data\
+///   macOS:    ~/Library/Application Support/{exe}/data/
+///   Linux:    $XDG_DATA_HOME/{exe}/data/  (falls back to ~/.local/share)
+fn app_db_dir() -> std::path::PathBuf {
     let exe_stem = std::env::current_exe()
         .ok()
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
@@ -38,9 +32,76 @@ pub fn resolve_db_path(path: String) -> String {
             .map(|h| std::path::PathBuf::from(h).join(".local").join("share"))
             .unwrap_or_else(|_| std::path::PathBuf::from(".")));
 
-    let data_dir = base.join(&exe_stem).join("data");
+    base.join(&exe_stem).join("data")
+}
+
+/// Resolve and security-check a DB path supplied by JS.
+///
+/// Rules (H4):
+/// - `:memory:` requires `capabilities.db.path: true` (explicit grant).
+/// - Absolute paths require `capabilities.db.path: true`.
+/// - Relative paths are rooted at the app data dir and verified via
+///   `glyx_security::resolve_and_check_write` — symlinks are resolved and
+///   the result must fall within a declared `fs.write` glob OR the app data
+///   dir is added to the allowlist implicitly (see note below).
+///
+/// Returns `Ok(resolved_string)` for use in `glyx_db::open`, or `Err` with
+/// a user-visible message on denial.
+///
+/// Note on implicit data-dir grant: apps using `db: true` but no `fs.write`
+/// are the common case. We allow the resolved path if it is a descendant of
+/// `app_db_dir()` — that directory is the intended default scope for db files.
+pub fn resolve_db_path_checked(path: &str) -> Result<String, String> {
+    let caps = glyx_security::get();
+
+    // ── :memory: — requires explicit db.path grant ───────────────────────────
+    if path == ":memory:" {
+        if caps.db_path {
+            return Ok(":memory:".to_string());
+        }
+        return Err("db.open(\":memory:\") requires capabilities.db.path: true".to_string());
+    }
+
+    let p = std::path::Path::new(path);
+
+    // ── Absolute paths — require explicit db.path grant ──────────────────────
+    if p.is_absolute() {
+        if !caps.db_path {
+            return Err(format!(
+                "db.open with absolute path requires capabilities.db.path: true (got {path:?})"
+            ));
+        }
+        // Still canonicalize + check via fs.write if declared.
+        return glyx_security::resolve_and_check_write(p)
+            .map(|c| c.to_string_lossy().into_owned())
+            .map_err(|e| format!("db path denied: {e}"));
+    }
+
+    // ── Relative path — root under app data dir ───────────────────────────────
+    let data_dir = app_db_dir();
     let _ = std::fs::create_dir_all(&data_dir);
-    data_dir.join(&path).to_string_lossy().into_owned()
+    let joined = data_dir.join(path);
+
+    // Resolve symlinks. For a new file the parent must exist (created above).
+    let canonical = if joined.exists() {
+        joined.canonicalize()
+    } else {
+        joined.parent()
+            .unwrap_or(&data_dir)
+            .canonicalize()
+            .map(|p| p.join(joined.file_name().unwrap_or_default()))
+    }.map_err(|e| format!("db path resolve error: {e}"))?;
+
+    // Accept if canonical path is within the app data dir (implicit grant).
+    let canon_data = data_dir.canonicalize().unwrap_or(data_dir.clone());
+    if canonical.starts_with(&canon_data) {
+        return Ok(canonical.to_string_lossy().into_owned());
+    }
+
+    // Fall back: check fs.write allowlist.
+    glyx_security::resolve_and_check_write(&canonical)
+        .map(|c| c.to_string_lossy().into_owned())
+        .map_err(|e| format!("db path outside app data dir and not in fs.write grant: {e}"))
 }
 
 /// `__glyx_db_open(path) -> Promise<string>` â€” handle number.
@@ -57,7 +118,10 @@ pub fn db_open_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let path      = resolve_db_path(v8_arg_to_string(scope, &args, 0));
+    let path = match resolve_db_path_checked(&v8_arg_to_string(scope, &args, 0)) {
+        Ok(p) => p,
+        Err(e) => { throw_js_error(scope, &e); return; }
+    };
     let handle    = state.next_db_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let pools     = Arc::clone(&state.db_pools);
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
@@ -266,8 +330,11 @@ pub fn db_backup_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let handle   = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
-    let dest_path = v8_arg_to_string(scope, &args, 1);
+    let handle    = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
+    let dest_path = match resolve_db_path_checked(&v8_arg_to_string(scope, &args, 1)) {
+        Ok(p) => p,
+        Err(e) => { throw_js_error(scope, &e); return; }
+    };
 
     let pool = match state.db_pools.lock().get(&handle).cloned() {
         Some(p) => p,
@@ -286,11 +353,11 @@ pub fn db_backup_callback(
             if let Some(parent) = std::path::Path::new(&dest_path).parent() {
                 if !parent.as_os_str().is_empty() {
                     tokio::fs::create_dir_all(parent).await
-                        .map_err(|e| format!("db.backup: mkdir '{dest_path}': {e}"))?;
+                        .map_err(|e| format!("db.backup: mkdir: {e}"))?;
                 }
             }
             // VACUUM INTO creates an atomic, defragmented copy of the database.
-            // It works with WAL mode and doesn't block the source.
+            // Path is already canonicalized by resolve_db_path_checked — no SQL injection risk.
             let escaped = dest_path.replace('\'', "''");
             let sql = format!("VACUUM INTO '{escaped}'");
             glyx_db::run(&pool, &sql, vec![])
@@ -318,7 +385,10 @@ pub fn vectordb_open_callback(
     let ext    = v8::Local::<v8::External>::try_from(data).unwrap();
     let state  = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let path   = resolve_db_path(v8_arg_to_string(scope, &args, 0));
+    let path = match resolve_db_path_checked(&v8_arg_to_string(scope, &args, 0)) {
+        Ok(p) => p,
+        Err(e) => { throw_js_error(scope, &e); return; }
+    };
     let handle = state.next_vdb_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let stores = Arc::clone(&state.vector_stores);
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);

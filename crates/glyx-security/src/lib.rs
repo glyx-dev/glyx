@@ -246,6 +246,10 @@ pub struct Capabilities {
     pub env:     Option<EnvCapability>,
     #[serde(default)]
     pub db:           bool,
+    /// Grant arbitrary DB paths — required for `:memory:` or absolute paths.
+    /// Without this, `db.open()` is scoped to the app data dir only.
+    #[serde(rename = "dbPath", default)]
+    pub db_path:      bool,
     #[serde(default)]
     pub dialog:       bool,
     #[serde(default)]

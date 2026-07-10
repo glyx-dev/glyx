@@ -366,6 +366,7 @@ pub(super) fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut AnyFrame)
     let Some(dev) = state.dev_mode.as_mut() else { return };
     if !dev.overlay_visible { return; }
 
+    let verbose = dev.overlay_verbose;
     let now = Instant::now();
 
     if now >= dev.overlay_next_refresh || dev.overlay_lines.is_empty() {
@@ -391,80 +392,94 @@ pub(super) fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut AnyFrame)
         let budget = perf_g.budget_ms;
         drop(perf_g);
 
-        let start_rss_mb   = dev.startup_rss_bytes      as f64 / (1024.0 * 1024.0);
-        let start_v8_mb    = dev.startup_v8_total_bytes  as f64 / (1024.0 * 1024.0);
-        let delta_rss_mb   = rss_mb - start_rss_mb;
-        let native_mb      = (rss_mb - heap_total_mb).max(0.0);
-        let native_start   = (start_rss_mb - start_v8_mb).max(0.0);
+        let start_rss_mb    = dev.startup_rss_bytes     as f64 / (1024.0 * 1024.0);
+        let start_v8_mb     = dev.startup_v8_total_bytes as f64 / (1024.0 * 1024.0);
+        let delta_rss_mb    = rss_mb - start_rss_mb;
+        let native_mb       = (rss_mb - heap_total_mb).max(0.0);
+        let native_start    = (start_rss_mb - start_v8_mb).max(0.0);
         let delta_native_mb = native_mb - native_start;
-
         let since = dev.last_reload
             .map(|t| now.saturating_duration_since(t).as_secs())
             .unwrap_or(0);
         let phys_w = state.gpu.width();
         let phys_h = state.gpu.height();
+
         dev.overlay_lines = vec![
-            format!("Dev  {}×{}px  budget {:.1}ms  (Ctrl+Shift+D)", phys_w, phys_h, budget),
-            format!("FPS {:.0}  last {:.1}ms  avg {:.1}ms  P99 {:.1}ms", fps, last_ms, avg_ms, p99_ms),
-            format!("JS {:.2}ms  layout {:.2}ms  GPU {:.2}ms  nodes {}",
-                js_ms, lay_ms, gpu_ms, state.js_nodes.len()),
+            // line 0 — always shown (compact header)
+            format!("{}×{}  {:.0}fps  {:.1}ms  RSS {:.0}MB  (Ctrl+Shift+D)",
+                phys_w, phys_h, fps, last_ms, rss_mb),
+            // line 1 — always shown
+            format!("JS {:.2}ms  layout {:.2}ms  GPU {:.2}ms  nodes {}  P99 {:.1}ms",
+                js_ms, lay_ms, gpu_ms, state.js_nodes.len(), p99_ms),
+            // line 2 — always shown (build status)
+            format!("{}  ({}s ago)", dev.last_build_message, since),
+            // line 3+ — verbose only
+            format!("avg {:.1}ms  budget {:.1}ms  V8 {:.1}/{:.1}MB",
+                avg_ms, budget, heap_used_mb, heap_total_mb),
+            format!("native {:.1}MB  \u{0394}RSS {:+.1}  \u{0394}nat {:+.1}",
+                native_mb, delta_rss_mb, delta_native_mb),
+            format!("wgpu  buf {:.1}MB×{}  avg {:.1}MB  tex {:.1}MB×{}  waste {:.1}MB",
+                gpu_buf_mb, gpu_buf_n, avg_buf_mb, gpu_tex_mb, gpu_tex_n, gpu_waste_mb),
             format!("cache {} frags  img {}/{}  labels {}/256  canvas {}",
                 state.scene_cache.len(),
                 state.images.len(), state.images_by_path.len(),
                 state.label_cache.len(),
                 state.canvas_cmds.len()),
-            format!("V8 {:.1}/{:.1}MB  RSS {:.1}MB  native {:.1}MB  \u{0394}RSS {:+.1}  \u{0394}nat {:+.1}",
-                heap_used_mb, heap_total_mb, rss_mb, native_mb, delta_rss_mb, delta_native_mb),
-            format!("wgpu  buf {:.1}MB×{}  avg {:.1}MB  tex {:.1}MB×{}  waste {:.1}MB",
-                gpu_buf_mb, gpu_buf_n, avg_buf_mb, gpu_tex_mb, gpu_tex_n, gpu_waste_mb),
-            format!("{}  (reload {}s ago)", dev.last_build_message, since),
         ];
         dev.overlay_next_refresh = now + Duration::from_millis(250);
     }
 
-    let sparkline_data: Vec<glyx_perf::PerfFrame> = {
+    let (sparkline_data, budget) = {
         let perf_g = state.perf.lock();
         let data: Vec<_> = perf_g.ring.iter().copied().collect();
+        let b = perf_g.budget_ms;
         drop(perf_g);
-        data
-    };
-    let budget = {
-        let perf_g = state.perf.lock();
-        perf_g.budget_ms
+        (data, b)
     };
 
-    let overlay_w = 530.0_f64;
-    let overlay_h = 195.0_f64;
-    frame.fill_rounded_rect(16.0, 16.0, overlay_w, overlay_h, 8.0, peniko::Color::from_rgba8(15, 15, 25, 225));
+    let n_lines   = if verbose { 7 } else { 3 };
+    let bar_count = if verbose { 60 } else { 20 };
+    let bar_w     = if verbose { 2.0_f64 } else { 3.5_f64 };
+    let spark_h   = 14.0_f64;
+    let line_h    = 19.0_f64;
+    let pad_top   = 10.0_f64;
+    let pad_x     = 10.0_f64;
 
-    let txt_color  = peniko::Color::from_rgba8(220, 220, 235, 255);
-    let mem_color  = peniko::Color::from_rgba8(140, 210, 255, 255);
+    let overlay_h = pad_top + n_lines as f64 * line_h + 6.0 + spark_h + 8.0;
+    let overlay_w = if verbose { 530.0_f64 } else { 420.0_f64 };
+
+    frame.fill_rounded_rect(16.0, 16.0, overlay_w, overlay_h, 7.0,
+        peniko::Color::from_rgba8(12, 12, 20, 230));
+
+    let txt_color = peniko::Color::from_rgba8(210, 210, 228, 255);
+    let dim_color = peniko::Color::from_rgba8(130, 130, 160, 200);
+    let mem_color = peniko::Color::from_rgba8(140, 210, 255, 255);
+
     let lines = &dev.overlay_lines;
-    for (i, line) in lines.iter().enumerate() {
-        let col = if i == 4 || i == 5 { mem_color } else { txt_color };
-        let text = state.text_sys.label(line, 12.0);
-        frame.draw_text(&text, 26.0, 34.0 + (i as f64 * 20.0), col);
+    for i in 0..n_lines {
+        let col = if verbose && (i == 4 || i == 5) { mem_color } else if i >= 3 { dim_color } else { txt_color };
+        let text = state.text_sys.label(&lines[i], 11.5);
+        frame.draw_text(&text, 16.0 + pad_x, 16.0 + pad_top + i as f64 * line_h, col);
     }
 
-    let spark_x  = 26.0_f64;
-    let spark_y  = 177.0_f64;
-    let bar_w    = 2.0_f64;
-    let spark_h  = 18.0_f64;
+    // Sparkline strip
+    let spark_x = 16.0 + pad_x;
+    let spark_y = 16.0 + pad_top + n_lines as f64 * line_h + 4.0;
     let samples: Vec<f64> = sparkline_data.iter()
-        .rev().take(60).map(|f| f.frame_time_ms).collect::<Vec<_>>()
+        .rev().take(bar_count).map(|f| f.frame_time_ms).collect::<Vec<_>>()
         .into_iter().rev().collect();
     for (i, &ms) in samples.iter().enumerate() {
         let h   = (ms / (budget * 2.0)).min(1.0) * spark_h;
         let x   = spark_x + i as f64 * bar_w;
         let y   = spark_y + (spark_h - h);
         let col = if ms > budget * 2.0 {
-            peniko::Color::from_rgba8(255, 80, 80, 220)
+            peniko::Color::from_rgba8(255, 80,  80,  220)
         } else if ms > budget {
-            peniko::Color::from_rgba8(255, 180, 50, 220)
+            peniko::Color::from_rgba8(255, 180, 50,  220)
         } else {
-            peniko::Color::from_rgba8(80, 200, 120, 200)
+            peniko::Color::from_rgba8(80,  200, 120, 200)
         };
-        frame.fill_rect(x, y, bar_w - 0.5, h, col);
+        frame.fill_rect(x, y, (bar_w - 0.5).max(1.0), h, col);
     }
 }
 
@@ -561,6 +576,6 @@ pub(super) fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFram
     }
 
     let hint_lbl = state.text_sys.label(
-        "Save any file to rebuild  ·  glyx dev --inspect for Chrome DevTools", 10.0);
+        "Ctrl+C to copy  ·  save any file to rebuild  ·  glyx dev --inspect for Chrome DevTools", 10.0);
     frame.draw_text(&hint_lbl, 16.0, panel_y + panel_h - 14.0, dim_col);
 }

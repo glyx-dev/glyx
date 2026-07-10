@@ -8,7 +8,7 @@ edition = "2021"
 # Production builds (glyx build --mode snapshot/bundle) disable this feature
 # so notify and std::process::Command are never compiled in.
 default = ["dev"]
-dev = ["notify", "glyx-runtime/dev", "ffmpeg-sidecar"]
+dev = ["notify", "glyx-runtime/dev", "ffmpeg-sidecar", "arboard"]
 
 [dependencies]
 glyx-gpu      = { path = "../glyx-gpu" }
@@ -30,6 +30,7 @@ taffy          = { workspace = true }
 image          = { workspace = true }
 resvg          = "0.44"
 notify          = { workspace = true, optional = true }
+arboard         = { workspace = true, optional = true }
 ffmpeg-sidecar  = { workspace = true, optional = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }

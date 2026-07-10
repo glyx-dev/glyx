@@ -192,6 +192,7 @@ pub(super) enum DevBuildEvent {
 pub(super) struct DevModeState {
     pub(super) rx: Receiver<DevBuildEvent>,
     pub(super) overlay_visible: bool,
+    pub(super) overlay_verbose: bool,
     pub(super) last_reload: Option<Instant>,
     pub(super) last_build_message: String,
     pub(super) ctrl_down: bool,

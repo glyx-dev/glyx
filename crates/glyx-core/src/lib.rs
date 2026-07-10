@@ -92,6 +92,8 @@ mod render;
 use self::config::*;
 use self::state::*;
 use self::dev_mode::*;
+#[cfg(feature = "dev")]
+use arboard;
 
 use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, snapshot_resolved};
 use layout::{recompute_layout, update_scroll_positions};
@@ -991,6 +993,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         .map(|rx| DevModeState {
                             rx,
                             overlay_visible: false,
+                            overlay_verbose: false,
                             last_reload: None,
                             last_build_message: "watching changes".to_string(),
                             ctrl_down: false,
@@ -1151,8 +1154,21 @@ pub fn run(mut config: AppConfig) -> bool {
                             "ControlLeft" | "ControlRight" => dev.ctrl_down = pressed,
                             "ShiftLeft" | "ShiftRight"     => dev.shift_down = pressed,
                             "KeyD" if pressed && dev.ctrl_down && dev.shift_down => {
-                                dev.overlay_visible = !dev.overlay_visible;
+                                // Cycle: hidden → compact → verbose → hidden
+                                match (dev.overlay_visible, dev.overlay_verbose) {
+                                    (false, _)     => { dev.overlay_visible = true;  dev.overlay_verbose = false; }
+                                    (true, false)  => { dev.overlay_verbose = true; }
+                                    (true, true)   => { dev.overlay_visible = false; dev.overlay_verbose = false; }
+                                }
                                 (s.request_redraw)();
+                            }
+                            "KeyC" if pressed && dev.ctrl_down && dev.last_js_error.is_some() => {
+                                #[cfg(feature = "dev")]
+                                if let Some(ref err) = dev.last_js_error.clone() {
+                                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                                        let _ = cb.set_text(err.clone());
+                                    }
+                                }
                             }
                             _ => {}
                         }

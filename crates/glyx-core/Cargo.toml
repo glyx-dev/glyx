@@ -53,3 +53,4 @@ glyx-media    = { path = "../glyx-media" }
 rodio          = { workspace = true, optional = true }
 mimalloc       = { workspace = true }
 base64         = { workspace = true }
+

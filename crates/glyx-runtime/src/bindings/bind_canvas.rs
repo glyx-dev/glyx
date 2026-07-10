@@ -117,6 +117,12 @@ pub fn canvas3d_load_gltf_callback(
         .map(|s| s.to_rust_string_lossy(scope))
         .unwrap_or_default();
 
+    // M2: gate GLTF loads behind fs.read capability.
+    let path = match glyx_security::resolve_and_check_read(std::path::Path::new(&path)) {
+        Ok(c)  => c.to_string_lossy().into_owned(),
+        Err(e) => { throw_js_error(scope, &format!("canvas3d.loadGltf denied: {e}")); return; }
+    };
+
     // Push a dummy scene update that triggers GLTF loading on render side.
     // The GLTF geometry becomes available on the next canvas3d_update.
     let scene = glyx_3d::Scene3D {

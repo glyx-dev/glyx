@@ -14,10 +14,11 @@ pub fn fs_watch_callback(
     mut rv: v8::ReturnValue,
 ) {
     let path = v8_arg_to_string(scope, &args, 0);
-    if !glyx_security::get().can_read_path(&path) {
-        rv.set(reject_promise_with_error(scope, &fs_denied_msg("read", &path)).into());
-        return;
-    }
+    // M1: canonicalize+check before open -- closes TOCTOU window.
+    let path = match glyx_security::resolve_and_check_read(std::path::Path::new(&path)) {
+        Ok(c)  => c.to_string_lossy().into_owned(),
+        Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.watch denied: {e}")).into()); return; }
+    };
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
@@ -126,10 +127,11 @@ pub fn write_file_callback(
     mut rv: v8::ReturnValue,
 ) {
     let path = v8_arg_to_string(scope, &args, 0);
-    if !glyx_security::get().can_write_path(&path) {
-        rv.set(reject_promise_with_error(scope, &fs_denied_msg("write", &path)).into());
-        return;
-    }
+    // M1: canonicalize+check before open -- closes TOCTOU window.
+    let path = match glyx_security::resolve_and_check_write(std::path::Path::new(&path)) {
+        Ok(c)  => c.to_string_lossy().into_owned(),
+        Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.write denied: {e}")).into()); return; }
+    };
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
@@ -155,10 +157,11 @@ pub fn append_file_callback(
     mut rv: v8::ReturnValue,
 ) {
     let path = v8_arg_to_string(scope, &args, 0);
-    if !glyx_security::get().can_write_path(&path) {
-        rv.set(reject_promise_with_error(scope, &fs_denied_msg("write", &path)).into());
-        return;
-    }
+    // M1: canonicalize+check before open -- closes TOCTOU window.
+    let path = match glyx_security::resolve_and_check_write(std::path::Path::new(&path)) {
+        Ok(c)  => c.to_string_lossy().into_owned(),
+        Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.write denied: {e}")).into()); return; }
+    };
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
@@ -191,10 +194,11 @@ pub fn list_dir_callback(
     mut rv: v8::ReturnValue,
 ) {
     let path = v8_arg_to_string(scope, &args, 0);
-    if !glyx_security::get().can_read_path(&path) {
-        rv.set(reject_promise_with_error(scope, &fs_denied_msg("read", &path)).into());
-        return;
-    }
+    // M1: canonicalize+check before open -- closes TOCTOU window.
+    let path = match glyx_security::resolve_and_check_read(std::path::Path::new(&path)) {
+        Ok(c)  => c.to_string_lossy().into_owned(),
+        Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.watch denied: {e}")).into()); return; }
+    };
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
@@ -228,10 +232,23 @@ pub fn delete_file_callback(
     mut rv: v8::ReturnValue,
 ) {
     let path = v8_arg_to_string(scope, &args, 0);
-    if !glyx_security::get().can_delete_path(&path) {
-        rv.set(reject_promise_with_error(scope, &fs_denied_msg("delete", &path)).into());
-        return;
-    }
+    // M1: canonicalize+check before delete -- closes TOCTOU window.
+    let path = match path.as_str() {
+        p => match std::path::Path::new(p).canonicalize() {
+            Ok(c) => {
+                let cs = c.to_string_lossy();
+                if !glyx_security::get().can_delete_path(&cs) {
+                    rv.set(reject_promise_with_error(scope, &fs_denied_msg("delete", &cs)).into());
+                    return;
+                }
+                c.to_string_lossy().into_owned()
+            }
+            Err(e) => {
+                rv.set(reject_promise_with_error(scope, &format!("fs.delete: cannot resolve path: {e}")).into());
+                return;
+            }
+        }
+    };
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
@@ -255,10 +272,11 @@ pub fn mkdirp_callback(
     mut rv: v8::ReturnValue,
 ) {
     let path = v8_arg_to_string(scope, &args, 0);
-    if !glyx_security::get().can_write_path(&path) {
-        rv.set(reject_promise_with_error(scope, &fs_denied_msg("write", &path)).into());
-        return;
-    }
+    // M1: canonicalize+check before open -- closes TOCTOU window.
+    let path = match glyx_security::resolve_and_check_write(std::path::Path::new(&path)) {
+        Ok(c)  => c.to_string_lossy().into_owned(),
+        Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.write denied: {e}")).into()); return; }
+    };
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
@@ -282,10 +300,11 @@ pub fn stat_callback(
     mut rv: v8::ReturnValue,
 ) {
     let path = v8_arg_to_string(scope, &args, 0);
-    if !glyx_security::get().can_read_path(&path) {
-        rv.set(reject_promise_with_error(scope, &fs_denied_msg("read", &path)).into());
-        return;
-    }
+    // M1: canonicalize+check before open -- closes TOCTOU window.
+    let path = match glyx_security::resolve_and_check_read(std::path::Path::new(&path)) {
+        Ok(c)  => c.to_string_lossy().into_owned(),
+        Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.watch denied: {e}")).into()); return; }
+    };
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
@@ -321,15 +340,15 @@ pub fn rename_callback(
 ) {
     let src = v8_arg_to_string(scope, &args, 0);
     let dst = v8_arg_to_string(scope, &args, 1);
-    let sec = glyx_security::get();
-    if !sec.can_read_path(&src) {
-        rv.set(reject_promise_with_error(scope, &fs_denied_msg("read", &src)).into());
-        return;
-    }
-    if !sec.can_write_path(&dst) {
-        rv.set(reject_promise_with_error(scope, &fs_denied_msg("write", &dst)).into());
-        return;
-    }
+    // M1: canonicalize+check src (read) and dst (write).
+    let src = match glyx_security::resolve_and_check_read(std::path::Path::new(&src)) {
+        Ok(c)  => c.to_string_lossy().into_owned(),
+        Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.rename src denied: {e}")).into()); return; }
+    };
+    let dst = match glyx_security::resolve_and_check_write(std::path::Path::new(&dst)) {
+        Ok(c)  => c.to_string_lossy().into_owned(),
+        Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.rename dst denied: {e}")).into()); return; }
+    };
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
@@ -354,15 +373,15 @@ pub fn copy_file_callback(
 ) {
     let src = v8_arg_to_string(scope, &args, 0);
     let dst = v8_arg_to_string(scope, &args, 1);
-    let sec = glyx_security::get();
-    if !sec.can_read_path(&src) {
-        rv.set(reject_promise_with_error(scope, &fs_denied_msg("read", &src)).into());
-        return;
-    }
-    if !sec.can_write_path(&dst) {
-        rv.set(reject_promise_with_error(scope, &fs_denied_msg("write", &dst)).into());
-        return;
-    }
+    // M1: canonicalize+check src (read) and dst (write).
+    let src = match glyx_security::resolve_and_check_read(std::path::Path::new(&src)) {
+        Ok(c)  => c.to_string_lossy().into_owned(),
+        Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.rename src denied: {e}")).into()); return; }
+    };
+    let dst = match glyx_security::resolve_and_check_write(std::path::Path::new(&dst)) {
+        Ok(c)  => c.to_string_lossy().into_owned(),
+        Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.rename dst denied: {e}")).into()); return; }
+    };
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };

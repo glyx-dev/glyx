@@ -562,18 +562,16 @@ pub fn run(mut config: AppConfig) -> bool {
 
     // ── Deep link: check launch args for a URL matching the configured scheme ──
     //
-    // If the app registered `"deeplink": { "scheme": "notes" }` and was launched
-    // with `notes://note/42` as an argument, we capture it in `GLYX_LAUNCH_URL`
-    // so the `__glyx_deeplink_getInitialUrl()` binding can retrieve it.
+    // M4: Single-instance deep-link IPC via named pipe (Windows) or Unix socket
+    // (Linux/macOS) instead of TCP.  Named IPC has no discoverable port and no
+    // race window between reading the port file and connecting.
     //
-    // Single-instance mode (opt-in):
-    //   First instance  — binds a TCP socket on localhost, writes port to a temp
-    //                     file so second instances know where to forward URLs.
-    //   Second instance — connects to that socket, sends the URL, exits.
+    //   Windows: \.\pipe\glyx-{app_name}
+    //   Unix:    /tmp/.glyx-{app_name}.sock  (or $XDG_RUNTIME_DIR/... if set)
     //
-    // The TCP listener is started after the runtime is ready (inside WindowReady)
-    // using the Tokio handle and the runtime's `deeplink_url_queue`.
-    let mut single_instance_tcp: Option<std::net::TcpListener> = {
+    // The variable carries the IPC name so the async listener can be created
+    // inside the WindowReady block on the tokio runtime.
+    let mut single_instance_ipc: Option<String> = {
         if let Some(ref dl) = glyx_security::get().deeplink {
             let scheme_prefix = format!("{}://", dl.scheme);
             let launch_url: Option<String> = std::env::args()
@@ -581,14 +579,11 @@ pub fn run(mut config: AppConfig) -> bool {
                 .find(|a| a.starts_with(&scheme_prefix));
 
             if let Some(ref url) = launch_url {
-                // Safety: this is the only write; bindings read it after runtime starts.
                 #[allow(unused_unsafe)]
                 unsafe { std::env::set_var("GLYX_LAUNCH_URL", url); }
                 log::info!("glyx: deep-link launch URL: {}", url);
             }
 
-            // Auto-register the URL scheme on Windows so the app handles deeplinks
-            // without requiring a manual .reg import.  We write to HKCU (no admin needed).
             #[cfg(target_os = "windows")]
             register_deeplink_scheme_windows(&dl.scheme);
 
@@ -597,49 +592,59 @@ pub fn run(mut config: AppConfig) -> bool {
                     .ok()
                     .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
                     .unwrap_or_else(|| "glyx-app".to_string());
-                let port_file = std::env::temp_dir().join(format!("glyx-{}.port", app_name));
+
+                #[cfg(target_os = "windows")]
+                let ipc_name = format!(r"\.\pipe\glyx-{}", app_name);
+
+                #[cfg(not(target_os = "windows"))]
+                let ipc_name = {
+                    let dir = std::env::var("XDG_RUNTIME_DIR")
+                        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+                    format!("{}/.glyx-{}.sock", dir, app_name)
+                };
 
                 // Try to connect as a second instance.
-                let is_second = port_file.exists() && {
-                    let connected = std::fs::read_to_string(&port_file)
+                #[cfg(target_os = "windows")]
+                let is_second = {
+                    use std::io::Write;
+                    // On Windows, named pipes can be opened with std::fs::File --
+                    // OpenOptions wraps CreateFile internally.
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&ipc_name)
                         .ok()
-                        .and_then(|s| s.trim().parse::<u16>().ok())
-                        .and_then(|port| {
-                            use std::io::Write;
-                            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-                            std::net::TcpStream::connect_timeout(
-                                &addr,
-                                std::time::Duration::from_millis(150),
-                            )
-                                .ok()
-                                .and_then(|mut s| {
-                                    let payload = launch_url.as_deref().unwrap_or("").to_string() + "\n";
-                                    s.write_all(payload.as_bytes()).ok()
-                                })
+                        .and_then(|mut f| {
+                            let payload = launch_url.as_deref().unwrap_or("").to_string() + "
+";
+                            f.write_all(payload.as_bytes()).ok()
                         })
-                        .is_some();
-                    connected
+                        .is_some()
+                };
+
+                #[cfg(not(target_os = "windows"))]
+                let is_second = {
+                    use std::io::Write;
+                    std::os::unix::net::UnixStream::connect(&ipc_name)
+                        .ok()
+                        .and_then(|mut s| {
+                            let payload = launch_url.as_deref().unwrap_or("").to_string() + "
+";
+                            s.write_all(payload.as_bytes()).ok()
+                        })
+                        .is_some()
                 };
 
                 if is_second {
-                    log::info!("glyx: second instance detected — forwarded URL and exiting");
+                    log::info!("glyx: second instance -- forwarded URL and exiting");
                     std::process::exit(0);
                 }
 
-                // First instance: bind TCP listener.
-                match std::net::TcpListener::bind("127.0.0.1:0") {
-                    Ok(listener) => {
-                        listener.set_nonblocking(true).ok();
-                        let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
-                        std::fs::write(&port_file, port.to_string()).ok();
-                        log::info!("glyx: single-instance listener on port {}", port);
-                        Some(listener)
-                    }
-                    Err(e) => {
-                        log::warn!("glyx: could not bind single-instance socket: {}", e);
-                        None
-                    }
-                }
+                // Clean up stale socket file on Unix before binding.
+                #[cfg(not(target_os = "windows"))]
+                { let _ = std::fs::remove_file(&ipc_name); }
+
+                log::info!("glyx: single-instance IPC at {}", ipc_name);
+                Some(ipc_name)
             } else {
                 None
             }
@@ -849,43 +854,63 @@ pub fn run(mut config: AppConfig) -> bool {
                 rt.register_extensions(&*extensions_arc);
 
                 // ── Single-instance deep-link listener (main window only) ──
-                // If a TCP listener was created before the event loop started, hand it
-                // to a Tokio task that forwards URLs from second instances into the
-                // runtime's deeplink_url_queue.
+                // Accepts IPC connections from second instances and pushes their
+                // forwarded deep-link URLs into the runtime's url queue.
                 if window_handle == 0 {
-                    if let Some(listener) = single_instance_tcp.take() {
+                    if let Some(ipc_name) = single_instance_ipc.take() {
                         let queue_clone = Arc::clone(&rt.deeplink_url_queue);
-                        // Push URLs to the queue; the next frame will pick them up.
                         tokio_handle.spawn(async move {
                             use tokio::io::AsyncBufReadExt;
-                            // Convert the std listener to a tokio listener.
-                            let async_listener = match tokio::net::TcpListener::from_std(listener) {
-                                Ok(l)  => l,
-                                Err(e) => {
-                                    log::warn!("glyx: deep-link listener error: {}", e);
-                                    return;
-                                }
-                            };
-                            loop {
-                                match async_listener.accept().await {
-                                    Ok((stream, _addr)) => {
-                                        let queue = Arc::clone(&queue_clone);
-                                        tokio::spawn(async move {
-                                            let reader = tokio::io::BufReader::new(stream);
-                                            let mut lines = reader.lines();
-                                            while let Ok(Some(line)) = lines.next_line().await {
-                                                let url = line.trim().to_string();
-                                                if !url.is_empty() {
-                                                    log::info!("glyx: deep-link forwarded URL: {}", url);
-                                                    queue.lock().push_back(url);
-                                                    // Note: no request_redraw here — the frame loop will
-                                                    // pick up the URL on the next scheduled frame.
-                                                }
+
+                            #[cfg(target_os = "windows")]
+                            {
+                                // Windows named pipe listener loop.
+                                loop {
+                                    let server = match tokio::net::windows::named_pipe::ServerOptions::new()
+                                        .first_pipe_instance(false)
+                                        .create(&ipc_name)
+                                    {
+                                        Ok(s)  => s,
+                                        Err(e) => { log::warn!("glyx: pipe create error: {e}"); return; }
+                                    };
+                                    if server.connect().await.is_err() { continue; }
+                                    let queue = Arc::clone(&queue_clone);
+                                    tokio::spawn(async move {
+                                        let reader = tokio::io::BufReader::new(server);
+                                        let mut lines = reader.lines();
+                                        while let Ok(Some(line)) = lines.next_line().await {
+                                            let url = line.trim().to_string();
+                                            if !url.is_empty() {
+                                                log::info!("glyx: deep-link forwarded: {}", url);
+                                                queue.lock().push_back(url);
                                             }
-                                        });
-                                    }
-                                    Err(e) => {
-                                        log::warn!("glyx: deep-link listener accept error: {}", e);
+                                        }
+                                    });
+                                }
+                            }
+                            #[cfg(not(target_os = "windows"))]
+                            {
+                                let listener = match tokio::net::UnixListener::bind(&ipc_name) {
+                                    Ok(l)  => l,
+                                    Err(e) => { log::warn!("glyx: Unix socket bind error: {e}"); return; }
+                                };
+                                loop {
+                                    match listener.accept().await {
+                                        Ok((stream, _)) => {
+                                            let queue = Arc::clone(&queue_clone);
+                                            tokio::spawn(async move {
+                                                let reader = tokio::io::BufReader::new(stream);
+                                                let mut lines = reader.lines();
+                                                while let Ok(Some(line)) = lines.next_line().await {
+                                                    let url = line.trim().to_string();
+                                                    if !url.is_empty() {
+                                                        log::info!("glyx: deep-link forwarded: {}", url);
+                                                        queue.lock().push_back(url);
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        Err(e) => log::warn!("glyx: IPC accept error: {e}"),
                                     }
                                 }
                             }

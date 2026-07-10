@@ -2,6 +2,28 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Verify the SHA-256 hex digest of `path` matches `expected`.
+/// Deletes the file on mismatch so a retry will re-download cleanly.
+fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
+    use std::io::Read;
+    use sha2::Digest as _;
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("cannot open {} for hash verification", path.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 { break; }
+        hasher.update(&buf[..n]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    if actual != expected {
+        let _ = std::fs::remove_file(path);
+        bail!("SHA-256 mismatch for {}:\n  expected: {}\n  actual:   {}\nFile deleted -- retry will re-download.", path.display(), expected, actual);
+    }
+    Ok(())
+}
+
 use super::{
     read_project_name, host_os, platform_to_rust_target, binary_name,
     find_workspace_root, read_app_metadata, read_icon_path, read_deeplink_scheme,
@@ -304,10 +326,12 @@ pub(super) fn ensure_nsis() -> Result<PathBuf> {
     }
 
     const URL: &str = "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10.zip";
+    // SHA-256 of the canonical nsis-3.10.zip from SourceForge.
+    const SHA256: &str = "2735f04e5d1686b8aeecb8a9a56a80ae08c5e37f0dfa78ba9a7bf7f90a397c81";
     let zip_tmp = home.join(".glyx").join("tools").join("nsis-download.zip");
     std::fs::create_dir_all(zip_tmp.parent().unwrap())?;
 
-    println!("Downloading NSIS (one-time, ~5 MB)…");
+    println!("Downloading NSIS (one-time, ~5 MB)...");
     // curl is built into Windows 10+, macOS, and every Linux distro.
     let ok = Command::new("curl")
         .args(["-fsSL", "-o", zip_tmp.to_str().unwrap(), URL])
@@ -322,7 +346,11 @@ pub(super) fn ensure_nsis() -> Result<PathBuf> {
         );
     }
 
-    println!("Extracting NSIS…");
+    // Verify SHA-256 before extracting — guards against supply-chain tampering.
+    verify_sha256(&zip_tmp, SHA256)
+        .context("NSIS download integrity check failed")?;
+
+    println!("Extracting NSIS...");
     extract_zip_strip_top(&zip_tmp, &nsis_dir)
         .context("failed to extract NSIS zip")?;
     let _ = std::fs::remove_file(&zip_tmp);
@@ -350,7 +378,9 @@ pub(super) fn ensure_rcedit() -> Result<PathBuf> {
     if rcedit.exists() { return Ok(rcedit); }
 
     const URL: &str = "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe";
-    println!("Downloading rcedit (icon patcher, ~200 KB)…");
+    // SHA-256 of rcedit-x64.exe v2.0.0 from the official GitHub release.
+    const SHA256: &str = "4088d04409b4db9c35acdb01b0e1a9a27f64b3e62562c7dc6e37b8a6b7be75f7";
+    println!("Downloading rcedit (icon patcher, ~200 KB)...");
     let ok = Command::new("curl")
         .args(["-fsSL", "-o", rcedit.to_str().unwrap(), URL])
         .status()
@@ -363,7 +393,10 @@ pub(super) fn ensure_rcedit() -> Result<PathBuf> {
              Save to: {}", rcedit.display()
         );
     }
-    println!("✓ rcedit cached: {}", rcedit.display());
+    // Verify SHA-256 before caching — guards against supply-chain tampering.
+    verify_sha256(&rcedit, SHA256)
+        .context("rcedit download integrity check failed")?;
+    println!("rcedit cached: {}", rcedit.display());
     Ok(rcedit)
 }
 

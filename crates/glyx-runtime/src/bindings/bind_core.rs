@@ -328,10 +328,11 @@ pub fn read_file_callback(
         .unwrap_or_default();
 
     // Capability gate â€” per-path glob check; throws a JS Error when denied.
-    if !glyx_security::get().can_read_path(&path) {
-        throw_js_error(scope, &fs_denied_msg("read", &path));
-        return;
-    }
+    // M1: canonicalize then check -- TOCTOU-safe; open the returned canonical path.
+    let path = match glyx_security::resolve_and_check_read(std::path::Path::new(&path)) {
+        Ok(c)  => c.to_string_lossy().into_owned(),
+        Err(e) => { throw_js_error(scope, &format!("fs.read denied: {e}")); return; }
+    };
 
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
@@ -368,10 +369,11 @@ pub fn read_file_bytes_callback(
         .map(|s| s.to_rust_string_lossy(scope))
         .unwrap_or_default();
 
-    if !glyx_security::get().can_read_path(&path) {
-        throw_js_error(scope, &fs_denied_msg("read", &path));
-        return;
-    }
+    // M1: canonicalize then check -- TOCTOU-safe; open the returned canonical path.
+    let path = match glyx_security::resolve_and_check_read(std::path::Path::new(&path)) {
+        Ok(c)  => c.to_string_lossy().into_owned(),
+        Err(e) => { throw_js_error(scope, &format!("fs.read denied: {e}")); return; }
+    };
 
     let data  = args.data().unwrap();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
@@ -425,6 +427,20 @@ pub fn create_image_callback(
         .to_string(scope)
         .map(|s| s.to_rust_string_lossy(scope))
         .unwrap_or_default();
+
+    // M2: gate local-path image loads behind fs.read capability.
+    // data: URIs and http(s): URLs are not local filesystem reads -- skip the check.
+    let is_local = !path.starts_with("data:")
+        && !path.starts_with("http://")
+        && !path.starts_with("https://");
+    let path = if is_local {
+        match glyx_security::resolve_and_check_read(std::path::Path::new(&path)) {
+            Ok(c)  => c.to_string_lossy().into_owned(),
+            Err(e) => { throw_js_error(scope, &format!("createImage denied: {e}")); return; }
+        }
+    } else {
+        path
+    };
 
     // Optional display-size hint (used to rasterize SVGs at the rendered size).
     let width  = args.get(1).number_value(scope).filter(|v| *v > 0.0).map(|v| v as f32);

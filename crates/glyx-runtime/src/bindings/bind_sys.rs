@@ -692,6 +692,13 @@ pub fn shortcut_poll_callback(
     rv.set(s.into());
 }
 
+fn credential_app_prefix() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "glyx".to_string())
+}
+
 // â"€â"€ Credentials (OS keychain) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// `__glyx_credentials_set(service, key, value)` â†' Promise<void>
@@ -710,6 +717,7 @@ pub fn credentials_set_callback(
         rv.set(reject_cap_promise(scope, "credentials").into()); return;
     }
     let service = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let service = format!("{}::{}", credential_app_prefix(), service);
     let key     = args.get(1).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
     let value   = args.get(2).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
     let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
@@ -738,12 +746,13 @@ pub fn credentials_get_callback(
         rv.set(reject_cap_promise(scope, "credentials").into()); return;
     }
     let service = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let service = format!("{}::{}", credential_app_prefix(), service);
     let key     = args.get(1).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
     let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
     state.tokio.spawn(async move {
         let result = tokio::task::spawn_blocking(move || {
             glyx_sysapi::credentials_get(&service, &key).map(|opt| match opt {
-                Some(val) => format!("{:?}", val), // JSON-escaped string
+                Some(val) => serde_json::to_string(&val).unwrap_or_else(|_| "null".into()),
                 None      => "null".into(),
             })
         }).await.map_err(|e| e.to_string()).and_then(|r| r);
@@ -765,6 +774,7 @@ pub fn credentials_delete_callback(
         rv.set(reject_cap_promise(scope, "credentials").into()); return;
     }
     let service = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let service = format!("{}::{}", credential_app_prefix(), service);
     let key     = args.get(1).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
     let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
     state.tokio.spawn(async move {

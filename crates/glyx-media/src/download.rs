@@ -110,7 +110,13 @@ pub async fn download_and_cache_media() -> Result<PathBuf, String> {
 
     log::info!("[glyx-media] downloading manifest from {manifest_url}");
 
-    let client = reqwest::Client::new();
+    // No redirects: signed CDN resources must be fetched from their canonical URL.
+    // A redirect would bypass the domain check and must be treated as an error.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("glyx-media: failed to build HTTP client: {e}"))?;
 
     let manifest_bytes = client.get(&manifest_url).send().await
         .map_err(|e| format!("glyx-media: manifest fetch failed: {e}"))?

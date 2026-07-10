@@ -32,15 +32,18 @@ pub enum DenyReason {
     NotAllowed,
     /// The path is absolute but no absolute grant covers it.
     AbsolutePathDenied,
+    /// Windows NTFS Alternate Data Stream (`:stream`) in the path component.
+    AlternateDataStream,
 }
 
 impl std::fmt::Display for DenyReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Canonicalize(e)    => write!(f, "cannot canonicalize path: {e}"),
-            Self::CapabilityMissing  => write!(f, "capability not declared"),
-            Self::NotAllowed         => write!(f, "path not covered by any declared glob"),
-            Self::AbsolutePathDenied => write!(f, "absolute path requires an explicit grant"),
+            Self::Canonicalize(e)      => write!(f, "cannot canonicalize path: {e}"),
+            Self::CapabilityMissing    => write!(f, "capability not declared"),
+            Self::NotAllowed           => write!(f, "path not covered by any declared glob"),
+            Self::AbsolutePathDenied   => write!(f, "absolute path requires an explicit grant"),
+            Self::AlternateDataStream  => write!(f, "NTFS Alternate Data Streams are not permitted"),
         }
     }
 }
@@ -53,6 +56,12 @@ impl std::fmt::Display for DenyReason {
 /// Fails with [`DenyReason::Canonicalize`] if the path does not exist (the
 /// file must already exist for a read check to make sense).
 pub fn resolve_and_check_read(path: &Path) -> Result<PathBuf, DenyReason> {
+    // Reject NTFS Alternate Data Streams (e.g. "file.txt:hidden") — they
+    // can hide payloads in the same inode and bypass content checks on Windows.
+    if path.components().any(|c| c.as_os_str().to_string_lossy().contains(':')) {
+        #[cfg(target_os = "windows")]
+        return Err(DenyReason::AlternateDataStream);
+    }
     let canonical = path.canonicalize().map_err(DenyReason::Canonicalize)?;
     let caps = get();
     let path_str = canonical.to_string_lossy();
@@ -72,6 +81,11 @@ pub fn resolve_and_check_read(path: &Path) -> Result<PathBuf, DenyReason> {
 /// Uses the parent-canonicalize strategy so new files can be created: if
 /// `path` itself doesn't exist, its parent must exist and be within the grant.
 pub fn resolve_and_check_write(path: &Path) -> Result<PathBuf, DenyReason> {
+    // Reject NTFS Alternate Data Streams on Windows.
+    if path.components().any(|c| c.as_os_str().to_string_lossy().contains(':')) {
+        #[cfg(target_os = "windows")]
+        return Err(DenyReason::AlternateDataStream);
+    }
     // For writes the target file may not exist yet — canonicalize the parent.
     let canonical = if path.exists() {
         path.canonicalize().map_err(DenyReason::Canonicalize)?

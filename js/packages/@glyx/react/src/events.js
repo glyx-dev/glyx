@@ -77,6 +77,9 @@ const globalClickListeners = [];
 
 // Currently focused input node id (or null).
 let focusedNodeId = null;
+// Input node currently being drag-selected (left button held after pressing
+// on a TextInput); cursorMoved extends its selection until release.
+let inputDragNodeId = null;
 
 // Currently hovered pressable node id (or null).
 // Updated once per frame from the last cursorMoved event's position.
@@ -445,7 +448,10 @@ export function dispatchEvents() {
     switch (ev.type) {
 
       case 'mouseButton': {
-        if (!ev.pressed) break; // react only to press-down for now
+        if (!ev.pressed) {
+          inputDragNodeId = null;   // end text drag-selection on release
+          break;
+        }
 
         const isRight = ev.button === 1; // 0 = left, 1 = right, 2 = middle
 
@@ -492,6 +498,9 @@ export function dispatchEvents() {
             setFocus(topmostId);
             const layout = __glyx_getLayout(topmostId);
             if (layout) ih.onClickAt?.(ev.x - layout.x, ev.y - layout.y);
+            // Begin drag-selection: subsequent cursorMoved events extend the
+            // selection from this anchor until the button is released.
+            if (!isRight) inputDragNodeId = topmostId;
           }
         }
 
@@ -564,6 +573,15 @@ export function dispatchEvents() {
         cursorX = ev.x;
         cursorY = ev.y;
         cursorMovedThisFrame = true;
+        // Text drag-selection: while the left button is held on an input,
+        // every cursor move extends the selection toward the pointer.
+        if (inputDragNodeId !== null) {
+          const ih = inputRegistry.get(inputDragNodeId);
+          if (ih && ih.onDragAt) {
+            const layout = __glyx_getLayout(inputDragNodeId);
+            if (layout) ih.onDragAt(ev.x - layout.x, ev.y - layout.y);
+          }
+        }
         break;
       }
 

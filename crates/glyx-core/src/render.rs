@@ -501,18 +501,31 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                 *ctx.any_cursor_active = true;
                 // Whole node rect (not just the caret line): erases the caret's
                 // previous x-position too when the damage path repaints it.
-                *ctx.cursor_node_rect = Some((rx, ry, rw, rh));
+                // Height is clamped up to the rendered text height — the layout
+                // box can lag the wrapped line count, and a too-short blink
+                // damage rect clips the caret on later lines to a "dot".
+                *ctx.cursor_node_rect = Some((rx, ry, rw, rh.max(label.text_height)));
                 if ctx.cursor_blink_on {
-                    let cx = if let Some(cp) = cursor_position {
+                    let (cx, cy) = if let Some(cp) = cursor_position {
                         let char_count = text.chars().count();
-                        ctx.text_sys.measure_to_cursor(
-                            text, font_size, max_width, cp.min(char_count),
-                        ) as f64
+                        let cp = cp.min(char_count);
+                        // Find the wrapped line containing the caret so it
+                        // blinks on the correct visual line, not always the
+                        // first (explicit '\n' AND soft wraps).
+                        let byte_idx = text.char_indices().nth(cp)
+                            .map(|(b, _)| b).unwrap_or(text.len());
+                        let (line_top, line_start) = label.layout.caret_line(byte_idx);
+                        let first_top = label.layout.caret_line(0).0;
+                        let cp_in_line = text[line_start..byte_idx].chars().count();
+                        let cx = ctx.text_sys.measure_to_cursor(
+                            &text[line_start..], font_size, max_width, cp_in_line,
+                        ) as f64;
+                        (cx, cur_top + (line_top - first_top) as f64)
                     } else {
-                        label_width
+                        (label_width, cur_top)
                     };
                     ctx.frame.fill_rounded_rect(
-                        tx + cx, cur_top, 2.0, cur_height, 0.0,
+                        tx + cx, cy, 2.0, cur_height, 0.0,
                         apply_opacity(rgba_to_vello(color), child_opacity),
                     );
                 }

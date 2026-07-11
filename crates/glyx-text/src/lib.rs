@@ -343,6 +343,24 @@ impl TextLayout {
             .unwrap_or_else(|| self.inner.height() * 0.8)
     }
 
+    /// For a caret at `byte_idx`, return `(line_top_y, line_start_byte)` of
+    /// the wrapped line containing it.  Handles both explicit newlines and
+    /// soft wraps, so multiline inputs can draw the caret on the correct
+    /// visual line instead of always the first.
+    pub fn caret_line(&self, byte_idx: usize) -> (f32, usize) {
+        let mut last = (0.0_f32, 0usize);
+        for line in self.inner.lines() {
+            let m = line.metrics();
+            let r = line.text_range();
+            // block_min_coord = top edge of the line box (horizontal text).
+            last = (m.block_min_coord.max(0.0), r.start);
+            if byte_idx < r.end {
+                return last;
+            }
+        }
+        last
+    }
+
     /// Returns `(cursor_top_offset, cursor_height)` relative to the `ty` argument
     /// passed to `draw_text`.
     ///

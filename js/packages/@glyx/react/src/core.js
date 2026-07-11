@@ -81,7 +81,7 @@ export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', 
 // always delegate to the latest closure values without needing re-registration
 // on every render.
 
-export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, disabled, style, ...props }) {
+export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, disabled, feedback = true, style, ...props }) {
   const nodeIdRef    = useRef(null);
   const handlersRef  = useRef(null);
   const [pressed, setPressed] = useState(false);
@@ -138,11 +138,14 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
   // Visual feedback (opacity-based — stays within element bounds):
   //   pressed → darkened (confirms the click)
   //   hovered → slightly dimmed (indicates interactivity)
-  //   disabled / default → no change
+  //   disabled / default / feedback:false → no change
+  // `feedback: false` is for structural pressables (backdrops, click
+  // absorbers, custom-styled controls) — opacity on a container multiplies
+  // through the whole subtree, so a dimming backdrop dims its content too.
   const baseOpacity = style?.opacity ?? 1;
-  const mergedStyle = (pressed && !disabled)
+  const mergedStyle = (feedback && pressed && !disabled)
     ? { ...style, opacity: baseOpacity * 0.65 }
-    : (hovered && !disabled)
+    : (feedback && hovered && !disabled)
     ? { ...style, opacity: baseOpacity * 0.85 }
     : style;
 

@@ -57,11 +57,15 @@ export function PopoverHost() {
 
   return React.createElement(Pressable, {
     // Full-screen backdrop — a click anywhere outside the content dismisses.
+    // feedback:false — opacity feedback on a container multiplies through the
+    // subtree, which made the whole popover dim on hover.
     onPress: () => _popoverStore.close(p.id),
+    feedback: false,
     style: { position: 'absolute', left: 0, top: 0, width: winW, height: winH, zIndex: 9000 },
   },
     React.createElement(Pressable, {
       onPress: () => {}, // absorb clicks inside the popover so it doesn't dismiss
+      feedback: false,
       style: { position: 'absolute', left, top, width: cw, zIndex: 9001 },
     }, p.render(p.id))
   );

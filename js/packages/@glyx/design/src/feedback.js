@@ -396,7 +396,7 @@ function _ToastItem({ toast, onDismiss }) {
 
       <Pressable onPress={() => onDismiss(toast.id)}>
         <Text fontSize={fontSize.sm} style={{ color: fg, opacity: 0.7 }}>
-          ✕
+          x
         </Text>
       </Pressable>
     </View>

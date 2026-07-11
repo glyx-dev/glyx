@@ -102,6 +102,36 @@ export declare const PasswordInput: React.FC<Omit<TextInputProps, 'secureTextEnt
 /** Single-line TextInput accepting only numbers (keyboardType defaults to 'decimal'). */
 export declare const NumericInput:  React.FC<Omit<TextInputProps, 'multiline'>>;
 
+// ── Pickers (calendar/time float in the root popover layer) ──────────────────
+
+export declare const DatePicker: React.FC<{
+  value?: Date | string | null;
+  onValueChange?: (d: Date) => void;
+  disabled?: boolean;
+  style?: GlyxStyle;
+}>;
+
+export declare const TimePicker: React.FC<{
+  /** 24-hour 'HH:MM' string regardless of display format. */
+  value?: string | null;
+  onValueChange?: (hhmm: string) => void;
+  /** Display format: false = '2:05 PM' (default), true = '14:05'. */
+  use24Hour?: boolean;
+  /** Minute column granularity (default 5). */
+  minuteStep?: number;
+  disabled?: boolean;
+  style?: GlyxStyle;
+}>;
+
+export declare const DateTimePicker: React.FC<{
+  value?: Date | string | null;
+  onValueChange?: (d: Date) => void;
+  use24Hour?: boolean;
+  minuteStep?: number;
+  disabled?: boolean;
+  style?: GlyxStyle;
+}>;
+
 export declare function render(element: React.ReactElement): void;
 
 // ── Responsive hooks ──────────────────────────────────────────────────────────

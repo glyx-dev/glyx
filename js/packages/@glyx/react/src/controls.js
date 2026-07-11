@@ -272,7 +272,8 @@ export function TextInput({
         commit(value.slice(0, ss) + text + value.slice(se), ss + text.length);
       }
     },
-    onClickAt: (relX, relY) => {
+    // Character position under a pointer coordinate (shared by click + drag).
+    posAt: (relX, relY) => {
       const padding = multiline ? 10 : 8;
       const textX   = relX - padding;
 
@@ -288,17 +289,22 @@ export function TextInput({
           : Math.max(0, Math.min(Math.round(Math.max(0, textX) / (fontSize * 0.55)), lineText.length));
         let pos = 0;
         for (let i = 0; i < clampedLine; i++) pos += lines[i].length + 1;
-        moveCursor(pos + col);
-      } else {
-        // Single-line: add scrollX offset so click maps to the correct character
-        // even when the text is shifted left.  Measured against renderValue so
-        // masked (password) glyph widths line up with what's on screen.
-        const localX = Math.max(0, textX) + scrollXRef.current;
-        const col = (typeof __glyx_text_char_at_x !== 'undefined')
-          ? __glyx_text_char_at_x(renderValue, fontSize, 1e6, localX)
-          : Math.max(0, Math.min(Math.round(localX / (fontSize * 0.55)), renderValue.length));
-        moveCursor(col);
+        return pos + col;
       }
+      // Single-line: add scrollX offset so click maps to the correct character
+      // even when the text is shifted left.  Measured against renderValue so
+      // masked (password) glyph widths line up with what's on screen.
+      const localX = Math.max(0, textX) + scrollXRef.current;
+      return (typeof __glyx_text_char_at_x !== 'undefined')
+        ? __glyx_text_char_at_x(renderValue, fontSize, 1e6, localX)
+        : Math.max(0, Math.min(Math.round(localX / (fontSize * 0.55)), renderValue.length));
+    },
+    onClickAt: (relX, relY) => {
+      moveCursor(handlersRef.current.posAt(relX, relY));
+    },
+    // Mouse drag: keep the press-down anchor, move only the focus end.
+    onDragAt: (relX, relY) => {
+      extendTo(handlersRef.current.posAt(relX, relY));
     },
   };
 
@@ -309,6 +315,7 @@ export function TextInput({
       onBlur:     () => handlersRef.current.onBlur(),
       onKeyPress: (ev) => handlersRef.current.onKeyPress(ev),
       onClickAt:  (relX, relY) => handlersRef.current.onClickAt(relX, relY),
+      onDragAt:   (relX, relY) => handlersRef.current.onDragAt(relX, relY),
     });
   }, []);
 
@@ -784,13 +791,52 @@ export function Select({
 
 // Self-contained month calendar — owns its view month/year so the prev/next
 // arrows re-render it in place inside the popover layer.
+// Hover-highlighted selectable cell — shared by calendar days and time
+// columns.  Uses an explicit hover background (Pressable's opacity feedback
+// is invisible on transparent backgrounds).
+function _HoverCell({ selected, onPress, w = 36, h = 32, fontSize = 13, children }) {
+  const [hov, setHov] = useState(false);
+  return React.createElement(Pressable, {
+    onPress,
+    feedback: false,
+    onHoverIn:  () => setHov(true),
+    onHoverOut: () => setHov(false),
+    width: w, height: h,
+    style: {
+      alignItems: 'center', justifyContent: 'center', borderRadius: 4,
+      backgroundColor: selected ? '#7aa2f7' : hov ? '#2a3048' : 'transparent',
+    },
+  },
+    React.createElement(Text, {
+      height: Math.round(fontSize * 1.4),
+      style: { color: selected ? '#171923' : '#cdd6f4', fontSize, textAlign: 'center' },
+    }, children)
+  );
+}
+
+// Small hoverable arrow button used in the calendar header.
+function _CalArrow({ onPress, children }) {
+  const [hov, setHov] = useState(false);
+  return React.createElement(Pressable, {
+    onPress, feedback: false,
+    onHoverIn: () => setHov(true), onHoverOut: () => setHov(false),
+    width: 28, height: 28,
+    style: { justifyContent: 'center', alignItems: 'center', borderRadius: 4, backgroundColor: hov ? '#2a3048' : 'transparent' },
+  }, React.createElement(Text, { height: 22, style: { color: '#7aa2f7', fontSize: 18 } }, children));
+}
+
 function _Calendar({ value, onSelect }) {
   const base = value ? new Date(value) : new Date();
   const [viewYear, setViewYear]   = useState(base.getFullYear());
   const [viewMonth, setViewMonth] = useState(base.getMonth());
+  // 'days' | 'months' | 'years'
+  const [mode, setMode] = useState('days');
+  // anchor year for the 12-year grid shown in year mode
+  const [yearBase, setYearBase] = useState(() => Math.floor(base.getFullYear() / 12) * 12);
 
   const monthNames = ['January','February','March','April','May','June',
                       'July','August','September','October','November','December'];
+  const monthShort = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const dayNames = ['Su','Mo','Tu','We','Th','Fr','Sa'];
 
   const firstDow    = new Date(viewYear, viewMonth, 1).getDay();
@@ -806,38 +852,103 @@ function _Calendar({ value, onSelect }) {
   const CELL_W = 36, CELL_H = 32, CAL_W = CELL_W * 7;
   const sel = value ? new Date(value) : null;
 
+  // --- header label hover ---
+  const [labelHov, setLabelHov] = useState(false);
+
+  // --- month picker grid ---
+  const renderMonths = () => {
+    const MCW = Math.floor(CAL_W / 3), MCH = 36;
+    const mrows = [[0,1,2],[3,4,5],[6,7,8],[9,10,11]];
+    return React.createElement(View, { width: CAL_W },
+      mrows.map((row, ri) => React.createElement(View, {
+        key: ri, width: CAL_W, height: MCH,
+        style: { flexDirection: 'row' },
+      },
+        row.map(m => React.createElement(_HoverCell, {
+          key: m, selected: m === viewMonth, onPress: () => { setViewMonth(m); setMode('days'); },
+          w: MCW, h: MCH, fontSize: 12,
+        }, monthShort[m]))
+      ))
+    );
+  };
+
+  // --- year picker grid (12 years) ---
+  const renderYears = () => {
+    const YCW = Math.floor(CAL_W / 4), YCH = 36;
+    const years = Array.from({ length: 12 }, (_, i) => yearBase + i);
+    const yrows = [[0,1,2,3],[4,5,6,7],[8,9,10,11]];
+    return React.createElement(View, { width: CAL_W },
+      yrows.map((row, ri) => React.createElement(View, {
+        key: ri, width: CAL_W, height: YCH,
+        style: { flexDirection: 'row' },
+      },
+        row.map(i => React.createElement(_HoverCell, {
+          key: i, selected: years[i] === viewYear, onPress: () => { setViewYear(years[i]); setMode('months'); },
+          w: YCW, h: YCH, fontSize: 12,
+        }, String(years[i])))
+      ))
+    );
+  };
+
+  const onPrev = () => {
+    if (mode === 'days') prevMonth();
+    else if (mode === 'months') setViewYear(y => y - 1);
+    else setYearBase(b => b - 12);
+  };
+  const onNext = () => {
+    if (mode === 'days') nextMonth();
+    else if (mode === 'months') setViewYear(y => y + 1);
+    else setYearBase(b => b + 12);
+  };
+
+  const headerLabel = mode === 'years'
+    ? `${yearBase} – ${yearBase + 11}`
+    : mode === 'months'
+    ? String(viewYear)
+    : `${monthNames[viewMonth]} ${viewYear}`;
+
   return React.createElement(View, {
     style: { backgroundColor: '#1e2235', borderRadius: 8, padding: 8, borderWidth: 1, borderColor: '#3c4464' },
   },
+    // header row
     React.createElement(View, {
       width: CAL_W, height: 28,
       style: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
     },
-      React.createElement(Pressable, { onPress: prevMonth, width: 28, height: 28, style: { justifyContent: 'center', alignItems: 'center' } },
-        React.createElement(Text, { height: 22, style: { color: '#7aa2f7', fontSize: 18 } }, '‹')),
-      React.createElement(Text, { height: 18, style: { color: '#cdd6f4', fontSize: 13 } }, `${monthNames[viewMonth]} ${viewYear}`),
-      React.createElement(Pressable, { onPress: nextMonth, width: 28, height: 28, style: { justifyContent: 'center', alignItems: 'center' } },
-        React.createElement(Text, { height: 22, style: { color: '#7aa2f7', fontSize: 18 } }, '›')),
+      React.createElement(_CalArrow, { onPress: onPrev }, '<'),
+      React.createElement(Pressable, {
+        feedback: false,
+        onHoverIn: () => setLabelHov(true), onHoverOut: () => setLabelHov(false),
+        onPress: () => setMode(m => m === 'days' ? 'months' : m === 'months' ? 'years' : 'days'),
+        style: { paddingHorizontal: 6, height: 24, justifyContent: 'center', alignItems: 'center', borderRadius: 4, backgroundColor: labelHov ? '#2a3048' : 'transparent' },
+      },
+        React.createElement(Text, { height: 18, style: { color: '#cdd6f4', fontSize: 13, textAlign: 'center' } }, headerLabel)
+      ),
+      React.createElement(_CalArrow, { onPress: onNext }, '>'),
     ),
-    React.createElement(View, { width: CAL_W, height: 20, style: { flexDirection: 'row', marginBottom: 2 } },
-      ...dayNames.map(d => React.createElement(View, { key: d, width: CELL_W, height: 20, style: { alignItems: 'center', justifyContent: 'center' } },
-        React.createElement(Text, { height: 14, style: { color: '#666', fontSize: 10, textAlign: 'center' } }, d))),
+    // body
+    mode === 'months' ? renderMonths() :
+    mode === 'years'  ? renderYears()  :
+    React.createElement(View, null,
+      React.createElement(View, { width: CAL_W, height: 20, style: { flexDirection: 'row', marginBottom: 2 } },
+        ...dayNames.map(d => React.createElement(View, { key: d, width: CELL_W, height: 20, style: { alignItems: 'center', justifyContent: 'center' } },
+          React.createElement(Text, { height: 14, style: { color: '#666', fontSize: 10, textAlign: 'center' } }, d))),
+      ),
+      ...rows.map((row, ri) => React.createElement(View, {
+        key: `${viewYear}-${viewMonth}-${ri}`, width: CAL_W, height: CELL_H, style: { flexDirection: 'row' },
+      },
+        ...row.map((day, ci) => {
+          if (day === null) return React.createElement(View, { key: `e${ci}`, width: CELL_W, height: CELL_H });
+          const isSel = sel && sel.getDate() === day && sel.getMonth() === viewMonth && sel.getFullYear() === viewYear;
+          return React.createElement(_HoverCell, {
+            key: ci,
+            selected: !!isSel,
+            onPress: () => onSelect(new Date(viewYear, viewMonth, day)),
+            w: CELL_W, h: CELL_H,
+          }, String(day));
+        }),
+      )),
     ),
-    ...rows.map((row, ri) => React.createElement(View, {
-      key: `${viewYear}-${viewMonth}-${ri}`, width: CAL_W, height: CELL_H, style: { flexDirection: 'row' },
-    },
-      ...row.map((day, ci) => {
-        if (day === null) return React.createElement(View, { key: `e${ci}`, width: CELL_W, height: CELL_H });
-        const isSel = sel && sel.getDate() === day && sel.getMonth() === viewMonth && sel.getFullYear() === viewYear;
-        return React.createElement(Pressable, {
-          key: ci,
-          onPress: () => onSelect(new Date(viewYear, viewMonth, day)),
-          width: CELL_W, height: CELL_H,
-          style: { alignItems: 'center', justifyContent: 'center', borderRadius: 4, backgroundColor: isSel ? '#7aa2f7' : 'transparent' },
-        },
-          React.createElement(Text, { height: 18, style: { color: isSel ? '#171923' : '#cdd6f4', fontSize: 13, textAlign: 'center' } }, String(day)));
-      }),
-    )),
   );
 }
 
@@ -894,5 +1005,204 @@ export function DatePicker({ value = null, onValueChange, disabled = false, styl
       React.createElement(Text, { height: 20, style: { color: value ? '#e7ecff' : '#9aa0b6', fontSize: 14 } }, dlabel),
       React.createElement(Text, { width: 16, height: 16, style: { color: '#7aa2f7', fontSize: 11 } }, open ? '▲' : '▼'),
     ),
+  );
+}
+
+// ── TimePicker / DateTimePicker ───────────────────────────────────────────────
+
+/** Format hour/minute for display: '14:05' (24h) or '2:05 PM' (12h). */
+function _fmtTime(hour, minute, use24) {
+  const mm = String(minute).padStart(2, '0');
+  if (use24) return `${String(hour).padStart(2, '0')}:${mm}`;
+  const h12 = hour % 12 === 0 ? 12 : hour % 12;
+  return `${h12}:${mm} ${hour < 12 ? 'AM' : 'PM'}`;
+}
+
+// Scrollable hour/minute (+ AM/PM) columns.  Selecting updates immediately;
+// the popover stays open so both parts can be set, backdrop click dismisses.
+function _TimeColumns({ hour, minute, use24, minuteStep, onChange }) {
+  const COL_H = 6 * 28;
+  const hours   = use24 ? Array.from({ length: 24 }, (_, i) => i)
+                        : Array.from({ length: 12 }, (_, i) => (i === 0 ? 12 : i));
+  const minutes = [];
+  for (let m = 0; m < 60; m += minuteStep) minutes.push(m);
+  const isPM  = hour >= 12;
+  const h12   = hour % 12 === 0 ? 12 : hour % 12;
+
+  const col = (items, isSel, pick, w) => React.createElement(ScrollView, {
+    height: COL_H, showScrollbar: false, style: { width: w },
+    contentHeight: items.length * 28,
+  }, ...items.map((it) => React.createElement(_HoverCell, {
+    key: String(it), selected: isSel(it), onPress: () => pick(it), w, h: 28,
+  }, String(it).padStart(2, '0'))));
+
+  return React.createElement(View, {
+    style: {
+      flexDirection: 'row', gap: 4, padding: 8,
+      backgroundColor: '#1e2235', borderRadius: 8, borderWidth: 1, borderColor: '#3c4464',
+    },
+  },
+    col(hours,   (h) => (use24 ? h === hour : h === h12),
+        (h) => onChange(use24 ? h : ((h % 12) + (isPM ? 12 : 0)), minute), 48),
+    col(minutes, (m) => m === minute, (m) => onChange(hour, m), 48),
+    !use24 && React.createElement(View, { style: { gap: 4 } },
+      React.createElement(_HoverCell, { selected: !isPM, onPress: () => onChange(hour % 12, minute), w: 44, h: 28 }, 'AM'),
+      React.createElement(_HoverCell, { selected:  isPM, onPress: () => onChange((hour % 12) + 12, minute), w: 44, h: 28 }, 'PM'),
+    ),
+  );
+}
+
+/**
+ * Time picker — floating hour/minute columns (AM/PM in 12-hour mode).
+ *
+ * @param {{ value?: string|null, onValueChange?: (hhmm: string) => void,
+ *           use24Hour?: boolean, minuteStep?: number,
+ *           disabled?: boolean, style?: object }} props
+ *   `value` is always the 24-hour string 'HH:MM' (display honors use24Hour).
+ */
+export function TimePicker({
+  value = null, onValueChange, use24Hour = false, minuteStep = 5,
+  disabled = false, style, ...rest
+}) {
+  const [open, setOpen] = React.useState(false);
+  const containerNodeId = useRef(null);
+  const popoverId = useRef(null);
+  const onContainerMount = useCallback((id) => { containerNodeId.current = id; }, []);
+
+  const [hh, mm] = (value || '').split(':').map(Number);
+  const hour   = Number.isFinite(hh) ? Math.max(0, Math.min(23, hh)) : 12;
+  const minute = Number.isFinite(mm) ? Math.max(0, Math.min(59, mm)) : 0;
+
+  const close = () => { if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; } };
+  const emit  = (h, m) => onValueChange?.(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
+
+  const toggle = () => {
+    if (disabled) return;
+    if (open) { close(); return; }
+    const l = (typeof __glyx_getLayout !== 'undefined') ? __glyx_getLayout(containerNodeId.current) : null;
+    if (!l) return;
+    setOpen(true);
+    popoverId.current = openPopover({
+      x: l.x, y: l.y, h: l.height,
+      width: (use24Hour ? 48 * 2 + 4 : 48 * 2 + 44 + 8) + 18,
+      contentH: 6 * 28 + 18,
+      onClose: () => { popoverId.current = null; setOpen(false); },
+      render: () => React.createElement(_TimeColumnsLive, {
+        initial: { hour, minute }, use24: use24Hour, minuteStep, onEmit: emit,
+      }),
+    });
+  };
+  useEffect(() => () => close(), []);
+
+  const label = value != null && value !== '' ? _fmtTime(hour, minute, use24Hour) : 'Select time…';
+
+  return React.createElement(View, {
+    _glyxOnMount: onContainerMount,
+    style: { alignSelf: 'flex-start', width: 160, ...style },
+    ...rest,
+  },
+    React.createElement(Pressable, {
+      onPress: toggle,
+      style: {
+        flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+        paddingLeft: 12, paddingRight: 10, height: 40, borderRadius: 8,
+        backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
+        borderWidth: 1, borderColor: open ? '#7aa2f7' : '#3c4464',
+      },
+    },
+      React.createElement(Text, { height: 20, style: { color: value ? '#e7ecff' : '#9aa0b6', fontSize: 14 } }, label),
+      React.createElement(Text, { width: 16, height: 16, style: { color: '#7aa2f7', fontSize: 11 } }, open ? '▲' : '▼'),
+    ),
+  );
+}
+
+// Popover-local state wrapper: cell clicks re-render the columns in place
+// (closure-snapshot columns couldn't update selection, same lesson as the
+// _Calendar arrows).
+function _TimeColumnsLive({ initial, use24, minuteStep, onEmit }) {
+  const [hour, setHour]     = useState(initial.hour);
+  const [minute, setMinute] = useState(initial.minute);
+  return React.createElement(_TimeColumns, {
+    hour, minute, use24, minuteStep,
+    onChange: (h, m) => { setHour(h); setMinute(m); onEmit(h, m); },
+  });
+}
+
+/**
+ * Combined date + time picker: calendar and time columns side by side.
+ *
+ * @param {{ value?: Date|string|null, onValueChange?: (d: Date) => void,
+ *           use24Hour?: boolean, minuteStep?: number,
+ *           disabled?: boolean, style?: object }} props
+ */
+export function DateTimePicker({
+  value = null, onValueChange, use24Hour = false, minuteStep = 5,
+  disabled = false, style, ...rest
+}) {
+  const [open, setOpen] = React.useState(false);
+  const containerNodeId = useRef(null);
+  const popoverId = useRef(null);
+  const onContainerMount = useCallback((id) => { containerNodeId.current = id; }, []);
+
+  const d = value ? new Date(value) : null;
+  const close = () => { if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; } };
+
+  const toggle = () => {
+    if (disabled) return;
+    if (open) { close(); return; }
+    const l = (typeof __glyx_getLayout !== 'undefined') ? __glyx_getLayout(containerNodeId.current) : null;
+    if (!l) return;
+    setOpen(true);
+    popoverId.current = openPopover({
+      x: l.x, y: l.y, h: l.height,
+      width: 36 * 7 + (use24Hour ? 48 * 2 + 4 : 48 * 2 + 44 + 8) + 34,
+      contentH: 8 + 28 + 22 + 6 * 32 + 8,
+      onClose: () => { popoverId.current = null; setOpen(false); },
+      render: () => React.createElement(_DateTimePanel, {
+        initial: d, use24: use24Hour, minuteStep,
+        onEmit: (nd) => onValueChange?.(nd),
+      }),
+    });
+  };
+  useEffect(() => () => close(), []);
+
+  const label = d
+    ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${_fmtTime(d.getHours(), d.getMinutes(), use24Hour)}`
+    : 'Select date & time…';
+
+  return React.createElement(View, {
+    _glyxOnMount: onContainerMount,
+    style: { alignSelf: 'flex-start', width: 280, ...style },
+    ...rest,
+  },
+    React.createElement(Pressable, {
+      onPress: toggle,
+      style: {
+        flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+        paddingLeft: 12, paddingRight: 10, height: 40, borderRadius: 8,
+        backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
+        borderWidth: 1, borderColor: open ? '#7aa2f7' : '#3c4464',
+      },
+    },
+      React.createElement(Text, { height: 20, style: { color: d ? '#e7ecff' : '#9aa0b6', fontSize: 14 } }, label),
+      React.createElement(Text, { width: 16, height: 16, style: { color: '#7aa2f7', fontSize: 11 } }, open ? '▲' : '▼'),
+    ),
+  );
+}
+
+function _DateTimePanel({ initial, use24, minuteStep, onEmit }) {
+  const [dt, setDt] = useState(initial || new Date());
+  const emit = (next) => { setDt(next); onEmit(next); };
+  return React.createElement(View, { style: { flexDirection: 'row', gap: 6, alignItems: 'flex-start' } },
+    React.createElement(_Calendar, {
+      value: dt,
+      onSelect: (day) => emit(new Date(
+        day.getFullYear(), day.getMonth(), day.getDate(), dt.getHours(), dt.getMinutes())),
+    }),
+    React.createElement(_TimeColumns, {
+      hour: dt.getHours(), minute: dt.getMinutes(), use24, minuteStep,
+      onChange: (h, m) => emit(new Date(
+        dt.getFullYear(), dt.getMonth(), dt.getDate(), h, m)),
+    }),
   );
 }

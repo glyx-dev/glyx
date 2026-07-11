@@ -110,7 +110,26 @@ export interface DevConfig {
   inspect?: boolean | number;
 }
 
+export interface AppConfig {
+  /** Publisher / company name. Used in installer metadata (NSIS, DMG). */
+  publisher?:   string;
+  /** Short description of the app. Shown in installer and OS app listings. */
+  description?: string;
+  /** App website URL, e.g. 'https://myapp.com'. Embedded in installer metadata. */
+  website?:     string;
+  /** Path to a license file (relative to project root), e.g. 'LICENSE.txt'.
+   *  Included in the installation directory. */
+  license?:     string;
+}
+
 export interface GlyxConfig {
+  /** Machine-readable app identifier. Used as the binary filename, installer slug,
+   *  and bundle ID. No spaces — use hyphens, e.g. 'my-notes'. */
+  name?:         string;
+  /** App version string, e.g. '1.2.0'. Exposed via updater.getVersion(). */
+  version?:      string;
+  /** Installer and store metadata (publisher, description, website, license). */
+  app?:          AppConfig;
   window?:       WindowConfig;
   capabilities?: Capabilities;
   dev?:          DevConfig;
@@ -121,8 +140,8 @@ export interface GlyxConfig {
   /** JS plugin extensions. Each plugin's exported async functions are
    *  callable via backend.<name>.<fn>() from JS. */
   plugins?:      PluginConfig[];
-  /** App version string, e.g. '1.2.0'. Exposed via updater.getVersion(). */
-  version?:      string;
+  /** Preferred package manager. Auto-detected from lockfile when omitted. */
+  packageManager?: 'npm' | 'pnpm' | 'yarn' | 'bun';
 }
 
 /**

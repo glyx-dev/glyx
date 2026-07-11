@@ -466,9 +466,20 @@ fn relpath(from_dir: &Path, to: &Path) -> String {
 }
 
 /// Read the project name.
-/// Tries Cargo.toml first (native projects), then package.json (JS-only projects).
+/// Priority: glyx.config.ts `name` → Cargo.toml `name` → package.json `name`.
+/// glyx.config.ts is the canonical source; the others are fallbacks so existing
+/// projects without a config `name` continue to work.
 fn read_project_name() -> Option<String> {
-    // 1. Cargo.toml (native projects)
+    // 1. glyx.config.ts `name` field (canonical)
+    if let Ok(src) = resolve_config_json() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&src) {
+            if let Some(name) = v["name"].as_str() {
+                let name = name.trim();
+                if !name.is_empty() { return Some(name.to_string()); }
+            }
+        }
+    }
+    // 2. Cargo.toml (native projects — fallback)
     if let Ok(src) = std::fs::read_to_string("Cargo.toml") {
         for line in src.lines() {
             let line = line.trim();
@@ -480,7 +491,7 @@ fn read_project_name() -> Option<String> {
             }
         }
     }
-    // 2. package.json (JS-only projects)
+    // 3. package.json (JS-only projects — fallback)
     if let Ok(src) = std::fs::read_to_string("package.json") {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&src) {
             if let Some(name) = v["name"].as_str() {
@@ -537,20 +548,22 @@ struct AppMeta {
 fn read_app_metadata() -> AppMeta {
     #[derive(serde::Deserialize, Default)]
     struct AppSection {
-        version:     Option<String>,
         publisher:   Option<String>,
         description: Option<String>,
         website:     Option<String>,
         license:     Option<String>,
     }
     #[derive(serde::Deserialize, Default)]
-    struct Cfg { app: Option<AppSection> }
+    struct Cfg {
+        version: Option<String>,
+        app:     Option<AppSection>,
+    }
 
-    let src  = resolve_config_json().unwrap_or_default();
+    let src = resolve_config_json().unwrap_or_default();
     let cfg: Cfg = serde_json::from_str(&src).unwrap_or_default();
     let a = cfg.app.unwrap_or_default();
     AppMeta {
-        version:     a.version.unwrap_or_else(|| "1.0.0".into()),
+        version:     cfg.version.unwrap_or_else(|| "1.0.0".into()),
         publisher:   a.publisher.unwrap_or_default(),
         description: a.description.unwrap_or_default(),
         website:     a.website.unwrap_or_default(),

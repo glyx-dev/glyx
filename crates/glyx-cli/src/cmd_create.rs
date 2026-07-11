@@ -436,11 +436,13 @@ pub(super) fn glyx_config_ts_js_template(name: &str) -> String {
     format!(r#"import {{ defineConfig }} from '@glyx/config';
 
 export default defineConfig({{
+  name:    '{name}',
+  version: '1.0.0',
   app: {{
-    version:     '1.0.0',
-    publisher:   '',        // Company or author name (used in installer)
-    description: '',        // Short app description
-    website:     '',        // https://yoursite.com
+    publisher:   '{name}',              // Company or author name (used in installer)
+    description: 'A {name} app.',      // Short app description
+    website:     'https://example.com', // https://yoursite.com
+    license:     'LICENSE.txt',
   }},
   window: {{
     title:       '{name}',
@@ -528,11 +530,13 @@ pub(super) fn glyx_config_ts_native_template(name: &str) -> String {
     format!(r#"import {{ defineConfig }} from '@glyx/config';
 
 export default defineConfig({{
+  name:    '{name}',
+  version: '1.0.0',
   app: {{
-    version:     '1.0.0',
-    publisher:   '',        // Company or author name (used in installer)
-    description: '',        // Short app description
-    website:     '',        // https://yoursite.com
+    publisher:   '{name}',              // Company or author name (used in installer)
+    description: 'A {name} app.',      // Short app description
+    website:     'https://example.com', // https://yoursite.com
+    license:     'LICENSE.txt',
   }},
   window: {{
     title:       '{name}',

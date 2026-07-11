@@ -8,13 +8,45 @@
   "properties": {
     "name": {
       "type": "string",
-      "description": "Application name used in build output and packaging.",
-      "examples": ["my-app"]
+      "description": "Machine-readable app identifier. Used as the binary filename, installer slug, and bundle ID. No spaces — use hyphens. This is the canonical name source for glyx package and glyx build; Cargo.toml and package.json names are fallbacks for projects that omit this field.",
+      "examples": ["my-notes", "acme-dashboard"]
     },
     "version": {
       "type": "string",
-      "description": "Semver version string.",
+      "description": "Semver version string. Exposed via updater.getVersion() and embedded in installer metadata.",
       "examples": ["1.0.0"]
+    },
+    "app": {
+      "type": "object",
+      "description": "Installer and store metadata used by glyx package when generating NSIS, DMG, and AppImage installers.",
+      "additionalProperties": false,
+      "properties": {
+        "publisher": {
+          "type": "string",
+          "description": "Company or author name shown in installer and OS app listings.",
+          "examples": ["Acme Corp"]
+        },
+        "description": {
+          "type": "string",
+          "description": "Short description of the app.",
+          "examples": ["A fast, native notes app."]
+        },
+        "website": {
+          "type": "string",
+          "description": "App website URL embedded in installer metadata.",
+          "examples": ["https://myapp.com"]
+        },
+        "license": {
+          "type": "string",
+          "description": "Path to a license file relative to the project root. Copied into the install directory.",
+          "examples": ["LICENSE.txt"]
+        }
+      }
+    },
+    "packageManager": {
+      "type": "string",
+      "enum": ["npm", "pnpm", "yarn", "bun"],
+      "description": "Override the package manager used by the CLI. Auto-detected from lockfile when omitted."
     },
     "window": {
       "type": "object",

@@ -146,6 +146,11 @@ impl ByteBudgetImageCache {
 /// Per-window rendering + runtime state.
 pub(super) struct PerWindowState {
     pub(super) gpu:          Present,
+    /// Window handle — needed to lazily create a wgpu context when a
+    /// Canvas3D node first appears under the soft present path.
+    pub(super) window:       Arc<winit::window::Window>,
+    /// Set after a failed soft→wgpu upgrade so we only log the error once.
+    pub(super) gpu_upgrade_failed: bool,
     pub(super) renderer:     AnyRenderer,
     pub(super) text_sys:     TextSystem,
     pub(super) layout:       LayoutTree,

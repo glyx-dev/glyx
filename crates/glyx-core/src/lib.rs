@@ -1119,6 +1119,8 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 let ws = PerWindowState {
                     gpu:          present,
+                    window:       Arc::clone(&window),
+                    gpu_upgrade_failed: false,
                     renderer,
                     text_sys:     TextSystem::new(),
                     layout:       LayoutTree::new(),
@@ -1681,6 +1683,41 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 // (overlay timer reschedule moved to before the blit-only fast path above)
 
+                // ── Lazy soft→wgpu upgrade for Canvas3D ──────────────────────
+                // 2D-only apps never create a wgpu device (35 MB baseline);
+                // the first Canvas3D node pays the GPU cost on demand, once.
+                #[cfg(feature = "canvas3d")]
+                if !canvas3d_overlays.is_empty()
+                    && matches!(s.gpu, Present::Soft(_))
+                    && !s.gpu_upgrade_failed
+                {
+                    log::info!("Canvas3D node detected — initialising wgpu present path.");
+                    match pollster::block_on(GpuContext::new(Arc::clone(&s.window))) {
+                        Ok(gpu_ctx) => match AnyRenderer::new(&gpu_ctx, BackendKind::TinySkia) {
+                            Ok(mut r) => {
+                                r.set_background_color(rgba_to_vello(window_bg));
+                                s.renderer = r;
+                                s.gpu = Present::Gpu(gpu_ctx);
+                                s.pipeline_cache_saved = false;
+                                // This frame was rasterized for the soft path;
+                                // discard it and re-render through wgpu.  The
+                                // frame owns the old renderer's shared state,
+                                // which dies with the replaced renderer.
+                                (s.request_redraw)();
+                                return;
+                            }
+                            Err(e) => {
+                                s.gpu_upgrade_failed = true;
+                                log::error!("Canvas3D wgpu upgrade failed (renderer): {e}");
+                            }
+                        },
+                        Err(e) => {
+                            s.gpu_upgrade_failed = true;
+                            log::error!("Canvas3D wgpu upgrade failed (GPU): {e}");
+                        }
+                    }
+                }
+
                 let gpu_start = Instant::now();
                 match &mut s.gpu {
                     Present::Gpu(gpu) => {
@@ -1742,10 +1779,9 @@ pub fn run(mut config: AppConfig) -> bool {
                         // the window via the OS software surface.  No wgpu.
                         #[cfg(feature = "canvas3d")]
                         if !canvas3d_overlays.is_empty() {
-                            log::warn!(
-                                "Canvas3D requires the GPU present path; set \
-                                 GLYX_NO_SOFT_PRESENT=1 or renderMode other than skia."
-                            );
+                            // Only reachable when the automatic wgpu upgrade
+                            // above failed (gpu_upgrade_failed set, logged once).
+                            log::debug!("Canvas3D overlays skipped: wgpu unavailable.");
                         }
                         match (&mut s.renderer, frame) {
                             (glyx_renderer::AnyRenderer::TinySkia(r),

@@ -1,0 +1,16 @@
+[package]
+name    = "model-viewer"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# "dev" gates hot-reload, bun watcher, and dev overlay in glyx-core.
+# Production builds (glyx build) use --no-default-features to exclude them.
+default = ["dev"]
+dev     = ["glyx-core/dev"]
+
+[dependencies]
+# canvas3d: this example's whole purpose is the 3D viewer.
+glyx-core  = { path = "../../crates/glyx-core", default-features = false, features = ["canvas3d"] }
+glyx-shell = { path = "../../crates/glyx-shell" }
+env_logger  = "0.11"

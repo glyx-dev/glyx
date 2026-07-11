@@ -1,0 +1,14 @@
+{
+  "name": "model-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "react":          "^18",
+    "@glyx/react":   "file:../../js/packages/@glyx/react",
+    "@glyx/router":  "file:../../js/packages/@glyx/router",
+    "@glyx/design":  "file:../../js/packages/@glyx/design"
+  },
+  "devDependencies": {
+    "@glyx/config": "file:../../js/packages/@glyx/config"
+  }
+}

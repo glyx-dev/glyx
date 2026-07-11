@@ -58,11 +58,20 @@ if (typeof setInterval === 'undefined') {
     _prevDrain?.();
     if (_pendingIntervals.size === 0) return;
     const now = performance.now();
+    let earliest = Infinity;
     for (const [, t] of _pendingIntervals) {
       if (now >= t.nextDue) {
         t.nextDue = now + t.ms;
         t.fn();
       }
+      if (t.nextDue < earliest) earliest = t.nextDue;
+    }
+    // Re-arm the native wakeup for the next due interval.  Without this,
+    // intervals fire once and then only tick when something else (input,
+    // a setTimeout) happens to cause a frame — animations stall unless
+    // the user keeps moving the mouse.
+    if (earliest < Infinity && typeof __glyx_request_frame !== 'undefined') {
+      __glyx_request_frame(Math.max(0, earliest - performance.now()));
     }
   };
 }

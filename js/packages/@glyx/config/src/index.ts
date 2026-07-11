@@ -28,11 +28,27 @@ export interface WindowConfig {
   background?:  string;
   /**
    * Rendering backend.
-   * - 'gpu'  — GPU compute via wgpu (default, best performance).
-   * - 'cpu'  — Vello's built-in CPU path; runs without a discrete GPU.
-   * Can also be forced at runtime via GLYX_CPU_RENDER=1.
+   * - 'auto'    — pick per machine (default): tiny-skia on integrated/no GPU
+   *               (software present, no wgpu), Vello on discrete GPUs.
+   * - 'skia'    — tiny-skia CPU rasterizer + OS software present (~35 MB RSS).
+   * - 'femtovg' — OpenGL tessellation renderer.
+   * - 'gpu'     — Vello GPU compute via wgpu (best visual quality; required
+   *               up-front for Canvas3D-heavy apps, though Canvas3D also
+   *               upgrades automatically from 'skia'/'auto').
+   * - 'cpu'     — Vello's built-in CPU path.
+   * TinySkia can also be forced at runtime via GLYX_CPU_RENDER=1.
    */
-  renderMode?:  'gpu' | 'cpu';
+  renderMode?:  'auto' | 'skia' | 'femtovg' | 'gpu' | 'cpu';
+  /** V8 heap cap in MB (16–512). Default: auto from bundle size. */
+  maxJsHeapMb?: number;
+  /**
+   * When true, `glyxWindow.create({ title })` for a title that is already
+   * open focuses the existing window and returns its handle instead of
+   * opening a twin.  Per-call `allowDuplicate: true` bypasses this, and an
+   * explicit per-call `key` dedupes regardless of this flag.  Child windows
+   * with distinct titles are never affected.
+   */
+  preventDuplicateWindows?: boolean;
 }
 
 export interface FsCapability {

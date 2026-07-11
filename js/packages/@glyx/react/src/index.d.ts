@@ -68,14 +68,27 @@ export interface ScrollViewProps {
 }
 
 export interface TextInputProps {
-  value?:        string;
-  onChangeText?: (text: string) => void;
-  placeholder?:  string;
-  fontSize?:     number;
-  multiline?:    boolean;
-  width?:        number;
-  height?:       number;
-  style?:        GlyxStyle;
+  value?:           string;
+  onChangeText?:    (text: string) => void;
+  /** Called when Enter is pressed in a single-line field. */
+  onSubmitEditing?: (text: string) => void;
+  placeholder?:     string;
+  fontSize?:        number;
+  multiline?:       boolean;
+  width?:           number;
+  /** Explicit height. Multiline default: auto-sized between minLines/maxLines. */
+  height?:          number;
+  /** Hard character limit — insertions beyond it are truncated. */
+  maxLength?:       number;
+  /** Multiline auto-height floor in lines (default 3). */
+  minLines?:        number;
+  /** Multiline auto-height ceiling in lines (default 10); grows with content between the two. */
+  maxLines?:        number;
+  /** Mask every character (password entry). */
+  secureTextEntry?: boolean;
+  /** Input filter: 'numeric' = integers, 'decimal' = numbers with one dot. */
+  keyboardType?:    'default' | 'numeric' | 'decimal';
+  style?:           GlyxStyle;
 }
 
 export declare const View:       React.FC<ViewProps>;
@@ -84,6 +97,10 @@ export declare const Image:      React.FC<ImageProps>;
 export declare const Pressable:  React.FC<PressableProps>;
 export declare const ScrollView: React.FC<ScrollViewProps>;
 export declare const TextInput:  React.FC<TextInputProps>;
+/** Single-line TextInput with secureTextEntry forced on. */
+export declare const PasswordInput: React.FC<Omit<TextInputProps, 'secureTextEntry' | 'multiline'>>;
+/** Single-line TextInput accepting only numbers (keyboardType defaults to 'decimal'). */
+export declare const NumericInput:  React.FC<Omit<TextInputProps, 'multiline'>>;
 
 export declare function render(element: React.ReactElement): void;
 
@@ -129,4 +146,30 @@ export declare const glyxWindow: {
   getWindowSize(): { width: number; height: number };
   /** Current monitor size in physical pixels. */
   getScreenSize(): { width: number; height: number };
+  /**
+   * Open a secondary (child) window.  Resolves with a handle whose `send()`
+   * posts IPC messages to it.
+   *
+   * Duplicate prevention: with `window.preventDuplicateWindows` enabled in
+   * glyx.config.ts, creating a window whose `title` matches one already open
+   * focuses the existing window and resolves with ITS handle instead of
+   * opening a twin.  `allowDuplicate: true` bypasses that; an explicit `key`
+   * dedupes on the key regardless of the config flag.  Windows with distinct
+   * titles/keys are never deduped.
+   */
+  create(opts?: {
+    title?: string;
+    width?: number;
+    height?: number;
+    /** Explicit dedupe key — at most one window per key. */
+    key?: string;
+    /** Opt out of config-level title dedupe for this call. */
+    allowDuplicate?: boolean;
+  }): Promise<{ readonly id: number; send(msg: unknown): void }>;
+  /** Quit the application — closes all windows. */
+  quit(): void;
+  /** Quit then relaunch the same executable. */
+  restart(): void;
+  /** Close this window. */
+  close(): void;
 };

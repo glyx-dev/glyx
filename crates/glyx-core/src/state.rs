@@ -185,6 +185,9 @@ pub(super) struct PerWindowState {
     pub(super) cursor_blink_on:       bool,
     pub(super) cursor_blink_deadline: Instant,
     pub(super) cursor_was_active: bool,
+    /// Screen rect of the focused TextInput (captured during render) — the
+    /// damage region for blink-only frames under software present.
+    pub(super) cursor_node_rect: Option<(f64, f64, f64, f64)>,
     /// Sender to the persistent blink-timer thread (spawned lazily on first
     /// focused TextInput). Sending a deadline schedules one redraw at that
     /// instant; newer deadlines received while waiting replace the pending one.

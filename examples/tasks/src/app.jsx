@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 import {
-  View, Text, ScrollView, render, db, useWindowSize,
+  View, Text, ScrollView, render, db, useWindowSize, DatePicker,
 } from '@glyx/react';
 import { Router, Route, useNavigate, useRoute } from '@glyx/router';
 import {
@@ -136,7 +136,18 @@ function EditScreen() {
             <Text style={{ color: C.textMuted, fontSize: 13, fontWeight: '500' }}>Priority</Text>
             <Tabs items={PRIORITIES.map((p) => ({ key: p, label: p }))} value={priority} onChange={setPriority} />
           </View>
-          <TextField label="Due date" value={due} onChangeText={setDue} placeholder="e.g. 2026-07-20" />
+          <View style={{ gap: 8 }}>
+            <Text style={{ color: C.textMuted, fontSize: 13, fontWeight: '500' }}>Due date</Text>
+            <DatePicker
+              value={due || null}
+              onValueChange={(d) => {
+                const y = d.getFullYear();
+                const m = String(d.getMonth() + 1).padStart(2, '0');
+                const day = String(d.getDate()).padStart(2, '0');
+                setDue(`${y}-${m}-${day}`);
+              }}
+            />
+          </View>
           <Button label="Save" variant="primary" onPress={save} style={{ alignSelf: 'flex-start' }} />
         </View>
       </ScrollView>

@@ -21,6 +21,10 @@ pub(crate) struct RenderCtx<'a> {
     pub video_streams: &'a std::collections::HashMap<u32, VideoStream>,
     pub cursor_blink_on: bool,
     pub any_cursor_active: &'a mut bool,
+    /// Screen rect (scroll-applied) of the focused TextInput drawing the caret.
+    /// Written every frame the caret is active; read by the NEXT frame's damage
+    /// computation so blink-only frames repaint just this rect.
+    pub cursor_node_rect: &'a mut Option<(f64, f64, f64, f64)>,
     /// Set of node IDs that must be redrawn this frame (dirty_nodes + ancestors + descendants).
     /// An **empty** set means "render everything" (first frame / full invalidation).
     /// A **non-empty** set activates clean-subtree skipping via the scene cache.
@@ -409,9 +413,21 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             let bold   = node.props.font_weight.as_deref() == Some("bold");
             let italic = node.props.font_style.as_deref()  == Some("italic");
             let underline = node.props.text_decoration_line.as_deref() == Some("underline");
-            // +1px guards against Taffy rounding shaving a sub-pixel off the
-            // measured width and wrapping the last word of an auto-sized Text.
-            let max_width  = (rw as f32).max(1.0) + 1.0;
+            // Single-line input text (marked by textScrollX) must NEVER wrap:
+            // it's shaped unbounded and panned left by text_scroll_x, with the
+            // container clipping the overflow.  Shaping at the node width made
+            // long input text wrap like a textarea and threw off caret math
+            // (measure_to_cursor walks wrapped lines).  1e6 matches the JS
+            // side's __glyx_measure_text(…, 1e6) caret measurements.
+            //
+            // For normal Text, +1px guards against Taffy rounding shaving a
+            // sub-pixel off the measured width and wrapping the last word.
+            let single_line = node.props.text_scroll_x.is_some();
+            let max_width = if single_line {
+                1e6_f32
+            } else {
+                (rw as f32).max(1.0) + 1.0
+            };
             // CSS default is left; center/right are opt-in via `textAlign`.
             let align = node.props.text_align.as_deref();
             let show_cursor     = node.props.show_cursor.unwrap_or(false);
@@ -483,6 +499,9 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             // 3. Blinking cursor line — uses same metrics as selection highlight.
             if show_cursor {
                 *ctx.any_cursor_active = true;
+                // Whole node rect (not just the caret line): erases the caret's
+                // previous x-position too when the damage path repaints it.
+                *ctx.cursor_node_rect = Some((rx, ry, rw, rh));
                 if ctx.cursor_blink_on {
                     let cx = if let Some(cp) = cursor_position {
                         let char_count = text.chars().count();

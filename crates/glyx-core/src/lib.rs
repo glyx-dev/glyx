@@ -911,6 +911,23 @@ pub fn run(mut config: AppConfig) -> bool {
                     Some(Arc::clone(&restart_fn)),
                 );
 
+                // Register in the window registry so duplicate-create calls
+                // can find and focus this window.  The key for windows created
+                // via glyxWindow.create was reserved by the binding; for the
+                // main window the title is used (only matters when the
+                // preventDuplicateWindows config is on).
+                {
+                    let wf = Arc::clone(&window);
+                    glyx_runtime::window_registry_attach(
+                        window_handle,
+                        window.title(),
+                        Arc::new(move || {
+                            wf.set_minimized(false);
+                            wf.focus_window();
+                        }),
+                    );
+                }
+
                 let ipc_clone  = Arc::clone(&ipc_bus);
                 let nwid       = Arc::clone(&next_window_id);
                 // Create the shared perf Arc BEFORE the runtime so both
@@ -1150,6 +1167,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     cursor_blink_on:       true,
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
                     cursor_was_active:     false,
+                    cursor_node_rect:      None,
                     cursor_blink_tx:       None,
                     perf:          shared_perf,
                     rss_bytes:     {
@@ -1629,10 +1647,15 @@ pub fn run(mut config: AppConfig) -> bool {
                 s.renderer.notify_resize(s.gpu.width().max(1), s.gpu.height().max(1));
 
                 // ── Damage computation (soft present + TinySkia only) ─────────
-                // Redraw + push only the changed region.  Full frame when:
-                // the cursor blinked (cursor node isn't in dirty_nodes), the
+                // Redraw + push only the changed region.  Full frame when the
                 // splash is up, a dev-overlay refresh is due (overlay draws on
                 // top of arbitrary content), or the damage analysis bails.
+                //
+                // Caret blink: the caret isn't in dirty_nodes (it's render-side
+                // state), so blink frames contribute the focused TextInput's
+                // rect — captured during the previous render — to the damage
+                // union.  An idle focused editor repaints one input at 2 Hz,
+                // not the whole window.
                 let frame_damage: Option<(f64, f64, f64, f64)> = {
                     let soft = matches!(s.gpu, Present::Soft(_));
                     let splash_up = s.splash_state.as_ref().map_or(false, |sp| sp.is_visible());
@@ -1641,10 +1664,49 @@ pub fn run(mut config: AppConfig) -> bool {
                         .map_or(false, |d| d.overlay_visible || d.last_js_error.is_some());
                     #[cfg(not(feature = "dev"))]
                     let overlay_up = false;
-                    if soft && !blink_changed && !splash_up && !overlay_up {
-                        scene::compute_frame_damage(s)
-                    } else {
+
+                    if !soft || splash_up || overlay_up {
                         None
+                    } else {
+                        // Dirty-node contribution: empty set → no rect;
+                        // non-empty → union rect, or bail (full frame).
+                        let dirty_damage: Option<Option<(f64, f64, f64, f64)>> =
+                            if s.dirty_nodes.is_empty() {
+                                Some(None)
+                            } else {
+                                match scene::compute_frame_damage(s) {
+                                    Some(d) => Some(Some(d)),
+                                    None    => None, // bail → full
+                                }
+                            };
+                        match dirty_damage {
+                            None => None,
+                            Some(dd) => {
+                                if blink_changed {
+                                    match s.cursor_node_rect {
+                                        // Pad matches compute_frame_damage's AA slack.
+                                        Some((cx, cy, cw, ch)) => {
+                                            let cr = (cx - 4.0, cy - 4.0, cw + 8.0, ch + 8.0);
+                                            Some(match dd {
+                                                None => cr,
+                                                Some((dx, dy, dw, dh)) => {
+                                                    let l = dx.min(cr.0);
+                                                    let t = dy.min(cr.1);
+                                                    let r = (dx + dw).max(cr.0 + cr.2);
+                                                    let b = (dy + dh).max(cr.1 + cr.3);
+                                                    (l, t, r - l, b - t)
+                                                }
+                                            })
+                                        }
+                                        // Caret position unknown (first blink
+                                        // before any render) → full frame.
+                                        None => None,
+                                    }
+                                } else {
+                                    dd
+                                }
+                            }
+                        }
                     }
                 };
 
@@ -1678,6 +1740,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         video_streams:     &s.video_streams,
                         cursor_blink_on:   s.cursor_blink_on,
                         any_cursor_active: &mut any_cursor_active,
+                        cursor_node_rect:  &mut s.cursor_node_rect,
                         dirty_subtrees:      &s.dirty_subtrees,
                         scene_cache:         &mut s.scene_cache,
                         scene_cache_new:     &mut s.scene_cache_new,
@@ -2076,6 +2139,8 @@ pub fn run(mut config: AppConfig) -> bool {
                 if let Some(s) = windows.get(&window_handle) {
                     s.runtime.shutdown_db_pools();
                 }
+                // Free the dedupe slot so the window can be reopened.
+                glyx_runtime::window_registry_remove(window_handle);
                 windows.remove(&window_handle);
             }
         }

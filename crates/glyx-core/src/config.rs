@@ -65,6 +65,11 @@ pub(super) struct WindowCfgJson {
     pub(super) render_mode:  Option<String>,
     #[serde(rename = "maxJsHeapMb")]
     pub(super) max_js_heap_mb: Option<u32>,
+    /// When true, `glyxWindow.create` with a title matching an open window
+    /// focuses that window instead of opening a twin.  Per-call
+    /// `allowDuplicate: true` or an explicit `key` override this.
+    #[serde(rename = "preventDuplicateWindows")]
+    pub(super) prevent_duplicate_windows: Option<bool>,
 }
 
 // ── Functions ─────────────────────────────────────────────────────────────────
@@ -283,6 +288,10 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
 
         if let Some(mb) = w.max_js_heap_mb {
             cfg.max_js_heap_mb = Some(mb.clamp(16, 512));
+        }
+
+        if let Some(on) = w.prevent_duplicate_windows {
+            glyx_runtime::set_prevent_duplicate_windows(on);
         }
     }
 

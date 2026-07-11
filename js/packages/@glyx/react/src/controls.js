@@ -20,13 +20,22 @@ export function TextInput({
   fontSize = 16,
   multiline = false,
   width  = 240,
-  height = 44,
+  height,                    // default: 44 single-line; auto-sized multiline
+  maxLength,                 // hard character limit (insertions truncated)
+  minLines,                  // multiline auto-height floor  (default 3)
+  maxLines,                  // multiline auto-height ceiling (default 10)
+  secureTextEntry = false,   // mask characters (password fields)
+  keyboardType = 'default',  // 'default' | 'numeric' | 'decimal'
   style,
   ...props
 }) {
   const nodeIdRef   = useRef(null);
   const handlersRef = useRef(null);
   const [focused, setFocused] = useState(false);
+  // Live layout width of the field — flex/stretch styles routinely make the
+  // real node wider than the `width` prop (which defaults to 240), so text
+  // wrapping, panning, and auto-height must all use the measured value.
+  const [measuredW, setMeasuredW] = useState(0);
 
   // anchor: fixed end of selection; focus_: moving cursor end.
   // When anchor === focus_: no selection, cursor blinks at that position.
@@ -38,6 +47,10 @@ export function TextInput({
   // Derived selection range (always ordered).
   const selStart = Math.min(anchor, focus_);
   const selEnd   = Math.max(anchor, focus_);
+
+  // Text as rendered: masked for password fields (same char count as value,
+  // so cursor indices line up), raw otherwise.
+  const renderValue = secureTextEntry ? '•'.repeat([...value].length) : value;
 
   // Collapse cursor to `pos`, clamped to [0, value.length].
   const moveCursor = (pos) => {
@@ -51,22 +64,80 @@ export function TextInput({
     setFocus_(Math.max(0, Math.min(pos, value.length)));
   };
 
+  // Central commit point for every text mutation: applies the keyboardType
+  // filter and maxLength cap, then emits + positions the cursor.
+  const commit = (next, newPos) => {
+    if (keyboardType === 'numeric' && !/^-?\d*$/.test(next)) return;
+    if (keyboardType === 'decimal' && !/^-?\d*\.?\d*$/.test(next)) return;
+    if (maxLength != null && next.length > maxLength) {
+      next = next.slice(0, maxLength);
+    }
+    onChangeText?.(next);
+    const pos = Math.max(0, Math.min(newPos, next.length));
+    setAnchor(pos);
+    setFocus_(pos);
+  };
+
+  // Measure the field's real layout width — runs after every render with an
+  // equality guard, so it converges instead of looping.  Covers mount,
+  // window resize, and flex reflow.
+  useEffect(() => {
+    const id = nodeIdRef.current;
+    if (id == null || typeof __glyx_getLayout === 'undefined') return;
+    try {
+      const l = __glyx_getLayout(id);
+      if (l && l.width > 0 && Math.abs(l.width - measuredW) > 1) {
+        setMeasuredW(l.width);
+      }
+    } catch (_) {}
+  });
+
+  const innerPadding = multiline ? 10 : 8;
+  const fieldW = measuredW || (typeof width === 'number' ? width : 240);
+  const innerW = Math.max(1, fieldW - innerPadding * 2);
+
   // Recompute horizontal scroll offset so the caret stays visible.
   // Only applies to single-line mode (multiline scrolls vertically via ScrollView).
   useEffect(() => {
     if (multiline) return;
     if (typeof __glyx_measure_text === 'undefined') return;
-    const visibleW   = (typeof width === 'number' ? width : 240) - (multiline ? 10 : 8) * 2;
-    const caretX     = __glyx_measure_text(value.slice(0, focus_), fontSize, 1e6).width;
+    const visibleW   = innerW;
+    const caretX     = __glyx_measure_text(renderValue.slice(0, focus_), fontSize, 1e6).width;
+    const textW      = __glyx_measure_text(renderValue, fontSize, 1e6).width;
     let sx = scrollXRef.current;
     if (caretX - sx > visibleW) sx = caretX - visibleW;
     if (caretX - sx < 0)        sx = caretX;
+    // Pan back right when text shrinks (deletion): never leave blank space
+    // on the right while text is clipped on the left.
+    sx = Math.min(sx, Math.max(0, textW - visibleW));
     sx = Math.max(0, sx);
     if (sx !== scrollXRef.current) {
       scrollXRef.current = sx;
       setScrollX(sx);
     }
-  }, [focus_, value, fontSize, width, multiline]);
+  }, [focus_, renderValue, fontSize, innerW, multiline]);
+
+  // Multiline auto-height: count rendered lines (explicit '\n' plus soft
+  // wraps at the real field width) and size the box between minLines and
+  // maxLines.  An explicit `height` prop opts out.
+  const lineH = fontSize * 1.4;
+  let autoHeight;
+  if (multiline && height == null) {
+    const lo = Math.max(1, minLines ?? 3);
+    const hi = Math.max(lo, maxLines ?? 10);
+    let lineCount = 0;
+    if (typeof __glyx_measure_text !== 'undefined' && innerW > 1) {
+      for (const line of renderValue.split('\n')) {
+        const w = line ? __glyx_measure_text(line, fontSize, 1e6).width : 0;
+        lineCount += Math.max(1, Math.ceil(w / innerW));
+      }
+    } else {
+      lineCount = renderValue.split('\n').length;
+    }
+    const lines = Math.max(lo, Math.min(hi, Math.max(1, lineCount)));
+    autoHeight = Math.ceil(lines * lineH) + innerPadding * 2 + 4;
+  }
+  const resolvedHeight = height ?? (multiline ? autoHeight : 44);
 
   // Keep handlersRef current so it always captures the latest state/props.
   handlersRef.current = {
@@ -97,19 +168,13 @@ export function TextInput({
         } else if (key === 'KeyX') {
           if (hasSel) {
             try { await clipboard.writeText(value.slice(ss, se)); } catch (_) {}
-            const newVal = value.slice(0, ss) + value.slice(se);
-            onChangeText?.(newVal);
-            moveCursor(ss);
+            commit(value.slice(0, ss) + value.slice(se), ss);
           }
         } else if (key === 'KeyV') {
           try {
             const pasted = await clipboard.readText();
             if (pasted) {
-              const newVal = value.slice(0, ss) + pasted + value.slice(se);
-              onChangeText?.(newVal);
-              const newPos = ss + pasted.length;
-              setAnchor(newPos);
-              setFocus_(newPos);
+              commit(value.slice(0, ss) + pasted + value.slice(se), ss + pasted.length);
             }
           } catch (_) {}
         }
@@ -170,26 +235,22 @@ export function TextInput({
       // ── Delete / Backspace ──────────────────────────────────────────────
       if (key === 'Backspace') {
         if (hasSel) {
-          onChangeText?.(value.slice(0, ss) + value.slice(se));
-          moveCursor(ss);
+          commit(value.slice(0, ss) + value.slice(se), ss);
         } else if (anchor > 0) {
           // Spread to handle multi-byte Unicode correctly.
           const chars = [...value];
           chars.splice(anchor - 1, 1);
-          onChangeText?.(chars.join(''));
-          moveCursor(anchor - 1);
+          commit(chars.join(''), anchor - 1);
         }
         return;
       }
       if (key === 'Delete') {
         if (hasSel) {
-          onChangeText?.(value.slice(0, ss) + value.slice(se));
-          moveCursor(ss);
+          commit(value.slice(0, ss) + value.slice(se), ss);
         } else if (anchor < value.length) {
           const chars = [...value];
           chars.splice(anchor, 1);
-          onChangeText?.(chars.join(''));
-          // cursor stays at same position
+          commit(chars.join(''), anchor);   // cursor stays put
         }
         return;
       }
@@ -197,24 +258,18 @@ export function TextInput({
       // ── Enter (multiline only) ──────────────────────────────────────────
       if (key === 'Enter') {
         if (multiline) {
-          const newVal = value.slice(0, ss) + '\n' + value.slice(se);
-          onChangeText?.(newVal);
-          const newPos = ss + 1;
-          setAnchor(newPos);
-          setFocus_(newPos);
+          commit(value.slice(0, ss) + '\n' + value.slice(se), ss + 1);
+        } else {
+          onSubmitEditing?.(value);
         }
         return;
       }
 
       // ── Printable character ─────────────────────────────────────────────
       if (text) {
-        const newVal = value.slice(0, ss) + text + value.slice(se);
-        onChangeText?.(newVal);
-        // Do NOT use moveCursor() here — it clamps to the old value.length,
-        // which is 0 when typing the first character into an empty field.
-        const newPos = ss + text.length;
-        setAnchor(newPos);
-        setFocus_(newPos);
+        // commit() clamps the cursor to the NEW value's length, so typing the
+        // first character into an empty field positions correctly.
+        commit(value.slice(0, ss) + text + value.slice(se), ss + text.length);
       }
     },
     onClickAt: (relX, relY) => {
@@ -225,7 +280,7 @@ export function TextInput({
         // Multiline: find line by Y, then char by X within that line.
         const lineHeight = fontSize * 1.4;
         const lineIdx    = Math.max(0, Math.floor((relY - padding) / lineHeight));
-        const lines      = value.split('\n');
+        const lines      = renderValue.split('\n');
         const clampedLine = Math.min(lineIdx, lines.length - 1);
         const lineText   = lines[clampedLine];
         const col = (typeof __glyx_text_char_at_x !== 'undefined')
@@ -236,11 +291,12 @@ export function TextInput({
         moveCursor(pos + col);
       } else {
         // Single-line: add scrollX offset so click maps to the correct character
-        // even when the text is shifted left.
+        // even when the text is shifted left.  Measured against renderValue so
+        // masked (password) glyph widths line up with what's on screen.
         const localX = Math.max(0, textX) + scrollXRef.current;
         const col = (typeof __glyx_text_char_at_x !== 'undefined')
-          ? __glyx_text_char_at_x(value, fontSize, 1e6, localX)
-          : Math.max(0, Math.min(Math.round(localX / (fontSize * 0.55)), value.length));
+          ? __glyx_text_char_at_x(renderValue, fontSize, 1e6, localX)
+          : Math.max(0, Math.min(Math.round(localX / (fontSize * 0.55)), renderValue.length));
         moveCursor(col);
       }
     },
@@ -264,10 +320,10 @@ export function TextInput({
     };
   }, []);
 
-  // Show placeholder only when unfocused and value is empty.
-  const displayText  = (focused || value) ? value : placeholder;
+  // Show placeholder only when unfocused and value is empty (masked for
+  // password fields so the real text never renders).
+  const displayText  = (focused || value) ? renderValue : placeholder;
   const textColor    = value ? '#ffffff' : '#888888';
-  const innerPadding = multiline ? 10 : 8;
 
   const inputStyle = {
     backgroundColor: focused ? '#4a4a7e' : '#2a2a3e',
@@ -283,12 +339,13 @@ export function TextInput({
 
   return React.createElement(
     'view',
-    { _glyxOnMount: onMount, style: inputStyle, width, height, ...props },
+    { _glyxOnMount: onMount, style: inputStyle, width, height: resolvedHeight, ...props },
     React.createElement('text', {
       text:           displayText,
       fontSize,
-      width:          width - innerPadding * 2,
-      height:         multiline ? undefined : height - innerPadding * 2,
+      // Wrap (multiline) at the REAL measured width, not the 240 prop default.
+      width:          innerW,
+      height:         multiline ? undefined : resolvedHeight - innerPadding * 2,
       style:          { color: textColor },
       showCursor:     focused,
       cursorPosition: focused ? focus_ : undefined,
@@ -298,6 +355,23 @@ export function TextInput({
       textScrollX:    multiline ? undefined : scrollX,
     })
   );
+}
+
+/**
+ * Password field — a single-line TextInput that masks every character.
+ * All TextInput props apply (maxLength, onSubmitEditing, …).
+ */
+export function PasswordInput(props) {
+  return React.createElement(TextInput, { ...props, secureTextEntry: true, multiline: false });
+}
+
+/**
+ * Numeric field — a single-line TextInput that only accepts numbers.
+ * `keyboardType` defaults to `'decimal'` (digits, one dot, leading minus);
+ * pass `keyboardType: 'numeric'` for integers only.
+ */
+export function NumericInput(props) {
+  return React.createElement(TextInput, { keyboardType: 'decimal', ...props, multiline: false });
 }
 
 // ── Form field components ─────────────────────────────────────────────────────

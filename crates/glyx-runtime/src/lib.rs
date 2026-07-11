@@ -30,6 +30,81 @@ pub use glyx_macros::{glyx_plugin, glyx_command};
 use std::sync::Once;
 use thiserror::Error;
 
+// ── Window registry (duplicate-window prevention) ────────────────────────────
+//
+// Process-wide map of open windows: handle → (dedupe key, focus closure).
+// Populated by the `__glyx_window_create` binding (key reservation, closes the
+// create→WindowReady race) and by glyx-core on WindowReady (focus closure);
+// entries are removed on window close.
+//
+// Dedupe fires only when a create call resolves to a non-empty key:
+// an explicit `key` in the create opts, or — when the app-level
+// `preventDuplicateWindows` config is on — the window title.  Calls with
+// `allowDuplicate: true`, and apps without the flag, are never deduped, so
+// ordinary multi-window / child-window use is unaffected.
+
+use std::collections::HashMap as WinRegMap;
+use std::sync::{Arc as WinRegArc, Mutex as WinRegMutex, OnceLock as WinRegOnce,
+                atomic::{AtomicBool, Ordering as WinRegOrdering}};
+
+struct WindowRegEntry {
+    key:   String,
+    focus: Option<WinRegArc<dyn Fn() + Send + Sync>>,
+}
+
+static WINDOW_REGISTRY: WinRegOnce<WinRegMutex<WinRegMap<u32, WindowRegEntry>>> = WinRegOnce::new();
+static PREVENT_DUPLICATE_WINDOWS: AtomicBool = AtomicBool::new(false);
+
+fn window_registry() -> &'static WinRegMutex<WinRegMap<u32, WindowRegEntry>> {
+    WINDOW_REGISTRY.get_or_init(|| WinRegMutex::new(WinRegMap::new()))
+}
+
+/// Enable/disable title-based dedupe app-wide (from `window.preventDuplicateWindows`).
+pub fn set_prevent_duplicate_windows(on: bool) {
+    PREVENT_DUPLICATE_WINDOWS.store(on, WinRegOrdering::Relaxed);
+}
+
+/// Whether title-based dedupe is enabled app-wide.
+pub fn prevent_duplicate_windows() -> bool {
+    PREVENT_DUPLICATE_WINDOWS.load(WinRegOrdering::Relaxed)
+}
+
+/// Reserve a registry slot for a window being created (before it exists).
+/// An empty `key` means the window never participates in dedupe.
+pub fn window_registry_reserve(id: u32, key: String) {
+    window_registry().lock().unwrap().insert(id, WindowRegEntry { key, focus: None });
+}
+
+/// Attach the focus closure once the real window exists (WindowReady).
+/// Creates the entry if the window wasn't reserved (e.g. the main window);
+/// `key_if_new` is used only in that case.
+pub fn window_registry_attach(id: u32, key_if_new: String,
+                              focus: WinRegArc<dyn Fn() + Send + Sync>) {
+    let mut reg = window_registry().lock().unwrap();
+    match reg.get_mut(&id) {
+        Some(e) => e.focus = Some(focus),
+        None => { reg.insert(id, WindowRegEntry { key: key_if_new, focus: Some(focus) }); }
+    }
+}
+
+/// Remove a window from the registry (window closed).
+pub fn window_registry_remove(id: u32) {
+    window_registry().lock().unwrap().remove(&id);
+}
+
+/// Find an open window by dedupe key and focus it.  Returns its handle.
+pub fn window_registry_find_and_focus(key: &str) -> Option<u32> {
+    if key.is_empty() { return None; }
+    let reg = window_registry().lock().unwrap();
+    for (&id, e) in reg.iter() {
+        if e.key == key {
+            if let Some(f) = &e.focus { f(); }
+            return Some(id);
+        }
+    }
+    None
+}
+
 pub mod bindings;
 pub mod cap_loader;
 pub mod runtime;

@@ -499,8 +499,34 @@ pub fn window_create_callback(
     let width  = opts.get("width") .and_then(|v| v.as_u64()).unwrap_or(800) as u32;
     let height = opts.get("height").and_then(|v| v.as_u64()).unwrap_or(600) as u32;
 
+    // ── Duplicate-window prevention (opt-in) ─────────────────────────────
+    // Dedupe key: explicit `key` in opts wins; otherwise the title when the
+    // app-level `preventDuplicateWindows` config is enabled.  Neither set →
+    // empty key → never dedupes (normal child-window behavior).
+    // `allowDuplicate: true` bypasses the config-level title dedupe.
+    let allow_dup = opts.get("allowDuplicate").and_then(|v| v.as_bool()).unwrap_or(false);
+    let dedupe_key = match opts.get("key").and_then(|v| v.as_str()) {
+        Some(k) if !k.is_empty() => k.to_string(),
+        _ if crate::prevent_duplicate_windows() && !allow_dup => title.clone(),
+        _ => String::new(),
+    };
+    if let Some(existing) = crate::window_registry_find_and_focus(&dedupe_key) {
+        log::info!("glyxWindow.create: '{dedupe_key}' already open (handle {existing}) — focusing it.");
+        let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
+        rv.set(promise.into());
+        enqueue_completion(&queue_clone, redraw.as_ref(), Completion {
+            resolver_ptr: resolver,
+            result:       Ok(existing.to_string()),
+        });
+        return;
+    }
+
     // Allocate a globally-unique handle (shared across all windows' runtimes).
     let new_id = state.next_window_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    // Reserve the dedupe key immediately so a second create call racing ahead
+    // of WindowReady still hits the registry.
+    crate::window_registry_reserve(new_id, dedupe_key);
 
     // Pre-register an inbox in the IPC bus so messages can be queued before
     // the secondary window's runtime starts polling.

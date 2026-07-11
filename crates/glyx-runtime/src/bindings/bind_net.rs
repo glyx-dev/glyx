@@ -45,6 +45,7 @@ pub fn extract_host(url: &str) -> String {
 /// - `fc00::/7`       -- IPv6 unique-local
 /// - `fe80::/10`      -- IPv6 link-local
 /// - `"localhost"`, `"*.local"`, `"*.internal"`, `"*.localhost"` hostnames
+#[allow(dead_code)]
 fn is_private_host(host: &str) -> bool {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return match ip {
@@ -72,6 +73,7 @@ fn is_private_host(host: &str) -> bool {
 }
 
 /// Scheme allowlist for fetch -- only `http://` and `https://`.
+#[allow(dead_code)]
 fn check_fetch_scheme(url: &str) -> Result<(), String> {
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("https://") || lower.starts_with("http://") {
@@ -83,6 +85,7 @@ fn check_fetch_scheme(url: &str) -> Result<(), String> {
 }
 
 /// Scheme allowlist for WebSocket -- only `ws://` and `wss://`.
+#[allow(dead_code)]
 fn check_ws_scheme(url: &str) -> Result<(), String> {
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("wss://") || lower.starts_with("ws://") {

@@ -4,6 +4,7 @@ use crate::layout::layout_props_changed;
 
 /// Locate the ffmpeg binary.
 /// Priority: `FFMPEG_PATH` env var → ffmpeg-sidecar (dev) → common install locations → PATH.
+#[cfg(feature = "camera")]
 fn find_ffmpeg() -> String {
     // 1. Explicit override.
     if let Ok(p) = std::env::var("FFMPEG_PATH") {
@@ -144,7 +145,7 @@ fn load_image_from_path(path: &str, width: Option<f32>, height: Option<f32>) -> 
 }
 
 /// Decode a `%xx` percent-encoded string (output of JS `encodeURIComponent`).
-fn percent_decode(s: &str) -> std::borrow::Cow<str> {
+fn percent_decode(s: &str) -> std::borrow::Cow<'_, str> {
     if !s.contains('%') { return std::borrow::Cow::Borrowed(s); }
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(s.len());

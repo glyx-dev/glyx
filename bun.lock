@@ -17,6 +17,7 @@
         "@glyx/keychain": "workspace:*",
         "@glyx/markdown": "workspace:*",
         "@glyx/react": "workspace:*",
+        "@glyx/rich-text": "workspace:*",
         "@glyx/router": "workspace:*",
         "@glyx/split-pane": "workspace:*",
         "@glyx/store": "workspace:*",
@@ -92,6 +93,14 @@
         "react": "^18.2.0",
       },
     },
+    "js/packages/@glyx/icons": {
+      "name": "@glyx/icons",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@glyx/react": "*",
+        "react": "*",
+      },
+    },
     "js/packages/@glyx/keychain": {
       "name": "@glyx/keychain",
       "version": "0.1.0",
@@ -113,6 +122,14 @@
       "peerDependencies": {
         "react": "^18.2.0",
         "react-reconciler": "^0.29.0",
+      },
+    },
+    "js/packages/@glyx/rich-text": {
+      "name": "@glyx/rich-text",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@glyx/react": "*",
+        "react": "*",
       },
     },
     "js/packages/@glyx/router": {
@@ -152,6 +169,7 @@
       "peerDependencies": {
         "react": ">=18",
         "react-dom": ">=18",
+        "react-reconciler": ">=0.29",
       },
     },
     "js/packages/@glyx/three": {
@@ -182,11 +200,15 @@
 
     "@glyx/form": ["@glyx/form@workspace:js/packages/@glyx/form"],
 
+    "@glyx/icons": ["@glyx/icons@workspace:js/packages/@glyx/icons"],
+
     "@glyx/keychain": ["@glyx/keychain@workspace:js/packages/@glyx/keychain"],
 
     "@glyx/markdown": ["@glyx/markdown@workspace:js/packages/@glyx/markdown"],
 
     "@glyx/react": ["@glyx/react@workspace:js/packages/@glyx/react"],
+
+    "@glyx/rich-text": ["@glyx/rich-text@workspace:js/packages/@glyx/rich-text"],
 
     "@glyx/router": ["@glyx/router@workspace:js/packages/@glyx/router"],
 

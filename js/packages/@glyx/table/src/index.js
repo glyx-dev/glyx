@@ -10,8 +10,6 @@
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { View, Text, Pressable, VirtualizedList, measureText, useDraggable } from '@glyx/react';
 
-const { useState, useMemo, useCallback, useEffect } = React;
-
 const HEADER_FS = 12;
 const CELL_FS   = 13;
 

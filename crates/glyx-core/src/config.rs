@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use glyx_renderer::peniko;
-use glyx_runtime::{JsPlugin, JsPlugins};
+use glyx_runtime::JsPlugin;
 use glyx_security::Capabilities;
 
 use crate::{DevModeConfig, WindowConfig, SplashState, StartupMode, RenderMode};

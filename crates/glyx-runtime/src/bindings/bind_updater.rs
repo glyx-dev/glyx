@@ -13,12 +13,16 @@ use super::*;
 // Set in glyx.config: updater: { owner, repo, binName }
 // The CLI sets GLYX_UPDATE_OWNER / GLYX_UPDATE_REPO / GLYX_UPDATE_BIN_NAME.
 
+#[allow(dead_code)]
 const UPDATE_OWNER:    Option<&str> = option_env!("GLYX_UPDATE_OWNER");
+#[allow(dead_code)]
 const UPDATE_REPO:     Option<&str> = option_env!("GLYX_UPDATE_REPO");
+#[allow(dead_code)]
 const UPDATE_BIN_NAME: Option<&str> = option_env!("GLYX_UPDATE_BIN_NAME");
 
 /// Fail fast at runtime if the origin constants were not baked in at build
 /// time and return a user-visible error string.
+#[allow(dead_code)]
 fn update_origin() -> Result<(&'static str, &'static str, &'static str), String> {
     match (UPDATE_OWNER, UPDATE_REPO, UPDATE_BIN_NAME) {
         (Some(o), Some(r), Some(b)) => Ok((o, r, b)),

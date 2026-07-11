@@ -45,6 +45,7 @@
     "@glyx/markdown":     "workspace:*",
     "@glyx/split-pane":   "workspace:*",
     "@glyx/table":        "workspace:*",
+    "@glyx/icons":        "workspace:*",
     "@glyx/rich-text":    "workspace:*",
     "drizzle-orm": "^0.36.4",
     "react": "^18.2.0",

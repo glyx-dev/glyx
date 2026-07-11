@@ -2,7 +2,9 @@
 
 #[cfg(feature = "dev")]
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+#[cfg(feature = "dev")]
 use std::sync::Arc;
+#[cfg(feature = "dev")]
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "dev")]
@@ -10,12 +12,16 @@ use notify::{RecursiveMode, Watcher};
 #[cfg(feature = "dev")]
 use std::process::Command;
 
+#[cfg(feature = "dev")]
 use glyx_renderer::{peniko, AnyFrame};
 
 #[cfg(feature = "dev")]
-use crate::state::{DevBuildEvent, DevModeState};
+use crate::state::DevBuildEvent;
+#[cfg(feature = "dev")]
 use crate::state::PerWindowState;
+#[cfg(feature = "dev")]
 use crate::DevModeConfig;
+#[cfg(feature = "dev")]
 use crate::scene::apply_scene_commands;
 
 #[cfg(feature = "dev")]
@@ -43,8 +49,6 @@ pub(super) fn start_dev_mode_worker(
     config:  Option<DevModeConfig>,
     plugins: glyx_runtime::JsPlugins,
 ) -> Option<Receiver<DevBuildEvent>> {
-    use std::path::PathBuf;
-
     let config = config.or_else(dev_mode_config_from_env)?;
     let cwd = if config.project_root.is_absolute() {
         config.project_root.clone()

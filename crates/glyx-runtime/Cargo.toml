@@ -57,7 +57,7 @@ notify             = { workspace = true }
 [features]
 default = ["v8"]
 v8 = []       # V8 backend (current only backend; rusty_v8 dep is always required for now)
-dev = []      # dev overlay, hot-reload, CDP inspector
+dev = ["websocket"]      # dev overlay, hot-reload, CDP inspector (needs WS transport)
 full     = ["audio", "gamepad", "canvas3d", "ai", "hid", "updater", "fetch", "websocket"]
 fetch     = ["dep:reqwest"]
 websocket = ["dep:tokio-tungstenite", "dep:futures-util"]

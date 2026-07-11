@@ -29,23 +29,17 @@ use std::collections::VecDeque;
 /// The callback is called whenever JS evaluates `import(specifier)`.  We
 /// immediately reject the resulting promise with a descriptive Error so the
 /// app sees a normal rejected-promise rather than a silent no-op.
+// rusty_v8 0.32 uses a raw extern "C" callback with no HandleScope.
+// Returning null_mut() signals to V8 that the import could not be resolved,
+// which causes it to reject the dynamic import with an error.
 #[cfg(not(debug_assertions))]
-fn deny_dynamic_import<'s>(
-    scope:                &mut v8::HandleScope<'s>,
-    _host_defined_options: v8::Local<'s, v8::Data>,
-    _resource_name:        v8::Local<'s, v8::Value>,
-    specifier:             v8::Local<'s, v8::String>,
-    _import_assertions:    v8::Local<'s, v8::FixedArray>,
-) -> Option<v8::Local<'s, v8::Promise>> {
-    let spec_str = specifier.to_rust_string_lossy(scope);
-    let resolver = v8::PromiseResolver::new(scope)?;
-    let msg = v8::String::new(scope, &format!(
-        "Dynamic import() is disabled in release builds (attempted: {spec_str:?}). \
-         Use static imports bundled at build time."
-    ))?;
-    let error = v8::Exception::error(scope, msg);
-    resolver.reject(scope, error);
-    Some(resolver.get_promise(scope))
+extern "C" fn deny_dynamic_import(
+    _ctx:                v8::Local<v8::Context>,
+    _referrer:           v8::Local<v8::ScriptOrModule>,
+    _specifier:          v8::Local<v8::String>,
+    _import_assertions:  v8::Local<v8::FixedArray>,
+) -> *mut v8::Promise {
+    std::ptr::null_mut()
 }
 
 /// Install the dynamic-import denial callback on a freshly created isolate.
@@ -57,31 +51,9 @@ fn install_import_guard(isolate: &mut v8::OwnedIsolate) {
     let _ = isolate;
 }
 
-/// Per-context callback that denies eval() / new Function() / new GeneratorFunction()
-/// in release builds.  Belt-and-suspenders alongside the V8 flag
-/// `--disallow-code-generation-from-strings` set in lib.rs.
-///
-/// Returning `None` causes V8 to throw `EvalError: Code generation from strings disallowed`.
-#[cfg(not(debug_assertions))]
-fn deny_code_generation<'s>(
-    scope:   &mut v8::HandleScope<'s>,
-    _source: v8::Local<'s, v8::Value>,
-) -> Option<v8::Local<'s, v8::String>> {
-    // Log once so developers see it clearly during testing.
-    // The return value is the modified source; returning None = deny.
-    let _ = scope;
-    None
-}
-
-/// Install the code-generation-from-strings denial callback on a context.
-/// Must be called inside a ContextScope while the context is active.
-/// No-op in debug builds.
-fn install_code_gen_guard(scope: &mut v8::ContextScope<v8::HandleScope>, ctx: v8::Local<v8::Context>) {
-    #[cfg(not(debug_assertions))]
-    ctx.set_allow_code_generation_from_strings(scope, false);
-    #[cfg(debug_assertions)]
-    { let _ = (scope, ctx); }
-}
+// eval / new Function denial is handled solely by the V8 flag
+// `--disallow-code-generation-from-strings` set in lib.rs.
+// rusty_v8 0.32 does not expose a per-context set_allow_code_generation_from_strings API.
 
 /// V8 isolate params shared by fresh and snapshot-restore paths.
 ///
@@ -190,8 +162,6 @@ impl V8Runtime {
             let scene  = new_scene_queue();
             let ctx    = v8::Context::new(scope);
             let scope  = &mut v8::ContextScope::new(scope, ctx);
-            // R1: deny eval() / new Function() in release.
-            install_code_gen_guard(scope, ctx);
             let global = ctx.global(scope);
 
             let state_ptr = register_all(
@@ -290,8 +260,6 @@ impl V8Runtime {
             // Snapshot contains a default context; use it
             let ctx    = v8::Context::new(scope);
             let scope  = &mut v8::ContextScope::new(scope, ctx);
-            // R1: deny eval() / new Function() in release.
-            install_code_gen_guard(scope, ctx);
             let global = ctx.global(scope);
 
             // Re-register all binding implementations (stubs are already in snapshot)

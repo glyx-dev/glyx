@@ -67,7 +67,7 @@ use glyx_runtime::{
 };
 
 pub use glyx_runtime::GlyxExtension;
-use glyx_security::{self, Capabilities};
+use glyx_security;
 use glyx_media;
 use glyx_shell::{ShellEvent, GlyxUserEvent};
 use glyx_text::{TextLayout, TextSystem};
@@ -91,6 +91,7 @@ mod render;
 
 use self::config::*;
 use self::state::*;
+#[cfg(feature = "dev")]
 use self::dev_mode::*;
 #[cfg(feature = "dev")]
 use arboard;
@@ -969,7 +970,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         // F1: Build SD before spawning to avoid holding *mut c_void across await.
                         // Transmit as usize (Send); valid for the lifetime of sd_guard below.
                         #[cfg(target_os = "windows")]
-                        let (sd_guard, sd_ptr_usize) = {
+                        let (_sd_guard, sd_ptr_usize) = {
                             let g = pipe_dacl::current_user_only_sd();
                             let p = g.as_ref().map(|sd| sd.ptr as usize).unwrap_or(0);
                             (g, p)
@@ -1384,6 +1385,8 @@ pub fn run(mut config: AppConfig) -> bool {
                 let js_start = Instant::now();
                 let frame_tick_err = s.runtime.frame_tick();
                 let js_time_ms = js_start.elapsed().as_secs_f64() * 1000.0;
+                #[cfg(not(feature = "dev"))]
+                let _ = frame_tick_err;
 
                 // In dev mode, surface JS exceptions as a visual overlay.
                 #[cfg(feature = "dev")]
@@ -1503,7 +1506,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     scene_needs_gpu || overlay_refresh_due
                 };
                 #[cfg(not(feature = "dev"))]
-                let needs_full_render = true; // always true here (early return above)
+                let _needs_full_render = true;
 
                 // 7. Acquire swapchain texture.
                 let texture = match s.gpu.current_texture() {

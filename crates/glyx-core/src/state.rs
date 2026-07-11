@@ -102,6 +102,7 @@ impl ByteBudgetImageCache {
         self.inner.put(key, img);
     }
 
+    #[allow(dead_code)]
     pub(super) fn len(&self) -> usize { self.inner.len() }
     pub(super) fn clear(&mut self) { self.inner.clear(); self.total_bytes = 0; }
 }

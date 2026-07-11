@@ -1133,7 +1133,7 @@ struct AsyncState {
     #[cfg(feature = "audio")]
     audio_trackers: Arc<Mutex<HashMap<u32, AudioTracker>>>,
     //  Camera €€€
-    /// Handle ID counter. CameraStream lives in glyx-core; we only track IDs here.
+    #[allow(dead_code)] // used when camera feature is enabled
     next_camera_id: std::sync::atomic::AtomicU32,
     //  Video player €€€
     /// Handle ID counter. VideoStream lives in glyx-core; we only track IDs here.

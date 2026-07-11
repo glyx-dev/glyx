@@ -182,6 +182,9 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
         .format_module_path(false)
+        .filter_module("wgpu_core", log::LevelFilter::Warn)
+        .filter_module("wgpu_hal",  log::LevelFilter::Warn)
+        .filter_module("naga",      log::LevelFilter::Warn)
         .init();
 
     // Check for a staged JS-only update before loading the normal bundle.

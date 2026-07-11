@@ -153,7 +153,10 @@ export interface GlyxConfig {
  *
  * @returns The config object (identical to input — useful for type inference).
  */
-export function defineConfig(config: GlyxConfig): GlyxConfig {
+export function defineConfig(config: GlyxConfig): never {
   console.log(JSON.stringify(config));
-  return config;
+  // Exit immediately so bun (v1.1+) does not treat the default-exported object
+  // as a server config and attempt to call Bun.serve() on it.
+  ;(globalThis as any).process?.exit(0) ?? (globalThis as any).Bun?.exit(0);
+  throw new Error('unreachable');
 }

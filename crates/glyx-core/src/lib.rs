@@ -648,7 +648,9 @@ pub fn run(mut config: AppConfig) -> bool {
     if let Ok(rust_log) = std::env::var("RUST_LOG") {
         log_builder.parse_filters(&rust_log);
     }
-    log_builder.init();
+    // try_init silently skips if a logger is already registered (e.g. glyx-runner
+    // calls env_logger::init() before invoking glyx_core::run()).
+    let _ = log_builder.try_init();
 
     // Load .env from the working directory (or any parent) if one exists.
     match dotenvy::dotenv() {

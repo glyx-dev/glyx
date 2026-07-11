@@ -196,8 +196,7 @@ export function useDraggable(handlers) {
 export function ScrollView({
   children,
   style,
-  width        = 300,
-  height       = 200,
+  height,               // layout height — only set if you need a fixed height
   contentHeight,        // explicit content height override (more reliable than auto-detect)
   showScrollbar   = true,
   scrollbarWidth  = 8,
@@ -220,9 +219,9 @@ export function ScrollView({
                      + 2 * padding;
   const resolvedContentH = contentHeight ?? autoContentH;
 
-  // Always keep maxScrollRef current so the stable `onScroll` callback reads
-  // the latest cap without needing to be re-registered on each render.
-  maxScrollRef.current = Math.max(0, resolvedContentH - height);
+  // Height for scroll cap: explicit prop > style.height > 0 (uncapped).
+  const viewH = height ?? (style && style.height) ?? 0;
+  maxScrollRef.current = Math.max(0, resolvedContentH - viewH);
 
   // ── Stable scroll handler ───────────────────────────────────────────────────
   // Empty dep array → created once, re-registered never.
@@ -255,7 +254,7 @@ export function ScrollView({
     // Items stack from top: prevents Taffy centering overflowing content
     // above the viewport origin, which would make early items invisible.
     justifyContent: 'flex-start',
-    alignItems:     'flex-start',
+    alignItems:     'stretch',
     // Rust: push Vello clip layer + shift children by scrollOffsetY.
     clip:           true,
     scrollOffsetY:  scrollY,
@@ -266,9 +265,11 @@ export function ScrollView({
     ...style,
   };
 
+  const finalStyle = height != null ? { ...viewStyle, height } : viewStyle;
+
   return React.createElement(
     'view',
-    { _glyxOnMount: onMount, style: viewStyle, width, height, ...props },
+    { _glyxOnMount: onMount, style: finalStyle, ...props },
     children,
   );
 }

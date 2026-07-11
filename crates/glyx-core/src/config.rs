@@ -71,30 +71,57 @@ pub(super) struct WindowCfgJson {
 
 /// Read the project config as a JSON string.
 pub(super) fn read_config_json() -> Option<String> {
+    // 1. Embedded at build time (snapshot / prod runner with appended payload).
     if let Some(embedded) = super::EMBEDDED_CONFIG {
         return Some(embedded.to_string());
     }
+
+    // 2. Pre-resolved by the CLI and passed via env var — avoids the runner
+    //    needing to re-run the config script with a hardcoded PM (bun).
+    //    glyx-cli resolves glyx.config.ts using the detected package manager
+    //    and sets this before spawning the runner.
+    if let Ok(json) = std::env::var("GLYX_CONFIG_JSON") {
+        let trimmed = json.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+
+    // 3. Fallback: execute glyx.config.ts directly (standalone / native projects
+    //    where the runner is launched without the CLI, e.g. cargo run).
+    //    Uses `bun <file>` — NOT `bun run <file>` which triggers bun's server
+    //    detection heuristic on default-exported objects.
+    //    Falls back to `npx tsx` for non-bun environments.
     if std::path::Path::new("glyx.config.ts").exists() {
-        let result = if cfg!(target_os = "windows") {
-            std::process::Command::new("cmd")
-                .args(["/C", "bun", "run", "glyx.config.ts"])
-                .output()
-        } else {
-            std::process::Command::new("bun")
-                .args(["run", "glyx.config.ts"])
-                .output()
-        };
-        if let Ok(out) = result {
-            if out.status.success() {
-                if let Ok(json) = String::from_utf8(out.stdout) {
-                    let trimmed = json.trim().to_string();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed);
+        let attempts: &[&[&str]] = &[
+            &["bun", "glyx.config.ts"],
+            &["npx", "tsx", "glyx.config.ts"],
+        ];
+        for args in attempts {
+            let result = if cfg!(target_os = "windows") {
+                let mut cmd = std::process::Command::new("cmd");
+                cmd.arg("/C");
+                for a in *args { cmd.arg(a); }
+                cmd.output()
+            } else {
+                let mut cmd = std::process::Command::new(args[0]);
+                for a in &args[1..] { cmd.arg(a); }
+                cmd.output()
+            };
+            if let Ok(out) = result {
+                if out.status.success() {
+                    if let Ok(json) = String::from_utf8(out.stdout) {
+                        let trimmed = json.trim().to_string();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed);
+                        }
                     }
                 }
             }
         }
     }
+
+    // 4. Plain JSON config (no TypeScript, no bundler needed).
     std::fs::read_to_string("glyx.config.json").ok()
 }
 

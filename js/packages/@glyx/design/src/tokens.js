@@ -54,11 +54,11 @@ export const tokens = {
   colors: {
     // Core
     bg:          _latte.base,
-    surface:     _latte.mantle,
-    surfaceRaised: _latte.crust,
+    surface:     _latte.surface0,
+    surfaceRaised: _latte.surface1,
     text:        _latte.text,
-    textMuted:   _latte.subtext0,
-    textDisabled: _latte.overlay2,
+    textMuted:   _latte.subtext1,
+    textDisabled: _latte.overlay1,
     border:      _latte.surface2,
     borderFocus: _latte.blue,
 
@@ -145,12 +145,12 @@ export const tokens = {
 export const darkTokens = {
   colors: {
     bg:          _mocha.base,
-    surface:     _mocha.mantle,
-    surfaceRaised: _mocha.crust,
+    surface:     _mocha.surface0,
+    surfaceRaised: _mocha.surface1,
     text:        _mocha.text,
-    textMuted:   _mocha.subtext0,
-    textDisabled: _mocha.overlay2,
-    border:      _mocha.surface2,
+    textMuted:   _mocha.subtext1,
+    textDisabled: _mocha.overlay1,
+    border:      _mocha.surface1,
     borderFocus: _mocha.blue,
 
     primary:     _mocha.blue,

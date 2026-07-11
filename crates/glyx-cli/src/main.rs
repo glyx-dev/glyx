@@ -272,7 +272,11 @@ enum RuntimeCommands {
     /// List cached glyx-runner binaries with their sizes and locations
     List,
     /// Build both runners (dev + prod) from source and cache them in ~/.glyx/runners/
-    Build,
+    Build {
+        /// Delete any cached runner binaries before building, forcing a clean rebuild.
+        #[arg(long)]
+        force: bool,
+    },
     /// Install a specific glyx-runner version.
     /// Currently builds from source; prebuilt downloads are planned.
     Install {
@@ -505,11 +509,9 @@ fn read_project_name() -> Option<String> {
 /// Resolve the project config to a JSON string.
 fn resolve_config_json() -> Result<String> {
     if Path::new("glyx.config.ts").exists() {
-        // Use the PM-agnostic run helper if a PM is already detected; otherwise
-        // fall back to bun (config resolution runs before PM detection in some paths).
-        let pm_guess = detect_pm_fast();
-        let mut cmd = pm::run_cmd(pm_guess, "glyx.config.ts");
-        let out = cmd.output().context("failed to run glyx.config.ts")?;
+        // Execute glyx.config.ts directly — NOT via `bun run` (which triggers
+        // bun's server-detection heuristic on default-exported objects).
+        let out = exec_config_ts("glyx.config.ts")?;
         if !out.status.success() {
             bail!("glyx.config.ts execution failed:\n{}", String::from_utf8_lossy(&out.stderr));
         }
@@ -519,6 +521,29 @@ fn resolve_config_json() -> Result<String> {
     }
     std::fs::read_to_string("glyx.config.json")
         .context("neither glyx.config.ts nor glyx.config.json found")
+}
+
+/// Execute a TypeScript config file and return its output.
+/// Uses `bun <file>` (direct execution, no server detection) with `node --import tsx`
+/// as a fallback for non-bun environments.
+fn exec_config_ts(file: &str) -> std::io::Result<std::process::Output> {
+    // Try bun first (native TS support, direct file execution)
+    let bun_result = if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd").args(["/C", "bun", file]).output()
+    } else {
+        std::process::Command::new("bun").arg(file).output()
+    };
+    if let Ok(out) = bun_result {
+        if out.status.success() || !out.stdout.is_empty() {
+            return Ok(out);
+        }
+    }
+    // Fallback: tsx (works with npm/pnpm/yarn projects that have tsx installed)
+    if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd").args(["/C", "npx", "tsx", file]).output()
+    } else {
+        std::process::Command::new("npx").args(["tsx", file]).output()
+    }
 }
 
 // ── Icon helpers ──────────────────────────────────────────────────────────────

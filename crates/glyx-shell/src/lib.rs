@@ -143,7 +143,7 @@ pub struct ShellConfig {
     /// Eliminates the blank-white-window flash during JS startup.
     /// Defaults to the Glyx dark background `[0x14, 0x14, 0x1A, 0xFF]`.
     pub background_color: [u8; 4],
-    /// Rendering backend.  Defaults to `RenderMode::Gpu`.
+    /// Rendering backend.  Defaults to `RenderMode::Auto` (heuristic picks the best backend for the detected GPU tier).
     /// Controlled by `renderMode` in `glyx.config.json` or `GLYX_CPU_RENDER=1`.
     pub render_mode: RenderMode,
     /// Optional explicit V8 heap cap in MB.  `None` = auto-calculated from bundle size.
@@ -168,7 +168,7 @@ impl Default for ShellConfig {
             decorations:  true,
             icon_rgba:    None,
             background_color: [0x14, 0x14, 0x1A, 0xFF],
-            render_mode:  RenderMode::Gpu,
+            render_mode:  RenderMode::Auto,
             max_js_heap_mb: None,
             canvas_protocol: "binary".into(),
             canvas_buffer_kb: None,

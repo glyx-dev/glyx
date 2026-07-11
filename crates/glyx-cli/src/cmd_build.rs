@@ -42,8 +42,10 @@ pub(super) fn cmd_build(
 pub(super) fn run_perf_check(bin: &Path, budget_ms: f64, duration_secs: u64) -> Result<()> {
     println!();
     println!("Running performance check ({duration_secs}s at {budget_ms}ms budget)...");
+    let config_json = super::resolve_config_json().unwrap_or_default();
     let output = Command::new(bin)
         .env("GLYX_PERF_CHECK", format!("{duration_secs}:{budget_ms}"))
+        .env("GLYX_CONFIG_JSON", &config_json)
         .output()
         .with_context(|| format!("Failed to launch {}", bin.display()))?;
 

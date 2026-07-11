@@ -481,23 +481,52 @@ impl TinySkiaFrame {
     /// Scale and blit `src` (RGBA, iw×ih) to fill the destination rect.
     fn blit_scaled(&mut self, src: &[u8], iw: u32, ih: u32,
                    x: f64, y: f64, w: f64, h: f64) {
-        let Some(pm) = tiny_skia::PixmapRef::from_bytes(src, iw, ih) else { return };
-        let sx = iw as f32 / w as f32;
-        let sy = ih as f32 / h as f32;
-        let tx = -(x as f32) * sx;
-        let ty = -(y as f32) * sy;
-        let local = tiny_skia::Transform::from_row(sx, 0.0, 0.0, sy, tx, ty);
-        let shader = tiny_skia::Pattern::new(
-            pm,
-            tiny_skia::SpreadMode::Pad,
-            tiny_skia::FilterQuality::Bilinear,
-            1.0,
-            local,
-        );
-        let paint = tiny_skia::Paint { shader, ..Default::default() };
-        let mask  = self.current_mask.as_ref();
-        if let Some(rect) = tiny_skia::Rect::from_xywh(x as f32, y as f32, w as f32, h as f32) {
-            self.pixmap.fill_rect(rect, &paint, tiny_skia::Transform::identity(), mask);
+        let Some(src_pm) = tiny_skia::PixmapRef::from_bytes(src, iw, ih) else { return };
+
+        let dw = w.ceil() as u32;
+        let dh = h.ceil() as u32;
+        if dw == 0 || dh == 0 { return; }
+
+        let paint = tiny_skia::PixmapPaint {
+            opacity:    1.0,
+            blend_mode: tiny_skia::BlendMode::SourceOver,
+            quality:    tiny_skia::FilterQuality::Bilinear,
+        };
+        let mask = self.current_mask.as_ref();
+
+        if iw == dw && ih == dh {
+            // 1:1 blit — place source directly at (x, y).
+            self.pixmap.draw_pixmap(
+                x as i32, y as i32,
+                src_pm,
+                &paint,
+                tiny_skia::Transform::identity(),
+                mask,
+            );
+        } else {
+            // Scaled blit — draw into a temporary pixmap at destination size,
+            // then blit the temporary to (x, y).
+            let Some(mut tmp) = tiny_skia::Pixmap::new(dw, dh) else { return };
+            let sx = iw as f32 / dw as f32;
+            let sy = ih as f32 / dh as f32;
+            let shader = tiny_skia::Pattern::new(
+                src_pm,
+                tiny_skia::SpreadMode::Pad,
+                tiny_skia::FilterQuality::Bilinear,
+                1.0,
+                tiny_skia::Transform::from_scale(sx, sy),
+            );
+            let fill = tiny_skia::Paint { shader, ..Default::default() };
+            if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, dw as f32, dh as f32) {
+                tmp.fill_rect(r, &fill, tiny_skia::Transform::identity(), None);
+            }
+            self.pixmap.draw_pixmap(
+                x as i32, y as i32,
+                tmp.as_ref(),
+                &paint,
+                tiny_skia::Transform::identity(),
+                mask,
+            );
         }
     }
 

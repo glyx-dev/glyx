@@ -14,7 +14,7 @@ pub use sqlx::sqlite::SqlitePool;
 
 use anyhow::Result;
 use sqlx::{Column, Row};
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
 // ── Pool management ────────────────────────────────────────────────────────────
 
@@ -25,11 +25,18 @@ use sqlx::sqlite::SqlitePoolOptions;
 /// - WAL journal mode and `synchronous=NORMAL` are set on every new pool for
 ///   fast concurrent writes without risking data loss on unexpected exit.
 pub async fn open(path: &str) -> Result<SqlitePool> {
-    let url = if path == ":memory:" {
-        "sqlite::memory:".to_string()
+    // Build connect options directly to avoid URL-parsing issues with Windows
+    // paths (backslashes confuse sqlx's sqlite: URI parser).
+    let opts = if path == ":memory:" {
+        SqliteConnectOptions::new()
+            .filename(":memory:")
+            .in_memory(true)
     } else {
-        // ?mode=rwc — create the file if it does not exist
-        format!("sqlite:{}?mode=rwc", path)
+        SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
     };
 
     let pool = SqlitePoolOptions::new()
@@ -37,18 +44,10 @@ pub async fn open(path: &str) -> Result<SqlitePool> {
         // Give up acquiring a connection after 5 s instead of blocking forever.
         // This surfaces lock errors quickly (e.g. WAL left by a previous crash).
         .acquire_timeout(std::time::Duration::from_secs(5))
-        .connect(&url)
+        .connect_with(opts)
         .await?;
 
-    // Set busy_timeout FIRST — every subsequent PRAGMA must also be able to wait
-    // for any WAL lock left by a previous crash before acquiring the DB.
     sqlx::query("PRAGMA busy_timeout=5000").execute(&pool).await?;
-    // WAL: allows concurrent reads while writing
-    sqlx::query("PRAGMA journal_mode=WAL").execute(&pool).await?;
-    // NORMAL: flush at the most critical moments; fast and safe enough for apps
-    sqlx::query("PRAGMA synchronous=NORMAL").execute(&pool).await?;
-    // Deny virtual table and view schemas that can execute arbitrary code.
-    // Prevents SQL injection from escalating into code execution via crafted schemas.
     sqlx::query("PRAGMA trusted_schema=OFF").execute(&pool).await?;
 
     log::info!("glyx-db: opened {:?}", path);

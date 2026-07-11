@@ -68,12 +68,12 @@ export function TextField({
         style={{
           flexDirection:     'row',
           alignItems:        'center',
-          backgroundColor:   disabled ? colors.surfaceRaised : colors.surface,
-          borderWidth:       1,
+          backgroundColor:   disabled ? colors.surfaceRaised : colors.bg,
+          borderWidth:       focused ? 2 : 1,
           borderColor,
           borderRadius:      radius.md,
           paddingHorizontal: space[3],
-          paddingVertical:   space[2],
+          paddingVertical:   space[3],
           gap:               space[2],
           opacity:           disabled ? 0.6 : 1,
         }}
@@ -305,7 +305,7 @@ export function NumberInput({
         style={{
           flexDirection:    'row',
           alignItems:       'center',
-          backgroundColor:  colors.surface,
+          backgroundColor:  colors.bg,
           borderWidth:      1,
           borderColor:      colors.border,
           borderRadius:     radius.md,
@@ -364,7 +364,7 @@ export function SearchInput({
       style={{
         flexDirection:     'row',
         alignItems:        'center',
-        backgroundColor:   colors.surface,
+        backgroundColor:   colors.bg,
         borderWidth:       1,
         borderColor:       colors.border,
         borderRadius:      radius.full,

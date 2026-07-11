@@ -190,9 +190,10 @@ fn load_svg_from_bytes(svg_data: &[u8], width: Option<f32>, height: Option<f32>)
     let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
     let transform = resvg::tiny_skia::Transform::from_scale(tw / iw, th / ih);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
-    rgba_to_peniko(pixmap.take(), w, h)
+    rgba_premul_srgb_to_peniko(pixmap.take(), w, h)
 }
 
+/// Convert straight-alpha sRGB bytes (from image crate) → linear premultiplied RGBA.
 fn rgba_to_peniko(mut bytes: Vec<u8>, w: u32, h: u32) -> Option<peniko::ImageData> {
     for px in bytes.chunks_exact_mut(4) {
         px[0] = srgb_to_linear_u8(px[0]);
@@ -202,6 +203,38 @@ fn rgba_to_peniko(mut bytes: Vec<u8>, w: u32, h: u32) -> Option<peniko::ImageDat
         px[0] = ((px[0] as u16 * a + 127) / 255) as u8;
         px[1] = ((px[1] as u16 * a + 127) / 255) as u8;
         px[2] = ((px[2] as u16 * a + 127) / 255) as u8;
+    }
+    Some(peniko::ImageData {
+        data: peniko::Blob::from(bytes),
+        format: peniko::ImageFormat::Rgba8,
+        alpha_type: peniko::ImageAlphaType::AlphaPremultiplied,
+        width: w, height: h,
+    })
+}
+
+/// Convert premultiplied sRGB bytes (resvg/tiny_skia output) → linear premultiplied RGBA.
+/// Must un-premultiply before linearising to avoid double-premultiplication, which
+/// would make antialiased edges nearly transparent and render thin SVG strokes invisible.
+fn rgba_premul_srgb_to_peniko(mut bytes: Vec<u8>, w: u32, h: u32) -> Option<peniko::ImageData> {
+    for px in bytes.chunks_exact_mut(4) {
+        let a = px[3];
+        if a == 0 { continue; }
+        if a == 255 {
+            // Fully opaque: just linearise in place.
+            px[0] = srgb_to_linear_u8(px[0]);
+            px[1] = srgb_to_linear_u8(px[1]);
+            px[2] = srgb_to_linear_u8(px[2]);
+        } else {
+            // Un-premultiply → linearise → re-premultiply.
+            let inv = 255.0 / a as f32;
+            let lr = srgb_to_linear_u8((px[0] as f32 * inv).min(255.0) as u8);
+            let lg = srgb_to_linear_u8((px[1] as f32 * inv).min(255.0) as u8);
+            let lb = srgb_to_linear_u8((px[2] as f32 * inv).min(255.0) as u8);
+            let a16 = a as u16;
+            px[0] = ((lr as u16 * a16 + 127) / 255) as u8;
+            px[1] = ((lg as u16 * a16 + 127) / 255) as u8;
+            px[2] = ((lb as u16 * a16 + 127) / 255) as u8;
+        }
     }
     Some(peniko::ImageData {
         data: peniko::Blob::from(bytes),

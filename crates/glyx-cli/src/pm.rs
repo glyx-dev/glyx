@@ -219,7 +219,9 @@ pub fn js_bundle(
         .arg("--bundle")
         .arg("--target=chrome108")   // V8 version shipped with rusty_v8 0.32
         .arg("--format=iife")
-        .arg("--define:process.env.NODE_ENV='production'");
+        .arg("--define:process.env.NODE_ENV='production'")
+        .arg("--loader:.js=jsx")
+        .arg("--loader:.ts=tsx");
     if minify     { cmd.arg("--minify"); }
     if source_map { cmd.arg("--sourcemap=inline"); }
 

@@ -9,6 +9,7 @@
 
 import React from 'react';
 import { View, Text, Pressable } from '@glyx/react';
+import { Icon } from '@glyx/icons';
 import { useTheme } from './theme.js';
 
 // ── Button ────────────────────────────────────────────────────────────────────
@@ -191,9 +192,7 @@ export function IconButton({ icon, onPress, size = 36, variant = 'secondary', di
         ...style,
       }}
     >
-      <Text fontSize={Math.round(size * 0.5)} style={{ color: fg }}>
-        {icon}
-      </Text>
+      <Icon name={icon} size={Math.round(size * 0.5)} color={fg} />
     </Pressable>
   );
 }

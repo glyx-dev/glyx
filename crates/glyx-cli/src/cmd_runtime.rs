@@ -2,6 +2,36 @@ use anyhow::Result;
 
 use super::{RuntimeCommands, find_or_build_runner, glyx_runners_dir, runner_bin_name, glyx_home};
 
+fn evict_cached_runners() {
+    let dir = glyx_runners_dir();
+    let bin = runner_bin_name();
+    // Remove user-cache copies (~/.glyx/runners/...)
+    for profile in ["dev", "prod"] {
+        let path = dir.join(profile).join(&bin);
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                eprintln!("warning: could not remove {}: {e}", path.display());
+            } else {
+                println!("  removed cached {profile} runner");
+            }
+        }
+    }
+    // Also remove workspace target/ binaries so find_or_build_runner can't
+    // short-circuit to a stale binary on step 2.
+    if let Ok(home) = glyx_home() {
+        for ws_profile in ["debug", "release"] {
+            let path = home.join("target").join(ws_profile).join(&bin);
+            if path.exists() {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    eprintln!("warning: could not remove workspace binary {}: {e}", path.display());
+                } else {
+                    println!("  removed workspace {ws_profile} runner");
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn cmd_runtime(cmd: RuntimeCommands) -> Result<()> {
     match cmd {
         RuntimeCommands::List => {
@@ -32,7 +62,11 @@ pub(super) fn cmd_runtime(cmd: RuntimeCommands) -> Result<()> {
             }
             Ok(())
         }
-        RuntimeCommands::Build => {
+        RuntimeCommands::Build { force } => {
+            if force {
+                println!("Evicting cached runners...");
+                evict_cached_runners();
+            }
             println!("Building glyx-runner from source...");
             let dev  = find_or_build_runner(true)?;
             let prod = find_or_build_runner(false)?;
@@ -47,6 +81,7 @@ pub(super) fn cmd_runtime(cmd: RuntimeCommands) -> Result<()> {
             let v = version.as_deref().unwrap_or("local");
             println!("Installing glyx-runner v{v} (building from source)...");
             println!("  (Prebuilt binary download is planned for a future release)");
+            evict_cached_runners();
             let dev  = find_or_build_runner(true)?;
             let prod = find_or_build_runner(false)?;
             println!();

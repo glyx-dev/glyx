@@ -338,8 +338,16 @@ pub(crate) fn rebuild_layout_from_scene(
     }
 
     if let Some(content_root) = build_subtree(layout, nodes, root_id) {
+        // Root wrapper: stretch children to fill the full window width.
+        // flex_column uses align_items:center which shrinks app to content width.
+        let root_style = {
+            let mut s = flex_column(0.0);
+            s.align_items = Some(AlignItems::Stretch);
+            s.justify_content = Some(JustifyContent::FlexStart);
+            s
+        };
         if let Ok(wrapper_id) = layout
-            .add_container(flex_column(0.0), &[content_root], Some("js-root".into()))
+            .add_container(root_style, &[content_root], Some("js-root".into()))
         {
             layout.set_root(wrapper_id);
         }

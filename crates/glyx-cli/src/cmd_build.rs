@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::{
-    read_project_name, read_dev_config, bun_build, is_native_project,
+    read_project_name, read_dev_config, is_native_project,
     build_app_bundle, resolve_config_json, platform_to_rust_target,
     ensure_rust_target, binary_name, find_or_build_runner,
-    glyx_home,
+    glyx_home, pm,
 };
 
 pub(super) fn cmd_build(
@@ -15,14 +15,15 @@ pub(super) fn cmd_build(
     check_performance: bool,
     perf_budget: f64,
     perf_duration: u64,
+    p: pm::Pm,
 ) -> Result<()> {
     let project_name = read_project_name()
         .context("Run `glyx build` from the project root (where glyx.config.ts or package.json lives)")?;
 
     let bin_path = match mode {
-        "snapshot" => build_snapshot_mode(target, &project_name)?,
-        "bundle"   => build_bundle_mode(target, &project_name)?,
-        "portable" => build_portable_mode(target, &project_name)?,
+        "snapshot" => build_snapshot_mode(target, &project_name, p)?,
+        "bundle"   => build_bundle_mode(target, &project_name, p)?,
+        "portable" => build_portable_mode(target, &project_name, p)?,
         other => bail!("Unknown build mode '{other}'. Use: snapshot, bundle, portable"),
     };
 
@@ -78,19 +79,20 @@ pub(super) fn run_perf_check(bin: &Path, budget_ms: f64, duration_secs: u64) -> 
 /// For native projects: `cargo build --release -p <project_name>`
 /// For JS-only projects: `cargo build --release --no-default-features -p glyx-runner`
 ///                        then rename the output binary to <project_name>[.exe]
-pub(super) fn build_snapshot_mode(target: Option<&str>, project_name: &str) -> Result<Option<PathBuf>> {
-    println!("[snapshot mode] bun bundle → V8 snapshot + embedded app.js → self-contained binary");
+pub(super) fn build_snapshot_mode(target: Option<&str>, project_name: &str, p: pm::Pm) -> Result<Option<PathBuf>> {
+    println!("[snapshot mode] JS bundle → V8 snapshot + embedded app.js → self-contained binary");
 
     let Some((entry, output)) = read_dev_config() else {
         println!("⚠ No dev.entry in glyx config — falling back to portable mode");
-        return build_portable_mode(target, project_name);
+        return build_portable_mode(target, project_name, p);
     };
 
     // 1. Build the app bundle (embedded in binary, eval'd at runtime)
     println!("Bundling JS: {} → {}", entry, output);
-    bun_build(&entry, &output).context("bun build failed")?;
+    pm::js_bundle(p, &entry, &output, /*minify=*/false, /*source_map=*/true)
+        .context("JS build failed")?;
     println!("✓ JS bundled (dev output)");
-    let bundle = build_app_bundle(project_name, &entry).context("app bundle build failed")?;
+    let bundle = build_app_bundle(project_name, &entry, p).context("app bundle build failed")?;
     println!("✓ App bundle: {} ({} KB)", bundle.display(), std::fs::metadata(&bundle)?.len() / 1024);
 
     // 2. Create V8 snapshot (stubs + polyfills ONLY — app is eval'd separately at runtime)
@@ -129,12 +131,12 @@ pub(super) fn build_snapshot_mode(target: Option<&str>, project_name: &str) -> R
     Ok(Some(bin_path))
 }
 
-/// bundle mode — bun build → minified bundle alongside binary (easy JS updates, no recompile)
-pub(super) fn build_bundle_mode(target: Option<&str>, project_name: &str) -> Result<Option<PathBuf>> {
-    println!("[bundle mode] bun bundle → minified JS shipped alongside binary");
+/// bundle mode — minified bundle alongside binary (easy JS updates, no recompile)
+pub(super) fn build_bundle_mode(target: Option<&str>, project_name: &str, p: pm::Pm) -> Result<Option<PathBuf>> {
+    println!("[bundle mode] JS bundle → minified JS shipped alongside binary");
 
     if let Some((entry, _output)) = read_dev_config() {
-        let bundle_src = build_app_bundle(project_name, &entry).context("app bundle build failed")?;
+        let bundle_src = build_app_bundle(project_name, &entry, p).context("app bundle build failed")?;
         let output_js = read_dev_config().map(|(_, o)| o).unwrap_or_else(|| "js/app.js".into());
         std::fs::copy(&bundle_src, &output_js).with_context(|| format!("copy bundle to {output_js}"))?;
         println!("✓ Bundle → {} ({} KB)", output_js, std::fs::metadata(&output_js)?.len() / 1024);
@@ -165,13 +167,14 @@ pub(super) fn build_bundle_mode(target: Option<&str>, project_name: &str) -> Res
     Ok(Some(bin_path))
 }
 
-/// portable mode — bun build → JS alongside binary (readable, easiest to patch)
-pub(super) fn build_portable_mode(target: Option<&str>, project_name: &str) -> Result<Option<PathBuf>> {
-    println!("[portable mode] bun build → JS files shipped alongside binary");
+/// portable mode — JS alongside binary (readable, easiest to patch)
+pub(super) fn build_portable_mode(target: Option<&str>, project_name: &str, p: pm::Pm) -> Result<Option<PathBuf>> {
+    println!("[portable mode] JS files shipped alongside binary");
 
     if let Some((entry, output)) = read_dev_config() {
         println!("Bundling JS: {} → {}", entry, output);
-        bun_build(&entry, &output).context("bun build failed")?;
+        pm::js_bundle(p, &entry, &output, /*minify=*/false, /*source_map=*/true)
+            .context("JS build failed")?;
         println!("✓ JS built: {}", output);
     } else {
         println!("⚠ No dev.entry in glyx config — skipping JS build");

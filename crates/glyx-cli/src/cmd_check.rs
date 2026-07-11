@@ -1,9 +1,9 @@
 use anyhow::{bail, Result};
 use std::process::Command;
 
-use super::{resolve_config_json, is_native_project, read_project_name};
+use super::{resolve_config_json, is_native_project, read_project_name, pm};
 
-pub(super) fn cmd_check(config_only: bool) -> Result<()> {
+pub(super) fn cmd_check(config_only: bool, p: pm::Pm) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
     let mut ok_count = 0;
 
@@ -46,22 +46,16 @@ pub(super) fn cmd_check(config_only: bool) -> Result<()> {
     // ── 2. TypeScript check ───────────────────────────────────────────────────
     if std::path::Path::new("tsconfig.json").exists() {
         println!("Type-checking TypeScript...");
-        let status = if cfg!(target_os = "windows") {
-            Command::new("cmd")
-                .args(["/C", "bun", "x", "tsc", "--noEmit"])
-                .status()
-        } else {
-            Command::new("bun")
-                .args(["x", "tsc", "--noEmit"])
-                .status()
-        };
+        let status = pm::dlx_cmd(p, "tsc")
+            .arg("--noEmit")
+            .status();
         match status {
             Ok(s) if s.success() => {
                 println!("  ✓ TypeScript OK");
                 ok_count += 1;
             }
             Ok(_) => errors.push("TypeScript: type errors found (see above)".to_string()),
-            Err(e) => errors.push(format!("TypeScript: could not run tsc — {e}")),
+            Err(e) => errors.push(format!("TypeScript: could not run tsc via {} — {e}", p.name())),
         }
     } else {
         println!("  (no tsconfig.json — skipping TS check)");

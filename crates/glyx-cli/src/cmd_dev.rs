@@ -3,16 +3,17 @@ use std::process::Command;
 
 use super::{
     read_project_name, read_dev_config, read_dev_inspect_port,
-    bun_build, is_native_project, find_or_build_runner,
+    is_native_project, find_or_build_runner, pm,
 };
 
-pub(super) fn cmd_dev(inspect: Option<u16>) -> Result<()> {
+pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm) -> Result<()> {
     let project_name = read_project_name()
         .context("Run `glyx dev` from the project root (where glyx.config.ts or package.json lives)")?;
     let cfg = read_dev_config();
     if let Some((entry, output)) = &cfg {
         println!("Building JS: {} → {}", entry, output);
-        bun_build(entry, output).context("Initial bun build failed")?;
+        pm::js_bundle(p, entry, output, /*minify=*/false, /*source_map=*/true)
+            .context("Initial JS build failed")?;
         println!("✓ JS built");
     }
 

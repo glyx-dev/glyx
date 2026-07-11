@@ -2,10 +2,10 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 use super::{
-    glyx_home, relpath, write_file, copy_glyx_mark_to,
+    glyx_home, relpath, write_file, copy_glyx_mark_to, pm,
 };
 
-pub(super) fn cmd_create(name: &str, native: bool, template: &str) -> Result<()> {
+pub(super) fn cmd_create(name: &str, native: bool, template: &str, p: pm::Pm) -> Result<()> {
     let dest = PathBuf::from(name);
     if dest.exists() { anyhow::bail!("directory '{}' already exists", name); }
 
@@ -35,7 +35,7 @@ pub(super) fn cmd_create(name: &str, native: bool, template: &str) -> Result<()>
     println!();
     println!("Next steps:");
     println!("  cd {name}");
-    println!("  bun install");
+    println!("  {} install", p.name());
     if native {
         println!("  glyx dev      # hot-reload dev server (requires Rust toolchain)");
     } else {

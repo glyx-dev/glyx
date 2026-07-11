@@ -1,9 +1,9 @@
 use anyhow::{bail, Context, Result};
 use std::process::Command;
 
-use super::{is_native_project, read_project_name};
+use super::{is_native_project, read_project_name, pm};
 
-pub(super) fn cmd_test(js_only: bool, rust_only: bool, extra_args: &[String]) -> Result<()> {
+pub(super) fn cmd_test(js_only: bool, rust_only: bool, extra_args: &[String], p: pm::Pm) -> Result<()> {
     let native = is_native_project();
     let run_js   = !rust_only;
     let run_rust = !js_only && native;
@@ -17,7 +17,7 @@ pub(super) fn cmd_test(js_only: bool, rust_only: bool, extra_args: &[String]) ->
 
     // ── JS tests ─────────────────────────────────────────────────────────────
     if run_js {
-        println!("Running JS tests (bun test)...");
+        println!("Running JS tests ({} test)...", p.name());
         println!();
 
         // Look for a test directory — prefer js/src, then js, then src, then current dir.
@@ -26,18 +26,12 @@ pub(super) fn cmd_test(js_only: bool, rust_only: bool, extra_args: &[String]) ->
             .find(|d| std::path::Path::new(d).exists())
             .unwrap_or(".");
 
-        let mut cmd = if cfg!(target_os = "windows") {
-            let mut c = Command::new("cmd");
-            c.args(["/C", "bun", "test", test_root]);
-            c
-        } else {
-            let mut c = Command::new("bun");
-            c.args(["test", test_root]);
-            c
-        };
+        let mut cmd = pm::test_cmd(p, test_root);
         for arg in extra_args { cmd.arg(arg); }
 
-        let status = cmd.status().context("Failed to run `bun test`; is Bun installed? https://bun.sh")?;
+        let pm_name = p.name();
+        let status = cmd.status()
+            .with_context(|| format!("Failed to run JS tests via {pm_name}; is it installed?"))?;
         if !status.success() {
             any_failed = true;
             if run_rust {

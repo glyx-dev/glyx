@@ -20,6 +20,7 @@ mod cmd_check;
 mod cmd_test;
 mod cmd_generate;
 mod cmd_runtime;
+pub mod pm;
 
 use self::cmd_create::*;
 use self::cmd_dev::*;
@@ -37,6 +38,7 @@ static DEFAULT_ICON_PNG: &[u8] = include_bytes!("../../../glyx.png");
 #[derive(Parser)]
 #[command(
     name    = "glyx",
+    // --pm is a global flag accepted before any subcommand.
     about   = "Build desktop apps with React + Rust",
     long_about = "Glyx — build fast, native desktop apps with React + Rust.\n\
                   GPU-rendered (wgpu), no WebView, no Electron.\n\n\
@@ -54,6 +56,11 @@ static DEFAULT_ICON_PNG: &[u8] = include_bytes!("../../../glyx.png");
         Run 'glyx <command> --help' for details on a command.",
 )]
 struct Cli {
+    /// Package manager to use: bun, npm, pnpm, yarn.
+    /// Overrides auto-detection (lockfile sniff → which probe).
+    #[arg(long, global = true, value_name = "PM")]
+    pm: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -69,7 +76,7 @@ enum Commands {
     /// binary, so no Rust toolchain is required. Use --native to generate a
     /// full Rust workspace instead (needed for custom native extensions).
     ///
-    /// After creating: cd <name> && bun install && glyx dev
+    /// After creating: cd <name> && <pm> install && glyx dev
     Create {
         /// Project name (also used as the directory name)
         name: String,
@@ -182,7 +189,7 @@ enum Commands {
     ///
     /// Runs fast type-checking and config validation:
     ///   - Validates glyx.config.ts (resolves + checks required fields)
-    ///   - TypeScript type check via `bun x tsc --noEmit` (if tsconfig.json exists)
+    ///   - TypeScript type check via `<pm> tsc --noEmit` (if tsconfig.json exists)
     ///   - `cargo check` for native projects (type-checks Rust without linking)
     ///
     /// Much faster than `glyx build` — use this in CI or as a pre-commit check.
@@ -193,18 +200,18 @@ enum Commands {
     },
     /// Run tests
     ///
-    /// For JS projects:   `bun test` (uses @glyx/testing stubs)
-    /// For native projects: `cargo test` + `bun test`
+    /// For JS projects:   `<pm> test` (uses @glyx/testing stubs)
+    /// For native projects: `cargo test` + `<pm> test`
     ///
     /// Pass --js or --rust to run only one side.
     Test {
-        /// Run only the JS test suite (bun test)
+        /// Run only the JS test suite
         #[arg(long, conflicts_with = "rust")]
         js: bool,
         /// Run only the Rust test suite (cargo test)
         #[arg(long, conflicts_with = "js")]
         rust: bool,
-        /// Extra args passed through to bun test (e.g. -- --watch)
+        /// Extra args passed through to the JS test runner
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -288,18 +295,23 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    // Detect package manager once; all subcommands use this value.
+    let config_json = resolve_config_json().unwrap_or_default();
+    let pm = pm::detect(cli.pm.as_deref(), &config_json)?;
+
     match cli.command {
-        Commands::Create { name, native, template } => cmd_create(&name, native, &template),
-        Commands::Dev { inspect }         => cmd_dev(inspect),
+        Commands::Create { name, native, template } => cmd_create(&name, native, &template, pm),
+        Commands::Dev { inspect }         => cmd_dev(inspect, pm),
         Commands::Build { target, snapshot: _, bundle, portable, check_performance, perf_budget, perf_duration } => {
             let mode = if bundle { "bundle" } else if portable { "portable" } else { "snapshot" };
-            cmd_build(target.as_deref(), mode, check_performance, perf_budget, perf_duration)
+            cmd_build(target.as_deref(), mode, check_performance, perf_budget, perf_duration, pm)
         }
         Commands::Package { target, installer } => cmd_package(target.as_deref(), installer),
         Commands::Runtime { cmd }         => cmd_runtime(cmd),
         Commands::Generate { cmd }        => cmd_generate(cmd),
-        Commands::Check { config_only }   => cmd_check(config_only),
-        Commands::Test { js, rust, args } => cmd_test(js, rust, &args),
+        Commands::Check { config_only }   => cmd_check(config_only, pm),
+        Commands::Test { js, rust, args } => cmd_test(js, rust, &args, pm),
         Commands::Caps { cmd } => match cmd {
             CapsCommands::Build { dest, target } => {
                 let caps = read_capabilities_from_config();
@@ -395,25 +407,9 @@ fn runner_bin_name() -> &'static str {
 
 // ── Build helpers ─────────────────────────────────────────────────────────────
 
-fn build_app_bundle(project_name: &str, entry: &str) -> Result<PathBuf> {
+fn build_app_bundle(project_name: &str, entry: &str, p: pm::Pm) -> Result<PathBuf> {
     let bundle_out = format!("target/glyx/{project_name}.js");
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd"); c.args(["/C", "bun", "build"]); c
-    } else {
-        let mut c = Command::new("bun"); c.arg("build"); c
-    };
-    let status = cmd
-        .arg(entry)
-        .args([
-            "--outfile", &bundle_out,
-            "--target", "browser",
-            "--format", "iife",
-            "--minify",
-            "--define", "process.env.NODE_ENV='production'",
-        ])
-        .status()
-        .context("Failed to run `bun build`")?;
-    if !status.success() { bail!("bun build failed"); }
+    pm::js_bundle(p, entry, &bundle_out, /*minify=*/true, /*source_map=*/false)?;
     Ok(PathBuf::from(bundle_out))
 }
 
@@ -498,12 +494,11 @@ fn read_project_name() -> Option<String> {
 /// Resolve the project config to a JSON string.
 fn resolve_config_json() -> Result<String> {
     if Path::new("glyx.config.ts").exists() {
-        let mut cmd = if cfg!(target_os = "windows") {
-            let mut c = Command::new("cmd"); c.args(["/C", "bun", "run", "glyx.config.ts"]); c
-        } else {
-            let mut c = Command::new("bun"); c.args(["run", "glyx.config.ts"]); c
-        };
-        let out = cmd.output().context("failed to run `bun run glyx.config.ts`")?;
+        // Use the PM-agnostic run helper if a PM is already detected; otherwise
+        // fall back to bun (config resolution runs before PM detection in some paths).
+        let pm_guess = detect_pm_fast();
+        let mut cmd = pm::run_cmd(pm_guess, "glyx.config.ts");
+        let out = cmd.output().context("failed to run glyx.config.ts")?;
         if !out.status.success() {
             bail!("glyx.config.ts execution failed:\n{}", String::from_utf8_lossy(&out.stderr));
         }
@@ -717,21 +712,14 @@ fn read_dev_inspect_port() -> Option<u16> {
     }
 }
 
-fn bun_build(entry: &str, output: &str) -> Result<()> {
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd"); c.args(["/C", "bun", "build"]); c
-    } else {
-        let mut c = Command::new("bun"); c.arg("build"); c
-    };
-    let status = cmd
-        .arg(entry)
-        .args(["--outfile", output, "--target", "browser", "--format", "iife",
-               "--define", "process.env.NODE_ENV='production'",
-               "--source-map=inline"])
-        .status()
-        .context("Failed to run `bun`; is Bun installed? https://bun.sh")?;
-    if !status.success() { bail!("bun build failed"); }
-    Ok(())
+/// Quick lockfile-only PM sniff used before full detection is available
+/// (e.g. when resolving glyx.config.ts, which happens before PM detection).
+fn detect_pm_fast() -> pm::Pm {
+    if Path::new("bun.lock").exists() || Path::new("bun.lockb").exists() { return pm::Pm::Bun; }
+    if Path::new("pnpm-lock.yaml").exists()  { return pm::Pm::Pnpm; }
+    if Path::new("package-lock.json").exists() { return pm::Pm::Npm; }
+    if Path::new("yarn.lock").exists()       { return pm::Pm::Yarn; }
+    pm::Pm::Bun  // safe default — most glyx projects use bun
 }
 
 fn platform_to_rust_target(os: &str) -> Result<String> {

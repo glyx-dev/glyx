@@ -216,21 +216,7 @@ impl GpuContext {
     /// - `DiscreteIntel` → FemtoVG   (~103–153 MB RSS, OpenGL triangle path)
     /// - `Discrete`      → Vello     (~285–328 MB RSS, full GPU compute)
     pub fn gpu_tier(&self) -> GpuTier {
-        let info = self.adapter.get_info();
-        match info.device_type {
-            wgpu::DeviceType::Cpu                                     => GpuTier::None,
-            wgpu::DeviceType::VirtualGpu | wgpu::DeviceType::Other    => GpuTier::Integrated,
-            wgpu::DeviceType::IntegratedGpu                           => GpuTier::Integrated,
-            wgpu::DeviceType::DiscreteGpu => {
-                // Intel PCI vendor ID 0x8086 — covers Arc (Alchemist/Battlemage).
-                // Lighter VRAM budget than NVIDIA/AMD flagships; FemtoVG fits better.
-                if info.vendor == 0x8086 {
-                    GpuTier::DiscreteIntel
-                } else {
-                    GpuTier::Discrete
-                }
-            }
-        }
+        tier_from_info(&self.adapter.get_info())
     }
 
     /// Returns the adapter name for logging. Avoids exposing wgpu types outside this crate.
@@ -241,6 +227,61 @@ impl GpuContext {
             self.adapter.get_info().device_type,
         )
     }
+}
+
+/// Classify an adapter into a capability tier (shared by `gpu_tier` and `probe_adapter_info`).
+fn tier_from_info(info: &wgpu::AdapterInfo) -> GpuTier {
+    match info.device_type {
+        wgpu::DeviceType::Cpu                                     => GpuTier::None,
+        wgpu::DeviceType::VirtualGpu | wgpu::DeviceType::Other    => GpuTier::Integrated,
+        wgpu::DeviceType::IntegratedGpu                           => GpuTier::Integrated,
+        wgpu::DeviceType::DiscreteGpu => {
+            // Intel PCI vendor ID 0x8086 — covers Arc (Alchemist/Battlemage).
+            // Lighter VRAM budget than NVIDIA/AMD flagships; FemtoVG fits better.
+            if info.vendor == 0x8086 {
+                GpuTier::DiscreteIntel
+            } else {
+                GpuTier::Discrete
+            }
+        }
+    }
+}
+
+/// Query the adapter tier + name WITHOUT creating a device, surface, or
+/// swapchain.  Used by `RenderMode::Auto` to decide the backend before any
+/// GPU memory is committed: when the answer is TinySkia, the caller can skip
+/// wgpu entirely and present via a software surface.
+///
+/// The instance and adapter created here are dropped on return — an adapter
+/// handle alone allocates no device memory pools.
+pub async fn probe_adapter_info() -> Option<(GpuTier, String)> {
+    #[cfg(target_os = "windows")]
+    let sets: &[wgpu::Backends] = &[wgpu::Backends::DX12, wgpu::Backends::all()];
+    #[cfg(not(target_os = "windows"))]
+    let sets: &[wgpu::Backends] = &[wgpu::Backends::PRIMARY];
+
+    for &backends in sets {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends,
+            flags: wgpu::InstanceFlags::from_build_config()
+                .difference(wgpu::InstanceFlags::VALIDATION)
+                .with_env(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        if let Ok(adapter) = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference:       wgpu::PowerPreference::HighPerformance,
+                compatible_surface:     None,
+                force_fallback_adapter: false,
+            })
+            .await
+        {
+            let info = adapter.get_info();
+            let name = format!("{} ({:?})", info.name, info.device_type);
+            return Some((tier_from_info(&info), name));
+        }
+    }
+    None
 }
 
 /// GPU capability tier for renderer auto-selection.

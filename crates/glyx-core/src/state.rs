@@ -12,6 +12,40 @@ use glyx_gpu::GpuContext;
 use glyx_text::TextSystem;
 
 use crate::{LabelKey, CachedLabel};
+use crate::soft_present::SoftPresent;
+
+// ── Present target ───────────────────────────────────────────────────────────
+
+/// How rendered pixels reach the window.
+///
+/// `Gpu` — wgpu device + swapchain (Vello / FemtoVG, or TinySkia when soft
+/// present is disabled via `GLYX_NO_SOFT_PRESENT=1`).
+/// `Soft` — softbuffer OS blit (TinySkia only). No wgpu objects exist at all.
+pub(super) enum Present {
+    Gpu(GpuContext),
+    Soft(SoftPresent),
+}
+
+impl Present {
+    pub(super) fn width(&self) -> u32 {
+        match self { Present::Gpu(g) => g.width(),  Present::Soft(s) => s.width() }
+    }
+    pub(super) fn height(&self) -> u32 {
+        match self { Present::Gpu(g) => g.height(), Present::Soft(s) => s.height() }
+    }
+    pub(super) fn resize(&mut self, w: u32, h: u32) {
+        match self { Present::Gpu(g) => g.resize(w, h), Present::Soft(s) => s.resize(w, h) }
+    }
+    pub(super) fn poll(&self) {
+        if let Present::Gpu(g) = self { g.poll(); }
+    }
+    pub(super) fn memory_counters(&self) -> (u64, u64, u64, u32, u32) {
+        match self {
+            Present::Gpu(g)  => g.memory_counters(),
+            Present::Soft(_) => (0, 0, 0, 0, 0),
+        }
+    }
+}
 
 #[cfg(feature = "dev")]
 use std::sync::mpsc::Receiver;
@@ -111,7 +145,7 @@ impl ByteBudgetImageCache {
 
 /// Per-window rendering + runtime state.
 pub(super) struct PerWindowState {
-    pub(super) gpu:          GpuContext,
+    pub(super) gpu:          Present,
     pub(super) renderer:     AnyRenderer,
     pub(super) text_sys:     TextSystem,
     pub(super) layout:       LayoutTree,

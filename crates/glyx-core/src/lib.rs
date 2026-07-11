@@ -88,6 +88,7 @@ mod dev_mode;
 mod scene;
 mod layout;
 mod render;
+mod soft_present;
 
 use self::config::*;
 use self::state::*;
@@ -827,14 +828,19 @@ pub fn run(mut config: AppConfig) -> bool {
         match event {
             // ── Window ready — initialise per-window subsystems ──────────
             ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy } => {
-                let gpu_ctx = pollster::block_on(GpuContext::new(window.clone()))
-                    .expect("Failed to initialise GPU");
                 // Resolve RenderMode → BackendKind.
                 // GLYX_CPU_RENDER=1 forces the cheapest CPU path (TinySkia) for
                 // CI, headless testing, or machines without a supported GPU.
                 let force_cpu = std::env::var("GLYX_CPU_RENDER")
                     .map(|v| v.trim() == "1").unwrap_or(false);
-                let backend_kind = resolve_backend(render_mode_config, gpu_ctx.gpu_tier(), force_cpu);
+                // Probe the adapter tier WITHOUT creating a device/swapchain —
+                // if the backend resolves to TinySkia, we present via softbuffer
+                // and never initialise wgpu at all (saves ~20 MB private +
+                // ~47 MB GPU-shared on iGPUs where GPU memory is system RAM).
+                let (probe_tier, probe_name) =
+                    pollster::block_on(glyx_gpu::probe_adapter_info())
+                        .unwrap_or((glyx_gpu::GpuTier::None, "no adapter".into()));
+                let backend_kind = resolve_backend(render_mode_config, probe_tier, force_cpu);
                 if render_mode_config == RenderMode::Auto {
                     log::info!(
                         "[glyx] renderMode=auto → {} ({})",
@@ -844,11 +850,39 @@ pub fn run(mut config: AppConfig) -> bool {
                             BackendKind::Vello { use_cpu: false } => "vello",
                             BackendKind::Vello { use_cpu: true  } => "vello/cpu",
                         },
-                        gpu_ctx.adapter_name(),
+                        probe_name,
                     );
                 }
-                let mut renderer = AnyRenderer::new(&gpu_ctx, backend_kind)
-                    .expect("Failed to initialise renderer");
+                // GLYX_NO_SOFT_PRESENT=1 keeps TinySkia on the wgpu present
+                // path (escape hatch while the software path is new).
+                let no_soft = std::env::var("GLYX_NO_SOFT_PRESENT")
+                    .map(|v| v.trim() == "1").unwrap_or(false);
+                let (present, mut renderer) =
+                    if matches!(backend_kind, BackendKind::TinySkia) && !no_soft {
+                        match soft_present::SoftPresent::new(Arc::clone(&window)) {
+                            Ok(sp) => {
+                                let size = window.inner_size();
+                                let r = AnyRenderer::TinySkia(
+                                    glyx_renderer::TinySkiaRenderer::new_cpu_only(
+                                        size.width, size.height));
+                                (Present::Soft(sp), r)
+                            }
+                            Err(e) => {
+                                log::warn!("soft present unavailable ({e}); falling back to wgpu");
+                                let gpu_ctx = pollster::block_on(GpuContext::new(window.clone()))
+                                    .expect("Failed to initialise GPU");
+                                let r = AnyRenderer::new(&gpu_ctx, backend_kind)
+                                    .expect("Failed to initialise renderer");
+                                (Present::Gpu(gpu_ctx), r)
+                            }
+                        }
+                    } else {
+                        let gpu_ctx = pollster::block_on(GpuContext::new(window.clone()))
+                            .expect("Failed to initialise GPU");
+                        let r = AnyRenderer::new(&gpu_ctx, backend_kind)
+                            .expect("Failed to initialise renderer");
+                        (Present::Gpu(gpu_ctx), r)
+                    };
                 // Apply window background color so the GPU clear matches the
                 // app theme from frame zero — no blank white flash on startup.
                 renderer.set_background_color(rgba_to_vello(window_bg));
@@ -1084,7 +1118,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     };
 
                 let ws = PerWindowState {
-                    gpu:          gpu_ctx,
+                    gpu:          present,
                     renderer,
                     text_sys:     TextSystem::new(),
                     layout:       LayoutTree::new(),
@@ -1511,15 +1545,22 @@ pub fn run(mut config: AppConfig) -> bool {
                 #[cfg(not(feature = "dev"))]
                 let _needs_full_render = true;
 
-                // 7. Acquire swapchain texture.
-                let texture = match s.gpu.current_texture() {
-                    Some(t) => t,
-                    None => {
-                        log::warn!("Surface lost or outdated; reconfiguring.");
-                        s.gpu.resize(s.gpu.width(), s.gpu.height());
-                        return;
-                    }
+                // 7. Acquire swapchain texture (wgpu present path only; soft
+                //    present writes straight into the OS surface buffer).
+                let mut surface_lost = false;
+                let texture = match &s.gpu {
+                    Present::Gpu(gpu) => match gpu.current_texture() {
+                        Some(t) => Some(t),
+                        None    => { surface_lost = true; None }
+                    },
+                    Present::Soft(_) => None,
                 };
+                if surface_lost {
+                    log::warn!("Surface lost or outdated; reconfiguring.");
+                    let (w, h) = (s.gpu.width(), s.gpu.height());
+                    s.gpu.resize(w, h);
+                    return;
+                }
 
                 // ── Overlay timer reschedule ───────────────────────────────────
                 // Placed here — before any early return — so the timer keeps
@@ -1558,11 +1599,17 @@ pub fn run(mut config: AppConfig) -> bool {
                     // Stamp last_frame_at so FPS reflects the visual refresh rate
                     // (~20fps from the overlay timer), not the full-render rate (~4fps).
                     s.perf.lock().last_frame_at = Some(frame_start);
-                    if let Err(e) = s.renderer.blit_cached_frame(&s.gpu, &texture) {
-                        log::warn!("blit_cached_frame: {e}");
-                    } else {
-                        texture.present();
-                        s.gpu.poll();
+                    match &mut s.gpu {
+                        Present::Gpu(gpu) => {
+                            let texture = texture.expect("wgpu path always acquires a texture");
+                            if let Err(e) = s.renderer.blit_cached_frame(gpu, &texture) {
+                                log::warn!("blit_cached_frame: {e}");
+                            } else {
+                                texture.present();
+                                gpu.poll();
+                            }
+                        }
+                        Present::Soft(sp) => sp.re_present(),
                     }
                     return;
                 }
@@ -1635,57 +1682,85 @@ pub fn run(mut config: AppConfig) -> bool {
                 // (overlay timer reschedule moved to before the blit-only fast path above)
 
                 let gpu_start = Instant::now();
-                if let Err(e) = s.renderer.render_frame(&s.gpu, &texture, frame) {
-                    log::error!("Render error: {}", e);
-                    return;
-                }
-
-                // 3D overlays — blitted on top of Vello with LoadOp::Load.
-                #[cfg(feature = "canvas3d")]
-                if !canvas3d_overlays.is_empty() {
-                    let surface_view = texture.texture.create_view(&Default::default());
-                    let sw = s.gpu.width()  as f32;
-                    let sh = s.gpu.height() as f32;
-                    for (id, x, y, w, h) in &canvas3d_overlays {
-                        // Lazy-initialise Renderer3D on first use.
-                        if s.renderer_3d.is_none() {
-                            s.renderer_3d = Some(glyx_3d::Renderer3D::new(
-                                &s.gpu.device,
-                                &s.gpu.queue,
-                                s.gpu.surface_format(),
-                            ));
+                match &mut s.gpu {
+                    Present::Gpu(gpu) => {
+                        let texture = texture.expect("wgpu path always acquires a texture");
+                        if let Err(e) = s.renderer.render_frame(gpu, &texture, frame) {
+                            log::error!("Render error: {}", e);
+                            return;
                         }
-                        if s.canvas3d_dirty.contains(id) {
-                            // Scene changed this frame: full re-render.
-                            if let Some(scene) = s.canvas3d_scenes.get(id) {
-                                let gltf_paths: Vec<&str> = scene.meshes.iter()
-                                    .filter_map(|m| match &m.geometry {
-                                        glyx_3d::Geometry3D::Gltf { path } => Some(path.as_str()),
-                                        _ => None,
-                                    })
-                                    .collect();
-                                let r3d = s.renderer_3d.as_mut().unwrap();
-                                for path in gltf_paths {
-                                    if let Err(e) = r3d.load_gltf(&s.gpu.device, &s.gpu.queue, path) {
-                                        log::warn!("GLTF load error '{}': {}", path, e);
-                                    }
+
+                        // 3D overlays — blitted on top of Vello with LoadOp::Load.
+                        #[cfg(feature = "canvas3d")]
+                        if !canvas3d_overlays.is_empty() {
+                            let surface_view = texture.texture.create_view(&Default::default());
+                            let sw = gpu.width()  as f32;
+                            let sh = gpu.height() as f32;
+                            for (id, x, y, w, h) in &canvas3d_overlays {
+                                // Lazy-initialise Renderer3D on first use.
+                                if s.renderer_3d.is_none() {
+                                    s.renderer_3d = Some(glyx_3d::Renderer3D::new(
+                                        &gpu.device,
+                                        &gpu.queue,
+                                        gpu.surface_format(),
+                                    ));
                                 }
-                                r3d.render(&s.gpu.device, &s.gpu.queue,
-                                           *id, scene, *x, *y, *w, *h,
-                                           &surface_view, sw, sh);
+                                if s.canvas3d_dirty.contains(id) {
+                                    // Scene changed this frame: full re-render.
+                                    if let Some(scene) = s.canvas3d_scenes.get(id) {
+                                        let gltf_paths: Vec<&str> = scene.meshes.iter()
+                                            .filter_map(|m| match &m.geometry {
+                                                glyx_3d::Geometry3D::Gltf { path } => Some(path.as_str()),
+                                                _ => None,
+                                            })
+                                            .collect();
+                                        let r3d = s.renderer_3d.as_mut().unwrap();
+                                        for path in gltf_paths {
+                                            if let Err(e) = r3d.load_gltf(&gpu.device, &gpu.queue, path) {
+                                                log::warn!("GLTF load error '{}': {}", path, e);
+                                            }
+                                        }
+                                        r3d.render(&gpu.device, &gpu.queue,
+                                                   *id, scene, *x, *y, *w, *h,
+                                                   &surface_view, sw, sh);
+                                    }
+                                    s.canvas3d_dirty.remove(id);
+                                } else if s.canvas3d_scenes.contains_key(id) {
+                                    // Scene unchanged: blit cached texture, skip the 3D pipeline.
+                                    let r3d = s.renderer_3d.as_mut().unwrap();
+                                    r3d.blit_only(&gpu.device, &gpu.queue,
+                                                  *id, *x, *y, *w, *h,
+                                                  &surface_view, sw, sh);
+                                }
                             }
-                            s.canvas3d_dirty.remove(id);
-                        } else if s.canvas3d_scenes.contains_key(id) {
-                            // Scene unchanged: blit cached texture, skip the 3D pipeline.
-                            let r3d = s.renderer_3d.as_mut().unwrap();
-                            r3d.blit_only(&s.gpu.device, &s.gpu.queue,
-                                          *id, *x, *y, *w, *h,
-                                          &surface_view, sw, sh);
+                        }
+
+                        texture.present();
+                    }
+                    Present::Soft(sp) => {
+                        // CPU path: finalize the tiny-skia frame and blit it to
+                        // the window via the OS software surface.  No wgpu.
+                        #[cfg(feature = "canvas3d")]
+                        if !canvas3d_overlays.is_empty() {
+                            log::warn!(
+                                "Canvas3D requires the GPU present path; set \
+                                 GLYX_NO_SOFT_PRESENT=1 or renderMode other than skia."
+                            );
+                        }
+                        match (&mut s.renderer, frame) {
+                            (glyx_renderer::AnyRenderer::TinySkia(r),
+                             glyx_renderer::AnyFrame::TinySkia(f)) => {
+                                r.finish_frame_soft(f, |rgba, w, h| {
+                                    sp.present_rgba(rgba, w, h);
+                                });
+                            }
+                            _ => {
+                                log::error!("soft present requires the TinySkia renderer");
+                                return;
+                            }
                         }
                     }
                 }
-
-                texture.present();
 
                 // Release staging buffers and D3D12 command allocators from
                 // completed GPU submissions.  Without this, wgpu's upload ring

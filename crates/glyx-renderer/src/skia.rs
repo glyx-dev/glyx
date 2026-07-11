@@ -620,27 +620,44 @@ impl StagingBuf {
 
 // ── TinySkiaRenderer ──────────────────────────────────────────────────────────
 
-/// Manages CPU→GPU upload for the tiny-skia backend.
-pub struct TinySkiaRenderer {
+/// wgpu resources for presenting the CPU pixmap through a swapchain.
+/// Absent when the renderer was created via `new_cpu_only` (softbuffer present).
+struct GpuUpload {
     upload_texture: wgpu::Texture,
     upload_view:    wgpu::TextureView,
     blit:           CachedBlit,
     staging:        StagingBuf,
-    width:          u32,
-    height:         u32,
-    /// Actual dimensions of `upload_texture`.  May differ from `width/height`
-    /// when `notify_resize` updated the renderer dims but `render_frame` hasn't
-    /// had a chance to recreate the texture yet.
+    /// Actual dimensions of `upload_texture`.  May differ from renderer
+    /// width/height when `notify_resize` updated the dims but `render_frame`
+    /// hasn't had a chance to recreate the texture yet.
     upload_w:       u32,
     upload_h:       u32,
+}
+
+/// Manages CPU rasterization (and optionally CPU→GPU upload) for the
+/// tiny-skia backend.
+pub struct TinySkiaRenderer {
+    gpu_upload:     Option<GpuUpload>,
+    width:          u32,
+    height:         u32,
     pub background_color: peniko::Color,
     /// Swash context + glyph cache — moved into TinySkiaFrame during render.
     shared:         Option<TinySkiaShared>,
 }
 
 impl TinySkiaRenderer {
+    fn make_shared() -> Option<TinySkiaShared> {
+        Some(TinySkiaShared {
+            scale_ctx:   swash::scale::ScaleContext::new(),
+            // 2048 entries ≈ ~1 MB for typical UI text; ample headroom for
+            // several font sizes' worth of Latin glyphs without thrashing.
+            glyph_cache: lru::LruCache::new(std::num::NonZeroUsize::new(2048).unwrap()),
+            pixmap:      None,
+        })
+    }
+
     pub fn new(gpu: &GpuContext) -> Result<Self, RendererError> {
-        log::info!("glyx-renderer: tiny-skia CPU backend active.");
+        log::info!("glyx-renderer: tiny-skia CPU backend active (wgpu present).");
         let w = gpu.width().max(1);
         let h = gpu.height().max(1);
         let (texture, view) = Self::make_upload(gpu, w, h);
@@ -648,19 +665,46 @@ impl TinySkiaRenderer {
         blit.set_source(&gpu.device, &view);
         let staging = StagingBuf::new(&gpu.device, w, h);
         Ok(Self {
-            upload_texture: texture,
-            upload_view:    view,
-            blit, staging,
-            width: w, height: h, upload_w: w, upload_h: h,
-            background_color: crate::colors::BACKGROUND,
-            shared: Some(TinySkiaShared {
-                scale_ctx:   swash::scale::ScaleContext::new(),
-                // 2048 entries ≈ ~1 MB for typical UI text; ample headroom for
-                // several font sizes' worth of Latin glyphs without thrashing.
-                glyph_cache: lru::LruCache::new(std::num::NonZeroUsize::new(2048).unwrap()),
-                pixmap:      None,
+            gpu_upload: Some(GpuUpload {
+                upload_texture: texture,
+                upload_view:    view,
+                blit, staging,
+                upload_w: w, upload_h: h,
             }),
+            width: w, height: h,
+            background_color: crate::colors::BACKGROUND,
+            shared: Self::make_shared(),
         })
+    }
+
+    /// CPU-only renderer: rasterizes to the pixmap with no wgpu resources at
+    /// all.  The caller presents via [`finish_frame_soft`] (softbuffer / DIB).
+    pub fn new_cpu_only(w: u32, h: u32) -> Self {
+        log::info!("glyx-renderer: tiny-skia CPU backend active (software present, no wgpu).");
+        Self {
+            gpu_upload: None,
+            width: w.max(1), height: h.max(1),
+            background_color: crate::colors::BACKGROUND,
+            shared: Self::make_shared(),
+        }
+    }
+
+    /// Finalize a frame for software present: hands the premultiplied RGBA8
+    /// pixel data to `write`, then returns the pixmap to the pool.  No GPU work.
+    pub fn finish_frame_soft(
+        &mut self,
+        frame: TinySkiaFrame,
+        write: impl FnOnce(&[u8], u32, u32),
+    ) {
+        let TinySkiaFrame { pixmap, shared, .. } = frame;
+        let w = pixmap.width();
+        let h = pixmap.height();
+        write(pixmap.data(), w, h);
+        let mut shared = shared;
+        if self.width == w && self.height == h {
+            shared.pixmap = Some(pixmap);
+        }
+        self.shared = Some(shared);
     }
 
     fn make_upload(gpu: &GpuContext, w: u32, h: u32)
@@ -702,19 +746,22 @@ impl TinySkiaRenderer {
         let w = pixmap.width();
         let h = pixmap.height();
 
+        let up = self.gpu_upload.as_mut()
+            .expect("skia: render_frame called on a cpu-only renderer (use finish_frame_soft)");
+
         // Recreate upload texture AND staging buffers on resize.
-        if self.upload_w != w || self.upload_h != h {
-            self.upload_w = w;
-            self.upload_h = h;
+        if up.upload_w != w || up.upload_h != h {
+            up.upload_w = w;
+            up.upload_h = h;
             let (tex, view) = Self::make_upload(gpu, w, h);
-            self.upload_texture = tex;
-            self.upload_view    = view;
+            up.upload_texture = tex;
+            up.upload_view    = view;
             // Refresh cached bind group for the new texture view — pipeline is reused.
-            self.blit.set_source(&gpu.device, &self.upload_view);
+            up.blit.set_source(&gpu.device, &up.upload_view);
             // New staging buffers sized for the new resolution.
             // Old buffers are dropped here; wgpu schedules their GPU-side destruction
             // after any pending commands referencing them complete.
-            self.staging = StagingBuf::new(&gpu.device, w, h);
+            up.staging = StagingBuf::new(&gpu.device, w, h);
         }
 
         // Non-blocking poll: process completed GPU work and fire any pending
@@ -725,17 +772,17 @@ impl TinySkiaRenderer {
         // Single-buffered: if the GPU hasn't finished copying last frame's pixels
         // yet, block until it has.  The copy is a plain memcpy-sized transfer, so
         // this wait is sub-millisecond even on integrated GPUs.
-        if !*self.staging.ready.lock().unwrap() {
+        if !*up.staging.ready.lock().unwrap() {
             let _ = gpu.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         }
 
         // Write CPU pixels into the currently-mapped staging buffer.
         // If bytes_per_row > w*4 (alignment padding), copy row-by-row so padding
         // bytes stay in the correct positions expected by copy_buffer_to_texture.
-        let bpr     = self.staging.bytes_per_row as usize;
+        let bpr     = up.staging.bytes_per_row as usize;
         let row_src = w as usize * 4;
         {
-            let mut view = self.staging.buf.slice(..).get_mapped_range_mut();
+            let mut view = up.staging.buf.slice(..).get_mapped_range_mut();
             let src = pixmap.data();
             if bpr == row_src {
                 // Tightly-packed rows — single copy.
@@ -751,8 +798,8 @@ impl TinySkiaRenderer {
                 }
             }
         }
-        *self.staging.ready.lock().unwrap() = false;
-        self.staging.buf.unmap();
+        *up.staging.ready.lock().unwrap() = false;
+        up.staging.buf.unmap();
 
         // One command buffer: copy staging → upload texture, then blit to surface.
         let surface_view = texture.texture.create_view(&Default::default());
@@ -760,24 +807,24 @@ impl TinySkiaRenderer {
             &wgpu::CommandEncoderDescriptor { label: Some("skia-blit") });
         enc.copy_buffer_to_texture(
             wgpu::TexelCopyBufferInfo {
-                buffer: &self.staging.buf,
+                buffer: &up.staging.buf,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset:         0,
-                    bytes_per_row:  Some(self.staging.bytes_per_row),
+                    bytes_per_row:  Some(up.staging.bytes_per_row),
                     rows_per_image: None,
                 },
             },
-            self.upload_texture.as_image_copy(),
+            up.upload_texture.as_image_copy(),
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
-        self.blit.copy(&mut enc, &surface_view);
+        up.blit.copy(&mut enc, &surface_view);
         gpu.queue.submit([enc.finish()]);
 
         // Schedule async re-map AFTER submit.  The callback fires on the next
         // poll() once the GPU has finished the copy, which takes at most one
         // frame; if it hasn't fired by then, render_frame blocks briefly above.
-        let ready_clone = Arc::clone(&self.staging.ready);
-        self.staging.buf.slice(..).map_async(wgpu::MapMode::Write, move |r| {
+        let ready_clone = Arc::clone(&up.staging.ready);
+        up.staging.buf.slice(..).map_async(wgpu::MapMode::Write, move |r| {
             if r.is_ok() { *ready_clone.lock().unwrap() = true; }
         });
         // -----------------------------------------------------------------------
@@ -797,10 +844,11 @@ impl TinySkiaRenderer {
         gpu:     &GpuContext,
         texture: &wgpu::SurfaceTexture,
     ) -> Result<(), RendererError> {
+        let Some(up) = self.gpu_upload.as_ref() else { return Ok(()) };
         let surface_view = texture.texture.create_view(&Default::default());
         let mut enc = gpu.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("skia-blit-cached") });
-        self.blit.copy(&mut enc, &surface_view);
+        up.blit.copy(&mut enc, &surface_view);
         gpu.queue.submit([enc.finish()]);
         Ok(())
     }

@@ -5,6 +5,7 @@ import {
 import { Router, Route, useNavigate, useRoute } from '@glyx/router';
 import {
   ThemeProvider, Button, IconButton, Card, TextField, Chip, Tabs, CheckboxRow, Empty, Spinner, useTheme,
+  ToastProvider, useToast,
 } from '@glyx/design';
 
 const PRIORITIES = ['low', 'normal', 'high', 'urgent'];
@@ -97,6 +98,7 @@ function ListScreen() {
 function EditScreen() {
   const C = useTheme().colors;
   const navigate = useNavigate();
+  const { showToast } = useToast();
   const { params } = useRoute();
   const id = params && params.id != null ? params.id : null;
   const [title, setTitle] = useState('');
@@ -113,7 +115,10 @@ function EditScreen() {
   }, [id]);
 
   const save = async () => {
-    if (!title.trim()) return;
+    if (!title.trim()) {
+      showToast({ message: 'Title is required', variant: 'error' });
+      return;
+    }
     const now = Date.now();
     if (id == null) {
       await db.run('INSERT INTO tasks (title, body, done, priority, due, created_at) VALUES (?,?,0,?,?,?)',
@@ -122,6 +127,7 @@ function EditScreen() {
       await db.run('UPDATE tasks SET title=?, body=?, priority=?, due=? WHERE id=?',
         [title, notes, priority, due, id]);
     }
+    showToast({ message: id == null ? 'Task created' : 'Task saved', variant: 'success' });
     navigate('back');
   };
 
@@ -207,7 +213,9 @@ function Root() {
   return (
     <SchemeCtx.Provider value={{ scheme, toggle }}>
       <ThemeProvider colorScheme={scheme}>
-        <App />
+        <ToastProvider>
+          <App />
+        </ToastProvider>
       </ThemeProvider>
     </SchemeCtx.Provider>
   );

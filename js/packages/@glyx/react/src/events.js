@@ -417,11 +417,24 @@ function findTopmostSolid(x, y) {
   // z-index beats one registered later (which is the common case when an
   // absolutely-positioned overlay is declared before the content it covers
   // in JSX but must receive clicks over it).
+  // The effective z-index is inherited from the ancestor chain: a leaf inside
+  // a zIndex:999 overlay layer must beat content re-rendered after the
+  // overlay mounted (e.g. toast items over a screen that re-rendered later).
+  const effectiveZ = (id) => {
+    let z = zIndexMap.get(id) ?? 0;
+    let p = parentMap.get(id);
+    while (p !== undefined) {
+      const pz = zIndexMap.get(p);
+      if (pz !== undefined && pz > z) z = pz;
+      p = parentMap.get(p);
+    }
+    return z;
+  };
   let bestId = deepest[0];
   let bestIdx = solidRegistry.lastIndexOf(deepest[0]);
-  let bestZ   = zIndexMap.get(deepest[0]) ?? 0;
+  let bestZ   = effectiveZ(deepest[0]);
   for (let i = 1; i < deepest.length; i++) {
-    const z   = zIndexMap.get(deepest[i]) ?? 0;
+    const z   = effectiveZ(deepest[i]);
     const idx = solidRegistry.lastIndexOf(deepest[i]);
     if (z > bestZ || (z === bestZ && idx > bestIdx)) {
       bestId  = deepest[i];

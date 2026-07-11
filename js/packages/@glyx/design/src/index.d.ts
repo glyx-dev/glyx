@@ -184,13 +184,19 @@ export declare function Skeleton(props: {
 }): JSX.Element;
 
 export interface ToastOptions {
-  message:   string;
-  variant?:  AlertVariant;
-  duration?: number;
+  message:        string;
+  variant?:       AlertVariant;
+  /** ms before auto-dismiss; 0 = stay until manually dismissed (default 3000) */
+  duration?:      number;
+  /** pause countdown while pointer is over the toast (default true) */
+  pauseOnHover?:  boolean;
+  action?:        () => void;
+  actionLabel?:   string;
 }
 
 export interface ToastAPI {
-  show(opts: ToastOptions): void;
+  showToast(opts: ToastOptions): number;
+  dismiss(id: number): void;
 }
 
 export declare function ToastProvider(props: { children: ReactNode }): JSX.Element;

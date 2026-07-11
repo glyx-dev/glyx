@@ -271,53 +271,72 @@ export function Skeleton({ width, height = 16, borderRadius, lines, gap, style }
 //      showToast({ message: 'Saved!', variant: 'success' })
 //
 // showToast options:
-//   message     — notification text
-//   variant     — 'default' | 'success' | 'error' | 'warning'
-//   duration    — ms before auto-dismiss (0 = stay until dismissed, default 3000)
-//   action      — optional callback for an action button
-//   actionLabel — label for the action button (default 'Action')
+//   message       — notification text
+//   variant       — 'default' | 'success' | 'error' | 'warning'
+//   duration      — ms before auto-dismiss (0 = stay until manually dismissed, default 3000)
+//   pauseOnHover  — pause the countdown while the pointer is over the toast (default true)
+//   action        — optional callback for an action button
+//   actionLabel   — label for the action button (default 'Action')
 
 const ToastCtx = createContext(null);
 
 export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
-  const timersRef = useRef(new Map()); // id → timer handle
+  // id → { handle, remaining, startedAt }
+  const timersRef = useRef(new Map());
 
   useEffect(() => {
     const timers = timersRef.current;
-    return () => { for (const h of timers.values()) clearTimeout(h); timers.clear(); };
+    return () => { for (const entry of timers.values()) clearTimeout(entry.handle); timers.clear(); };
+  }, []);
+
+  const _arm = useCallback((id, ms) => {
+    const h = setTimeout(() => {
+      setToasts(t => t.filter(x => x.id !== id));
+      timersRef.current.delete(id);
+    }, ms);
+    timersRef.current.set(id, { handle: h, remaining: ms, startedAt: Date.now() });
   }, []);
 
   const showToast = useCallback(({
     message,
     variant      = 'default',
     duration     = 3000,
+    pauseOnHover = true,
     action,
     actionLabel  = 'Action',
   }) => {
     const id = Date.now() + Math.random();
-    setToasts(t => [...t, { id, message, variant, duration, action, actionLabel }]);
-    if (duration > 0) {
-      const h = setTimeout(() => {
-        setToasts(t => t.filter(x => x.id !== id));
-        timersRef.current.delete(id);
-      }, duration);
-      timersRef.current.set(id, h);
-    }
+    setToasts(t => [...t, { id, message, variant, duration, pauseOnHover, action, actionLabel }]);
+    if (duration > 0) _arm(id, duration);
     return id;
-  }, []);
+  }, [_arm]);
 
   const dismiss = useCallback((id) => {
-    const h = timersRef.current.get(id);
-    if (h != null) { clearTimeout(h); timersRef.current.delete(id); }
+    const entry = timersRef.current.get(id);
+    if (entry) { clearTimeout(entry.handle); timersRef.current.delete(id); }
     setToasts(t => t.filter(x => x.id !== id));
   }, []);
+
+  const pauseToast = useCallback((id) => {
+    const entry = timersRef.current.get(id);
+    if (!entry) return;
+    clearTimeout(entry.handle);
+    const elapsed = Date.now() - entry.startedAt;
+    timersRef.current.set(id, { handle: null, remaining: Math.max(0, entry.remaining - elapsed), startedAt: null });
+  }, []);
+
+  const resumeToast = useCallback((id) => {
+    const entry = timersRef.current.get(id);
+    if (!entry || entry.handle != null || entry.remaining <= 0) return;
+    _arm(id, entry.remaining);
+  }, [_arm]);
 
   return (
     <ToastCtx.Provider value={{ showToast, dismiss }}>
       {children}
       {toasts.length > 0 && (
-        <_ToastLayer toasts={toasts} onDismiss={dismiss} />
+        <_ToastLayer toasts={toasts} onDismiss={dismiss} onPause={pauseToast} onResume={resumeToast} />
       )}
     </ToastCtx.Provider>
   );
@@ -329,7 +348,7 @@ export function useToast() {
   return ctx;
 }
 
-function _ToastLayer({ toasts, onDismiss }) {
+function _ToastLayer({ toasts, onDismiss, onPause, onResume }) {
   return (
     <View
       style={{
@@ -343,14 +362,15 @@ function _ToastLayer({ toasts, onDismiss }) {
       }}
     >
       {toasts.map(t => (
-        <_ToastItem key={t.id} toast={t} onDismiss={onDismiss} />
+        <_ToastItem key={t.id} toast={t} onDismiss={onDismiss} onPause={onPause} onResume={onResume} />
       ))}
     </View>
   );
 }
 
-function _ToastItem({ toast, onDismiss }) {
+function _ToastItem({ toast, onDismiss, onPause, onResume }) {
   const { colors, space, radius, fontSize, fontWeight } = useTheme();
+  const [hov, setHov] = useState(false);
 
   const bg = toast.variant === 'success' ? colors.success
            : toast.variant === 'error'   ? colors.error
@@ -363,8 +383,20 @@ function _ToastItem({ toast, onDismiss }) {
            ? colors.primaryText
            : colors.text;
 
+  const onHoverIn = () => {
+    setHov(true);
+    if (toast.pauseOnHover && toast.duration > 0) onPause(toast.id);
+  };
+  const onHoverOut = () => {
+    setHov(false);
+    if (toast.pauseOnHover && toast.duration > 0) onResume(toast.id);
+  };
+
   return (
-    <View
+    <Pressable
+      feedback={false}
+      onHoverIn={onHoverIn}
+      onHoverOut={onHoverOut}
       style={{
         flexDirection:     'row',
         alignItems:        'center',
@@ -375,6 +407,7 @@ function _ToastItem({ toast, onDismiss }) {
         gap:               space[3],
         width:             320,
         boxShadow:         '0 4 16 #00000040',
+        opacity:           hov ? 1 : 0.92,
       }}
     >
       <Text fontSize={fontSize.sm} style={{ color: fg, flex: 1 }}>
@@ -399,6 +432,6 @@ function _ToastItem({ toast, onDismiss }) {
           x
         </Text>
       </Pressable>
-    </View>
+    </Pressable>
   );
 }

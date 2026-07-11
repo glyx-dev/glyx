@@ -494,7 +494,7 @@ pub(super) fn load_splash_state() -> Option<SplashState> {
 /// Calculate a sensible V8 max-heap cap from the JS bundle size.
 pub(super) fn calc_heap_mb(bundle_bytes: usize) -> usize {
     const MB: usize = 1024 * 1024;
-    ((bundle_bytes * 12) / MB).max(32).min(256)
+    ((bundle_bytes * 12) / MB).max(16).min(256)
 }
 
 /// Load the Glyx config from the current working directory.

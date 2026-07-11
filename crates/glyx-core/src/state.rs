@@ -135,6 +135,10 @@ pub(super) struct PerWindowState {
     pub(super) cursor_blink_on:       bool,
     pub(super) cursor_blink_deadline: Instant,
     pub(super) cursor_was_active: bool,
+    /// Sender to the persistent blink-timer thread (spawned lazily on first
+    /// focused TextInput). Sending a deadline schedules one redraw at that
+    /// instant; newer deadlines received while waiting replace the pending one.
+    pub(super) cursor_blink_tx: Option<std::sync::mpsc::Sender<Instant>>,
     pub(super) perf: Arc<Mutex<glyx_perf::PerfState>>,
     pub(super) rss_bytes: Arc<std::sync::atomic::AtomicU64>,
     pub(super) gc_frame_counter: u32,

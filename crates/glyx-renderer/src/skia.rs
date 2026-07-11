@@ -579,24 +579,24 @@ impl TinySkiaFrame {
 
 // ── Persistent staging buffers ────────────────────────────────────────────────
 
-/// Two persistently-mapped `MAP_WRITE | COPY_SRC` GPU buffers for zero-allocation
-/// pixmap upload.  While the GPU copies one buffer to the upload texture the CPU
-/// writes into the other.  `map_async` re-maps each buffer after the GPU is done,
-/// bounding staging memory to exactly `2 × w × h × 4` bytes regardless of frame
+/// One persistently-mapped `MAP_WRITE | COPY_SRC` GPU buffer for zero-allocation
+/// pixmap upload.  `map_async` re-maps the buffer after the GPU consumes it,
+/// bounding staging memory to exactly `w × h × 4` bytes regardless of frame
 /// rate — eliminating the per-frame allocation that `queue.write_texture()` causes
-/// through wgpu's internal StagingPool.
-struct StagingPair {
-    bufs:  [wgpu::Buffer; 2],
-    /// `true` when the corresponding buffer is mapped and ready for CPU writes.
-    ready: [Arc<Mutex<bool>>; 2],
-    /// Index of the slot to write into next frame (0 or 1).
-    idx:   usize,
+/// through wgpu's internal StagingPool.  A single buffer means the CPU may wait
+/// for the GPU copy of the previous frame before writing the next one; for a UI
+/// workload (a memcpy-sized copy, mostly idle frames) that wait is negligible and
+/// halves staging memory vs. double-buffering.
+struct StagingBuf {
+    buf:   wgpu::Buffer,
+    /// `true` when the buffer is mapped and ready for CPU writes.
+    ready: Arc<Mutex<bool>>,
     /// Row stride in the staging buffer, aligned to COPY_BYTES_PER_ROW_ALIGNMENT.
     /// May be > `width * 4` when width is not a multiple of 64.
     bytes_per_row: u32,
 }
 
-impl StagingPair {
+impl StagingBuf {
     fn new(device: &wgpu::Device, w: u32, h: u32) -> Self {
         // copy_buffer_to_texture requires bytes_per_row to be a multiple of
         // COPY_BYTES_PER_ROW_ALIGNMENT (256).  Round up to the next multiple.
@@ -604,16 +604,15 @@ impl StagingPair {
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let bpr   = (raw + align - 1) & !(align - 1);
         let size  = bpr as u64 * h as u64;
-        let make  = |label: &'static str| device.create_buffer(&wgpu::BufferDescriptor {
-            label:              Some(label),
+        let buf   = device.create_buffer(&wgpu::BufferDescriptor {
+            label:              Some("skia-staging"),
             size,
             usage:              wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: true,
         });
         Self {
-            bufs:          [make("skia-staging-0"), make("skia-staging-1")],
-            ready:         [Arc::new(Mutex::new(true)), Arc::new(Mutex::new(true))],
-            idx:           0,
+            buf,
+            ready:         Arc::new(Mutex::new(true)),
             bytes_per_row: bpr,
         }
     }
@@ -626,7 +625,7 @@ pub struct TinySkiaRenderer {
     upload_texture: wgpu::Texture,
     upload_view:    wgpu::TextureView,
     blit:           CachedBlit,
-    staging:        StagingPair,
+    staging:        StagingBuf,
     width:          u32,
     height:         u32,
     /// Actual dimensions of `upload_texture`.  May differ from `width/height`
@@ -647,7 +646,7 @@ impl TinySkiaRenderer {
         let (texture, view) = Self::make_upload(gpu, w, h);
         let mut blit = CachedBlit::new(&gpu.device, gpu.surface_format());
         blit.set_source(&gpu.device, &view);
-        let staging = StagingPair::new(&gpu.device, w, h);
+        let staging = StagingBuf::new(&gpu.device, w, h);
         Ok(Self {
             upload_texture: texture,
             upload_view:    view,
@@ -715,7 +714,7 @@ impl TinySkiaRenderer {
             // New staging buffers sized for the new resolution.
             // Old buffers are dropped here; wgpu schedules their GPU-side destruction
             // after any pending commands referencing them complete.
-            self.staging = StagingPair::new(&gpu.device, w, h);
+            self.staging = StagingBuf::new(&gpu.device, w, h);
         }
 
         // Non-blocking poll: process completed GPU work and fire any pending
@@ -723,13 +722,10 @@ impl TinySkiaRenderer {
         let _ = gpu.device.poll(wgpu::PollType::Poll);
 
         // --- Persistent staging upload (replaces queue.write_texture) ----------
-        // With double-buffering and a GPU frame latency of 2, each staging slot
-        // is recycled before we return to it, so the Wait branch is never taken
-        // under normal conditions.
-        let idx = self.staging.idx;
-        if !*self.staging.ready[idx].lock().unwrap() {
-            // Rare: GPU is running more than 2 frames behind — block until done.
-            log::warn!("skia: staging slot {} not ready, blocking on GPU", idx);
+        // Single-buffered: if the GPU hasn't finished copying last frame's pixels
+        // yet, block until it has.  The copy is a plain memcpy-sized transfer, so
+        // this wait is sub-millisecond even on integrated GPUs.
+        if !*self.staging.ready.lock().unwrap() {
             let _ = gpu.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         }
 
@@ -739,7 +735,7 @@ impl TinySkiaRenderer {
         let bpr     = self.staging.bytes_per_row as usize;
         let row_src = w as usize * 4;
         {
-            let mut view = self.staging.bufs[idx].slice(..).get_mapped_range_mut();
+            let mut view = self.staging.buf.slice(..).get_mapped_range_mut();
             let src = pixmap.data();
             if bpr == row_src {
                 // Tightly-packed rows — single copy.
@@ -755,8 +751,8 @@ impl TinySkiaRenderer {
                 }
             }
         }
-        *self.staging.ready[idx].lock().unwrap() = false;
-        self.staging.bufs[idx].unmap();
+        *self.staging.ready.lock().unwrap() = false;
+        self.staging.buf.unmap();
 
         // One command buffer: copy staging → upload texture, then blit to surface.
         let surface_view = texture.texture.create_view(&Default::default());
@@ -764,7 +760,7 @@ impl TinySkiaRenderer {
             &wgpu::CommandEncoderDescriptor { label: Some("skia-blit") });
         enc.copy_buffer_to_texture(
             wgpu::TexelCopyBufferInfo {
-                buffer: &self.staging.bufs[idx],
+                buffer: &self.staging.buf,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset:         0,
                     bytes_per_row:  Some(self.staging.bytes_per_row),
@@ -779,12 +775,11 @@ impl TinySkiaRenderer {
 
         // Schedule async re-map AFTER submit.  The callback fires on the next
         // poll() once the GPU has finished the copy, which takes at most one
-        // frame — well within the two-frame latency window of double-buffering.
-        let ready_clone = Arc::clone(&self.staging.ready[idx]);
-        self.staging.bufs[idx].slice(..).map_async(wgpu::MapMode::Write, move |r| {
+        // frame; if it hasn't fired by then, render_frame blocks briefly above.
+        let ready_clone = Arc::clone(&self.staging.ready);
+        self.staging.buf.slice(..).map_async(wgpu::MapMode::Write, move |r| {
             if r.is_ok() { *ready_clone.lock().unwrap() = true; }
         });
-        self.staging.idx ^= 1;
         // -----------------------------------------------------------------------
 
         // Return pixmap to pool (same size → reuse the allocation next frame).

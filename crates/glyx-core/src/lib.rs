@@ -1108,6 +1108,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     cursor_blink_on:       true,
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
                     cursor_was_active:     false,
+                    cursor_blink_tx:       None,
                     perf:          shared_perf,
                     rss_bytes:     {
                         // Spawn a background task that polls RSS every 2 s via sysinfo.
@@ -1797,13 +1798,33 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 s.cursor_was_active = any_cursor_active;
                 if any_cursor_active {
-                    let redraw   = Arc::clone(&s.request_redraw);
-                    let deadline = s.cursor_blink_deadline;
-                    std::thread::spawn(move || {
-                        let now = Instant::now();
-                        if deadline > now { std::thread::sleep(deadline - now); }
-                        redraw();
+                    // One persistent timer thread per window (lazy). Each frame we
+                    // send the next blink deadline; the thread coalesces deadlines
+                    // received while waiting and fires a single redraw per blink.
+                    let tx = s.cursor_blink_tx.get_or_insert_with(|| {
+                        let (tx, rx) = std::sync::mpsc::channel::<Instant>();
+                        let redraw = Arc::clone(&s.request_redraw);
+                        std::thread::Builder::new()
+                            .name("glyx-cursor-blink".into())
+                            .stack_size(64 * 1024)
+                            .spawn(move || {
+                                while let Ok(mut deadline) = rx.recv() {
+                                    loop {
+                                        let now = Instant::now();
+                                        if deadline <= now { break; }
+                                        match rx.recv_timeout(deadline - now) {
+                                            Ok(newer) => deadline = newer,
+                                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                                        }
+                                    }
+                                    redraw();
+                                }
+                            })
+                            .expect("spawn cursor-blink timer");
+                        tx
                     });
+                    let _ = tx.send(s.cursor_blink_deadline);
                 }
             }
 

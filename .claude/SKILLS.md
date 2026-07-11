@@ -45,8 +45,9 @@ Run the full Glyx test suite.
 # Rust tests (security, decoder, backend, config)
 cargo test --workspace
 
-# JS tests (all 18 @glyx packages)
-cd js && bun test
+# JS tests (all 18 @glyx packages) — use glyx test or your PM directly
+glyx test --js
+# or: cd js && bun test / npm test / pnpm test
 
 # Single crate
 cargo test -p glyx-security

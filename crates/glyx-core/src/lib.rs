@@ -1121,6 +1121,12 @@ pub fn run(mut config: AppConfig) -> bool {
                     gpu:          present,
                     window:       Arc::clone(&window),
                     gpu_upgrade_failed: false,
+                    #[cfg(feature = "canvas3d")]
+                    gpu_was_upgraded: false,
+                    #[cfg(feature = "canvas3d")]
+                    canvas3d_last_used: None,
+                    #[cfg(feature = "canvas3d")]
+                    downgrade_timer_armed: false,
                     renderer,
                     text_sys:     TextSystem::new(),
                     layout:       LayoutTree::new(),
@@ -1621,7 +1627,37 @@ pub fn run(mut config: AppConfig) -> bool {
                 // their per-frame buffer at their stored size; if the window was
                 // just maximized/resized, Resized only updated gpu, not the renderer.
                 s.renderer.notify_resize(s.gpu.width().max(1), s.gpu.height().max(1));
-                let mut frame = s.renderer.begin_frame();
+
+                // ── Damage computation (soft present + TinySkia only) ─────────
+                // Redraw + push only the changed region.  Full frame when:
+                // the cursor blinked (cursor node isn't in dirty_nodes), the
+                // splash is up, a dev-overlay refresh is due (overlay draws on
+                // top of arbitrary content), or the damage analysis bails.
+                let frame_damage: Option<(f64, f64, f64, f64)> = {
+                    let soft = matches!(s.gpu, Present::Soft(_));
+                    let splash_up = s.splash_state.as_ref().map_or(false, |sp| sp.is_visible());
+                    #[cfg(feature = "dev")]
+                    let overlay_up = s.dev_mode.as_ref()
+                        .map_or(false, |d| d.overlay_visible || d.last_js_error.is_some());
+                    #[cfg(not(feature = "dev"))]
+                    let overlay_up = false;
+                    if soft && !blink_changed && !splash_up && !overlay_up {
+                        scene::compute_frame_damage(s)
+                    } else {
+                        None
+                    }
+                };
+
+                let mut frame = match (&s.renderer, frame_damage) {
+                    (glyx_renderer::AnyRenderer::TinySkia(_), Some(_)) => {
+                        match &mut s.renderer {
+                            glyx_renderer::AnyRenderer::TinySkia(r) =>
+                                glyx_renderer::AnyFrame::TinySkia(r.begin_frame_damaged(frame_damage)),
+                            _ => unreachable!(),
+                        }
+                    }
+                    _ => s.renderer.begin_frame(),
+                };
                 let mut any_cursor_active = false;
                 #[cfg(feature = "canvas3d")]
                 let mut canvas3d_overlays: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
@@ -1683,6 +1719,63 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 // (overlay timer reschedule moved to before the blit-only fast path above)
 
+                // ── Idle wgpu→soft downgrade ─────────────────────────────────
+                // If this window was lazily upgraded for Canvas3D and no 3D
+                // overlay has been composited for 60 s, release the entire
+                // wgpu layer and return to software present.  The debounce
+                // prevents device-creation thrash when 3D views mount and
+                // unmount rapidly (e.g. tab switching).
+                #[cfg(feature = "canvas3d")]
+                {
+                    const IDLE_3D: Duration = Duration::from_secs(60);
+                    if !canvas3d_overlays.is_empty() {
+                        s.canvas3d_last_used = Some(Instant::now());
+                        s.downgrade_timer_armed = false;
+                    } else if s.gpu_was_upgraded && matches!(s.gpu, Present::Gpu(_)) {
+                        let last = s.canvas3d_last_used.unwrap_or(frame_start);
+                        if last.elapsed() >= IDLE_3D {
+                            match soft_present::SoftPresent::new(Arc::clone(&s.window)) {
+                                Ok(sp) => {
+                                    log::info!(
+                                        "Canvas3D idle for 60 s — releasing wgpu, \
+                                         back to software present."
+                                    );
+                                    let size = s.window.inner_size();
+                                    s.renderer = AnyRenderer::TinySkia(
+                                        glyx_renderer::TinySkiaRenderer::new_cpu_only(
+                                            size.width, size.height));
+                                    s.renderer.set_background_color(rgba_to_vello(window_bg));
+                                    s.gpu = Present::Soft(sp);
+                                    s.renderer_3d = None;
+                                    s.gpu_was_upgraded = false;
+                                    s.gpu_upgrade_failed = false;
+                                    s.pipeline_cache_saved = false;
+                                    // This frame targeted the old wgpu renderer;
+                                    // discard and re-render through soft present.
+                                    (s.request_redraw)();
+                                    return;
+                                }
+                                Err(e) => {
+                                    // Keep the wgpu path; don't retry every frame.
+                                    log::warn!("idle downgrade unavailable: {e}");
+                                    s.gpu_was_upgraded = false;
+                                }
+                            }
+                        } else if !s.downgrade_timer_armed {
+                            // Static 3D-less screens get no further frames, so
+                            // arm one wake-up at the deadline to run this check.
+                            s.downgrade_timer_armed = true;
+                            let req = Arc::clone(&s.request_redraw);
+                            let wait = IDLE_3D.saturating_sub(last.elapsed())
+                                + Duration::from_millis(100);
+                            tokio_handle.spawn(async move {
+                                tokio::time::sleep(wait).await;
+                                req();
+                            });
+                        }
+                    }
+                }
+
                 // ── Lazy soft→wgpu upgrade for Canvas3D ──────────────────────
                 // 2D-only apps never create a wgpu device (35 MB baseline);
                 // the first Canvas3D node pays the GPU cost on demand, once.
@@ -1699,6 +1792,8 @@ pub fn run(mut config: AppConfig) -> bool {
                                 s.renderer = r;
                                 s.gpu = Present::Gpu(gpu_ctx);
                                 s.pipeline_cache_saved = false;
+                                s.gpu_was_upgraded = true;
+                                s.canvas3d_last_used = Some(Instant::now());
                                 // This frame was rasterized for the soft path;
                                 // discard it and re-render through wgpu.  The
                                 // frame owns the old renderer's shared state,
@@ -1786,8 +1881,8 @@ pub fn run(mut config: AppConfig) -> bool {
                         match (&mut s.renderer, frame) {
                             (glyx_renderer::AnyRenderer::TinySkia(r),
                              glyx_renderer::AnyFrame::TinySkia(f)) => {
-                                r.finish_frame_soft(f, |rgba, w, h| {
-                                    sp.present_rgba(rgba, w, h);
+                                r.finish_frame_soft(f, |rgba, w, h, damage| {
+                                    sp.present_rgba(rgba, w, h, damage);
                                 });
                             }
                             _ => {

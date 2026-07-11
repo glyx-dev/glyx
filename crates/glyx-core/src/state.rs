@@ -151,6 +151,17 @@ pub(super) struct PerWindowState {
     pub(super) window:       Arc<winit::window::Window>,
     /// Set after a failed soft→wgpu upgrade so we only log the error once.
     pub(super) gpu_upgrade_failed: bool,
+    /// True when the wgpu path was created lazily for Canvas3D (as opposed to
+    /// being the configured backend).  Only lazily-upgraded windows are
+    /// eligible for the idle downgrade back to software present.
+    #[cfg(feature = "canvas3d")]
+    pub(super) gpu_was_upgraded: bool,
+    /// Last frame that actually composited a Canvas3D overlay.
+    #[cfg(feature = "canvas3d")]
+    pub(super) canvas3d_last_used: Option<Instant>,
+    /// True while a wake-up timer for the idle downgrade check is in flight.
+    #[cfg(feature = "canvas3d")]
+    pub(super) downgrade_timer_armed: bool,
     pub(super) renderer:     AnyRenderer,
     pub(super) text_sys:     TextSystem,
     pub(super) layout:       LayoutTree,

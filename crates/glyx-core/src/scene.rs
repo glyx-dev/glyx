@@ -911,6 +911,89 @@ pub(crate) fn update_dirty_from_layout(state: &mut PerWindowState) -> bool {
     any_changed
 }
 
+/// Compute the union damage rect for this frame from the dirty node set.
+///
+/// Returns `Some((x, y, w, h))` when every visual change this frame is
+/// provably contained in that rect, `None` when a full-frame render is
+/// required.  Used by the software present path to redraw + push only the
+/// changed region (a hover repaints one button, a keystroke one line).
+///
+/// Full-frame bailout conditions (correctness over cleverness):
+/// - a dirty node has a `transform` (visual bounds ≠ layout bounds) or a
+///   `box_shadow` (draws outside its rect),
+/// - a dirty node is missing from the tree or has no resolved layout
+///   (just removed / not yet laid out),
+/// - `dirty_nodes` is empty (callers treat that as "render everything").
+///
+/// Scroll handling: a node inside a scrolled ancestor renders at
+/// `resolved.y - Σ ancestor offsets`, which this function does not replay.
+/// Instead, the OUTERMOST ancestor with a non-zero `scroll_offset_y` is used
+/// as the damage contribution — its own rect is absolute-correct and clips
+/// its content, so it bounds the node's old and new visual positions.
+pub(crate) fn compute_frame_damage(state: &PerWindowState) -> Option<(f64, f64, f64, f64)> {
+    if state.dirty_nodes.is_empty() {
+        return None;
+    }
+
+    // layout NodeId → resolved rect
+    let resolved: std::collections::HashMap<NodeId, &ResolvedLayout> =
+        state.resolved.iter().map(|(nid, rl)| (*nid, rl)).collect();
+    // child → parent
+    let mut parent_of: std::collections::HashMap<u32, u32> =
+        std::collections::HashMap::with_capacity(state.js_nodes.len());
+    for (&pid, node) in &state.js_nodes {
+        for &cid in &node.children {
+            parent_of.insert(cid, pid);
+        }
+    }
+
+    let mut ltrb: Option<(f64, f64, f64, f64)> = None;
+
+    fn add(ltrb: &mut Option<(f64, f64, f64, f64)>, x: f64, y: f64, w: f64, h: f64) {
+        // Padding covers anti-aliased edges and 1px layout rounding.
+        const PAD: f64 = 4.0;
+        let (l, t, r, b) = (x - PAD, y - PAD, x + w + PAD, y + h + PAD);
+        *ltrb = Some(match *ltrb {
+            None                     => (l, t, r, b),
+            Some((ul, ut, ur, ub))   => (ul.min(l), ut.min(t), ur.max(r), ub.max(b)),
+        });
+    }
+
+    for &id in &state.dirty_nodes {
+        let Some(node) = state.js_nodes.get(&id) else { return None };
+        if node.props.transform.is_some() || node.props.box_shadow.is_some() {
+            return None;
+        }
+
+        // Outermost scrolled ancestor bounds this node's visual position.
+        let mut cur = id;
+        let mut outer_scrolled: Option<u32> = None;
+        while let Some(&pid) = parent_of.get(&cur) {
+            if let Some(pn) = state.js_nodes.get(&pid) {
+                if pn.props.scroll_offset_y.unwrap_or(0.0) != 0.0 {
+                    outer_scrolled = Some(pid);
+                }
+            }
+            cur = pid;
+        }
+
+        let target = outer_scrolled.unwrap_or(id);
+        let Some(tnode) = state.js_nodes.get(&target)     else { return None };
+        let Some(lid)   = tnode.layout_id                  else { return None };
+        let Some(rl)    = resolved.get(&lid)               else { return None };
+        add(&mut ltrb, rl.x as f64, rl.y as f64, rl.width as f64, rl.height as f64);
+
+        // Include the PREVIOUS rect so moved/shrunk nodes erase their old
+        // pixels (prev_resolved is keyed by JS id and still holds last frame).
+        if let Some(prl) = state.prev_resolved.get(&target) {
+            add(&mut ltrb, prl.x as f64, prl.y as f64,
+                prl.width as f64, prl.height as f64);
+        }
+    }
+
+    ltrb.map(|(l, t, r, b)| (l, t, r - l, b - t))
+}
+
 /// Update `prev_resolved` snapshot with the positions computed this frame.
 /// Call this **after** `render_subtree` (once the frame is definitely going to screen).
 pub(crate) fn snapshot_resolved(state: &mut PerWindowState) {

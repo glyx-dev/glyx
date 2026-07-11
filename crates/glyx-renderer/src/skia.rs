@@ -159,33 +159,112 @@ pub struct TinySkiaFrame {
     clip_stack:   Vec<Option<tiny_skia::Mask>>,
     /// Active clip mask (`None` = no clip).
     current_mask: Option<tiny_skia::Mask>,
+    /// Damage region for partial redraw (`None` = full frame).  Draws are
+    /// clipped to this rect via the base mask AND bbox-culled for speed.
+    damage:       Option<tiny_skia::Rect>,
     /// Persistent state moved from TinySkiaRenderer for the frame duration.
     shared:       TinySkiaShared,
 }
 
 impl TinySkiaFrame {
-    fn new(width: u32, height: u32, bg: peniko::Color, mut shared: TinySkiaShared)
+    fn new(width: u32, height: u32, bg: peniko::Color, shared: TinySkiaShared)
         -> Option<Self>
     {
-        // Reuse the pooled pixmap if it's the right size; allocate otherwise.
-        let mut pixmap = match shared.pixmap.take() {
-            Some(p) if p.width() == width && p.height() == height => p,
-            _ => tiny_skia::Pixmap::new(width, height)?,
+        Self::new_damaged(width, height, bg, shared, None)
+    }
+
+    /// Create a frame, optionally restricted to a damage rect.
+    ///
+    /// With `damage: Some(rect)`, the pooled pixmap's previous contents are
+    /// KEPT outside the rect; only the rect is cleared to `bg`, and a base
+    /// clip mask confines every subsequent draw (including nested layers,
+    /// which intersect with it) to the rect.  Falls back to a full frame when
+    /// no correctly-sized pooled pixmap exists (first frame, resize).
+    fn new_damaged(
+        width: u32, height: u32, bg: peniko::Color, mut shared: TinySkiaShared,
+        damage: Option<(f64, f64, f64, f64)>,
+    ) -> Option<Self> {
+        // Partial redraw needs last frame's pixels — only valid when the
+        // pooled pixmap exists at the same size.
+        let (mut pixmap, damage) = match (shared.pixmap.take(), damage) {
+            (Some(p), Some(d)) if p.width() == width && p.height() == height => (p, Some(d)),
+            (Some(p), _) if p.width() == width && p.height() == height => (p, None),
+            _ => (tiny_skia::Pixmap::new(width, height)?, None),
         };
+
+        // Clamp damage to the pixmap; treat degenerate/full-coverage as full.
+        let damage_rect = damage.and_then(|(x, y, w, h)| {
+            let x0 = (x.max(0.0)).floor() as f32;
+            let y0 = (y.max(0.0)).floor() as f32;
+            let x1 = ((x + w).min(width  as f64)).ceil() as f32;
+            let y1 = ((y + h).min(height as f64)).ceil() as f32;
+            if x1 <= x0 || y1 <= y0 { return None; }             // empty
+            if x0 <= 0.0 && y0 <= 0.0
+                && x1 >= width as f32 && y1 >= height as f32 { return None; } // full
+            tiny_skia::Rect::from_ltrb(x0, y0, x1, y1)
+        });
+
         let q = bg.to_rgba8();
-        pixmap.fill(tiny_skia::Color::from_rgba8(q.r, q.g, q.b, q.a));
+        let bg_color = tiny_skia::Color::from_rgba8(q.r, q.g, q.b, q.a);
+        let base_mask = match damage_rect {
+            None => {
+                pixmap.fill(bg_color);
+                None
+            }
+            Some(d) => {
+                // Clear only the damaged region to the background color.
+                let paint = tiny_skia::Paint {
+                    shader: tiny_skia::Shader::SolidColor(bg_color),
+                    blend_mode: tiny_skia::BlendMode::Source,
+                    anti_alias: false,
+                    ..Default::default()
+                };
+                pixmap.fill_rect(d, &paint, tiny_skia::Transform::identity(), None);
+                // Base clip mask = damage rect; push_clip_path intersects
+                // nested layers with it, so no draw can escape the region.
+                tiny_skia::Mask::new(width, height).map(|mut m| {
+                    let p = tiny_skia::PathBuilder::from_rect(d);
+                    m.fill_path(&p, tiny_skia::FillRule::Winding, true,
+                                tiny_skia::Transform::identity());
+                    m
+                })
+            }
+        };
+
         Some(Self {
             pixmap,
             clip_stack:   Vec::new(),
-            current_mask: None,
+            current_mask: base_mask,
+            damage:       damage_rect,
             shared,
         })
+    }
+
+    /// The clamped damage rect this frame was created with (`None` = full).
+    pub fn damage(&self) -> Option<(u32, u32, u32, u32)> {
+        self.damage.map(|d| {
+            (d.left() as u32, d.top() as u32,
+             (d.right() - d.left()) as u32, (d.bottom() - d.top()) as u32)
+        })
+    }
+
+    /// True when a draw with the given bbox lies entirely outside the damage
+    /// region and can be skipped (the base mask would zero it anyway; this
+    /// avoids the rasterization work).
+    #[inline]
+    fn culled(&self, x: f64, y: f64, w: f64, h: f64) -> bool {
+        match self.damage {
+            Some(d) => (x + w) as f32 <= d.left()  || x as f32 >= d.right()
+                    || (y + h) as f32 <= d.top()   || y as f32 >= d.bottom(),
+            None => false,
+        }
     }
 
     // ── Primitives ────────────────────────────────────────────────────────────
 
     pub fn fill_rounded_rect(&mut self, x: f64, y: f64, w: f64, h: f64,
                               radius: f64, color: peniko::Color) {
+        if self.culled(x, y, w, h) { return; }
         let Some(path) = rrect_path(x as f32, y as f32, w as f32, h as f32, radius as f32)
             else { return };
         let paint = solid_paint(color);
@@ -196,6 +275,7 @@ impl TinySkiaFrame {
 
     pub fn fill_rounded_rect_with_brush(&mut self, x: f64, y: f64, w: f64, h: f64,
                                          radius: f64, brush: &peniko::Brush) {
+        if self.culled(x, y, w, h) { return; }
         let Some(path) = rrect_path(x as f32, y as f32, w as f32, h as f32, radius as f32)
             else { return };
         let paint: tiny_skia::Paint<'static> = match brush {
@@ -216,6 +296,7 @@ impl TinySkiaFrame {
     }
 
     pub fn fill_rect(&mut self, x: f64, y: f64, w: f64, h: f64, color: peniko::Color) {
+        if self.culled(x, y, w, h) { return; }
         let paint = solid_paint(color);
         let mask  = self.current_mask.as_ref();
         if let Some(rect) = tiny_skia::Rect::from_xywh(x as f32, y as f32, w as f32, h as f32) {
@@ -225,6 +306,8 @@ impl TinySkiaFrame {
 
     pub fn stroke_rounded_rect(&mut self, x: f64, y: f64, w: f64, h: f64,
                                 radius: f64, sw: f64, color: peniko::Color) {
+        // Inflate bbox by the stroke width (strokes extend past the rect).
+        if self.culled(x - sw, y - sw, w + sw * 2.0, h + sw * 2.0) { return; }
         let Some(path) = rrect_path(x as f32, y as f32, w as f32, h as f32, radius as f32)
             else { return };
         let paint  = solid_paint(color);
@@ -235,6 +318,7 @@ impl TinySkiaFrame {
     }
 
     pub fn fill_circle(&mut self, cx: f64, cy: f64, r: f64, color: peniko::Color) {
+        if self.culled(cx - r, cy - r, r * 2.0, r * 2.0) { return; }
         let Some(path) = tiny_skia::PathBuilder::from_circle(cx as f32, cy as f32, r as f32)
             else { return };
         let paint = solid_paint(color);
@@ -244,6 +328,8 @@ impl TinySkiaFrame {
     }
 
     pub fn stroke_circle(&mut self, cx: f64, cy: f64, r: f64, width: f64, color: peniko::Color) {
+        let rr = r + width;
+        if self.culled(cx - rr, cy - rr, rr * 2.0, rr * 2.0) { return; }
         let Some(path) = tiny_skia::PathBuilder::from_circle(cx as f32, cy as f32, r as f32)
             else { return };
         let paint  = solid_paint(color);
@@ -255,6 +341,12 @@ impl TinySkiaFrame {
 
     pub fn stroke_line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64,
                         width: f64, color: peniko::Color) {
+        {
+            let (lx, hx) = if x0 < x1 { (x0, x1) } else { (x1, x0) };
+            let (ly, hy) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
+            if self.culled(lx - width, ly - width,
+                           hx - lx + width * 2.0, hy - ly + width * 2.0) { return; }
+        }
         let mut pb = tiny_skia::PathBuilder::new();
         pb.move_to(x0 as f32, y0 as f32);
         pb.line_to(x1 as f32, y1 as f32);
@@ -301,6 +393,10 @@ impl TinySkiaFrame {
     /// directly — no swash rasterization at all.
     pub fn draw_text(&mut self, layout: &glyx_text::TextLayout, x: f64, y: f64,
                      color: peniko::Color) {
+        // 2px slack: glyphs (italics, swashes) can extend slightly past the
+        // shaped advance box.
+        if self.culled(x - 2.0, y - 2.0,
+                       layout.width() as f64 + 4.0, layout.height() as f64 + 4.0) { return; }
         use swash::{FontRef, scale::{Render, Source}, zeno::Format};
 
         let q   = color.to_rgba8();
@@ -425,6 +521,7 @@ impl TinySkiaFrame {
 
     pub fn draw_image(&mut self, image: &peniko::ImageData, x: f64, y: f64,
                       w: f64, h: f64) {
+        if self.culled(x, y, w, h) { return; }
         let (iw, ih) = (image.width, image.height);
         if iw == 0 || ih == 0 { return; }
         let bytes = image.data.data();
@@ -690,16 +787,18 @@ impl TinySkiaRenderer {
     }
 
     /// Finalize a frame for software present: hands the premultiplied RGBA8
-    /// pixel data to `write`, then returns the pixmap to the pool.  No GPU work.
+    /// pixel data (plus the frame's damage rect, `None` = full) to `write`,
+    /// then returns the pixmap to the pool.  No GPU work.
     pub fn finish_frame_soft(
         &mut self,
         frame: TinySkiaFrame,
-        write: impl FnOnce(&[u8], u32, u32),
+        write: impl FnOnce(&[u8], u32, u32, Option<(u32, u32, u32, u32)>),
     ) {
+        let damage = frame.damage();
         let TinySkiaFrame { pixmap, shared, .. } = frame;
         let w = pixmap.width();
         let h = pixmap.height();
-        write(pixmap.data(), w, h);
+        write(pixmap.data(), w, h, damage);
         let mut shared = shared;
         if self.width == w && self.height == h {
             shared.pixmap = Some(pixmap);
@@ -728,6 +827,14 @@ impl TinySkiaRenderer {
     pub fn begin_frame(&mut self) -> TinySkiaFrame {
         let shared = self.shared.take().expect("skia: frame already in progress");
         TinySkiaFrame::new(self.width, self.height, self.background_color, shared)
+            .expect("Pixmap creation failed — zero-sized window?")
+    }
+
+    /// Begin a frame restricted to a damage rect (falls back to a full frame
+    /// when no pooled pixmap is available — first frame or just-resized).
+    pub fn begin_frame_damaged(&mut self, damage: Option<(f64, f64, f64, f64)>) -> TinySkiaFrame {
+        let shared = self.shared.take().expect("skia: frame already in progress");
+        TinySkiaFrame::new_damaged(self.width, self.height, self.background_color, shared, damage)
             .expect("Pixmap creation failed — zero-sized window?")
     }
 

@@ -61,26 +61,77 @@ impl SoftPresent {
     /// The top-level pixmap is always opaque (window background underneath),
     /// so premultiplied == straight and the conversion is a channel shuffle:
     /// RGBA bytes → 0x00RRGGBB u32 (softbuffer's format).
-    pub fn present_rgba(&mut self, rgba: &[u8], w: u32, h: u32) {
+    ///
+    /// With `damage: Some((x, y, dw, dh))` only that region is converted and
+    /// pushed to the OS (`present_with_damage`), so a keystroke costs one text
+    /// line's worth of pixels rather than the whole window.  Requires a valid
+    /// `last_frame` (pixels outside the damage region are refreshed from it,
+    /// since the OS swap buffer's previous contents aren't guaranteed).
+    pub fn present_rgba(&mut self, rgba: &[u8], w: u32, h: u32,
+                        damage: Option<(u32, u32, u32, u32)>) {
         if w != self.width || h != self.height {
             // Stale frame from just before a resize — drop it; the next
             // redraw renders at the new size.
             return;
         }
+        let total = (w as usize) * (h as usize);
+        if rgba.len() / 4 < total { return; }
+
+        // Partial present is only safe when we hold a full previous frame.
+        let damage = match damage {
+            Some(d) if self.last_frame.len() == total => Some(d),
+            _ => None,
+        };
+
         let mut buffer = match self.surface.buffer_mut() {
             Ok(b) => b,
             Err(e) => { log::warn!("softbuffer buffer_mut: {e}"); return; }
         };
-        let n = (w as usize * h as usize).min(buffer.len()).min(rgba.len() / 4);
-        for i in 0..n {
-            let p = &rgba[i * 4..i * 4 + 4];
-            buffer[i] = ((p[0] as u32) << 16) | ((p[1] as u32) << 8) | (p[2] as u32);
-        }
-        // Keep a copy for re_present (unchanged-frame fast path).
-        self.last_frame.clear();
-        self.last_frame.extend_from_slice(&buffer[..n]);
-        if let Err(e) = buffer.present() {
-            log::warn!("softbuffer present: {e}");
+        if buffer.len() < total { return; }
+
+        match damage {
+            None => {
+                for i in 0..total {
+                    let p = &rgba[i * 4..i * 4 + 4];
+                    buffer[i] = ((p[0] as u32) << 16) | ((p[1] as u32) << 8) | (p[2] as u32);
+                }
+                self.last_frame.clear();
+                self.last_frame.extend_from_slice(&buffer[..total]);
+                if let Err(e) = buffer.present() {
+                    log::warn!("softbuffer present: {e}");
+                }
+            }
+            Some((dx, dy, dw, dh)) => {
+                let dx = dx.min(w) as usize;
+                let dy = dy.min(h) as usize;
+                let dw = (dw as usize).min(w as usize - dx);
+                let dh = (dh as usize).min(h as usize - dy);
+                // The OS swap buffer may be double-buffered (contents undefined
+                // or two frames old).  age()==1 means it holds last frame's
+                // pixels; anything else → restore from our last_frame copy.
+                if buffer.age() != 1 {
+                    buffer.copy_from_slice(&self.last_frame[..total]);
+                }
+                // Convert only the damaged rows/cols.
+                for row in dy..dy + dh {
+                    let base = row * w as usize;
+                    for col in dx..dx + dw {
+                        let i = base + col;
+                        let p = &rgba[i * 4..i * 4 + 4];
+                        let v = ((p[0] as u32) << 16) | ((p[1] as u32) << 8) | (p[2] as u32);
+                        buffer[i] = v;
+                        self.last_frame[i] = v;
+                    }
+                }
+                let rect = softbuffer::Rect {
+                    x: dx as u32, y: dy as u32,
+                    width:  std::num::NonZeroU32::new(dw.max(1) as u32).unwrap(),
+                    height: std::num::NonZeroU32::new(dh.max(1) as u32).unwrap(),
+                };
+                if let Err(e) = buffer.present_with_damage(&[rect]) {
+                    log::warn!("softbuffer present_with_damage: {e}");
+                }
+            }
         }
     }
 

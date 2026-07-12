@@ -11,6 +11,26 @@ import { View, Text, Image, ScrollView, Pressable, measureText, useWindowSize } 
 import { openPopover, closePopover } from './popover.js';
 import { clipboard, dialog } from './api.js';
 
+// ── Control width resolution ──────────────────────────────────────────────────
+//
+// THE sizing contract for fixed-footprint controls (Select, pickers, inputs):
+//   1. If the caller's style controls width in ANY way (width, flex, flexGrow,
+//      minWidth, alignSelf), the caller is in charge — layout decides, no
+//      default is applied.
+//   2. Otherwise the control gets a compact default: alignSelf 'flex-start'
+//      (so stretch parents don't blow it up) + its default width.
+// "Use the defaults or override" — stretching is one style away:
+//   style={{ alignSelf: 'stretch' }}   or   style={{ flex: 1 }} (in a row).
+function _sizedRootStyle(style, defaultWidth) {
+  const sized = !!style && (
+    style.width != null || style.flex != null || style.flexGrow != null ||
+    style.minWidth != null || style.alignSelf != null
+  );
+  return sized
+    ? { ...style }
+    : { alignSelf: 'flex-start', width: defaultWidth, ...style };
+}
+
 // ── TextInput ─────────────────────────────────────────────────────────────────
 
 export function TextInput({
@@ -845,7 +865,7 @@ export function Select({
     // Default to a sensible width (not full-window). alignSelf:flex-start stops
     // the parent's default `alignItems: stretch` from expanding it. User `style`
     // (incl. width) overrides.
-    style: { alignSelf: 'flex-start', width: 240, ...style },
+    style: _sizedRootStyle(style, 240),
     ...rest,
   },
     // Trigger button — fixed height so text never overflows.
@@ -1079,7 +1099,7 @@ export function DatePicker({ value = null, onValueChange, disabled = false, styl
 
   return React.createElement(View, {
     _glyxOnMount: onContainerMount,
-    style: { alignSelf: 'flex-start', width: 240, ...style },
+    style: _sizedRootStyle(style, 240),
     ...rest,
   },
     React.createElement(Pressable, {
@@ -1187,7 +1207,7 @@ export function TimePicker({
 
   return React.createElement(View, {
     _glyxOnMount: onContainerMount,
-    style: { alignSelf: 'flex-start', width: 160, ...style },
+    style: _sizedRootStyle(style, 160),
     ...rest,
   },
     React.createElement(Pressable, {
@@ -1261,7 +1281,7 @@ export function DateTimePicker({
 
   return React.createElement(View, {
     _glyxOnMount: onContainerMount,
-    style: { alignSelf: 'flex-start', width: 280, ...style },
+    style: _sizedRootStyle(style, 280),
     ...rest,
   },
     React.createElement(Pressable, {

@@ -49,9 +49,15 @@ pub struct SystemInfo {
 }
 
 pub fn system_info() -> SystemInfo {
-    use sysinfo::System;
-    let mut sys = System::new_all();
-    sys.refresh_all();
+    use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+    // Refresh ONLY cpu + memory.  `new_all()`/`refresh_all()` enumerates every
+    // process on the machine (cmdlines, memory maps, …) — tens of MB of
+    // allocations per call, and apps poll this API on timers.
+    let sys = System::new_with_specifics(
+        RefreshKind::nothing()
+            .with_cpu(CpuRefreshKind::everything())
+            .with_memory(MemoryRefreshKind::everything()),
+    );
     SystemInfo {
         cpu_name:        sys.cpus().first().map(|c| c.brand().to_string()).unwrap_or_default(),
         cpu_cores:       sys.cpus().len(),

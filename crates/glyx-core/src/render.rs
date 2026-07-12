@@ -456,7 +456,15 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             // treats ty as the layout top (glyphs at ty + baseline), so standard
             // line-box centering is (bh - text_height)/2. For content-sized boxes
             // (bh ≈ text_height) this is ~0, leaving text at the top as before.
-            let ty = ry + (bh - label.text_height).max(0.0) / 2.0;
+            // EXCEPTION: multiline editors (cursor without single-line panning)
+            // are always TOP-aligned — centering makes the text drift down as
+            // content shrinks below the box height (e.g. while deleting).
+            let multiline_editor = show_cursor && !single_line;
+            let ty = if multiline_editor {
+                ry
+            } else {
+                ry + (bh - label.text_height).max(0.0) / 2.0
+            };
 
             let label_width = label.width;
             // Cursor/selection positioned using font metrics (not the line-box)
@@ -466,20 +474,42 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             let cur_height = label.cursor_height;
 
             // 1. Selection highlight — drawn before text so text renders on top.
+            // Per-visual-line rects (soft wraps + '\n' included): the selection
+            // range is intersected with each line's byte range, and x extents
+            // measured against that line's own text (same trick as the caret).
             if let (Some(ss), Some(se)) = (selection_start, selection_end) {
                 if ss < se {
-                    let char_count = text.chars().count();
-                    let x0 = ctx.text_sys.measure_to_cursor(
-                        text, font_size, max_width, ss.min(char_count),
-                    ) as f64;
-                    let x1 = ctx.text_sys.measure_to_cursor(
-                        text, font_size, max_width, se.min(char_count),
-                    ) as f64;
-                    if x1 > x0 {
-                        ctx.frame.fill_rounded_rect(
-                            tx + x0, cur_top, x1 - x0, cur_height, 0.0,
-                            apply_opacity(peniko::Color::from_rgba8(100, 120, 255, 120), child_opacity),
-                        );
+                    let sel_color = apply_opacity(
+                        peniko::Color::from_rgba8(100, 120, 255, 120), child_opacity);
+                    let sb = text.char_indices().nth(ss).map(|(b, _)| b).unwrap_or(text.len());
+                    let eb = text.char_indices().nth(se).map(|(b, _)| b).unwrap_or(text.len());
+                    for (ls, le, l_top, l_bot, l_right) in label.layout.line_ranges() {
+                        if le <= sb || ls >= eb { continue; }
+                        let a = sb.max(ls);
+                        let b = eb.min(le);
+                        let cp_a = text[ls..a].chars().count();
+                        let x0 = ctx.text_sys.measure_to_cursor(
+                            &text[ls..], font_size, max_width, cp_a) as f64;
+                        // Selection reaching THIS line's end (newline or soft
+                        // wrap): use the line's right edge — measuring a cursor
+                        // at the boundary lands on the next line (x = 0).
+                        let to_line_end = b >= le || text[b..le].starts_with('\n');
+                        let x1 = if to_line_end {
+                            l_right as f64
+                        } else {
+                            let cp_b = text[ls..b].chars().count();
+                            ctx.text_sys.measure_to_cursor(
+                                &text[ls..], font_size, max_width, cp_b) as f64
+                        };
+                        // Fully-selected empty lines still get a visible sliver
+                        // so line coverage reads clearly.
+                        let w = (x1 - x0).max(if to_line_end && eb > le { 4.0 } else { 0.0 });
+                        if w > 0.0 {
+                            ctx.frame.fill_rounded_rect(
+                                tx + x0, ty + l_top as f64, w, (l_bot - l_top) as f64, 0.0,
+                                sel_color,
+                            );
+                        }
                     }
                 }
             }

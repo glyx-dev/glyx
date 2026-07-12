@@ -105,6 +105,21 @@ pub fn set_title_callback(
     }
 }
 
+/// `__glyx_setCursor(name: string) -> void` — set the mouse cursor icon.
+pub fn set_cursor_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let name  = v8_arg_to_string(scope, &args, 0);
+    if let Some(ctrl) = &state.window {
+        (ctrl.set_cursor)(name);
+    }
+}
+
 // â"€â"€ File dialog callbacks â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 //
 // All async. Gated by `dialog: true` capability.

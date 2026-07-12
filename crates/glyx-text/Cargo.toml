@@ -8,3 +8,4 @@ parley    = { workspace = true, features = ["system"] }
 peniko    = { workspace = true }
 log       = { workspace = true }
 thiserror = { workspace = true }
+memmap2   = "0.9"

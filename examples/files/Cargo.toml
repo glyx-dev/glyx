@@ -1,0 +1,15 @@
+[package]
+name    = "files"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# "dev" gates hot-reload, bun watcher, and dev overlay in glyx-core.
+# Production builds (glyx build) use --no-default-features to exclude them.
+default = ["dev"]
+dev     = ["glyx-core/dev"]
+
+[dependencies]
+glyx-core  = { path = "../../crates/glyx-core", default-features = false }
+glyx-shell = { path = "../../crates/glyx-shell" }
+env_logger  = "0.11"

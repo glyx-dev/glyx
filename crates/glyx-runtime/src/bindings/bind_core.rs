@@ -209,6 +209,11 @@ pub fn get_layout_callback(
         set_num!("y",      y);
         set_num!("width",  w);
         set_num!("height", h);
+        // Clip (scroll) nodes publish measured content height under the
+        // high-bit key (see glyx-core layout.rs CONTENT_HEIGHT_KEY).
+        if let Some(&[_, _, _, ch]) = cache.get(&(id | 0x8000_0000)) {
+            set_num!("contentHeight", ch);
+        }
         rv.set(obj.into());
     } else {
         rv.set(v8::null(scope).into());
@@ -280,6 +285,34 @@ pub fn text_char_at_x_callback(
     let target_x  = args.get(3).number_value(scope).unwrap_or(0.0) as f32;
 
     let idx = state.text_measure.borrow_mut().char_at_x(&text, font_size, max_width, target_x);
+    rv.set(v8::Number::new(scope, idx as f64).into());
+}
+
+// ── __glyx_text_pos_at ────────────────────────────────────────────────────────
+//
+// 2-D caret hit-test for WRAPPED text: returns the character index nearest to
+// point (x, y) in `text` shaped at `fontSize` and wrapped to `maxWidth`.
+// Handles soft wraps and '\n' — used by multiline TextInput click/drag.
+//
+// Signature: __glyx_text_pos_at(text, fontSize, maxWidth, x, y) → number
+
+pub fn text_pos_at_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let text      = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let font_size = args.get(1).number_value(scope).unwrap_or(16.0) as f32;
+    let mw        = args.get(2).number_value(scope).unwrap_or(0.0);
+    let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
+    let x         = args.get(3).number_value(scope).unwrap_or(0.0) as f32;
+    let y         = args.get(4).number_value(scope).unwrap_or(0.0) as f32;
+
+    let idx = state.text_measure.borrow_mut().pos_at_point(&text, font_size, max_width, x, y);
     rv.set(v8::Number::new(scope, idx as f64).into());
 }
 

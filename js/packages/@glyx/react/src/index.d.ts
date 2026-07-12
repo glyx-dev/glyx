@@ -176,6 +176,10 @@ export declare const glyxWindow: {
   getWindowSize(): { width: number; height: number };
   /** Current monitor size in physical pixels. */
   getScreenSize(): { width: number; height: number };
+  /** Set the mouse cursor icon (CSS-like names). Unknown names → default arrow. */
+  setCursor(name: 'default' | 'pointer' | 'text' | 'move' | 'grab' | 'grabbing'
+                | 'col-resize' | 'row-resize' | 'ew-resize' | 'ns-resize'
+                | 'crosshair' | 'not-allowed' | 'wait'): void;
   /**
    * Open a secondary (child) window.  Resolves with a handle whose `send()`
    * posts IPC messages to it.

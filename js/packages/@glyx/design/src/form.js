@@ -64,47 +64,67 @@ export function TextField({
         </Text>
       )}
 
-      <View
-        style={{
-          flexDirection:     'row',
-          alignItems:        'center',
-          backgroundColor:   disabled ? colors.surfaceRaised : colors.bg,
+      {(() => {
+        const hasIcons = leftIcon != null || rightIcon != null;
+        // The FIELD BOX chrome: exactly one bordered surface, standalone like
+        // DatePicker — no extra padded wrapper around it.
+        const boxChrome = {
+          backgroundColor:   disabled ? colors.surfaceRaised : colors.surface,
           borderWidth:       focused ? 2 : 1,
           borderColor,
           borderRadius:      radius.md,
-          paddingHorizontal: space[3],
-          paddingVertical:   space[3],
-          gap:               space[2],
           opacity:           disabled ? 0.6 : 1,
-        }}
-      >
-        {leftIcon != null && (
-          <View style={{ justifyContent: 'center' }}>{leftIcon}</View>
-        )}
-
-        <TextInput
-          value={value}
-          onChangeText={disabled ? undefined : onChangeText}
-          placeholder={placeholder}
-          placeholderTextColor={colors.textMuted}
-          secureTextEntry={secureTextEntry}
-          multiline={multiline}
-          editable={!disabled}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          style={{
-            flex:     1,
-            color:    colors.text,
-            fontSize: fontSize.base,
-            ...inputStyle,
-          }}
-          {...props}
-        />
-
-        {rightIcon != null && (
-          <View style={{ justifyContent: 'center' }}>{rightIcon}</View>
-        )}
-      </View>
+        };
+        const input = (
+          <TextInput
+            value={value}
+            onChangeText={disabled ? undefined : onChangeText}
+            placeholder={placeholder}
+            placeholderTextColor={colors.textMuted}
+            secureTextEntry={secureTextEntry}
+            multiline={multiline}
+            editable={!disabled}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            style={{
+              // flex:1 is for sharing the ICON ROW's main axis; on the bare
+              // (column) path it would collapse the input's height instead —
+              // there the field stretches to the column's full width.
+              ...(hasIcons ? { flex: 1 } : { alignSelf: 'stretch' }),
+              color:    colors.text,
+              fontSize: fontSize.base,
+              // With icons, the row container draws the box; bare, the input
+              // itself is the box.  Either way there is only ONE chrome.
+              ...(hasIcons
+                ? { backgroundColor: 'transparent', borderWidth: 0, padding: 0 }
+                : boxChrome),
+              ...inputStyle,
+            }}
+            {...props}
+          />
+        );
+        if (!hasIcons) return input;
+        return (
+          <View
+            style={{
+              flexDirection:     'row',
+              alignItems:        'center',
+              paddingHorizontal: space[3],
+              paddingVertical:   space[3],
+              gap:               space[2],
+              ...boxChrome,
+            }}
+          >
+            {leftIcon != null && (
+              <View style={{ justifyContent: 'center' }}>{leftIcon}</View>
+            )}
+            {input}
+            {rightIcon != null && (
+              <View style={{ justifyContent: 'center' }}>{rightIcon}</View>
+            )}
+          </View>
+        );
+      })()}
 
       {(helperText != null || error != null) && (
         <Text

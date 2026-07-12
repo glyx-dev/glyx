@@ -124,6 +124,9 @@ pub struct WindowController {
     pub is_maximized:      Arc<dyn Fn() -> bool + Send + Sync>,
     pub set_always_on_top: Arc<dyn Fn(bool) + Send + Sync>,
     pub set_title:         Arc<dyn Fn(String) + Send + Sync>,
+    /// Set the mouse cursor icon by CSS-like name ("default", "pointer",
+    /// "col-resize", ...).  Unknown names fall back to the default arrow.
+    pub set_cursor:        Arc<dyn Fn(String) + Send + Sync>,
     /// Raw platform window handle (HWND on Windows) as a plain integer.
     /// Used to parent native dialogs so they appear in front of the Glyx window.
     pub hwnd:              Option<isize>,
@@ -865,6 +868,7 @@ pub fn register_all(
     register!("__glyx_getLayout",   get_layout_callback);
     register!("__glyx_measure_text",    measure_text_callback);
     register!("__glyx_text_char_at_x", text_char_at_x_callback);
+    register!("__glyx_text_pos_at",    text_pos_at_callback);
 
     register!("__glyx_getWindowSize", get_window_size_callback);
     register!("__glyx_getScreenSize", get_screen_size_callback);
@@ -904,6 +908,7 @@ pub fn register_all(
     //  Window extras (sync) 
     register!("__glyx_setAlwaysOnTop", set_always_on_top_callback);
     register!("__glyx_setTitle",       set_title_callback);
+    register!("__glyx_setCursor",      set_cursor_callback);
 
     //  File dialogs €€€
     register!("__glyx_dialog_openFile",   dialog_open_file_callback);

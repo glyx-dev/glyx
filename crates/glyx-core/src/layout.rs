@@ -109,16 +109,15 @@ pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::
             if let Some(v) = props.max_height { style.max_size.height = to_dim(v); }
 
             // ── Overflow ──────────────────────────────────────────────────
-            style.overflow = taffy::geometry::Point {
-                x: match props.overflow.as_deref() {
-                    Some("hidden") | Some("scroll") => taffy::style::Overflow::Clip,
-                    _                               => taffy::style::Overflow::Visible,
-                },
-                y: match props.overflow.as_deref() {
-                    Some("hidden") | Some("scroll") => taffy::style::Overflow::Clip,
-                    _                               => taffy::style::Overflow::Visible,
-                },
-            };
+            // Clip containers (ScrollView sets clip:true) must use
+            // Overflow::Hidden, not Clip: Taffy only zeroes the automatic
+            // min-content size for Hidden/Scroll.  With Visible/Clip a flex:1
+            // ScrollView can never shrink below its content, blowing the
+            // whole flex chain past the window (no overflow → no scrolling).
+            let clips = props.clip.unwrap_or(false)
+                || matches!(props.overflow.as_deref(), Some("hidden") | Some("scroll"));
+            let ov = if clips { taffy::style::Overflow::Hidden } else { taffy::style::Overflow::Visible };
+            style.overflow = taffy::geometry::Point { x: ov, y: ov };
 
             if let Some(g) = props.gap {
                 let d = to_lp(g);
@@ -126,7 +125,15 @@ pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::
             }
 
             if let Some(f) = props.flex {
-                style.flex_grow = f;
+                // React Native semantics: `flex: N` = grow N, shrink 1, basis 0,
+                // and NO automatic minimum size (Yoga has no CSS auto-min rule).
+                // Without this, a flex:1 chain containing a tall ScrollView can
+                // never shrink below its content and overflows the window.
+                style.flex_grow   = f;
+                style.flex_shrink = 1.0;
+                style.flex_basis  = Dimension::length(0.0);
+                if props.min_width.is_none()  { style.min_size.width  = Dimension::length(0.0); }
+                if props.min_height.is_none() { style.min_size.height = Dimension::length(0.0); }
             }
 
             // ── Flex item overrides ───────────────────────────────────────
@@ -403,16 +410,25 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
     // Framework guarantee: the layout root is always exactly the GPU viewport size.
     // This prevents child views from ever overflowing the window, even during the
     // one frame between a window resize and React re-rendering with new winW/winH.
-    if let Some(root_lid) = state.layout.root() {
-        if let Ok(root_style) = state.layout.get_style(root_lid) {
+    //
+    // IMPORTANT: clamp BOTH the tree root and the js_root's own layout node —
+    // they are different nodes (the tree root is a synthetic wrapper).  Clamping
+    // only the wrapper lets the js_root grow to content height (auto sizing),
+    // which silently breaks every flex:1 chain below it: ScrollViews size to
+    // their content, never overflow, and scrolling/scrollbars are dead.
+    let js_root_lid = state.js_root
+        .and_then(|rid| state.js_nodes.get(&rid))
+        .and_then(|n| n.layout_id);
+    for lid in [state.layout.root(), js_root_lid].into_iter().flatten() {
+        if let Ok(style) = state.layout.get_style(lid) {
             let need_w = Dimension::length(w);
             let need_h = Dimension::length(h);
-            if root_style.size.width != need_w || root_style.size.height != need_h {
-                let mut s = root_style;
+            if style.size.width != need_w || style.size.height != need_h {
+                let mut s = style;
                 s.size.width  = need_w;
                 s.size.height = need_h;
-                let _ = state.layout.set_style(root_lid, s);
-                let _ = state.layout.mark_dirty(root_lid);
+                let _ = state.layout.set_style(lid, s);
+                let _ = state.layout.mark_dirty(lid);
             }
         }
     }
@@ -476,6 +492,11 @@ pub(crate) fn update_scroll_positions(state: &PerWindowState) {
 /// [x, y, width, height] in screen space of the nearest clipping ancestor.
 type ClipRect = Option<[f32; 4]>;
 
+/// High-bit key marker: `id | CONTENT_HEIGHT_KEY` stores `[0,0,0,content_h]`
+/// for clip (scroll) nodes.  Node ids are a small counter, so the high bit
+/// never collides with a real id.
+pub(crate) const CONTENT_HEIGHT_KEY: u32 = 0x8000_0000;
+
 fn scroll_walk(
     id:        u32,
     nodes:     &std::collections::HashMap<u32, JsNode>,
@@ -523,7 +544,19 @@ fn scroll_walk(
         }
     }
 
-    cache.insert(id, [visible_x, visible_y, rl.width, rl.height]);
+    // Store the rect INTERSECTED with the clip ancestor: a node half-scrolled
+    // out of a ScrollView must only be hit-testable where it is actually
+    // visible — otherwise scrolled content invisibly covers fixed chrome
+    // (headers, tab bars) and steals its clicks.
+    if let Some([cx, cy, cw, ch]) = clip_rect {
+        let ix = visible_x.max(cx);
+        let iy = visible_y.max(cy);
+        let iw = (visible_x + rl.width).min(cx + cw) - ix;
+        let ih = (visible_y + rl.height).min(cy + ch) - iy;
+        cache.insert(id, [ix, iy, iw.max(0.0), ih.max(0.0)]);
+    } else {
+        cache.insert(id, [visible_x, visible_y, rl.width, rl.height]);
+    }
 
     let overflows = matches!(node.props.overflow.as_deref(), Some("hidden" | "scroll"));
     let is_clip = node.props.clip.unwrap_or(false) || overflows;
@@ -544,6 +577,11 @@ fn scroll_walk(
 
             if max_child_bottom.is_finite() {
                 let pad   = match node.props.padding { Some(LengthValue::Px(px)) => px as f64, _ => 0.0 };
+                // Publish the measured content height under the high-bit key so
+                // __glyx_getLayout can report it as `contentHeight` — JS ScrollView
+                // uses it to clamp wheel/scrollbar scrolling to real content.
+                let content_h = (max_child_bottom + pad - rl.y as f64).max(0.0) as f32;
+                cache.insert(id | CONTENT_HEIGHT_KEY, [0.0, 0.0, 0.0, content_h]);
                 let max_s = (max_child_bottom + pad - (rl.y as f64 + rh)).max(0.0);
                 raw.min(max_s).max(0.0)
             } else {

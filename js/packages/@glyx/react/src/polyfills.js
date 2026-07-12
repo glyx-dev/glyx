@@ -11,6 +11,19 @@ if (typeof performance === 'undefined') {
   };
 }
 
+// V8 is embedded without ICU data, so locale-aware builtins throw
+// "Internal error. Icu error.".  Replace localeCompare with a plain
+// code-unit comparison (sufficient for sorting file names etc.).
+try {
+  'a'.localeCompare('b');
+} catch {
+  // eslint-disable-next-line no-extend-native
+  String.prototype.localeCompare = function (other) {
+    const a = String(this), b = String(other);
+    return a < b ? -1 : a > b ? 1 : 0;
+  };
+}
+
 if (typeof setTimeout === 'undefined') {
   let _nextTimerId = 1;
   const _pendingTimers = new Map();

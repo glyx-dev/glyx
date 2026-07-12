@@ -427,58 +427,82 @@ fn has_pressable_descendant_at(
     false
 }
 
-/// Try to start a scrollbar thumb drag at the current cursor position.
-/// Returns `Some(ScrollbarDragState)` if the cursor is over a scrollbar thumb.
+/// Try to start a scrollbar interaction at the current cursor position.
+/// Thumb hit → drag from the current scroll position.  Track hit → JUMP the
+/// scroll so the thumb centers on the click, then drag from there (standard
+/// scrollbar behavior).  Pushes the jump event itself; returns the drag state.
 fn try_start_scrollbar_drag(s: &mut PerWindowState) -> Option<ScrollbarDragState> {
     let cx = s.cursor_x as f64;
     let cy = s.cursor_y as f64;
-    for (&id, node) in &s.js_nodes {
-        let show = node.props.show_scrollbar.unwrap_or(true);
-        if !show { continue; }
-        let Some(lid) = node.layout_id else { continue };
-        let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == lid) else { continue };
-        let scroll_y = node.props.scroll_offset_y.unwrap_or(0.0);
-        let bar_w = node.props.scrollbar_width.unwrap_or(8.0);
-        let rx = rl.x as f64;
-        let ry = rl.y as f64;
-        let rw = rl.width as f64;
-        let rh = rl.height as f64;
-        // Skip if cursor is not even in the track X range
-        let track_x = rx + rw - bar_w as f64;
-        if cx < track_x || cx > rx + rw { continue; }
-        // Compute max_child_bottom from raw Taffy positions (not the scroll-adjusted cache)
-        let max_child_bottom: f64 = node.children.iter()
-            .filter_map(|&cid| {
-                let cn   = s.js_nodes.get(&cid)?;
-                let clid = cn.layout_id?;
-                s.resolved.iter()
-                    .find(|(nid, _)| *nid == clid)
-                    .map(|(_, crl)| (crl.y + crl.height) as f64)
-            })
-            .fold(f64::NEG_INFINITY, f64::max);
-        if !max_child_bottom.is_finite() { continue; }
-        // Both rl.y and max_child_bottom are window-absolute; content height is
-        // the distance from this node's top to the furthest child bottom.
-        let content_h = max_child_bottom - rl.y as f64;
-        if let Some((_tx, ty, _tw, th)) = compute_scrollbar_thumb(
-            rx, ry, rw, rh,
-            scroll_y as f64, content_h, bar_w as f64,
-        ) {
-            if cy >= ty && cy <= ty + th {
-                let vp_h = rh;
-                let scroll_range = (content_h - vp_h).max(0.0);
-                return Some(ScrollbarDragState {
+    let mut result: Option<(ScrollbarDragState, Option<f64>, f64)> = None;
+    {
+        let cache = s.runtime.layout_cache.lock();
+        for (&id, node) in &s.js_nodes {
+            // Only clip containers (ScrollViews) own scrollbars.
+            let overflows = matches!(node.props.overflow.as_deref(), Some("hidden" | "scroll"));
+            if !(node.props.clip.unwrap_or(false) || overflows) { continue; }
+            if !node.props.show_scrollbar.unwrap_or(true) { continue; }
+            // Hit-test with SCREEN-SPACE coords (scroll-adjusted cache), which is
+            // where the scrollbar is actually painted — raw Taffy coords are wrong
+            // for panes inside scrolled/offset ancestors.
+            let Some(&[nx, ny, nw, nh]) = cache.get(&id) else { continue };
+            let (rx, ry, rw, rh) = (nx as f64, ny as f64, nw as f64, nh as f64);
+            let bar_w = node.props.scrollbar_width.unwrap_or(8.0) as f64;
+            let track_x = rx + rw - bar_w;
+            if cx < track_x || cx > rx + rw { continue; }
+            if cy < ry || cy > ry + rh { continue; }
+            let scroll_y = node.props.scroll_offset_y.unwrap_or(0.0) as f64;
+            // Content height from raw Taffy child rects (scroll-independent).
+            let Some(lid) = node.layout_id else { continue };
+            let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == lid) else { continue };
+            let max_child_bottom: f64 = node.children.iter()
+                .filter_map(|&cid| {
+                    let cn   = s.js_nodes.get(&cid)?;
+                    let clid = cn.layout_id?;
+                    s.resolved.iter()
+                        .find(|(nid, _)| *nid == clid)
+                        .map(|(_, crl)| (crl.y + crl.height) as f64)
+                })
+                .fold(f64::NEG_INFINITY, f64::max);
+            if !max_child_bottom.is_finite() { continue; }
+            let content_h = max_child_bottom - rl.y as f64;
+            let Some((_tx, ty, _tw, th)) = compute_scrollbar_thumb(
+                rx, ry, rw, rh, scroll_y, content_h, bar_w,
+            ) else { continue };
+            let scroll_range = (content_h - rh).max(0.0);
+            let on_thumb = cy >= ty && cy <= ty + th;
+            // Track click: jump so the thumb centers on the cursor.
+            let jump = if on_thumb { None } else {
+                let drag_range = (rh - th).max(1.0);
+                Some(((cy - ry - th / 2.0) / drag_range).clamp(0.0, 1.0) * scroll_range)
+            };
+            // Multiple clip nodes can cover this point (nested scrollables,
+            // side-by-side panes under a common clipping ancestor).  Keep the
+            // INNERMOST one — smallest area wins; js_nodes iteration order is
+            // arbitrary HashMap order and must not decide.
+            let area = rw * rh;
+            let smaller = result.as_ref().map_or(true, |(_, _, prev_area)| area < *prev_area);
+            if smaller {
+                result = Some((ScrollbarDragState {
                     node_id: id,
                     track_h: rh,
                     thumb_h: th,
                     scroll_range,
-                    start_scroll_y: scroll_y as f64,
-                    start_mouse_y: s.cursor_y as f64,
-                });
+                    start_scroll_y: jump.unwrap_or(scroll_y),
+                    start_mouse_y: cy,
+                }, jump, area));
             }
         }
     }
-    None
+    let (drag, jump, _) = result?;
+    if let Some(target) = jump {
+        s.runtime.push_event(InputEvent::ScrollbarDrag {
+            node_id: drag.node_id,
+            scroll_y: target as f32,
+        });
+        (s.request_redraw)();
+    }
+    Some(drag)
 }
 
 // ── Window controller builder ─────────────────────────────────────────────────
@@ -564,6 +588,7 @@ fn build_window_controller(
     let w8 = Arc::clone(&window);
     let w9 = Arc::clone(&window);
     let w10 = Arc::clone(&window);
+    let w11 = Arc::clone(&window);
 
     WindowController {
         get_window_size: Arc::new(move || {
@@ -603,6 +628,25 @@ fn build_window_controller(
         }),
         set_title: Arc::new(move |title| {
             w9.set_title(&title);
+        }),
+        set_cursor: Arc::new(move |name| {
+            use winit::window::CursorIcon;
+            let icon = match name.as_str() {
+                "pointer"    => CursorIcon::Pointer,
+                "text"       => CursorIcon::Text,
+                "move"       => CursorIcon::Move,
+                "grab"       => CursorIcon::Grab,
+                "grabbing"   => CursorIcon::Grabbing,
+                "col-resize" => CursorIcon::ColResize,
+                "row-resize" => CursorIcon::RowResize,
+                "ew-resize"  => CursorIcon::EwResize,
+                "ns-resize"  => CursorIcon::NsResize,
+                "crosshair"  => CursorIcon::Crosshair,
+                "not-allowed"=> CursorIcon::NotAllowed,
+                "wait"       => CursorIcon::Wait,
+                _            => CursorIcon::Default,
+            };
+            w11.set_cursor(icon);
         }),
         hwnd,
         create_window: create_window_fn,

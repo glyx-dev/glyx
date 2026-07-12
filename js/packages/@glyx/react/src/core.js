@@ -142,12 +142,17 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
   // `feedback: false` is for structural pressables (backdrops, click
   // absorbers, custom-styled controls) — opacity on a container multiplies
   // through the whole subtree, so a dimming backdrop dims its content too.
-  const baseOpacity = style?.opacity ?? 1;
-  const mergedStyle = (feedback && pressed && !disabled)
-    ? { ...style, opacity: baseOpacity * 0.65 }
-    : (feedback && hovered && !disabled)
-    ? { ...style, opacity: baseOpacity * 0.85 }
-    : style;
+  // style may be a function receiving the interaction state (RN-style):
+  //   style={({ pressed, hovered }) => ({ ... })}
+  // Function styles handle their own feedback, so opacity feedback is skipped.
+  const styleIsFn = typeof style === 'function';
+  const resolvedStyle = styleIsFn ? style({ pressed, hovered }) : style;
+  const baseOpacity = resolvedStyle?.opacity ?? 1;
+  const mergedStyle = (!styleIsFn && feedback && pressed && !disabled)
+    ? { ...resolvedStyle, opacity: baseOpacity * 0.65 }
+    : (!styleIsFn && feedback && hovered && !disabled)
+    ? { ...resolvedStyle, opacity: baseOpacity * 0.85 }
+    : resolvedStyle;
 
   return React.createElement(
     'view',
@@ -229,7 +234,21 @@ export function ScrollView({
   // ── Stable scroll handler ───────────────────────────────────────────────────
   // Empty dep array → created once, re-registered never.
   // Reads maxScrollRef.current (not a captured value) so the cap is always fresh.
+  // Refresh maxScroll from REAL layout right before clamping.  The native
+  // layout cache reports `contentHeight` for clip nodes (measured from actual
+  // child rects), which supersedes the prop-sum estimate — auto-sized children
+  // (no height props) would otherwise compute maxScroll = 0 and kill scrolling.
+  const refreshMaxScroll = useCallback(() => {
+    const id = nodeIdRef.current;
+    if (id == null || typeof __glyx_getLayout === 'undefined') return;
+    const l = __glyx_getLayout(id);
+    if (l && typeof l.contentHeight === 'number' && l.contentHeight > 0) {
+      maxScrollRef.current = Math.max(0, l.contentHeight - l.height);
+    }
+  }, []);
+
   const onScroll = useCallback((deltaY) => {
+    refreshMaxScroll();
     setScrollY((prev) => {
       const max = maxScrollRef.current;
       return Math.min(max, Math.max(0, prev + deltaY));
@@ -237,8 +256,9 @@ export function ScrollView({
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onAbsoluteScroll = useCallback((y) => {
+    refreshMaxScroll();
     setScrollY(Math.min(maxScrollRef.current, Math.max(0, y)));
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onMount = useCallback((id) => {
     nodeIdRef.current = id;

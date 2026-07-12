@@ -1070,6 +1070,10 @@ export const glyxWindow = {
   getScreenSize:   ()      => typeof __glyx_getScreenSize   !== 'undefined' ? __glyx_getScreenSize()   : { width: 0, height: 0 },
   setAlwaysOnTop:  (on)    => typeof __glyx_setAlwaysOnTop  !== 'undefined' && __glyx_setAlwaysOnTop(on),
   setTitle:        (title) => typeof __glyx_setTitle        !== 'undefined' && __glyx_setTitle(title),
+  /** Set the mouse cursor icon: 'default' | 'pointer' | 'text' | 'move' |
+   *  'grab' | 'grabbing' | 'col-resize' | 'row-resize' | 'ew-resize' |
+   *  'ns-resize' | 'crosshair' | 'not-allowed' | 'wait'. */
+  setCursor:       (name)  => typeof __glyx_setCursor       !== 'undefined' && __glyx_setCursor(name),
   /** Immediately run V8 GC + mimalloc segment decommit. The framework does
    *  this automatically on focus loss; call manually at level transitions or
    *  loading screens for faster memory recovery. */

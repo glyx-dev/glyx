@@ -68,15 +68,19 @@ impl TextSystem {
                         let name = entry.file_name()
                             .to_string_lossy()
                             .to_ascii_lowercase();
-                        // Load only the three core Segoe UI text variants needed
-                        // for regular, bold, and semibold rendering.  Italic and
+                        // Load the three core Segoe UI text variants (regular,
+                        // bold, semibold) plus the emoji/symbol fallbacks so
+                        // emoji and pictographs don't render as tofu.  Italic and
                         // light variants are omitted — fontique synthesises oblique
                         // on demand and the app rarely needs true italic faces.
-                        // Excluded: seguiemj (Emoji, ~25 MB), seguisym (~15 MB),
-                        // and all 7 condensed/light/italic variants (~40 MB total).
+                        // seguiemj/seguisym cost ~40 MB of RAM; set
+                        // GLYX_NO_EMOJI_FONT=1 to skip them in memory-critical apps.
+                        let no_emoji = std::env::var("GLYX_NO_EMOJI_FONT").ok().as_deref() == Some("1");
                         let wanted = matches!(name.as_str(),
                             "segoeui.ttf" | "segoeuib.ttf" | "seguisb.ttf"
-                        );
+                        ) || (!no_emoji && matches!(name.as_str(),
+                            "seguiemj.ttf" | "seguisym.ttf"
+                        ));
                         if wanted && register_font_file(&mut font_cx, &entry.path()) {
                             count += 1;
                         }
@@ -162,7 +166,7 @@ impl TextSystem {
         // The trailing "sans-serif" is a Parley generic that triggers its own
         // platform font-selection heuristic if none of the named fonts match.
         builder.push_default(StyleProperty::FontFamily(FontFamily::Source(
-            std::borrow::Cow::Borrowed("Segoe UI, Helvetica Neue, DejaVu Sans, sans-serif"),
+            std::borrow::Cow::Borrowed("Segoe UI, Helvetica Neue, DejaVu Sans, Segoe UI Emoji, Segoe UI Symbol, sans-serif"),
         )));
 
         let mut layout = builder.build(text);
@@ -204,7 +208,7 @@ impl TextSystem {
             builder.push_default(StyleProperty::FontStyle(FontStyle::Italic));
         }
         builder.push_default(StyleProperty::FontFamily(FontFamily::Source(
-            std::borrow::Cow::Borrowed("Segoe UI, Helvetica Neue, DejaVu Sans, sans-serif"),
+            std::borrow::Cow::Borrowed("Segoe UI, Helvetica Neue, DejaVu Sans, Segoe UI Emoji, Segoe UI Symbol, sans-serif"),
         )));
         let mut layout = builder.build(text);
         layout.break_all_lines(Some(max_width));
@@ -241,6 +245,24 @@ impl TextSystem {
             let (w, _) = self.measure(slice, font_size, max_width);
             w
         }
+    }
+
+    /// Character index of the caret position nearest to point (x, y) in text
+    /// wrapped at `max_width`.  Handles soft wraps and explicit newlines —
+    /// the proper hit-test for multiline editors (line-splitting on '\n' in JS
+    /// cannot account for soft-wrapped visual lines).
+    pub fn pos_at_point(&mut self, text: &str, font_size: f32, max_width: f32, x: f32, y: f32) -> usize {
+        if text.is_empty() { return 0; }
+        let layout = self.shape(text, font_size, max_width, FontWeight::NORMAL, Alignment::Start);
+        use parley::layout::{Cluster, ClusterSide};
+        let byte = match Cluster::from_point(&layout.inner, x, y) {
+            Some((cl, side)) => {
+                let r = cl.text_range();
+                if matches!(side, ClusterSide::Left) { r.start } else { r.end }
+            }
+            None => text.len(),
+        };
+        text[..byte.min(text.len())].chars().count()
     }
 
     /// Return the character index (0-based) whose left edge is closest to `target_x`
@@ -361,6 +383,23 @@ impl TextLayout {
         last
     }
 
+    /// Per-visual-line byte ranges and extents:
+    /// `(byte_start, byte_end, top, bottom, right_edge)` relative to the layout
+    /// origin.  Includes soft-wrapped lines — used for multiline selection
+    /// highlights.  `right_edge` is the x of the line's last glyph: measuring a
+    /// cursor AT a soft-wrap boundary reports x on the NEXT line (0), so
+    /// selections that reach a wrapped line's end must use this instead.
+    pub fn line_ranges(&self) -> Vec<(usize, usize, f32, f32, f32)> {
+        self.inner
+            .lines()
+            .map(|l| {
+                let r = l.text_range();
+                let m = l.metrics();
+                (r.start, r.end, m.block_min_coord.max(0.0), m.block_max_coord, m.inline_max_coord)
+            })
+            .collect()
+    }
+
     /// Returns `(cursor_top_offset, cursor_height)` relative to the `ty` argument
     /// passed to `draw_text`.
     ///
@@ -372,10 +411,13 @@ impl TextLayout {
     /// - `cursor_top_offset` — offset from `ty` to the cursor rect's top edge.
     /// - `cursor_height` — `font_ascent + font_descent` (glyph region only).
     pub fn cursor_metrics(&self) -> (f32, f32) {
+        // Scan for the FIRST line that actually has a glyph run — text starting
+        // with blank lines ('\n…') has an empty first line.  Falling back to the
+        // full layout height here made the caret a full-height bar in multiline
+        // fields whose content begins with a newline.
         self.inner
             .lines()
-            .next()
-            .and_then(|line| {
+            .find_map(|line| {
                 line.items().find_map(|item| {
                     if let parley::layout::PositionedLayoutItem::GlyphRun(gr) = item {
                         let baseline = gr.baseline();
@@ -388,13 +430,22 @@ impl TextLayout {
                     }
                 })
             })
-            .unwrap_or_else(|| (0.0, self.inner.height()))
+            // No glyphs anywhere (empty text): approximate one line box.
+            .unwrap_or_else(|| {
+                let h = self.inner.height();
+                (0.0, if h > 0.0 { h.min(24.0) } else { 18.0 })
+            })
     }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Try to register a single font file.  Returns true if it was registered.
+///
+/// Fonts are MEMORY-MAPPED, not read into RAM: mapped pages are file-backed,
+/// paged in on demand, and evictable under memory pressure — so even the
+/// ~25 MB emoji font costs near-zero committed memory (only the glyph tables
+/// actually shaped get touched).
 fn register_font_file(font_cx: &mut FontContext, path: &std::path::Path) -> bool {
     let ext = path
         .extension()
@@ -402,6 +453,16 @@ fn register_font_file(font_cx: &mut FontContext, path: &std::path::Path) -> bool
         .unwrap_or("")
         .to_ascii_lowercase();
     if matches!(ext.as_str(), "ttf" | "otf" | "ttc") {
+        if let Ok(file) = std::fs::File::open(path) {
+            // SAFETY: system font files are not truncated while the OS has
+            // them registered; a torn read would at worst fail font parsing.
+            if let Ok(mmap) = unsafe { memmap2::Mmap::map(&file) } {
+                let blob = parley::fontique::Blob::new(std::sync::Arc::new(mmap));
+                font_cx.collection.register_fonts(blob, None);
+                return true;
+            }
+        }
+        // Fallback: plain read (e.g. mmap refused on a network drive).
         if let Ok(data) = std::fs::read(path) {
             font_cx.collection.register_fonts(parley::fontique::Blob::from(data), None);
             return true;

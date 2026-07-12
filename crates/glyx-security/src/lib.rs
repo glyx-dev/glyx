@@ -55,10 +55,20 @@ impl std::fmt::Display for DenyReason {
 ///
 /// Fails with [`DenyReason::Canonicalize`] if the path does not exist (the
 /// file must already exist for a read check to make sense).
+/// True when any normal path component contains a ':' — an NTFS Alternate
+/// Data Stream (e.g. "file.txt:hidden").  The drive prefix (`C:`) of an
+/// absolute Windows path is NOT a stream and is skipped.
+fn has_ads_component(path: &Path) -> bool {
+    path.components().any(|c| {
+        !matches!(c, std::path::Component::Prefix(_))
+            && c.as_os_str().to_string_lossy().contains(':')
+    })
+}
+
 pub fn resolve_and_check_read(path: &Path) -> Result<PathBuf, DenyReason> {
     // Reject NTFS Alternate Data Streams (e.g. "file.txt:hidden") — they
     // can hide payloads in the same inode and bypass content checks on Windows.
-    if path.components().any(|c| c.as_os_str().to_string_lossy().contains(':')) {
+    if has_ads_component(path) {
         #[cfg(target_os = "windows")]
         return Err(DenyReason::AlternateDataStream);
     }
@@ -82,7 +92,7 @@ pub fn resolve_and_check_read(path: &Path) -> Result<PathBuf, DenyReason> {
 /// `path` itself doesn't exist, its parent must exist and be within the grant.
 pub fn resolve_and_check_write(path: &Path) -> Result<PathBuf, DenyReason> {
     // Reject NTFS Alternate Data Streams on Windows.
-    if path.components().any(|c| c.as_os_str().to_string_lossy().contains(':')) {
+    if has_ads_component(path) {
         #[cfg(target_os = "windows")]
         return Err(DenyReason::AlternateDataStream);
     }
@@ -731,7 +741,7 @@ mod tests {
 /// rather than reading from the global store (which isn't set in unit tests).
 #[cfg(test)]
 fn resolve_and_check_read_with(path: &std::path::Path, caps: &Capabilities) -> Result<std::path::PathBuf, DenyReason> {
-    if path.components().any(|c| c.as_os_str().to_string_lossy().contains(':')) {
+    if has_ads_component(path) {
         #[cfg(target_os = "windows")]
         return Err(DenyReason::AlternateDataStream);
     }

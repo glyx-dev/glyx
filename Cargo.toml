@@ -19,6 +19,8 @@ members = [
     "examples/hello-world",
     "examples/notes-app",
     "examples/calculator",
+    "examples/files",
+    "examples/model-viewer",
     "crates/glyx-snapshot",
     "crates/glyx-media",
     "crates/glyx-cap-abi",

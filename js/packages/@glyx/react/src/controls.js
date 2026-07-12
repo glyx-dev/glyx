@@ -3,6 +3,7 @@ import {
   registerInput, unregisterInput,
   registerDraggable, unregisterDraggable,
   registerPressable, unregisterPressable,
+  registerScrollView, unregisterScrollView,
   addGlobalClickListener, removeGlobalClickListener,
   addKeyListener,
 } from './events.js';
@@ -19,7 +20,7 @@ export function TextInput({
   placeholder = '',
   fontSize = 16,
   multiline = false,
-  width  = 240,
+  width,                     // explicit width; default 240 ONLY when no width-affecting style is given
   height,                    // default: 44 single-line; auto-sized multiline
   maxLength,                 // hard character limit (insertions truncated)
   minLines,                  // multiline auto-height floor  (default 3)
@@ -43,6 +44,10 @@ export function TextInput({
   const [focus_,  setFocus_]  = useState(() => value.length);
   const [scrollX, setScrollX] = useState(0);
   const scrollXRef = useRef(0);
+  // Vertical scroll for multiline mode (wheel, scrollbar drag, caret-follow).
+  const [scrollY, setScrollY] = useState(0);
+  const scrollYRef = useRef(0);
+  const setScrollYBoth = (y) => { scrollYRef.current = y; setScrollY(y); };
 
   // Derived selection range (always ordered).
   const selStart = Math.min(anchor, focus_);
@@ -93,7 +98,15 @@ export function TextInput({
   });
 
   const innerPadding = multiline ? 10 : 8;
-  const fieldW = measuredW || (typeof width === 'number' ? width : 240);
+  // Width resolution: explicit `width` prop wins; otherwise, if the style
+  // already controls width (width / flex / stretch), let layout decide; only
+  // when NOTHING sizes the field does the 240px default apply.
+  const styleSizesWidth = !!style && (
+    style.width != null || style.flex != null || style.flexGrow != null ||
+    style.minWidth != null || style.alignSelf === 'stretch'
+  );
+  const nodeWidth = width != null ? width : (styleSizesWidth ? undefined : 240);
+  const fieldW = measuredW || (typeof nodeWidth === 'number' ? nodeWidth : 240);
   const innerW = Math.max(1, fieldW - innerPadding * 2);
 
   // Recompute horizontal scroll offset so the caret stays visible.
@@ -224,11 +237,37 @@ export function TextInput({
         return;
       }
       if (key === 'Home') {
-        if (shift) { extendTo(0); } else { moveCursor(0); }
+        // Multiline: start of the current LOGICAL line (Ctrl+Home = document start).
+        const target = (multiline && !ctrl)
+          ? value.lastIndexOf('\n', Math.max(0, focus_ - 1)) + 1
+          : 0;
+        if (shift) { extendTo(target); } else { moveCursor(target); }
         return;
       }
       if (key === 'End') {
-        if (shift) { extendTo(value.length); } else { moveCursor(value.length); }
+        // Multiline: end of the current LOGICAL line (Ctrl+End = document end).
+        let target = value.length;
+        if (multiline && !ctrl) {
+          const nl = value.indexOf('\n', focus_);
+          target = nl === -1 ? value.length : nl;
+        }
+        if (shift) { extendTo(target); } else { moveCursor(target); }
+        return;
+      }
+      if (multiline && (key === 'PageUp' || key === 'PageDown')) {
+        // Move the CARET a viewport's worth of lines (editor standard) —
+        // the caret-follow effect then scrolls the view along with it.
+        const id = nodeIdRef.current;
+        const l = (id != null && typeof __glyx_getLayout !== 'undefined') ? __glyx_getLayout(id) : null;
+        const lineH = fontSize * 1.4;
+        const pageLines = Math.max(1, Math.floor(((l ? l.height : 300) - innerPadding * 2) / lineH) - 1);
+        if (typeof __glyx_measure_text !== 'undefined' && typeof __glyx_text_pos_at !== 'undefined') {
+          const caretY = __glyx_measure_text(renderValue.slice(0, focus_) || ' ', fontSize, innerW).height - lineH / 2;
+          const caretX = 0; // column preservation via x would need caret x tracking; home-column is acceptable
+          const targetY = key === 'PageUp' ? caretY - pageLines * lineH : caretY + pageLines * lineH;
+          const pos = __glyx_text_pos_at(renderValue, fontSize, innerW, caretX, Math.max(0, targetY));
+          if (shift) { extendTo(pos); } else { moveCursor(pos); }
+        }
         return;
       }
 
@@ -278,9 +317,16 @@ export function TextInput({
       const textX   = relX - padding;
 
       if (multiline) {
-        // Multiline: find line by Y, then char by X within that line.
+        // Multiline: native 2-D hit-test against the WRAPPED layout (handles
+        // soft wraps + '\n', which naive line-splitting cannot).  The click Y
+        // is in viewport space — add the scroll offset to land in content space.
+        const contentY = relY - padding + scrollYRef.current;
+        if (typeof __glyx_text_pos_at !== 'undefined') {
+          return __glyx_text_pos_at(renderValue, fontSize, innerW, Math.max(0, textX), Math.max(0, contentY));
+        }
+        // Fallback: '\n'-split line mapping (inaccurate with soft wraps).
         const lineHeight = fontSize * 1.4;
-        const lineIdx    = Math.max(0, Math.floor((relY - padding) / lineHeight));
+        const lineIdx    = Math.max(0, Math.floor(contentY / lineHeight));
         const lines      = renderValue.split('\n');
         const clampedLine = Math.min(lineIdx, lines.length - 1);
         const lineText   = lines[clampedLine];
@@ -308,6 +354,16 @@ export function TextInput({
     },
   };
 
+  // Clamp a target scroll offset against the real (native-measured) overflow.
+  const clampScrollY = (y) => {
+    const id = nodeIdRef.current;
+    if (id == null || typeof __glyx_getLayout === 'undefined') return 0;
+    const l = __glyx_getLayout(id);
+    const max = (l && typeof l.contentHeight === 'number')
+      ? Math.max(0, l.contentHeight - l.height) : 0;
+    return Math.min(max, Math.max(0, y));
+  };
+
   const onMount = useCallback((id) => {
     nodeIdRef.current = id;
     registerInput(id, {
@@ -317,20 +373,51 @@ export function TextInput({
       onClickAt:  (relX, relY) => handlersRef.current.onClickAt(relX, relY),
       onDragAt:   (relX, relY) => handlersRef.current.onDragAt(relX, relY),
     });
-  }, []);
+    // Multiline fields scroll vertically like a ScrollView: wheel + native
+    // scrollbar thumb/track drags both route here.
+    if (multiline) {
+      registerScrollView(id, {
+        onScroll:         (dy) => setScrollYBoth(clampScrollY(scrollYRef.current + dy)),
+        onAbsoluteScroll: (y)  => setScrollYBoth(clampScrollY(y)),
+      });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     return () => {
       if (nodeIdRef.current !== null) {
         unregisterInput(nodeIdRef.current);
+        unregisterScrollView(nodeIdRef.current);
       }
     };
   }, []);
 
+  // Caret follow: when typing/moving the caret in a scrolled multiline field,
+  // keep the caret's line inside the viewport.
+  useEffect(() => {
+    if (!multiline || !focused) return;
+    if (typeof __glyx_measure_text === 'undefined') return;
+    const id = nodeIdRef.current;
+    if (id == null || typeof __glyx_getLayout === 'undefined') return;
+    const l = __glyx_getLayout(id);
+    if (!l) return;
+    const lineH = Math.ceil(fontSize * 1.4);
+    // Caret bottom y within the content = height of the text up to the caret.
+    const caretBottom = __glyx_measure_text(renderValue.slice(0, focus_) || ' ', fontSize, innerW).height + innerPadding;
+    const viewH = l.height;
+    let sy = scrollYRef.current;
+    if (caretBottom - sy > viewH - innerPadding) sy = caretBottom - viewH + innerPadding;
+    if (caretBottom - lineH - sy < innerPadding) sy = Math.max(0, caretBottom - lineH - innerPadding);
+    sy = clampScrollY(sy);
+    if (sy !== scrollYRef.current) setScrollYBoth(sy);
+  }, [focus_, renderValue, multiline, focused]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Show placeholder only when unfocused and value is empty (masked for
   // password fields so the real text never renders).
   const displayText  = (focused || value) ? renderValue : placeholder;
-  const textColor    = value ? '#ffffff' : '#888888';
+  // Respect the style's text color (themed apps); white is only the default
+  // for the built-in dark field chrome.
+  const textColor    = value ? ((style && style.color) || '#ffffff') : '#888888';
 
   const inputStyle = {
     backgroundColor: focused ? '#4a4a7e' : '#2a2a3e',
@@ -342,11 +429,13 @@ export function TextInput({
     padding: innerPadding,
     clip: true,   // prevent text from rendering outside the input bounds
     ...style,
+    // Vertical scroll state (after the user-style spread — not overridable).
+    ...(multiline ? { scrollOffsetY: scrollY } : null),
   };
 
   return React.createElement(
     'view',
-    { _glyxOnMount: onMount, style: inputStyle, width, height: resolvedHeight, ...props },
+    { _glyxOnMount: onMount, style: inputStyle, width: nodeWidth, height: resolvedHeight, ...props },
     React.createElement('text', {
       text:           displayText,
       fontSize,

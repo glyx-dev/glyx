@@ -544,15 +544,16 @@ export function dispatchEvents() {
 
         if (!ev.pressed) break;
 
-        // Scroll-navigation keys: route to nearest scroll ancestor of the focused node,
-        // or the topmost scroll view the cursor is over when nothing is focused.
-        // PageUp/Down and Ctrl+Home/End always scroll (TextInput doesn't use them).
-        // ArrowUp/Down only scroll when no text input is focused.
+        // Scroll-navigation keys: route to the topmost scroll view the cursor
+        // is over — but ONLY when no text input is focused.  A focused input
+        // owns ALL navigation keys (TextInput moves the caret on PageUp/Down
+        // and jumps the document on Ctrl+Home/End; caret-follow scrolls the view).
         {
           const k = ev.key;
-          const isPageKey  = k === 'PageUp' || k === 'PageDown';
-          const isJumpKey  = ctrlHeld && (k === 'Home' || k === 'End');
-          const isArrowKey = (k === 'ArrowUp' || k === 'ArrowDown') && focusedNodeId === null;
+          const noFocus    = focusedNodeId === null;
+          const isPageKey  = (k === 'PageUp' || k === 'PageDown') && noFocus;
+          const isJumpKey  = ctrlHeld && (k === 'Home' || k === 'End') && noFocus;
+          const isArrowKey = (k === 'ArrowUp' || k === 'ArrowDown') && noFocus;
           if (isPageKey || isJumpKey || isArrowKey) {
             const target = findScrollTarget(focusedNodeId);
             if (target !== null) {
@@ -599,15 +600,20 @@ export function dispatchEvents() {
       }
 
       case 'scroll': {
-        // Route the scroll delta to the topmost ScrollView the cursor is over
-        // (iterate reverse-registration-order so later-rendered = topmost).
-        for (const [nodeId, handlers] of [...scrollRegistry].reverse()) {
-          if (hitTest(nodeId, cursorX, cursorY)) {
-            if (isDisabled(nodeId)) break;
-            handlers.onScroll?.(ev.deltaY);
-            break;
+        // Route the scroll delta to the DEEPEST ScrollView the cursor is over.
+        // Registration order is unreliable for nesting (children mount before
+        // parents, and side-by-side panes can re-register in any order): a
+        // table's inner list inside a page ScrollView must win over the page.
+        let target = null;
+        let targetHandlers = null;
+        for (const [nodeId, handlers] of scrollRegistry) {
+          if (!hitTest(nodeId, cursorX, cursorY) || isDisabled(nodeId)) continue;
+          if (target === null || isAncestorOf(target, nodeId)) {
+            target = nodeId;
+            targetHandlers = handlers;
           }
         }
+        targetHandlers?.onScroll?.(ev.deltaY);
         break;
       }
 

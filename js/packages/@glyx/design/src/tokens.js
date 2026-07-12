@@ -52,23 +52,27 @@ const _mocha = {
  */
 export const tokens = {
   colors: {
-    // Core
-    bg:          _latte.base,
-    surface:     _latte.surface0,
-    surfaceRaised: _latte.surface1,
-    text:        _latte.text,
-    textMuted:   _latte.subtext1,
-    textDisabled: _latte.overlay1,
-    border:      _latte.surface2,
+    // Core.
+    // NOTE: cards are WHITE on a grey window background — Catppuccin's
+    // surface0-2 greys are hover/overlay shades; using them as panel
+    // backgrounds makes everything blend into itself (grey-on-grey).
+    bg:          _latte.base,          // window background (soft grey)
+    surface:     '#ffffff',            // cards / panels — pops on bg
+    surfaceRaised: '#f6f7fa',          // nested panels, table headers
+    surfaceHover: '#e9ecf2',           // row/list hover on a surface
+    text:        '#303446',            // darker than Latte text for contrast
+    textMuted:   '#5d6274',
+    textDisabled: _latte.overlay0,
+    border:      '#d5d9e2',            // visible on white AND on bg
     borderFocus: _latte.blue,
 
     // Interactive
     primary:     _latte.blue,
-    primaryText: _latte.base,
+    primaryText: '#ffffff',
     primaryHover: _latte.sapphire,
 
-    secondary:   _latte.surface0,
-    secondaryText: _latte.text,
+    secondary:   '#e6e9f0',            // distinct from card surface
+    secondaryText: '#303446',
 
     // Semantic
     error:       _latte.red,
@@ -147,17 +151,20 @@ export const darkTokens = {
     bg:          _mocha.base,
     surface:     _mocha.surface0,
     surfaceRaised: _mocha.surface1,
+    surfaceHover: '#3a3c52',           // between surface0 and surface1
     text:        _mocha.text,
-    textMuted:   _mocha.subtext1,
-    textDisabled: _mocha.overlay1,
-    border:      _mocha.surface1,
+    // subtext0 (dimmer) — subtext1 was too close to `text` to read as muted.
+    textMuted:   _mocha.subtext0,
+    textDisabled: _mocha.overlay0,
+    // surface2 — surface1 borders were invisible against surface0 cards.
+    border:      _mocha.surface2,
     borderFocus: _mocha.blue,
 
     primary:     _mocha.blue,
     primaryText: _mocha.base,
     primaryHover: _mocha.sapphire,
 
-    secondary:   _mocha.surface0,
+    secondary:   _mocha.surface1,      // distinct from card surface
     secondaryText: _mocha.text,
 
     error:       _mocha.red,

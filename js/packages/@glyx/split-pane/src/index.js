@@ -6,7 +6,7 @@
 //   </SplitPane>
 
 import React from 'react';
-import { View, useDraggable } from '@glyx/react';
+import { View, useDraggable, glyxWindow } from '@glyx/react';
 
 const { useState, useCallback } = React;
 
@@ -27,9 +27,10 @@ export function SplitPane({
   const [fraction, setFraction] = useState(defaultSizes[0] / 100);
   const [dragging, setDragging] = useState(false);
 
+  const resizeCursor = horizontal ? 'col-resize' : 'row-resize';
   const onDivider = useDraggable({
-    onDragStart: () => setDragging(true),
-    onDragEnd:   () => setDragging(false),
+    onDragStart: () => { setDragging(true); glyxWindow.setCursor(resizeCursor); },
+    onDragEnd:   () => { setDragging(false); glyxWindow.setCursor('default'); },
     onDragMove: ({ dx, dy }) => {
       const delta = horizontal ? dx : dy;
       setFraction((prev) => {

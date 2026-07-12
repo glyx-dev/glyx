@@ -1,9 +1,9 @@
 name: Publish npm packages
 
-# Publishes every @glyx/* workspace package to npm.
+# Publishes every @glyx-dev/* workspace package to npm.
 # Trigger with a `js-v*` tag (e.g. js-v0.1.0) or manually from the Actions tab.
 #
-# Requires the repo secret NPM_TOKEN (an npm "Automation" token for the @glyx org).
+# Requires the repo secret NPM_TOKEN (an npm token for the glyx-dev org).
 
 on:
   push:
@@ -34,9 +34,13 @@ jobs:
 
       - name: Install workspace deps
         run: bun install
+        env:
+          GLYX_SKIP_DOWNLOAD: '1'   # glyx-cli postinstall: no binary fetch in CI
 
       - name: Run JS tests
         run: bun test
+        env:
+          GLYX_SKIP_DOWNLOAD: '1'
 
       - name: Publish all @glyx packages
         env:
@@ -44,7 +48,7 @@ jobs:
           DIST_TAG: ${{ github.event.inputs.dist_tag || 'latest' }}
         run: |
           set -e
-          for dir in js/packages/@glyx/*/; do
+          for dir in js/packages/@glyx/*/ js/packages/glyx-cli/; do
             name=$(node -p "require('./$dir/package.json').name")
             version=$(node -p "require('./$dir/package.json').version")
             # Skip if this exact version is already on the registry.

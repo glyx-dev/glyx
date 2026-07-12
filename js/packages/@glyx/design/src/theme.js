@@ -1,7 +1,7 @@
-// @glyx/design — ThemeProvider + useTheme hook
+// @glyx-dev/design — ThemeProvider + useTheme hook
 //
 // Usage:
-//   import { ThemeProvider, useTheme } from '@glyx/design';
+//   import { ThemeProvider, useTheme } from '@glyx-dev/design';
 //
 //   // Wrap your app root:
 //   render(
@@ -28,7 +28,7 @@
 //   }
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { system } from '@glyx/react';
+import { system } from '@glyx-dev/react';
 import { tokens, darkTokens } from './tokens.js';
 
 // ── Context ───────────────────────────────────────────────────────────────────

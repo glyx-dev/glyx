@@ -1,10 +1,10 @@
-// @glyx/auth — OAuth flows via system browser + deep-link callback, with
+// @glyx-dev/auth — OAuth flows via system browser + deep-link callback, with
 // tokens stored in the OS keychain.
 //
 // The app must be registered as the handler for its deep-link scheme (see
 // `deeplink` in glyx.config.json) and provide a token-exchange endpoint.
 //
-//   import { createAuth } from '@glyx/auth';
+//   import { createAuth } from '@glyx-dev/auth';
 //   const auth = createAuth({
 //     redirect: 'myapp://auth',
 //     providers: {
@@ -18,8 +18,8 @@
 //   });
 //   const tokens = await auth.signIn('github');
 
-import { glyxWindow, deeplink } from '@glyx/react';
-import { createKeychain } from '@glyx/keychain';
+import { glyxWindow, deeplink } from '@glyx-dev/react';
+import { createKeychain } from '@glyx-dev/keychain';
 
 function randomState() {
   const a = new Uint8Array(16);
@@ -85,7 +85,11 @@ export function createAuth({ redirect, providers = {}, storage } = {}) {
       return tokens;
     })();
 
-    _signInFlight.finally(() => { _signInFlight = null; });
+    // Clear the in-flight guard on settle.  The .catch() is REQUIRED: the
+    // .finally()-derived promise is a side-chain nobody awaits — without it,
+    // a failed sign-in raises an unhandled rejection alongside the one the
+    // caller actually handles.
+    _signInFlight.finally(() => { _signInFlight = null; }).catch(() => {});
     return _signInFlight;
   }
 

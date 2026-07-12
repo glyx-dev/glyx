@@ -1,4 +1,4 @@
-// @glyx/icons — Lucide icon set for Glyx apps.
+// @glyx-dev/icons — Lucide icon set for Glyx apps.
 //
 // Icons are rendered as inline SVG data URIs so they work without any
 // asset bundling step and support runtime color + size changes.
@@ -6,11 +6,11 @@
 // Lucide icons are MIT licensed. https://lucide.dev
 //
 // Usage:
-//   import { Icon } from '@glyx/icons'
+//   import { Icon } from '@glyx-dev/icons'
 //   <Icon name="arrow-right" size={20} color="#fff" />
 
 import React from 'react';
-import { Image } from '@glyx/react';
+import { Image } from '@glyx-dev/react';
 
 // ── Icon path registry ────────────────────────────────────────────────────────
 // Each value is the inner SVG content (paths, circles, lines, polylines).

@@ -16,7 +16,7 @@ if (typeof performance === 'undefined') {
 
 if (typeof setTimeout === 'undefined') {
   // Deferred timer queue — drained each frame by _glyxDrainTimers()
-  // which is called from __glyx_frameCallback in @glyx/react/index.js.
+  // which is called from __glyx_frameCallback in @glyx-dev/react/index.js.
   // Calling fn() immediately caused infinite recursion in animation loops.
   let _nextTimerId = 1;
   const _pendingTimers = new Map(); // id → { fn, due }

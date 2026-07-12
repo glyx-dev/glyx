@@ -1,4 +1,4 @@
-// @glyx/react — React renderer for the Glyx runtime.
+// @glyx-dev/react — React renderer for the Glyx runtime.
 // Polyfills must be installed before react/react-reconciler initialise.
 import './polyfills.js';
 
@@ -22,7 +22,7 @@ export * from './controls.js';
 export * from './canvas.js';
 export * from './media.js';
 
-// Event-registry helpers used by companion packages (@glyx/context-menu, …).
+// Event-registry helpers used by companion packages (@glyx-dev/context-menu, …).
 export { addGlobalClickListener, removeGlobalClickListener, addKeyListener };
 
 // ── Reconciler ────────────────────────────────────────────────────────────────

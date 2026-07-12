@@ -62,7 +62,7 @@ export default function App() {
 
 Four layers, each replaceable/inspectable on its own:
 
-1. **React layer** — your application code. JSX components, hooks, `@glyx/router`.
+1. **React layer** — your application code. JSX components, hooks, `@glyx-dev/router`.
 2. **Runtime** — V8 with snapshot startup, the JS↔Rust bridge, and capability gating.
 3. **GPU pipeline** — wgpu + Vello render the 2D scene graph and Canvas 3D.
 4. **Shell** — native OS integration: window management, system APIs, auto-updater.
@@ -160,7 +160,7 @@ tools/
 examples/
   hello-world/
   notes-app/           Full-featured reference app
-  design-regular/      @glyx/design showcase
+  design-regular/      @glyx-dev/design showcase
   calculator/
 ```
 

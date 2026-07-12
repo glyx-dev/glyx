@@ -1,4 +1,4 @@
-// @glyx/design — TypeScript declarations
+// @glyx-dev/design — TypeScript declarations
 // Auto-generated — do not edit manually.
 
 import type { ReactNode, CSSProperties } from 'react';

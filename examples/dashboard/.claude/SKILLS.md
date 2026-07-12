@@ -8,7 +8,7 @@ Add a new capability to this app.
 
 1. Open `glyx.config.ts` and add the capability key to the `capabilities` block
 2. For `fs`, add glob patterns to `read`, `write`, or `delete` arrays
-3. Import the API in your component: `import { fs, db, clipboard, ... } from '@glyx/react'`
+3. Import the API in your component: `import { fs, db, clipboard, ... } from '@glyx-dev/react'`
 4. Glyx will enforce the capability at runtime — calls outside declared globs throw `CapabilityDenied`
 
 Common capabilities: `fs`, `db`, `dialog`, `clipboard`, `notification`, `audio`, `network`, `credentials`, `storage`, `updater`
@@ -18,8 +18,8 @@ Common capabilities: `fs`, `db`, `dialog`, `clipboard`, `notification`, `audio`,
 Create a new React component for this app.
 
 1. Create the file in `src/components/` (JS-only) or `ui/components/` (native project)
-2. Use `@glyx/react` primitives — `View`, `Text`, `Pressable`, `ScrollView`, `TextInput`, `Image`
-3. Use `@glyx/design` for themed UI — `Button`, `Card`, `TextField`, `Modal`, `Alert`, `Tabs`
+2. Use `@glyx-dev/react` primitives — `View`, `Text`, `Pressable`, `ScrollView`, `TextInput`, `Image`
+3. Use `@glyx-dev/design` for themed UI — `Button`, `Card`, `TextField`, `Modal`, `Alert`, `Tabs`
 4. Style with object props (React Native-style, not CSS strings)
 
 ## /scaffold-plugin
@@ -33,7 +33,7 @@ Add a JS plugin to extend this app with custom backend commands.
 
 ```js
 // src/plugins/example.plugin.js
-import { db } from '@glyx/react'
+import { db } from '@glyx-dev/react'
 
 export async function getAll() {
   return db.query('SELECT * FROM items ORDER BY created_at DESC')

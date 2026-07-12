@@ -1,15 +1,15 @@
-// @glyx/charts — GPU-rendered charts on Glyx Canvas 2D.
+// @glyx-dev/charts — GPU-rendered charts on Glyx Canvas 2D.
 //
 // Built entirely on the Canvas path API (fill/stroke/arc) + fillText. No DOM,
 // no SVG. Charts redraw only when their props change (not per-frame), so they
 // cost nothing while idle.
 //
 // Usage:
-//   import { LineChart, BarChart, PieChart, AreaChart } from '@glyx/charts';
+//   import { LineChart, BarChart, PieChart, AreaChart } from '@glyx-dev/charts';
 //   <LineChart data={[{x:'Jan',y:10},…]} width={600} height={300} />
 
 import React from 'react';
-import { Canvas } from '@glyx/react';
+import { Canvas } from '@glyx-dev/react';
 
 const { useRef, useEffect } = React;
 

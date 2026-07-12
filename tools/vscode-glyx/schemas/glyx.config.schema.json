@@ -138,7 +138,7 @@
         },
         "db": {
           "type": "boolean",
-          "description": "SQLite database access via @glyx/drizzle."
+          "description": "SQLite database access via @glyx-dev/drizzle."
         },
         "dialog": {
           "type": "boolean",
@@ -210,7 +210,7 @@
         },
         "storage": {
           "type": "boolean",
-          "description": "Persistent key-value storage via @glyx/store."
+          "description": "Persistent key-value storage via @glyx-dev/store."
         },
         "mdns": {
           "type": "boolean",

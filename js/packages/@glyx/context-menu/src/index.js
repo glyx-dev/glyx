@@ -1,9 +1,9 @@
-// @glyx/context-menu — right-click context menus.
+// @glyx-dev/context-menu — right-click context menus.
 //
 // Uses the native `onRightPress` event (right mouse button) and z-index overlay
 // positioning. Dismisses on any outside click.
 //
-//   import { ContextMenu } from '@glyx/context-menu';
+//   import { ContextMenu } from '@glyx-dev/context-menu';
 //   <ContextMenu items={[
 //     { label: 'Open', action: () => open(id) },
 //     { separator: true },
@@ -14,7 +14,7 @@
 
 import React from 'react';
 import { View, Text, Pressable, useWindowSize,
-         addGlobalClickListener, removeGlobalClickListener } from '@glyx/react';
+         addGlobalClickListener, removeGlobalClickListener } from '@glyx-dev/react';
 
 const { useState, useEffect } = React;
 

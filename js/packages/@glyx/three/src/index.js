@@ -1,4 +1,4 @@
-// @glyx/three — Declarative React-Three-Fiber-style 3D for Glyx Canvas3D.
+// @glyx-dev/three — Declarative React-Three-Fiber-style 3D for Glyx Canvas3D.
 //
 // Architecture:
 //   • <Scene> owns a React context that child components register into.
@@ -16,8 +16,8 @@
 //   }
 //
 // Usage:
-//   import { Canvas3D } from '@glyx/react';
-//   import { Scene, PerspectiveCamera, AmbientLight, DirectionalLight, Mesh } from '@glyx/three';
+//   import { Canvas3D } from '@glyx-dev/react';
+//   import { Scene, PerspectiveCamera, AmbientLight, DirectionalLight, Mesh } from '@glyx-dev/three';
 //
 //   function My3DScene() {
 //     const c3dRef = React.useRef(null);
@@ -129,7 +129,7 @@ export function Scene({ canvasRef, background, children }) {
 
 function useRegister(type, data) {
   const ctx = useContext(SceneCtx);
-  if (!ctx) throw new Error(`@glyx/three: must be a descendant of <Scene>`);
+  if (!ctx) throw new Error(`@glyx-dev/three: must be a descendant of <Scene>`);
   // Stable per-instance key so the registry entry survives prop changes.
   const id = useId();
   useLayoutEffect(() => {
@@ -317,7 +317,7 @@ export function Model({
   transform,
 }) {
   const ctx = useContext(SceneCtx);
-  if (!ctx) throw new Error('@glyx/three: <Model> must be a descendant of <Scene>');
+  if (!ctx) throw new Error('@glyx-dev/three: <Model> must be a descendant of <Scene>');
 
   // Preload GLTF once per src change.
   useEffect(() => {

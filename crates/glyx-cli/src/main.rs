@@ -200,7 +200,7 @@ enum Commands {
     },
     /// Run tests
     ///
-    /// For JS projects:   `<pm> test` (uses @glyx/testing stubs)
+    /// For JS projects:   `<pm> test` (uses @glyx-dev/testing stubs)
     /// For native projects: `cargo test` + `<pm> test`
     ///
     /// Pass --js or --rust to run only one side.
@@ -344,7 +344,8 @@ fn run() -> Result<()> {
 /// Search order:
 ///   1. ~/.glyx/runners/{dev|prod}/glyx-runner[.exe]  (cached)
 ///   2. glyx_home/target/{debug|release}/glyx-runner[.exe]  (workspace)
-///   3. Build from source → copy to cache
+///   3. Download the prebuilt runner from GitHub Releases → cache
+///   4. Build from source → copy to cache
 fn find_or_build_runner(dev_mode: bool) -> Result<PathBuf> {
     let profile = if dev_mode { "dev" } else { "prod" };
     let bin_name = runner_bin_name();
@@ -361,7 +362,15 @@ fn find_or_build_runner(dev_mode: bool) -> Result<PathBuf> {
         if ws_bin.exists() { return Ok(ws_bin); }
     }
 
-    // 3. Build from source
+    // 3. Download the prebuilt runner for this CLI version from GitHub
+    //    Releases — the NORMAL path for users who installed the CLI binary
+    //    and don't have the glyx source workspace.  Falls through to a
+    //    source build (workspace devs) if unavailable.
+    if download_runner(profile, &cached).unwrap_or(false) {
+        return Ok(cached);
+    }
+
+    // 4. Build from source
     let home = glyx_home().context("Cannot locate glyx workspace — needed to build glyx-runner")?;
     let label = if dev_mode { "dev (with hot-reload)" } else { "prod (lean)" };
     println!("Building glyx-runner [{label}] from source (first-run, one-time cost)...");
@@ -394,6 +403,71 @@ fn find_or_build_runner(dev_mode: bool) -> Result<PathBuf> {
 
     println!("✓ glyx-runner [{profile}] cached at {}", cached.display());
     Ok(cached)
+}
+
+/// The release-artifact target triple for the running CLI, or None on
+/// platforms we don't publish binaries for (falls back to source build).
+fn release_target() -> Option<&'static str> {
+    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Some("x86_64-pc-windows-msvc")
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some("aarch64-apple-darwin")
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Some("x86_64-apple-darwin")
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some("x86_64-unknown-linux-gnu")
+    } else {
+        None
+    }
+}
+
+/// Download the prebuilt glyx-runner artifact matching this CLI's version
+/// from GitHub Releases into `dest`.  Returns Ok(true) on success, Ok(false)
+/// when the artifact isn't available (offline, unsupported platform, 404) —
+/// the caller then falls through to building from source.
+fn download_runner(profile: &str, dest: &std::path::Path) -> Result<bool> {
+    let Some(target) = release_target() else { return Ok(false) };
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    // Release ships two runner flavors: lean prod and dev (hot-reload + overlay).
+    let artifact = if profile == "dev" {
+        format!("glyx-runner-dev-{target}{suffix}")
+    } else {
+        format!("glyx-runner-{target}{suffix}")
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    let urls = [
+        format!("https://github.com/glyx-dev/glyx/releases/download/v{version}/{artifact}"),
+        format!("https://github.com/glyx-dev/glyx/releases/latest/download/{artifact}"),
+    ];
+
+    for url in &urls {
+        println!("Downloading prebuilt glyx-runner [{profile}]…");
+        log::info!("  {url}");
+        let resp = match ureq::get(url).call() {
+            Ok(r) => r,
+            Err(e) => { log::info!("  unavailable: {e}"); continue; }
+        };
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create cache dir {}", parent.display()))?;
+        }
+        // Write to a temp file then rename — never leave a half-written binary.
+        let tmp = dest.with_extension("part");
+        let mut file = std::fs::File::create(&tmp)
+            .with_context(|| format!("create {}", tmp.display()))?;
+        std::io::copy(&mut resp.into_reader(), &mut file)
+            .with_context(|| format!("download {url}"))?;
+        drop(file);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        }
+        std::fs::rename(&tmp, dest)?;
+        println!("✓ glyx-runner [{profile}] cached at {}", dest.display());
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn glyx_runners_dir() -> PathBuf {
@@ -977,11 +1051,17 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_glyx_mark_to(glyx_home: &Path, dest: &Path, subfolder: &str) {
-    let src = glyx_home.join("assets/glyx-mark.svg");
+fn copy_glyx_mark_to(glyx_home: Option<&Path>, dest: &Path, subfolder: &str) {
     let dst = dest.join(subfolder).join("glyx-mark.svg");
-    if let Err(e) = std::fs::copy(&src, &dst) {
-        log::warn!("[create] could not copy glyx-mark.svg: {e}");
+    // Workspace checkout: copy the asset.  Standalone CLI: write the
+    // embedded copy (the binary carries it — 404 bytes).
+    if let Some(home) = glyx_home {
+        let src = home.join("assets/glyx-mark.svg");
+        if std::fs::copy(&src, &dst).is_ok() { return; }
+    }
+    const MARK_SVG: &str = include_str!("../../../assets/glyx-mark.svg");
+    if let Err(e) = std::fs::write(&dst, MARK_SVG) {
+        log::warn!("[create] could not write glyx-mark.svg: {e}");
     }
 }
 

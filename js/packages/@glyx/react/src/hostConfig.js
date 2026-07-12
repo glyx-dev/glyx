@@ -1,4 +1,4 @@
-// @glyx/react — react-reconciler HostConfig
+// @glyx-dev/react — react-reconciler HostConfig
 //
 // This is the bridge between React's reconciler and Glyx's native scene graph.
 // Every method here maps React's internal tree operations to native bindings

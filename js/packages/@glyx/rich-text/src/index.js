@@ -1,4 +1,4 @@
-// @glyx/rich-text — Rich text editor for Glyx apps.
+// @glyx-dev/rich-text — Rich text editor for Glyx apps.
 //
 // Architecture:
 //   Document  = array of paragraphs
@@ -12,7 +12,7 @@
 // Cursor pixel position is computed via __glyx_measure_text (styled).
 
 import React, { useState, useEffect, useRef, useCallback, useContext, createContext } from 'react';
-import { View, Text, Pressable, addKeyListener, removeKeyListener, addGlobalClickListener, removeGlobalClickListener, clipboard } from '@glyx/react';
+import { View, Text, Pressable, addKeyListener, removeKeyListener, addGlobalClickListener, removeGlobalClickListener, clipboard } from '@glyx-dev/react';
 
 // ── Document helpers ──────────────────────────────────────────────────────────
 

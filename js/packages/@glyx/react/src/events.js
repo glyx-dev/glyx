@@ -1,4 +1,4 @@
-// @glyx/react — event dispatcher
+// @glyx-dev/react — event dispatcher
 //
 // This module bridges Glyx's native input events to React component handlers.
 // It is driven by `__glyx_frameCallback`, registered on `globalThis` in

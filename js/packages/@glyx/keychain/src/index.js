@@ -1,6 +1,6 @@
-// @glyx/keychain — Typed namespace-scoped OS keychain for Glyx apps.
+// @glyx-dev/keychain — Typed namespace-scoped OS keychain for Glyx apps.
 //
-// Wraps @glyx/react's `credentials` API with:
+// Wraps @glyx-dev/react's `credentials` API with:
 //   • Namespace scoping (prevents key collisions between logical stores)
 //   • Automatic JSON serialization / deserialization for any value type
 //   • Optional typed schema with default values
@@ -8,14 +8,14 @@
 // Requires `credentials: true` in glyx.config.json.
 //
 // Usage (simple):
-//   import { createKeychain } from '@glyx/keychain';
+//   import { createKeychain } from '@glyx-dev/keychain';
 //   const chain = createKeychain('myapp');
 //   await chain.set('authToken', 'Bearer abc123');
 //   const token = await chain.get('authToken');   // 'Bearer abc123'
 //   await chain.delete('authToken');
 //
 // Usage (typed schema):
-//   import { createTypedKeychain } from '@glyx/keychain';
+//   import { createTypedKeychain } from '@glyx-dev/keychain';
 //   const secrets = createTypedKeychain('auth', {
 //     accessToken:  null,
 //     refreshToken: null,
@@ -24,7 +24,7 @@
 //   await secrets.set('accessToken', 'Bearer xyz');
 //   const tok = await secrets.get('accessToken');   // 'Bearer xyz' | null
 
-import { credentials } from '@glyx/react';
+import { credentials } from '@glyx-dev/react';
 
 /**
  * Create a namespaced keychain. All keys are stored as `namespace:key` to
@@ -36,7 +36,7 @@ import { credentials } from '@glyx/react';
  */
 export function createKeychain(namespace, { service = 'glyx' } = {}) {
   if (!namespace || typeof namespace !== 'string') {
-    throw new Error('@glyx/keychain: namespace must be a non-empty string');
+    throw new Error('@glyx-dev/keychain: namespace must be a non-empty string');
   }
 
   const _key = (k) => `${namespace}:${k}`;
@@ -109,7 +109,7 @@ export function createTypedKeychain(namespace, schema, opts = {}) {
      */
     async set(key, value) {
       if (!(key in schema)) throw new Error(
-        `@glyx/keychain: unknown key "${key}" in namespace "${namespace}"`
+        `@glyx-dev/keychain: unknown key "${key}" in namespace "${namespace}"`
       );
       await chain.set(key, value);
     },
@@ -121,7 +121,7 @@ export function createTypedKeychain(namespace, schema, opts = {}) {
      */
     async get(key) {
       if (!(key in schema)) throw new Error(
-        `@glyx/keychain: unknown key "${key}" in namespace "${namespace}"`
+        `@glyx-dev/keychain: unknown key "${key}" in namespace "${namespace}"`
       );
       const val = await chain.get(key);
       return val !== null ? val : schema[key];

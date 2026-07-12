@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   View, Text, ScrollView, render, useWindowSize, system, battery,
-} from '@glyx/react';
+} from '@glyx-dev/react';
 import {
   ThemeProvider, Card, Stat, Tabs, ProgressBar, KVRow, Badge, Spinner, useTheme,
-} from '@glyx/design';
-import { Icon } from '@glyx/icons';
-import { LineChart, AreaChart, BarChart, PieChart, DEFAULT_PALETTE } from '@glyx/charts';
-import { DataTable } from '@glyx/table';
+} from '@glyx-dev/design';
+import { Icon } from '@glyx-dev/icons';
+import { LineChart, AreaChart, BarChart, PieChart, DEFAULT_PALETTE } from '@glyx-dev/charts';
+import { DataTable } from '@glyx-dev/table';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 

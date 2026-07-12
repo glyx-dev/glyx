@@ -3,12 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
-    "react":          "^18",
-    "@glyx/react":   "file:../../js/packages/@glyx/react",
-    "@glyx/router":  "file:../../js/packages/@glyx/router",
-    "@glyx/design":  "file:../../js/packages/@glyx/design"
+    "react": "^18",
+    "@glyx-dev/react": "workspace:*",
+    "@glyx-dev/router": "workspace:*",
+    "@glyx-dev/design": "workspace:*"
   },
   "devDependencies": {
-    "@glyx/config": "file:../../js/packages/@glyx/config"
+    "@glyx-dev/config": "workspace:*"
   }
 }

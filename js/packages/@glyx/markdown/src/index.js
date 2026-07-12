@@ -1,15 +1,15 @@
-// @glyx/markdown — render Markdown as Glyx component trees.
+// @glyx-dev/markdown — render Markdown as Glyx component trees.
 //
 // Self-contained block parser (no external deps). Handles headings, paragraphs,
 // ordered/unordered lists, fenced code blocks, blockquotes, and horizontal
 // rules. Inline emphasis markers (**bold**, *italic*, `code`) are stripped to
 // plain text — the renderer's Text node doesn't yet support mixed inline spans.
 //
-//   import { Markdown } from '@glyx/markdown';
+//   import { Markdown } from '@glyx-dev/markdown';
 //   <Markdown source={md} width={600} />
 
 import React from 'react';
-import { View, Text } from '@glyx/react';
+import { View, Text } from '@glyx-dev/react';
 
 const DEFAULT = {
   h1: { fontSize: 26, color: '#E0E0F0', bold: true,  mb: 12 },

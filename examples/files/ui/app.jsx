@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, ScrollView, TextInput, Pressable, render, useWindowSize, fs, dialog,
-} from '@glyx/react';
+} from '@glyx-dev/react';
 import {
   ThemeProvider, IconButton, Button, Empty, useTheme,
-} from '@glyx/design';
-import { Icon } from '@glyx/icons';
-import { SplitPane } from '@glyx/split-pane';
-import { Markdown } from '@glyx/markdown';
+} from '@glyx-dev/design';
+import { Icon } from '@glyx-dev/icons';
+import { SplitPane } from '@glyx-dev/split-pane';
+import { Markdown } from '@glyx-dev/markdown';
 
 function basename(p) { return (p || '').split(/[\\/]/).pop() || p; }
 function parentOf(p) { return (p || '').split(/[\\/]/).slice(0, -1).join('/'); }

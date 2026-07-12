@@ -42,7 +42,7 @@ This document describes how the pieces fit together.
       |                           wgpu   (GPU context, swapchain)
   React component tree            Vello  (2D vector rendering)
       |                           Taffy  (CSS flexbox layout)
-  @glyx/react bindings           Parley (text shaping)
+  @glyx-dev/react bindings           Parley (text shaping)
       |                           V8     (JavaScript engine)
   native bindings (~120)          Tokio  (async runtime)
       |
@@ -681,9 +681,9 @@ Loaded via the `gltf` crate. Vertex positions, normals, and UV coordinates are e
 
 **Capacity limits**: MAX_MESHES = 64 per scene.
 
-**@glyx/three** (JS layer):
+**@glyx-dev/three** (JS layer):
 
-`@glyx/three` provides a declarative React API over the imperative `GlyxCanvas3DContext.updateScene()` call. `<Scene>` collects child component data synchronously during React's render phase (Glyx uses synchronous LegacyRoot rendering), assembles the scene JSON, and commits it via `useLayoutEffect`. Child components (`<PerspectiveCamera>`, `<AmbientLight>`, `<DirectionalLight>`, `<Mesh>`, `<Model>`) call a `register(type, data)` function obtained from React context. No custom reconciler is needed.
+`@glyx-dev/three` provides a declarative React API over the imperative `GlyxCanvas3DContext.updateScene()` call. `<Scene>` collects child component data synchronously during React's render phase (Glyx uses synchronous LegacyRoot rendering), assembles the scene JSON, and commits it via `useLayoutEffect`. Child components (`<PerspectiveCamera>`, `<AmbientLight>`, `<DirectionalLight>`, `<Mesh>`, `<Model>`) call a `register(type, data)` function obtained from React context. No custom reconciler is needed.
 
 ---
 
@@ -969,7 +969,7 @@ db.transaction(statements[])   -> Promise<void>
 db.close(handle)               -> Promise<void>
 ```
 
-**Vector store** (`@glyx/react` `vectorDb` API):
+**Vector store** (`@glyx-dev/react` `vectorDb` API):
 
 Built on SQLite with a custom BLOB column for storing float32 vectors. Cosine similarity search is computed in Rust (no sqlite-vss). This is a simple approximate search suitable for a few thousand vectors — not a production vector database.
 
@@ -1011,21 +1011,21 @@ All packages live under `js/packages/@glyx/`. All are pure ESM with `"type": "mo
 
 | Package | Entry | Description |
 |---------|-------|-------------|
-| `@glyx/react` | `src/index.js` | React reconciler, HostConfig, all native bindings exposed as JS APIs. The runtime. |
-| `@glyx/router` | `src/index.js` | Named-route history stack. `<Router>`, `<Route>`, `useNavigate`, `useRoute`. |
-| `@glyx/drizzle` | `src/index.js` | Drizzle ORM sqlite-proxy adapter. Translates Drizzle's SQL+params into `db.run`/`db.query` calls. |
-| `@glyx/keychain` | `src/index.js` | Typed, namespace-scoped OS keychain wrapper. `createKeychain`, `createTypedKeychain`. |
-| `@glyx/store` | `src/index.js` | Persistent reactive Zustand-style store backed by SQLite. `initStore`, `createStore`. |
-| `@glyx/three` | `src/index.js` | Declarative R3F-style 3D API over `Canvas3D`. `<Scene>`, `<Mesh>`, `<Model>`, math utilities. |
+| `@glyx-dev/react` | `src/index.js` | React reconciler, HostConfig, all native bindings exposed as JS APIs. The runtime. |
+| `@glyx-dev/router` | `src/index.js` | Named-route history stack. `<Router>`, `<Route>`, `useNavigate`, `useRoute`. |
+| `@glyx-dev/drizzle` | `src/index.js` | Drizzle ORM sqlite-proxy adapter. Translates Drizzle's SQL+params into `db.run`/`db.query` calls. |
+| `@glyx-dev/keychain` | `src/index.js` | Typed, namespace-scoped OS keychain wrapper. `createKeychain`, `createTypedKeychain`. |
+| `@glyx-dev/store` | `src/index.js` | Persistent reactive Zustand-style store backed by SQLite. `initStore`, `createStore`. |
+| `@glyx-dev/three` | `src/index.js` | Declarative R3F-style 3D API over `Canvas3D`. `<Scene>`, `<Mesh>`, `<Model>`, math utilities. |
 
 **Package conventions**:
 
 - No build step — Bun resolves ESM directly from `src/index.js`
 - Peer dependencies declared in `package.json` (never bundled)
-- Packages import from `@glyx/react` for access to native bindings; they do not call `__glyx_*` bindings directly
+- Packages import from `@glyx-dev/react` for access to native bindings; they do not call `__glyx_*` bindings directly
 - New packages are added to root `package.json` workspaces array and `bun install` is run
 
-**React reconciler** (`@glyx/react`):
+**React reconciler** (`@glyx-dev/react`):
 
 The reconciler is built on `react-reconciler@0.29` in `legacy` mode (synchronous rendering). All React state updates and effects execute synchronously within the V8 call initiated by `__glyx_frameCallback`. There is no concurrent mode, no scheduler, no time-slicing. The simplicity trades concurrency for predictability — every frame, React processes all pending work before Rust proceeds to layout and render.
 

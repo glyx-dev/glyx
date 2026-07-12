@@ -1,9 +1,9 @@
-// @glyx/form — form orchestration: values, validation, errors, touched.
+// @glyx-dev/form — form orchestration: values, validation, errors, touched.
 //
 // Schema-agnostic: pass any object with a `safeParse(values)` method (Zod works
 // directly). Without a schema, submission always passes.
 //
-//   import { useForm, FormField } from '@glyx/form';
+//   import { useForm, FormField } from '@glyx-dev/form';
 //   const form = useForm({ defaultValues:{email:''}, schema, onSubmit });
 //   <FormField form={form} name="email" label="Email">
 //     <TextInput value={form.values.email}
@@ -12,7 +12,7 @@
 //   </FormField>
 
 import React from 'react';
-import { View, Text } from '@glyx/react';
+import { View, Text } from '@glyx-dev/react';
 
 const { useState, useCallback } = React;
 

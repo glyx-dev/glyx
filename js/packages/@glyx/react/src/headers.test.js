@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test';
-// Importing the full package also proves @glyx/react loads in a plain Bun
-// process with only the @glyx/testing stubs installed (no window, no GPU).
+// Importing the full package also proves @glyx-dev/react loads in a plain Bun
+// process with only the @glyx-dev/testing stubs installed (no window, no GPU).
 import { Headers } from './index.js';
 
 test('Headers get/has are case-insensitive', () => {

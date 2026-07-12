@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 import {
   View, Text, ScrollView, render, db, useWindowSize, DatePicker,
-} from '@glyx/react';
-import { Router, Route, useNavigate, useRoute } from '@glyx/router';
+} from '@glyx-dev/react';
+import { Router, Route, useNavigate, useRoute } from '@glyx-dev/router';
 import {
   ThemeProvider, Button, IconButton, Card, TextField, Chip, Tabs, CheckboxRow, Empty, Spinner, useTheme,
   ToastProvider, useToast,
-} from '@glyx/design';
+} from '@glyx-dev/design';
 
 const PRIORITIES = ['low', 'normal', 'high', 'urgent'];
 

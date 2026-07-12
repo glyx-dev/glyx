@@ -1,11 +1,11 @@
-// @glyx/command — command palette (Cmd/Ctrl+K) with fuzzy search.
+// @glyx-dev/command — command palette (Cmd/Ctrl+K) with fuzzy search.
 //
-//   import { CommandPalette, useCommands } from '@glyx/command';
+//   import { CommandPalette, useCommands } from '@glyx-dev/command';
 //   useCommands([{ id:'new', label:'New Note', section:'Notes', action: newNote }]);
 //   <CommandPalette />   // render once near the app root
 
 import React from 'react';
-import { View, Text, Pressable, ScrollView, TextInput, useWindowSize, input } from '@glyx/react';
+import { View, Text, Pressable, ScrollView, TextInput, useWindowSize, input } from '@glyx-dev/react';
 
 const { useState, useEffect, useMemo } = React;
 

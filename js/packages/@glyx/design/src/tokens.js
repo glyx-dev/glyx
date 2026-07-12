@@ -1,10 +1,10 @@
-// @glyx/design — Design tokens
+// @glyx-dev/design — Design tokens
 //
 // Usage:
-//   import { tokens } from '@glyx/design';
+//   import { tokens } from '@glyx-dev/design';
 //   const bg = tokens.colors.surface;          // light-mode surface
 //
-//   import { darkTokens } from '@glyx/design';
+//   import { darkTokens } from '@glyx-dev/design';
 //   const bg = darkTokens.colors.surface;      // dark-mode surface
 //
 // Tokens follow a semantic naming convention: intent, not value.

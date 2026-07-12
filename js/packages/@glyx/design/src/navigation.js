@@ -1,4 +1,4 @@
-// @glyx/design — Navigation components
+// @glyx-dev/design — Navigation components
 //
 // Exports:
 //   Tabs        — horizontal tab bar + content panels
@@ -7,7 +7,7 @@
 //   Breadcrumb  — path navigation
 
 import React, { useState, useCallback } from 'react';
-import { View, Text, Pressable, ScrollView } from '@glyx/react';
+import { View, Text, Pressable, ScrollView } from '@glyx-dev/react';
 import { useTheme } from './theme.js';
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────

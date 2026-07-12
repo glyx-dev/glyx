@@ -42,16 +42,29 @@ jobs:
       - name: Build lean runner
         run: cargo build --release --no-default-features -p glyx-runner --target ${{ matrix.target }}
 
-      - name: Stage artifact
+      - name: Stage lean artifact
         shell: bash
         run: |
           cp "target/${{ matrix.target }}/release/glyx-runner${{ matrix.bin_suffix }}" \
              "glyx-runner-${{ matrix.target }}${{ matrix.bin_suffix }}"
 
+      # The dev-flavored runner (hot-reload + overlay) — downloaded by the CLI
+      # for `glyx dev` on machines without the source workspace.
+      - name: Build dev runner
+        run: cargo build --release -p glyx-runner --target ${{ matrix.target }}
+
+      - name: Stage dev artifact
+        shell: bash
+        run: |
+          cp "target/${{ matrix.target }}/release/glyx-runner${{ matrix.bin_suffix }}" \
+             "glyx-runner-dev-${{ matrix.target }}${{ matrix.bin_suffix }}"
+
       - uses: actions/upload-artifact@v4
         with:
           name: runner-${{ matrix.target }}
-          path: glyx-runner-${{ matrix.target }}${{ matrix.bin_suffix }}
+          path: |
+            glyx-runner-${{ matrix.target }}${{ matrix.bin_suffix }}
+            glyx-runner-dev-${{ matrix.target }}${{ matrix.bin_suffix }}
 
   # ── glyx CLI binary ────────────────────────────────────────────────────────
   cli:

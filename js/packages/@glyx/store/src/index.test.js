@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import { db } from '@glyx/react';
+import { db } from '@glyx-dev/react';
 import { initStore, createStore } from './index.js';
 
 test('createStore rejects an invalid namespace', () => {

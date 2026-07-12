@@ -1,14 +1,14 @@
-// @glyx/table — data table with sortable + resizable columns, selection, and
-// virtualized rows (built on @glyx/react VirtualizedList + measureText).
+// @glyx-dev/table — data table with sortable + resizable columns, selection, and
+// virtualized rows (built on @glyx-dev/react VirtualizedList + measureText).
 //
-//   import { DataTable } from '@glyx/table';
+//   import { DataTable } from '@glyx-dev/table';
 //   <DataTable columns={cols} rows={rows} width={W} height={H}
 //              selectable onRowPress={r => open(r)} />
 //
 // Column: { key, label, width?, minWidth?, sortable?, align?, render?(value,row) }
 
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
-import { View, Text, Pressable, VirtualizedList, measureText, useDraggable } from '@glyx/react';
+import { View, Text, Pressable, VirtualizedList, measureText, useDraggable } from '@glyx-dev/react';
 
 const HEADER_FS = 12;
 const CELL_FS   = 13;

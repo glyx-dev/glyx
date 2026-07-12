@@ -630,7 +630,7 @@ export function SelectableText({
 // title bars (`window.decorations: false` in glyx.config.json).
 //
 // Usage:
-//   import { WindowControls } from '@glyx/react';
+//   import { WindowControls } from '@glyx-dev/react';
 //   <View glyxDraggable style={styles.titleBar}>
 //     <Text style={styles.title}>My App</Text>
 //     <WindowControls />

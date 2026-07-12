@@ -1,4 +1,4 @@
-// @glyx/design — Design system for Glyx apps
+// @glyx-dev/design — Design system for Glyx apps
 //
 // Exports:
 //   tokens, darkTokens — raw design token objects (colors, space, radius, fontSize, …)
@@ -25,7 +25,7 @@
 //   Tabs, Accordion, Stepper, Breadcrumb
 //
 // Quick-start:
-//   import { ThemeProvider, Button, Card, TextField, Alert } from '@glyx/design';
+//   import { ThemeProvider, Button, Card, TextField, Alert } from '@glyx-dev/design';
 //
 //   render(
 //     <ThemeProvider colorScheme="system">

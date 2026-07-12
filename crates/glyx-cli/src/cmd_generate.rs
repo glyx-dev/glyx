@@ -74,7 +74,7 @@ async fn handler(args_json: String) -> Result<String, String> {{
     println!("           crate::commands::{snake}::register(cmds);");
     println!("       }}");
     println!("  3. Call from JS:");
-    println!("       import {{ backend }} from '@glyx/react';");
+    println!("       import {{ backend }} from '@glyx-dev/react';");
     println!("       const result = await backend.{camel}({{ /* args */ }});");
 
     Ok(())
@@ -111,7 +111,7 @@ r#"/**
  *   ]
  */
 
-import {{ db }} from '@glyx/react';
+import {{ db }} from '@glyx-dev/react';
 
 /**
  * Example: query all items from a table.
@@ -150,7 +150,7 @@ export async function insert(args) {{
     println!("  ]");
     println!();
     println!("Then call from any React component:");
-    println!("  import {{ backend }} from '@glyx/react';");
+    println!("  import {{ backend }} from '@glyx-dev/react';");
     println!("  const {{ rows }} = await backend.{safe_name}.getAll({{ table: 'items' }});");
 
     Ok(())

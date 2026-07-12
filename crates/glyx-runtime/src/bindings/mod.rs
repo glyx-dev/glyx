@@ -313,7 +313,7 @@ pub struct NodeProps {
     pub pressable: Option<bool>,
 
     //  Testing 
-    /// Stable identifier used by `@glyx/testing` `getByTestId` queries.
+    /// Stable identifier used by `@glyx-dev/testing` `getByTestId` queries.
     pub test_id: Option<String>,
 
     //  Text input scroll 
@@ -1639,7 +1639,7 @@ mod tests {
 
     //  Canvas binary protocol 
     //
-    // Mirrors what @glyx/react's VeloxCanvasContext writes: f32 slots, with
+    // Mirrors what @glyx-dev/react's VeloxCanvasContext writes: f32 slots, with
     // color slots written through a Uint32Array alias (raw RGBA bytes).
 
     /// Little-endian f32 slot stream builder.

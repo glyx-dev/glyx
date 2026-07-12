@@ -1,12 +1,12 @@
 {
-  "name": "@glyx/form",
+  "name": "@glyx-dev/form",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",
   "description": "Form orchestration: validation, errors, touched state (Zod-compatible).",
   "peerDependencies": {
     "react": "^18.2.0",
-    "@glyx/react": "0.1.0"
+    "@glyx-dev/react": "0.1.0"
   },
   "scripts": {
     "test": "bun test"

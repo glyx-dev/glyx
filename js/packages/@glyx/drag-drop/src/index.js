@@ -1,6 +1,6 @@
-// @glyx/drag-drop — drag-and-drop primitives on native drag events.
+// @glyx-dev/drag-drop — drag-and-drop primitives on native drag events.
 //
-//   import { Draggable, DropZone } from '@glyx/drag-drop';
+//   import { Draggable, DropZone } from '@glyx-dev/drag-drop';
 //   <Draggable data={item}> <Card/> </Draggable>
 //   <DropZone onDrop={(data) => move(data)}> <Column/> </DropZone>
 //
@@ -8,7 +8,7 @@
 // live layout rect at drop time.
 
 import React from 'react';
-import { View, useDraggable } from '@glyx/react';
+import { View, useDraggable } from '@glyx-dev/react';
 
 const { useState, useRef, useCallback, useEffect } = React;
 

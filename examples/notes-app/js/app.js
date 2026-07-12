@@ -8374,7 +8374,7 @@ No matching component was found for:
   // ../../js/packages/@glyx/keychain/src/index.js
   function createKeychain(namespace, { service = "glyx" } = {}) {
     if (!namespace || typeof namespace !== "string") {
-      throw new Error("@glyx/keychain: namespace must be a non-empty string");
+      throw new Error("@glyx-dev/keychain: namespace must be a non-empty string");
     }
     const _key = (k) => `${namespace}:${k}`;
     return {
@@ -8405,12 +8405,12 @@ No matching component was found for:
     return {
       async set(key, value) {
         if (!(key in schema))
-          throw new Error(`@glyx/keychain: unknown key "${key}" in namespace "${namespace}"`);
+          throw new Error(`@glyx-dev/keychain: unknown key "${key}" in namespace "${namespace}"`);
         await chain.set(key, value);
       },
       async get(key) {
         if (!(key in schema))
-          throw new Error(`@glyx/keychain: unknown key "${key}" in namespace "${namespace}"`);
+          throw new Error(`@glyx-dev/keychain: unknown key "${key}" in namespace "${namespace}"`);
         const val = await chain.get(key);
         return val !== null ? val : schema[key];
       },
@@ -8440,7 +8440,7 @@ No matching component was found for:
   var _registry = new Map;
   function createStore(namespace, defaults) {
     if (!namespace || typeof namespace !== "string") {
-      throw new Error("@glyx/store: namespace must be a non-empty string");
+      throw new Error("@glyx-dev/store: namespace must be a non-empty string");
     }
     if (_registry.has(namespace))
       return _registry.get(namespace).hook;
@@ -8587,7 +8587,7 @@ No matching component was found for:
   function useRegister(type, data) {
     const ctx = import_react6.useContext(SceneCtx);
     if (!ctx)
-      throw new Error(`@glyx/three: <${type}> must be a descendant of <Scene>`);
+      throw new Error(`@glyx-dev/three: <${type}> must be a descendant of <Scene>`);
     ctx.register(type, data);
   }
   function PerspectiveCamera({
@@ -14881,7 +14881,7 @@ Ranking: cosine similarity across stored note vectors.`
           width: inner,
           height: 18,
           style: { color: C.dim },
-          children: "3D Canvas — declarative @glyx/three (R3F-style)"
+          children: "3D Canvas — declarative @glyx-dev/three (R3F-style)"
         }),
         /* @__PURE__ */ jsx_runtime.jsx(Canvas3D, {
           ref: c3dRef,
@@ -16126,7 +16126,7 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
           width: inner,
           height: 20,
           style: { color: C2.accent },
-          children: "@glyx/keychain"
+          children: "@glyx-dev/keychain"
         }),
         /* @__PURE__ */ jsx_runtime.jsx(Text, {
           fontSize: 12,
@@ -16215,7 +16215,7 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
           width: inner,
           height: 20,
           style: { color: C2.accent },
-          children: "@glyx/store"
+          children: "@glyx-dev/store"
         }),
         /* @__PURE__ */ jsx_runtime.jsxs(Text, {
           fontSize: 12,
@@ -16530,7 +16530,7 @@ L2 norm ≈ ${Math.sqrt(vec.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
         /* @__PURE__ */ jsx_runtime.jsx(Text, {
           fontSize: 10,
           style: { color: C2.dim, marginTop: 12, lineHeight: 16 },
-          children: "Typed insert / select / delete / where / orderBy — zero raw SQL in the screen. " + "Drizzle generates the SQL; @glyx/drizzle routes it through __glyx_db_* bindings."
+          children: "Typed insert / select / delete / where / orderBy — zero raw SQL in the screen. " + "Drizzle generates the SQL; @glyx-dev/drizzle routes it through __glyx_db_* bindings."
         })
       ]
     });

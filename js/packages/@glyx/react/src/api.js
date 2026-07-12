@@ -1,4 +1,4 @@
-// @glyx/react — native API bindings and frame poll state.
+// @glyx-dev/react — native API bindings and frame poll state.
 import { addKeyListener, registerSystemWatch, unregisterSystemWatch } from './events.js';
 
 // ── WebSocket inbox polling ───────────────────────────────────────────────────
@@ -179,7 +179,7 @@ export function _pollAudio() {
 // rejects the Promise with a descriptive error.
 //
 // Usage:
-//   import { fs } from '@glyx/react';
+//   import { fs } from '@glyx-dev/react';
 //   await fs.writeFile('data/notes.txt', 'hello');
 //   const entries = await fs.listDir('data/');  // [{ name, isDir }, ...]
 
@@ -253,7 +253,7 @@ export function _pollFsWatch() {
 // `glyx.config.json`.
 //
 // Usage:
-//   import { db } from '@glyx/react';
+//   import { db } from '@glyx-dev/react';
 //   const handle = await db.open('app.db');
 //   await db.run(handle, 'CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)');
 //   await db.run(handle, 'INSERT INTO items (name) VALUES (?)', ['hello']);
@@ -894,7 +894,7 @@ export async function fetch(url, options = {}) {
 // Expose `fetch` + `Headers` as globals (the embedded V8 runtime has no platform
 // equivalents, so this is purely additive — nothing standard is shadowed). Lets
 // web-oriented libraries (Supabase, Stripe, …) work unmodified; both remain
-// importable from @glyx/react.
+// importable from @glyx-dev/react.
 //
 // NOTE: response bodies cross the bridge as UTF-8 text, so `arrayBuffer()`/`blob()`
 // are correct for text/JSON but lossy for true binary downloads (images). Fetch
@@ -943,7 +943,7 @@ export function _pollWebSockets() {
 // Requires `mdns: true` capability in glyx.config.json.
 //
 // Usage:
-//   import { mdns } from '@glyx/react';
+//   import { mdns } from '@glyx-dev/react';
 //   const services = await mdns.discover('_http._tcp.local.', { timeout: 4000 });
 //   // [{ name, hostname, port, addresses: string[] }, ...]
 
@@ -1947,7 +1947,7 @@ export const input = {
  * any URLs forwarded by a second instance (when `singleInstance: true`).
  *
  * @example
- * import { deeplink } from '@glyx/react';
+ * import { deeplink } from '@glyx-dev/react';
  * deeplink.onOpen((url) => {
  *   // url = "notes://note/42"
  *   navigate('noteDetail', { id: url.split('/').pop() });

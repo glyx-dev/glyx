@@ -1,8 +1,8 @@
-// V8 environment polyfills — auto-loaded by @glyx/react
+// V8 environment polyfills — auto-loaded by @glyx-dev/react
 //
 // rusty_v8 runs a bare V8 isolate — no browser or Node globals.
 // React's scheduler needs performance.now(), setTimeout, clearTimeout,
-// and MessageChannel. These stubs are installed once when @glyx/react
+// and MessageChannel. These stubs are installed once when @glyx-dev/react
 // is first imported, before the reconciler initialises its scheduler.
 
 if (typeof performance === 'undefined') {

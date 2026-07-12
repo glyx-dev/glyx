@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import { installStubs, mockBinding } from '@glyx/testing';
+import { installStubs, mockBinding } from '@glyx-dev/testing';
 import { createKeychain } from './index.js';
 
 test('createKeychain rejects an invalid namespace', () => {

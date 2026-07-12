@@ -1,5 +1,5 @@
 {
-  "name": "@glyx/config",
+  "name": "@glyx-dev/config",
   "version": "0.1.0",
   "description": "Type-safe configuration helper for Glyx apps",
   "main": "src/index.ts",

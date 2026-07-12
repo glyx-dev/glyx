@@ -1,8 +1,8 @@
-// @glyx/config — type-safe configuration helper for Glyx apps.
+// @glyx-dev/config — type-safe configuration helper for Glyx apps.
 //
 // Usage in glyx.config.ts:
 //
-//   import { defineConfig } from '@glyx/config';
+//   import { defineConfig } from '@glyx-dev/config';
 //   export default defineConfig({
 //     window:       { title: 'My App', width: 1280, height: 800 },
 //     capabilities: { fs: { read: ['**'] }, db: true },

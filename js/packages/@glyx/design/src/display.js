@@ -1,4 +1,4 @@
-// @glyx/design — Display components
+// @glyx-dev/design — Display components
 //
 // Exports:
 //   Avatar       — circular image or initials fallback
@@ -9,7 +9,7 @@
 //   KVRow        — key / value table row
 
 import React from 'react';
-import { View, Text, Pressable, Image } from '@glyx/react';
+import { View, Text, Pressable, Image } from '@glyx-dev/react';
 import { useTheme } from './theme.js';
 
 // ── Avatar ─────────────────────────────────────────────────────────────────────

@@ -112,7 +112,7 @@ fn broken_image_placeholder() -> peniko::ImageData {
 }
 
 fn load_image_from_path(path: &str, width: Option<f32>, height: Option<f32>) -> Option<peniko::ImageData> {
-    // ── Data URI (e.g. from @glyx/icons inline SVGs) ─────────────────────────
+    // ── Data URI (e.g. from @glyx-dev/icons inline SVGs) ─────────────────────────
     if path.starts_with("data:") {
         let rest = &path["data:".len()..];
         if let Some(comma) = rest.find(',') {

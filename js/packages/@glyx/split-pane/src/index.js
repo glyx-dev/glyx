@@ -1,12 +1,12 @@
-// @glyx/split-pane — resizable two-pane layout with a draggable divider.
+// @glyx-dev/split-pane — resizable two-pane layout with a draggable divider.
 //
-//   import { SplitPane } from '@glyx/split-pane';
+//   import { SplitPane } from '@glyx-dev/split-pane';
 //   <SplitPane direction="horizontal" defaultSizes={[30,70]} width={W} height={H}>
 //     <Sidebar /> <Editor />
 //   </SplitPane>
 
 import React from 'react';
-import { View, useDraggable, glyxWindow } from '@glyx/react';
+import { View, useDraggable, glyxWindow } from '@glyx-dev/react';
 
 const { useState, useCallback } = React;
 

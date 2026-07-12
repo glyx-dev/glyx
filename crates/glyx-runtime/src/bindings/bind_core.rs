@@ -154,6 +154,11 @@ pub fn poll_events_callback(
                 set_num!("imageId", image_id);
                 set_str!("path", &path);
             }
+            InputEvent::SystemWatch { id, payload } => {
+                set_str!("type", "systemWatch");
+                set_num!("id", id);
+                set_str!("payload", &payload);
+            }
             InputEvent::DragStart { x, y } => {
                 set_str!("type", "dragStart");
                 set_num!("x", x);

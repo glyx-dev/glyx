@@ -28,6 +28,7 @@
 //   }
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { system } from '@glyx/react';
 import { tokens, darkTokens } from './tokens.js';
 
 // ── Context ───────────────────────────────────────────────────────────────────
@@ -66,7 +67,15 @@ export function ThemeProvider({ colorScheme = 'system', overrides, children }) {
       setIsDark(colorScheme === 'dark');
       return;
     }
-    // Poll every 2 seconds (winit doesn't fire a change event today).
+    // Rust-side watcher: fires ONLY when the OS preference changes — no JS
+    // timer, V8 stays idle between changes.
+    if (typeof __glyx_system_watch !== 'undefined') {
+      const id = system.watch('darkMode', (mode) => {
+        setIsDark((prev) => (prev === (mode === 'dark') ? prev : mode === 'dark'));
+      });
+      return () => system.unwatch(id);
+    }
+    // Fallback (snapshot stubs / old runtimes): 2s JS poll.
     const id = setInterval(() => {
       try {
         if (typeof __glyx_system_getDarkMode !== 'undefined') {

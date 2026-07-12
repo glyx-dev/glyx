@@ -1,5 +1,5 @@
 // @glyx/react — native API bindings and frame poll state.
-import { addKeyListener } from './events.js';
+import { addKeyListener, registerSystemWatch, unregisterSystemWatch } from './events.js';
 
 // ── WebSocket inbox polling ───────────────────────────────────────────────────
 //
@@ -1334,6 +1334,37 @@ export const battery = {
 };
 
 export const system = {
+  /**
+   * Subscribe to a system metric — "don't poll; subscribe."
+   *
+   * A RUST-side poller reads the metric on a timer and fires `cb` ONLY when
+   * the value changes; V8 stays completely idle between changes.  Use this
+   * instead of setInterval + getInfo()/getStatus() for live displays.
+   *
+   * Kinds and payloads:
+   *   'battery'      → { level, charging, timeRemainingSecs } | null
+   *   'memory'       → { usedMb, totalMb }
+   *   'darkMode'     → 'dark' | 'light' | 'unknown'
+   *   'batterySaver' → boolean
+   *
+   * @param {'battery'|'memory'|'darkMode'|'batterySaver'} kind
+   * @param {(value: any) => void} cb
+   * @param {{ intervalMs?: number }} [opts]  Poll cadence (floor 1000ms;
+   *   defaults: 2s for darkMode/batterySaver, 10s for battery/memory).
+   * @returns {number} watch id — pass to `system.unwatch(id)`.
+   */
+  watch(kind, cb, opts) {
+    if (typeof __glyx_system_watch === 'undefined') return 0;
+    const id = __glyx_system_watch(kind, (opts && opts.intervalMs) || 0);
+    if (id > 0) registerSystemWatch(id, cb);
+    return id;
+  },
+  /** Stop a `system.watch` subscription. */
+  unwatch(id) {
+    if (!id) return;
+    unregisterSystemWatch(id);
+    if (typeof __glyx_system_unwatch !== 'undefined') __glyx_system_unwatch(id);
+  },
   /** @returns {Promise<{cpuName,cpuCores,memoryTotalMb,memoryUsedMb,osName,osVersion}>} */
   async getInfo() {
     if (typeof __glyx_system_getInfo === 'undefined') return null;

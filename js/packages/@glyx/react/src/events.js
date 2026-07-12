@@ -64,6 +64,9 @@ let activeDragId = null;
 // Map from imageId -> onError callback, fired when a native image load fails.
 const imageErrorRegistry = new Map();
 
+// Map from watch id -> callback for Rust-side system watchers (system.watch).
+const systemWatchRegistry = new Map();
+
 // Listeners notified on window resize: Array<(size: {width, height}) => void>
 const windowSizeListeners = [];
 
@@ -111,6 +114,14 @@ export function registerPressable(nodeId, handlers) {
  */
 export function registerImageError(imageId, onError) {
   imageErrorRegistry.set(imageId, onError);
+}
+
+/** Register/unregister a system.watch subscriber (see api.js). */
+export function registerSystemWatch(id, cb) {
+  systemWatchRegistry.set(id, cb);
+}
+export function unregisterSystemWatch(id) {
+  systemWatchRegistry.delete(id);
 }
 
 export function unregisterImageError(imageId) {
@@ -628,6 +639,18 @@ export function dispatchEvents() {
       case 'resize': {
         const size = { width: ev.width, height: ev.height };
         for (const fn of windowSizeListeners) fn(size);
+        break;
+      }
+
+      case 'systemWatch': {
+        // Rust-side watcher detected a change (delta-gated) — dispatch to the
+        // subscriber.  Payload is JSON (or a bare JSON scalar for darkMode).
+        const cb = systemWatchRegistry.get(ev.id);
+        if (cb) {
+          let val = null;
+          try { val = JSON.parse(ev.payload); } catch { val = ev.payload; }
+          try { cb(val); } catch (e) { if (typeof __glyx_log !== 'undefined') __glyx_log('[system.watch] callback error: ' + e); }
+        }
         break;
       }
 

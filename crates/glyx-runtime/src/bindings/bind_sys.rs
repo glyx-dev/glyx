@@ -1,4 +1,111 @@
 use super::*;
+
+// ── System watchers ───────────────────────────────────────────────────────────
+//
+// "Don't poll; subscribe."  `__glyx_system_watch(kind, intervalMs) → id` spawns
+// a Rust-side poller that reads the requested metric on a timer and pushes a
+// `systemWatch` event ONLY when the value changes (delta-gated) — V8 stays
+// completely idle between changes.  `__glyx_system_unwatch(id)` stops it.
+//
+// Kinds: "battery" | "memory" | "darkMode" | "batterySaver"
+
+static WATCHERS: std::sync::OnceLock<Mutex<HashMap<u32, Arc<std::sync::atomic::AtomicBool>>>> =
+    std::sync::OnceLock::new();
+static NEXT_WATCH_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+fn watchers() -> &'static Mutex<HashMap<u32, Arc<std::sync::atomic::AtomicBool>>> {
+    WATCHERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn watch_payload(kind: &str, mem_sys: &mut Option<sysinfo::System>) -> String {
+    match kind {
+        "battery" => match glyx_sysapi::battery_status() {
+            Some(b) => format!(
+                r#"{{"level":{:.3},"charging":{},"timeRemainingSecs":{}}}"#,
+                b.level, b.charging,
+                b.time_remaining_secs.map_or("null".into(), |t| t.to_string()),
+            ),
+            None => "null".into(),
+        },
+        "memory" => {
+            use sysinfo::{MemoryRefreshKind, RefreshKind};
+            let sys = mem_sys.get_or_insert_with(|| {
+                sysinfo::System::new_with_specifics(
+                    RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
+                )
+            });
+            sys.refresh_memory();
+            format!(
+                r#"{{"usedMb":{},"totalMb":{}}}"#,
+                sys.used_memory() / (1024 * 1024),
+                sys.total_memory() / (1024 * 1024),
+            )
+        }
+        "darkMode"     => format!(r#""{}""#, glyx_sysapi::dark_mode()),
+        "batterySaver" => glyx_sysapi::battery_saver_active().to_string(),
+        _ => "null".into(),
+    }
+}
+
+/// `__glyx_system_watch(kind: string, intervalMs: number) → id`
+pub fn system_watch_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data  = args.data().unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let kind = v8_arg_to_string(scope, &args, 0);
+    let interval_ms = args.get(1).number_value(scope).unwrap_or(0.0);
+    // Clamp: darkMode/batterySaver are registry reads (cheap, 2s default);
+    // battery/memory default 10s.  Floor 1s so apps can't spin the poller.
+    let default_ms = match kind.as_str() {
+        "darkMode" | "batterySaver" => 2_000.0,
+        _ => 10_000.0,
+    };
+    let interval = std::time::Duration::from_millis(
+        if interval_ms >= 1000.0 { interval_ms } else { default_ms } as u64,
+    );
+
+    let id = NEXT_WATCH_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    watchers().lock().insert(id, Arc::clone(&alive));
+
+    let events = Arc::clone(&state.events);
+    let redraw = state.request_redraw.as_ref().map(Arc::clone);
+    state.tokio.spawn(async move {
+        let mut last: Option<String> = None;
+        let mut mem_sys: Option<sysinfo::System> = None;
+        loop {
+            if !alive.load(std::sync::atomic::Ordering::Relaxed) { break; }
+            let payload = watch_payload(&kind, &mut mem_sys);
+            if last.as_deref() != Some(payload.as_str()) {
+                last = Some(payload.clone());
+                events.lock().push_back(InputEvent::SystemWatch { id, payload });
+                // Wake the frame loop so JS drains the event promptly.
+                if let Some(r) = &redraw { r(); }
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
+
+    rv.set(v8::Number::new(scope, id as f64).into());
+}
+
+/// `__glyx_system_unwatch(id: number) → void`
+pub fn system_unwatch_callback(
+    scope:  &mut v8::HandleScope,
+    args:   v8::FunctionCallbackArguments,
+    _rv:    v8::ReturnValue,
+) {
+    let id = args.get(0).number_value(scope).unwrap_or_default() as u32;
+    if let Some(alive) = watchers().lock().remove(&id) {
+        alive.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub fn set_fullscreen_callback(
     scope:  &mut v8::HandleScope,
     args:   v8::FunctionCallbackArguments,

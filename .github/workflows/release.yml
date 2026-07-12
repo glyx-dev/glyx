@@ -53,6 +53,49 @@ jobs:
           name: runner-${{ matrix.target }}
           path: glyx-runner-${{ matrix.target }}${{ matrix.bin_suffix }}
 
+  # ── glyx CLI binary ────────────────────────────────────────────────────────
+  cli:
+    name: CLI (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin_suffix: .exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin_suffix: ""
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin_suffix: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-cli
+
+      - name: Build CLI
+        run: cargo build --release -p glyx-cli --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          cp "target/${{ matrix.target }}/release/glyx${{ matrix.bin_suffix }}" \
+             "glyx-${{ matrix.target }}${{ matrix.bin_suffix }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: glyx-${{ matrix.target }}${{ matrix.bin_suffix }}
+
   # ── Capability DLLs ────────────────────────────────────────────────────────
   cap-windows:
     name: Cap DLLs (windows)
@@ -126,7 +169,7 @@ jobs:
   # ── Publish GitHub Release ─────────────────────────────────────────────────
   publish:
     name: Publish release
-    needs: [runner, cap-windows, cap-macos, cap-linux]
+    needs: [runner, cli, cap-windows, cap-macos, cap-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -150,4 +193,7 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
-          files: dist/*
+          files: |
+            dist/*
+            scripts/install.sh
+            scripts/install.ps1

@@ -161,6 +161,24 @@ export declare function getEnv(name: string): string | null;
 
 // ── Window imperative API ─────────────────────────────────────────────────────
 
+export type SystemWatchKind = 'battery' | 'memory' | 'darkMode' | 'batterySaver';
+
+export declare const system: {
+  getInfo(): Promise<{ cpuName: string; cpuCores: number; memoryTotalMb: number; memoryUsedMb: number; osName: string; osVersion: string } | null>;
+  getDarkMode(): 'dark' | 'light' | 'unknown';
+  isBatterySaverActive(): boolean;
+  /**
+   * Subscribe to a system metric. A Rust-side poller reads it on a timer and
+   * fires `cb` ONLY when the value changes — no JS timers, V8 idles between
+   * changes. Returns a watch id for `unwatch`.
+   */
+  watch(kind: 'battery',      cb: (v: { level: number; charging: boolean; timeRemainingSecs: number | null } | null) => void, opts?: { intervalMs?: number }): number;
+  watch(kind: 'memory',       cb: (v: { usedMb: number; totalMb: number }) => void, opts?: { intervalMs?: number }): number;
+  watch(kind: 'darkMode',     cb: (v: 'dark' | 'light' | 'unknown') => void, opts?: { intervalMs?: number }): number;
+  watch(kind: 'batterySaver', cb: (v: boolean) => void, opts?: { intervalMs?: number }): number;
+  unwatch(id: number): void;
+};
+
 export declare const glyxWindow: {
   /** Toggle game-style fullscreen (covers taskbar). */
   setFullscreen(full: boolean): void;

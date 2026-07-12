@@ -109,6 +109,9 @@ pub enum InputEvent {
     Resize { width: u32, height: u32 },
     /// An image failed to load (missing file, unreadable format).
     ImageError { image_id: u32, path: String },
+    /// A Rust-side system watcher (battery/memory/darkMode/…) detected a
+    /// CHANGE.  Pushed only on deltas — JS stays idle between changes.
+    SystemWatch { id: u32, payload: String },
 }
 
 /// Callbacks for window control operations.
@@ -909,6 +912,8 @@ pub fn register_all(
     register!("__glyx_setAlwaysOnTop", set_always_on_top_callback);
     register!("__glyx_setTitle",       set_title_callback);
     register!("__glyx_setCursor",      set_cursor_callback);
+    register!("__glyx_system_watch",   system_watch_callback);
+    register!("__glyx_system_unwatch", system_unwatch_callback);
 
     //  File dialogs €€€
     register!("__glyx_dialog_openFile",   dialog_open_file_callback);

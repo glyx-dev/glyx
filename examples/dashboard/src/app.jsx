@@ -37,16 +37,17 @@ function genTable() {
 function LivePanel() {
   const C = useTheme().colors;
   const [info, setInfo] = useState(null);
+  const [mem, setMem] = useState(null);
   const [bat, setBat] = useState(null);
   useEffect(() => {
     let alive = true;
-    const tick = () => {
-      system.getInfo().then((i) => alive && setInfo(i)).catch(() => {});
-      battery.getStatus().then((b) => alive && setBat(b)).catch(() => {});
-    };
-    tick();
-    const id = setInterval(tick, 5000);
-    return () => { alive = false; clearInterval(id); };
+    // One-shot: CPU name/cores and OS never change — read once.
+    system.getInfo().then((i) => alive && setInfo(i)).catch(() => {});
+    battery.getStatus().then((b) => alive && setBat(b)).catch(() => {});
+    // Subscriptions: Rust polls, JS wakes ONLY when a value changes.
+    const memId = system.watch('memory',  (m) => setMem(m), { intervalMs: 5000 });
+    const batId = system.watch('battery', (b) => setBat(b), { intervalMs: 10000 });
+    return () => { alive = false; system.unwatch(memId); system.unwatch(batId); };
   }, []);
   return (
     <Card style={{ padding: 16 }}>
@@ -55,7 +56,7 @@ function LivePanel() {
         <View style={{ gap: 6 }}>
           <KVRow label="CPU" value={info.cpuName || '—'} />
           <KVRow label="Cores" value={String(info.cpuCores)} />
-          <KVRow label="Memory" value={`${info.memoryUsedMb} / ${info.memoryTotalMb} MB`} />
+          <KVRow label="Memory" value={`${(mem ? mem.usedMb : info.memoryUsedMb)} / ${(mem ? mem.totalMb : info.memoryTotalMb)} MB`} />
           <KVRow label="OS" value={`${info.osName} ${info.osVersion}`} />
         </View>
       ) : <Text style={{ color: C.textMuted }}>Reading system info…</Text>}

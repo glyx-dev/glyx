@@ -501,9 +501,14 @@ pub(super) fn load_splash_state() -> Option<SplashState> {
 }
 
 /// Calculate a sensible V8 max-heap cap from the JS bundle size.
-pub(super) fn calc_heap_mb(bundle_bytes: usize) -> usize {
+///
+/// Dev mode gets a higher floor (32 MB) to absorb HMR double-eval churn.
+/// Prod floor is 24 MB — enough headroom for the React + framework baseline
+/// without squeezing small bundles into OOM territory.
+pub(super) fn calc_heap_mb(bundle_bytes: usize, is_dev: bool) -> usize {
     const MB: usize = 1024 * 1024;
-    ((bundle_bytes * 12) / MB).max(16).min(256)
+    let base = ((bundle_bytes * 12) / MB).max(24).min(256);
+    if is_dev { base.max(32) } else { base }
 }
 
 /// Load the Glyx config from the current working directory.

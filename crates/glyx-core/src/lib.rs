@@ -862,8 +862,9 @@ pub fn run(mut config: AppConfig) -> bool {
         Some(mb) => mb as usize,
         None => {
             let bundle_bytes = (*js_src_arc).as_ref().map(|s| s.len()).unwrap_or(0);
-            let cap = calc_heap_mb(bundle_bytes);
-            log::info!("[v8] heap cap: {cap} MB (auto from {:.2} MB bundle)", bundle_bytes as f64 / (1024.0 * 1024.0));
+            let is_dev = cfg!(feature = "dev");
+            let cap = calc_heap_mb(bundle_bytes, is_dev);
+            log::info!("[v8] heap cap: {cap} MB (auto from {:.2} MB bundle, dev={is_dev})", bundle_bytes as f64 / (1024.0 * 1024.0));
             cap
         }
     };

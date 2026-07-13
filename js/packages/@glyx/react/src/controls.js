@@ -45,7 +45,8 @@ export const SELECT_COLORS_DARK = {
   triggerBorderFocus:  '#7aa2f7',
   triggerText:         '#e7ecff',
   triggerPlaceholder:  '#9aa0b6',
-  chevron:             '#7aa2f7',
+  // chevron: arrow icons on triggers and calendar nav — subtler than accent
+  chevron:             '#9aa0b6',
   dropdownBg:          '#1e2235',
   dropdownBorder:      '#3c4464',
   optionText:          '#cdd6f4',
@@ -53,6 +54,8 @@ export const SELECT_COLORS_DARK = {
   optionHoverBg:       '#2a3048',
   optionSelectedBg:    '#2e3555',
   optionCheck:         '#7aa2f7',
+  // calCellSelectedBg: accent for the selected day cell (keep as primary)
+  calCellSelectedBg:   '#7aa2f7',
   calCellSelectedText: '#1e1e2e',
   calDayName:          '#6c7086',
 };
@@ -465,18 +468,21 @@ export function TextInput({
     if (sy !== scrollYRef.current) setScrollYBoth(sy);
   }, [focus_, renderValue, multiline, focused]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const C = React.useContext(SelectColorsContext);
+
   // Show placeholder only when unfocused and value is empty (masked for
   // password fields so the real text never renders).
   const displayText  = (focused || value) ? renderValue : placeholder;
-  // Respect the style's text color (themed apps); white is only the default
-  // for the built-in dark field chrome.
-  const textColor    = value ? ((style && style.color) || '#ffffff') : '#888888';
+  const displayingPlaceholder = !focused && !value;
+  const textColor    = displayingPlaceholder
+    ? C.triggerPlaceholder
+    : ((style && style.color) || C.triggerText);
 
   const inputStyle = {
-    backgroundColor: focused ? '#4a4a7e' : '#2a2a3e',
+    backgroundColor: C.triggerBg,
     borderRadius: 6,
     borderWidth: focused ? 2 : 1,
-    borderColor: focused ? '#8080ff' : '#44446a',
+    borderColor: focused ? C.triggerBorderFocus : C.triggerBorder,
     justifyContent: multiline ? 'flex-start' : 'center',
     alignItems: 'flex-start',
     padding: innerPadding,
@@ -877,17 +883,19 @@ export function Select({
     popoverId.current = openPopover({
       x: l.x, y: l.y, h: l.height, width: cw, contentH: dropH + 2,
       onClose: () => { popoverId.current = null; setOpen(false); },
-      render: () => React.createElement(
-        ScrollView,
-        { width: cw, height: dropH, contentHeight: options.length * OPTION_H,
-          style: { backgroundColor: C.dropdownBg, borderRadius: 8, borderWidth: 1, borderColor: C.dropdownBorder } },
-        ...options.map((opt, i) => React.createElement(_SelectOption, {
-          key: String(i),
-          label: opt.label,
-          selected: opt.value === value,
-          onSelect: () => { onValueChange?.(opt.value); close(); },
-          C,
-        })),
+      render: () => React.createElement(SelectColorsProvider, { colors: C },
+        React.createElement(
+          ScrollView,
+          { width: cw, height: dropH, contentHeight: options.length * OPTION_H,
+            style: { backgroundColor: C.dropdownBg, borderRadius: 8, borderWidth: 1, borderColor: C.dropdownBorder } },
+          ...options.map((opt, i) => React.createElement(_SelectOption, {
+            key: String(i),
+            label: opt.label,
+            selected: opt.value === value,
+            onSelect: () => { onValueChange?.(opt.value); close(); },
+            C,
+          })),
+        ),
       ),
     });
   };
@@ -949,7 +957,7 @@ function _HoverCell({ selected, onPress, w = 36, h = 32, fontSize = 13, children
     width: w, height: h,
     style: {
       alignItems: 'center', justifyContent: 'center', borderRadius: 4,
-      backgroundColor: selected ? C.chevron : hov ? C.optionHoverBg : 'transparent',
+      backgroundColor: selected ? C.calCellSelectedBg : hov ? C.optionHoverBg : 'transparent',
     },
   },
     React.createElement(Text, {
@@ -1124,10 +1132,12 @@ export function DatePicker({ value = null, onValueChange, disabled = false, styl
     popoverId.current = openPopover({
       x: l.x, y: l.y, h: l.height, width: 36 * 7 + 18, contentH: 8 + 28 + 22 + 6 * 32 + 8,
       onClose: () => { popoverId.current = null; setOpen(false); },
-      render: () => React.createElement(_Calendar, {
-        value,
-        onSelect: (d) => { onValueChange?.(d); close(); },
-      }),
+      render: () => React.createElement(SelectColorsProvider, { colors: C },
+        React.createElement(_Calendar, {
+          value,
+          onSelect: (d) => { onValueChange?.(d); close(); },
+        }),
+      ),
     });
   };
   useEffect(() => () => close(), []);
@@ -1237,9 +1247,11 @@ export function TimePicker({
       width: (use24Hour ? 48 * 2 + 4 : 48 * 2 + 44 + 8) + 18,
       contentH: 6 * 28 + 18,
       onClose: () => { popoverId.current = null; setOpen(false); },
-      render: () => React.createElement(_TimeColumnsLive, {
-        initial: { hour, minute }, use24: use24Hour, minuteStep, onEmit: emit,
-      }),
+      render: () => React.createElement(SelectColorsProvider, { colors: C },
+        React.createElement(_TimeColumnsLive, {
+          initial: { hour, minute }, use24: use24Hour, minuteStep, onEmit: emit,
+        }),
+      ),
     });
   };
   useEffect(() => () => close(), []);
@@ -1309,10 +1321,12 @@ export function DateTimePicker({
       width: 36 * 7 + (use24Hour ? 48 * 2 + 4 : 48 * 2 + 44 + 8) + 34,
       contentH: 8 + 28 + 22 + 6 * 32 + 8,
       onClose: () => { popoverId.current = null; setOpen(false); },
-      render: () => React.createElement(_DateTimePanel, {
-        initial: d, use24: use24Hour, minuteStep,
-        onEmit: (nd) => onValueChange?.(nd),
-      }),
+      render: () => React.createElement(SelectColorsProvider, { colors: C },
+        React.createElement(_DateTimePanel, {
+          initial: d, use24: use24Hour, minuteStep,
+          onEmit: (nd) => onValueChange?.(nd),
+        }),
+      ),
     });
   };
   useEffect(() => () => close(), []);

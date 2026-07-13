@@ -95,14 +95,15 @@ export function ThemeProvider({ colorScheme = 'system', overrides, children }) {
     : base;
 
   const { colors } = theme;
-  const selectColors = {
+  // Memoize so SelectColorsContext only re-emits when the theme actually changes.
+  const selectColors = React.useMemo(() => ({
     triggerBg:           colors.surface,
     triggerBgDisabled:   colors.bg,
     triggerBorder:       colors.border,
     triggerBorderFocus:  colors.borderFocus,
     triggerText:         colors.text,
     triggerPlaceholder:  colors.textMuted,
-    chevron:             colors.primary,
+    chevron:             colors.textMuted,   // arrows blend — not primary accent
     dropdownBg:          colors.surface,
     dropdownBorder:      colors.border,
     optionText:          colors.text,
@@ -110,9 +111,10 @@ export function ThemeProvider({ colorScheme = 'system', overrides, children }) {
     optionHoverBg:       colors.surfaceHover,
     optionSelectedBg:    colors.secondary,
     optionCheck:         colors.primary,
+    calCellSelectedBg:   colors.primary,
     calCellSelectedText: colors.primaryText,
     calDayName:          colors.textDisabled,
-  };
+  }), [colors]);
 
   return (
     <ThemeContext.Provider value={theme}>

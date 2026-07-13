@@ -28,7 +28,7 @@
 //   }
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { system } from '@glyx-dev/react';
+import { system, SelectColorsProvider } from '@glyx-dev/react';
 import { tokens, darkTokens } from './tokens.js';
 
 // ── Context ───────────────────────────────────────────────────────────────────
@@ -94,9 +94,31 @@ export function ThemeProvider({ colorScheme = 'system', overrides, children }) {
     ? _deepMerge(base, overrides)
     : base;
 
+  const { colors } = theme;
+  const selectColors = {
+    triggerBg:           colors.surface,
+    triggerBgDisabled:   colors.bg,
+    triggerBorder:       colors.border,
+    triggerBorderFocus:  colors.borderFocus,
+    triggerText:         colors.text,
+    triggerPlaceholder:  colors.textMuted,
+    chevron:             colors.primary,
+    dropdownBg:          colors.surface,
+    dropdownBorder:      colors.border,
+    optionText:          colors.text,
+    optionSelectedText:  colors.primary,
+    optionHoverBg:       colors.surfaceHover,
+    optionSelectedBg:    colors.secondary,
+    optionCheck:         colors.primary,
+    calCellSelectedText: colors.primaryText,
+    calDayName:          colors.textDisabled,
+  };
+
   return (
     <ThemeContext.Provider value={theme}>
-      {children}
+      <SelectColorsProvider colors={selectColors}>
+        {children}
+      </SelectColorsProvider>
     </ThemeContext.Provider>
   );
 }

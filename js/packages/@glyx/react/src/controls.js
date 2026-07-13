@@ -31,6 +31,39 @@ function _sizedRootStyle(style, defaultWidth) {
     : { alignSelf: 'flex-start', width: defaultWidth, ...style };
 }
 
+// ── Select color context ──────────────────────────────────────────────────────
+//
+// Provides theme-matched colors to every Select in the subtree.
+// @glyx-dev/design's ThemeProvider sets this automatically.
+// The defaults below match the dark (Mocha) theme so existing apps
+// that don't use ThemeProvider stay unchanged.
+
+export const SELECT_COLORS_DARK = {
+  triggerBg:           '#262b3f',
+  triggerBgDisabled:   '#1a1d2e',
+  triggerBorder:       '#3c4464',
+  triggerBorderFocus:  '#7aa2f7',
+  triggerText:         '#e7ecff',
+  triggerPlaceholder:  '#9aa0b6',
+  chevron:             '#7aa2f7',
+  dropdownBg:          '#1e2235',
+  dropdownBorder:      '#3c4464',
+  optionText:          '#cdd6f4',
+  optionSelectedText:  '#7aa2f7',
+  optionHoverBg:       '#2a3048',
+  optionSelectedBg:    '#2e3555',
+  optionCheck:         '#7aa2f7',
+  calCellSelectedText: '#1e1e2e',
+  calDayName:          '#6c7086',
+};
+
+export const SelectColorsContext = React.createContext(SELECT_COLORS_DARK);
+
+/** Wrap a subtree to override Select colors — used internally by ThemeProvider. */
+export function SelectColorsProvider({ colors, children }) {
+  return React.createElement(SelectColorsContext.Provider, { value: colors }, children);
+}
+
 // ── TextInput ─────────────────────────────────────────────────────────────────
 
 export function TextInput({
@@ -792,7 +825,7 @@ export function Slider({
 }
 
 // One option row in a Select dropdown — hover highlight + selected state + check.
-function _SelectOption({ label, selected, onSelect }) {
+function _SelectOption({ label, selected, onSelect, C }) {
   const [hover, setHover] = useState(false);
   return React.createElement(Pressable, {
     onPress: onSelect,
@@ -803,11 +836,11 @@ function _SelectOption({ label, selected, onSelect }) {
       alignSelf: 'stretch',   // fill the full popup width so hover spans the row
       flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
       paddingLeft: 12, paddingRight: 12,
-      backgroundColor: selected ? '#2e3555' : (hover ? '#2a3048' : 'transparent'),
+      backgroundColor: selected ? C.optionSelectedBg : (hover ? C.optionHoverBg : 'transparent'),
     },
   },
-    React.createElement(Text, { height: 18, style: { color: selected ? '#7aa2f7' : '#cdd6f4', fontSize: 14 } }, label),
-    selected ? React.createElement(Text, { width: 14, height: 16, style: { color: '#7aa2f7', fontSize: 13 } }, '✓') : null,
+    React.createElement(Text, { height: 18, style: { color: selected ? C.optionSelectedText : C.optionText, fontSize: 14 } }, label),
+    selected ? React.createElement(Text, { width: 14, height: 16, style: { color: C.optionCheck, fontSize: 13 } }, '✓') : null,
   );
 }
 
@@ -823,6 +856,7 @@ export function Select({
   disabled = false, placeholder = 'Select…', style,
   ...rest
 }) {
+  const C    = React.useContext(SelectColorsContext);
   const [open, setOpen] = React.useState(false);
   const selected = options.find(o => o.value === value);
   const containerNodeId = useRef(null);
@@ -846,12 +880,13 @@ export function Select({
       render: () => React.createElement(
         ScrollView,
         { width: cw, height: dropH, contentHeight: options.length * OPTION_H,
-          style: { backgroundColor: '#1e2235', borderRadius: 8, borderWidth: 1, borderColor: '#3c4464' } },
+          style: { backgroundColor: C.dropdownBg, borderRadius: 8, borderWidth: 1, borderColor: C.dropdownBorder } },
         ...options.map((opt, i) => React.createElement(_SelectOption, {
           key: String(i),
           label: opt.label,
           selected: opt.value === value,
           onSelect: () => { onValueChange?.(opt.value); close(); },
+          C,
         })),
       ),
     });
@@ -879,19 +914,19 @@ export function Select({
         paddingRight: 10,
         height: 40,
         borderRadius: 8,
-        backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
+        backgroundColor: disabled ? C.triggerBgDisabled : C.triggerBg,
         borderWidth: 1,
-        borderColor: open ? '#7aa2f7' : '#3c4464',
+        borderColor: open ? C.triggerBorderFocus : C.triggerBorder,
         clip: true,
       },
     },
       // Label auto-sizes; trigger clip:true prevents overflow past the arrow.
       React.createElement(Text, {
         height: 20,
-        style: { color: selected ? '#e7ecff' : '#9aa0b6', fontSize: 14 },
+        style: { color: selected ? C.triggerText : C.triggerPlaceholder, fontSize: 14 },
       }, selected ? selected.label : placeholder),
       React.createElement(Text, {
-        style: { color: '#7aa2f7', fontSize: 11 },
+        style: { color: C.chevron, fontSize: 11 },
         width: 16, height: 16,
       }, open ? '▲' : '▼'),
     ),
@@ -904,6 +939,7 @@ export function Select({
 // columns.  Uses an explicit hover background (Pressable's opacity feedback
 // is invisible on transparent backgrounds).
 function _HoverCell({ selected, onPress, w = 36, h = 32, fontSize = 13, children }) {
+  const C = React.useContext(SelectColorsContext);
   const [hov, setHov] = useState(false);
   return React.createElement(Pressable, {
     onPress,
@@ -913,25 +949,26 @@ function _HoverCell({ selected, onPress, w = 36, h = 32, fontSize = 13, children
     width: w, height: h,
     style: {
       alignItems: 'center', justifyContent: 'center', borderRadius: 4,
-      backgroundColor: selected ? '#7aa2f7' : hov ? '#2a3048' : 'transparent',
+      backgroundColor: selected ? C.chevron : hov ? C.optionHoverBg : 'transparent',
     },
   },
     React.createElement(Text, {
       height: Math.round(fontSize * 1.4),
-      style: { color: selected ? '#171923' : '#cdd6f4', fontSize, textAlign: 'center' },
+      style: { color: selected ? C.calCellSelectedText : C.optionText, fontSize, textAlign: 'center' },
     }, children)
   );
 }
 
 // Small hoverable arrow button used in the calendar header.
 function _CalArrow({ onPress, children }) {
+  const C = React.useContext(SelectColorsContext);
   const [hov, setHov] = useState(false);
   return React.createElement(Pressable, {
     onPress, feedback: false,
     onHoverIn: () => setHov(true), onHoverOut: () => setHov(false),
     width: 28, height: 28,
-    style: { justifyContent: 'center', alignItems: 'center', borderRadius: 4, backgroundColor: hov ? '#2a3048' : 'transparent' },
-  }, React.createElement(Text, { height: 22, style: { color: '#7aa2f7', fontSize: 18 } }, children));
+    style: { justifyContent: 'center', alignItems: 'center', borderRadius: 4, backgroundColor: hov ? C.optionHoverBg : 'transparent' },
+  }, React.createElement(Text, { height: 22, style: { color: C.chevron, fontSize: 18 } }, children));
 }
 
 function _Calendar({ value, onSelect }) {
@@ -1016,8 +1053,9 @@ function _Calendar({ value, onSelect }) {
     ? String(viewYear)
     : `${monthNames[viewMonth]} ${viewYear}`;
 
+  const C = React.useContext(SelectColorsContext);
   return React.createElement(View, {
-    style: { backgroundColor: '#1e2235', borderRadius: 8, padding: 8, borderWidth: 1, borderColor: '#3c4464' },
+    style: { backgroundColor: C.dropdownBg, borderRadius: 8, padding: 8, borderWidth: 1, borderColor: C.dropdownBorder },
   },
     // header row
     React.createElement(View, {
@@ -1029,9 +1067,9 @@ function _Calendar({ value, onSelect }) {
         feedback: false,
         onHoverIn: () => setLabelHov(true), onHoverOut: () => setLabelHov(false),
         onPress: () => setMode(m => m === 'days' ? 'months' : m === 'months' ? 'years' : 'days'),
-        style: { paddingHorizontal: 6, height: 24, justifyContent: 'center', alignItems: 'center', borderRadius: 4, backgroundColor: labelHov ? '#2a3048' : 'transparent' },
+        style: { paddingHorizontal: 6, height: 24, justifyContent: 'center', alignItems: 'center', borderRadius: 4, backgroundColor: labelHov ? C.optionHoverBg : 'transparent' },
       },
-        React.createElement(Text, { height: 18, style: { color: '#cdd6f4', fontSize: 13, textAlign: 'center' } }, headerLabel)
+        React.createElement(Text, { height: 18, style: { color: C.optionText, fontSize: 13, textAlign: 'center' } }, headerLabel)
       ),
       React.createElement(_CalArrow, { onPress: onNext }, '>'),
     ),
@@ -1041,7 +1079,7 @@ function _Calendar({ value, onSelect }) {
     React.createElement(View, null,
       React.createElement(View, { width: CAL_W, height: 20, style: { flexDirection: 'row', marginBottom: 2 } },
         ...dayNames.map(d => React.createElement(View, { key: d, width: CELL_W, height: 20, style: { alignItems: 'center', justifyContent: 'center' } },
-          React.createElement(Text, { height: 14, style: { color: '#666', fontSize: 10, textAlign: 'center' } }, d))),
+          React.createElement(Text, { height: 14, style: { color: C.calDayName, fontSize: 10, textAlign: 'center' } }, d))),
       ),
       ...rows.map((row, ri) => React.createElement(View, {
         key: `${viewYear}-${viewMonth}-${ri}`, width: CAL_W, height: CELL_H, style: { flexDirection: 'row' },
@@ -1070,6 +1108,7 @@ function _Calendar({ value, onSelect }) {
  *           disabled?: boolean, style?: object }} props
  */
 export function DatePicker({ value = null, onValueChange, disabled = false, style, ...rest }) {
+  const C = React.useContext(SelectColorsContext);
   const [open, setOpen] = React.useState(false);
   const containerNodeId = useRef(null);
   const popoverId = useRef(null);
@@ -1107,12 +1146,12 @@ export function DatePicker({ value = null, onValueChange, disabled = false, styl
       style: {
         flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
         paddingLeft: 12, paddingRight: 10, height: 40, borderRadius: 8,
-        backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
-        borderWidth: 1, borderColor: open ? '#7aa2f7' : '#3c4464',
+        backgroundColor: disabled ? C.triggerBgDisabled : C.triggerBg,
+        borderWidth: 1, borderColor: open ? C.triggerBorderFocus : C.triggerBorder,
       },
     },
-      React.createElement(Text, { height: 20, style: { color: value ? '#e7ecff' : '#9aa0b6', fontSize: 14 } }, dlabel),
-      React.createElement(Text, { width: 16, height: 16, style: { color: '#7aa2f7', fontSize: 11 } }, open ? '▲' : '▼'),
+      React.createElement(Text, { height: 20, style: { color: value ? C.triggerText : C.triggerPlaceholder, fontSize: 14 } }, dlabel),
+      React.createElement(Text, { width: 16, height: 16, style: { color: C.chevron, fontSize: 11 } }, open ? '▲' : '▼'),
     ),
   );
 }
@@ -1145,10 +1184,11 @@ function _TimeColumns({ hour, minute, use24, minuteStep, onChange }) {
     key: String(it), selected: isSel(it), onPress: () => pick(it), w, h: 28,
   }, String(it).padStart(2, '0'))));
 
+  const C = React.useContext(SelectColorsContext);
   return React.createElement(View, {
     style: {
       flexDirection: 'row', gap: 4, padding: 8,
-      backgroundColor: '#1e2235', borderRadius: 8, borderWidth: 1, borderColor: '#3c4464',
+      backgroundColor: C.dropdownBg, borderRadius: 8, borderWidth: 1, borderColor: C.dropdownBorder,
     },
   },
     col(hours,   (h) => (use24 ? h === hour : h === h12),
@@ -1173,6 +1213,7 @@ export function TimePicker({
   value = null, onValueChange, use24Hour = false, minuteStep = 5,
   disabled = false, style, ...rest
 }) {
+  const C = React.useContext(SelectColorsContext);
   const [open, setOpen] = React.useState(false);
   const containerNodeId = useRef(null);
   const popoverId = useRef(null);
@@ -1215,12 +1256,12 @@ export function TimePicker({
       style: {
         flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
         paddingLeft: 12, paddingRight: 10, height: 40, borderRadius: 8,
-        backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
-        borderWidth: 1, borderColor: open ? '#7aa2f7' : '#3c4464',
+        backgroundColor: disabled ? C.triggerBgDisabled : C.triggerBg,
+        borderWidth: 1, borderColor: open ? C.triggerBorderFocus : C.triggerBorder,
       },
     },
-      React.createElement(Text, { height: 20, style: { color: value ? '#e7ecff' : '#9aa0b6', fontSize: 14 } }, label),
-      React.createElement(Text, { width: 16, height: 16, style: { color: '#7aa2f7', fontSize: 11 } }, open ? '▲' : '▼'),
+      React.createElement(Text, { height: 20, style: { color: value ? C.triggerText : C.triggerPlaceholder, fontSize: 14 } }, label),
+      React.createElement(Text, { width: 16, height: 16, style: { color: C.chevron, fontSize: 11 } }, open ? '▲' : '▼'),
     ),
   );
 }
@@ -1248,6 +1289,7 @@ export function DateTimePicker({
   value = null, onValueChange, use24Hour = false, minuteStep = 5,
   disabled = false, style, ...rest
 }) {
+  const C = React.useContext(SelectColorsContext);
   const [open, setOpen] = React.useState(false);
   const containerNodeId = useRef(null);
   const popoverId = useRef(null);
@@ -1289,12 +1331,12 @@ export function DateTimePicker({
       style: {
         flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
         paddingLeft: 12, paddingRight: 10, height: 40, borderRadius: 8,
-        backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
-        borderWidth: 1, borderColor: open ? '#7aa2f7' : '#3c4464',
+        backgroundColor: disabled ? C.triggerBgDisabled : C.triggerBg,
+        borderWidth: 1, borderColor: open ? C.triggerBorderFocus : C.triggerBorder,
       },
     },
-      React.createElement(Text, { height: 20, style: { color: d ? '#e7ecff' : '#9aa0b6', fontSize: 14 } }, label),
-      React.createElement(Text, { width: 16, height: 16, style: { color: '#7aa2f7', fontSize: 11 } }, open ? '▲' : '▼'),
+      React.createElement(Text, { height: 20, style: { color: d ? C.triggerText : C.triggerPlaceholder, fontSize: 14 } }, label),
+      React.createElement(Text, { width: 16, height: 16, style: { color: C.chevron, fontSize: 11 } }, open ? '▲' : '▼'),
     ),
   );
 }

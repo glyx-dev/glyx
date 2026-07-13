@@ -10,10 +10,12 @@ export default defineConfig({
     license:     'LICENSE.txt',
   },
   window: {
-    title:       'tasks',
+    title:       'Tasks',
     width:       1280,
     height:      800,
     startupMode: 'windowed',
+    decorations: false,
+    background:  '#FAFAF9',
   },
   capabilities: {
     fs:           { read: ['public/**'], write: [] },

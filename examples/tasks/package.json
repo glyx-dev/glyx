@@ -5,8 +5,7 @@
   "dependencies": {
     "react": "^18",
     "@glyx-dev/react": "workspace:*",
-    "@glyx-dev/router": "workspace:*",
-    "@glyx-dev/design": "workspace:*"
+"@glyx-dev/design": "workspace:*"
   },
   "devDependencies": {
     "@glyx-dev/config": "workspace:*"

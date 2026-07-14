@@ -158,6 +158,11 @@ export interface GlyxConfig {
   plugins?:      PluginConfig[];
   /** Preferred package manager. Auto-detected from lockfile when omitted. */
   packageManager?: 'npm' | 'pnpm' | 'yarn' | 'bun';
+  /** ICU locales to bundle. Controls which locales `Intl.*` /
+   *  `toLocaleString()` format correctly (numbers, dates, currency, plurals).
+   *  Defaults to `['en']`. Glyx trims the bundled ICU data to just these
+   *  locales at build time, keeping packaged apps light. */
+  locales?: string[];
 }
 
 /**

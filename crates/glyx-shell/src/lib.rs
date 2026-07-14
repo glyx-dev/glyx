@@ -155,6 +155,10 @@ pub struct ShellConfig {
     /// Canvas2D binary command-buffer size in KiB. Controlled by
     /// `canvas.bufferKB`; `None` = default (256).
     pub canvas_buffer_kb: Option<u32>,
+    /// ICU locale set for `Intl.*` / `.toLocaleString()` support. The first
+    /// entry is used as the default ICU locale. Controlled by `locales` in
+    /// `glyx.config.json` / `glyx.config.ts`. Defaults to `["en"]`.
+    pub locales: Vec<String>,
 }
 
 impl Default for ShellConfig {
@@ -172,6 +176,7 @@ impl Default for ShellConfig {
             max_js_heap_mb: None,
             canvas_protocol: "binary".into(),
             canvas_buffer_kb: None,
+            locales:         vec!["en".to_string()],
         }
     }
 }

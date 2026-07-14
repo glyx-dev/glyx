@@ -273,6 +273,10 @@ pub struct AppConfig {
     /// Bundled JS plugins from `glyx.config.json` `plugins` array.
     /// Each plugin's exported async functions are callable via `backend.<name>.<fn>()`.
     pub js_plugins: Vec<JsPlugin>,
+    /// ICU locale set for `Intl.*` / `.toLocaleString()`. The first entry becomes
+    /// the default ICU locale. Read from the `locales` field of `glyx.config`,
+    /// defaulting to `["en"]`.
+    pub locales: Vec<String>,
 }
 
 impl AppConfig {
@@ -293,6 +297,7 @@ impl AppConfig {
         // Prefer build-time embedded app JS (snapshot mode), fall back to reading from disk.
         // The snapshot contains only stubs+polyfills; the app code is always eval'd at runtime.
         let js_src = embedded_app_js().or_else(read_output_js);
+        let locales = window.locales.clone();
         AppConfig {
             window,
             js_src,
@@ -300,6 +305,7 @@ impl AppConfig {
             dev_mode:      build_dev_mode_config(),
             extensions:    vec![],
             js_plugins,
+            locales,
         }
     }
 
@@ -312,6 +318,7 @@ impl AppConfig {
         let mut window = WindowConfig::default();
         let (caps, js_plugins) = apply_config_json(config_json, &mut window);
         glyx_security::init(caps);
+        let locales = window.locales.clone();
         AppConfig {
             window,
             js_src: Some(js_src),
@@ -319,6 +326,7 @@ impl AppConfig {
             dev_mode: None,
             extensions: vec![],
             js_plugins,
+            locales,
         }
     }
 }
@@ -826,7 +834,13 @@ pub fn run(mut config: AppConfig) -> bool {
 
     init_v8();
 
-    let AppConfig { window, js_src, snapshot_blob, dev_mode: _dev_mode, extensions, js_plugins } = config;
+    // Apply the app's default ICU locale (first declared `locales` entry) so
+    // `Intl.*` / `.toLocaleString()` format correctly when no locale is passed.
+    if let Some(locale) = config.locales.first().filter(|l| !l.is_empty()) {
+        glyx_runtime::icu::set_default_locale(locale);
+    }
+
+    let AppConfig { window, js_src, snapshot_blob, dev_mode: _dev_mode, extensions, js_plugins, locales: _locales } = config;
     // Capture before `window` is moved into glyx_shell::run().
     let window_decorations = window.decorations;
 

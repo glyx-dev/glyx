@@ -16,10 +16,12 @@ mod cmd_create;
 mod cmd_dev;
 mod cmd_build;
 mod cmd_package;
+mod icu_trim;
 mod cmd_check;
 mod cmd_test;
 mod cmd_generate;
 mod cmd_runtime;
+mod tools;
 pub mod pm;
 
 use self::cmd_create::*;
@@ -60,6 +62,12 @@ struct Cli {
     /// Overrides auto-detection (lockfile sniff → which probe).
     #[arg(long, global = true, value_name = "PM")]
     pm: Option<String>,
+
+    /// Path to a local `icupkg` (ICU data trimmer) binary to use instead of the
+    /// one glyx downloads/caches automatically. Useful behind a firewall or when
+    /// you want a specific ICU 77 build. Overrides the `GLYX_ICUPKG` env var.
+    #[arg(long, global = true, value_name = "PATH")]
+    icupkg: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Commands,
@@ -306,10 +314,10 @@ fn run() -> Result<()> {
 
     match cli.command {
         Commands::Create { name, native, template } => cmd_create(&name, native, &template, pm),
-        Commands::Dev { inspect }         => cmd_dev(inspect, pm),
+        Commands::Dev { inspect }         => cmd_dev(inspect, pm, cli.icupkg.clone()),
         Commands::Build { target, snapshot: _, bundle, portable, check_performance, perf_budget, perf_duration } => {
             let mode = if bundle { "bundle" } else if portable { "portable" } else { "snapshot" };
-            cmd_build(target.as_deref(), mode, check_performance, perf_budget, perf_duration, pm)
+            cmd_build(target.as_deref(), mode, check_performance, perf_budget, perf_duration, pm, cli.icupkg.clone())
         }
         Commands::Package { target, installer } => cmd_package(target.as_deref(), installer),
         Commands::Runtime { cmd }         => cmd_runtime(cmd),
@@ -435,10 +443,16 @@ fn download_runner(profile: &str, dest: &std::path::Path) -> Result<bool> {
         format!("glyx-runner-{target}{suffix}")
     };
     let version = env!("CARGO_PKG_VERSION");
-    let urls = [
+    let upstream = [
         format!("https://github.com/glyx-dev/glyx/releases/download/v{version}/{artifact}"),
         format!("https://github.com/glyx-dev/glyx/releases/latest/download/{artifact}"),
     ];
+    // When self-hosting, every runner comes from the mirror base; otherwise
+    // fall back to the upstream GitHub release URLs.
+    let urls: Vec<String> = match tools::tools_base() {
+        Some(base) => vec![format!("{}/{}", base, tools::runner_mirror_path(&artifact))],
+        None => upstream.to_vec(),
+    };
 
     for url in &urls {
         println!("Downloading prebuilt glyx-runner [{profile}]…");

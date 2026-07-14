@@ -16,6 +16,7 @@ pub(super) fn cmd_build(
     perf_budget: f64,
     perf_duration: u64,
     p: pm::Pm,
+    icupkg: Option<PathBuf>,
 ) -> Result<()> {
     let project_name = read_project_name()
         .context("Run `glyx build` from the project root (where glyx.config.ts or package.json lives)")?;
@@ -26,6 +27,15 @@ pub(super) fn cmd_build(
         "portable" => build_portable_mode(target, &project_name, p)?,
         other => bail!("Unknown build mode '{other}'. Use: snapshot, bundle, portable"),
     };
+
+    // Ship a trimmed icudtl.dat next to the binary so packaged apps stay light.
+    if let Some(ref bin) = bin_path {
+        if let Some(dir) = bin.parent() {
+            if let Err(e) = super::icu_trim::trim_icu_for_app(&project_name, dir, icupkg) {
+                log::warn!("ICU trim skipped: {e}");
+            }
+        }
+    }
 
     if check_performance {
         if let Some(bin) = &bin_path {

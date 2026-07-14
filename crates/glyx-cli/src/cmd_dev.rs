@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 use std::process::Command;
 
 use super::{
@@ -6,7 +7,7 @@ use super::{
     is_native_project, find_or_build_runner, resolve_config_json, pm,
 };
 
-pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm) -> Result<()> {
+pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm, icupkg: Option<PathBuf>) -> Result<()> {
     let project_name = read_project_name()
         .context("Run `glyx dev` from the project root (where glyx.config.ts or package.json lives)")?;
 
@@ -44,6 +45,14 @@ pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm) -> Result<()> {
 
     if is_native_project() {
         // Native project: custom Rust extensions compiled in — use cargo run
+        // Place a trimmed icudtl.dat next to the debug binary so the app
+        // (which builds without the embedded ICU data) can load it.
+        let dbg_dir = std::path::PathBuf::from("target/debug");
+        if let Err(e) = super::icu_trim::trim_icu_for_app(&project_name, &dbg_dir, icupkg.clone()) {
+            log::warn!("ICU trim skipped: {e}");
+        }
+
+        // Native project: custom Rust extensions compiled in — use cargo run
         let mut cmd = Command::new("cargo");
         cmd.args(["run", "-p", &project_name])
             .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
@@ -60,6 +69,12 @@ pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm) -> Result<()> {
             .context("Could not find or build glyx-runner. Run `glyx runtime build`.")?;
         log::info!("Using runner: {}", runner.display());
         let mut cmd = Command::new(&runner);
+        // Point the (shared) runner at this app's trimmed ICU data.
+        let icu_dir = std::path::PathBuf::from("target/glyx/icu");
+        match super::icu_trim::trim_icu_for_app(&project_name, &icu_dir, icupkg.clone()) {
+            Ok(dat) => { cmd.env("GLYX_ICU_DATA", &dat); }
+            Err(e)  => log::warn!("ICU trim skipped: {e}"),
+        }
         // Suppress noisy symphonia probe warnings (emitted when probing MKV/other
         // containers if the matching demuxer feature isn't compiled in).
         let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());

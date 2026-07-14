@@ -24,6 +24,8 @@ export default defineConfig({
     clipboard:    false,
     notification: false,
   },
+  // Locale set for Intl.* / toLocaleString() (timestamp + count formatting).
+  locales: ['en', 'de', 'ja'],
   dev: {
     entry:  'src/app.jsx',
     output: 'dist/app.js',

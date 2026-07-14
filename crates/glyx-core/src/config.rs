@@ -41,6 +41,10 @@ pub(super) struct GlyxConfigFile {
     #[serde(default)]
     pub(super) plugins:      Vec<PluginConfigJson>,
     pub(super) canvas:       Option<CanvasCfgJson>,
+    /// ICU locale set for `Intl.*` / `.toLocaleString()`. Defaults to `["en"]`
+    /// when omitted or empty.
+    #[serde(default)]
+    pub(super) locales:      Option<Vec<String>>,
 }
 
 /// Canvas2D transport settings from `glyx.config.json`.
@@ -292,6 +296,14 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
 
         if let Some(on) = w.prevent_duplicate_windows {
             glyx_runtime::set_prevent_duplicate_windows(on);
+        }
+
+        // ICU locale set for Intl.* / toLocaleString(). Keep the default (en)
+        // unless the app explicitly lists one or more non-empty locales.
+        if let Some(l) = file.as_ref().and_then(|f| f.locales.as_ref()) {
+            if !l.is_empty() && l.iter().any(|s| !s.is_empty()) {
+                cfg.locales = l.iter().filter(|s| !s.is_empty()).cloned().collect();
+            }
         }
     }
 

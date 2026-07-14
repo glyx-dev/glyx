@@ -48,6 +48,12 @@
       "enum": ["npm", "pnpm", "yarn", "bun"],
       "description": "Override the package manager used by the CLI. Auto-detected from lockfile when omitted."
     },
+    "locales": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "ICU locales to bundle. Controls which locales Intl.* and toLocaleString() format correctly. Defaults to ['en']. Glyx trims the bundled icudtl.dat to just these locales at build time, keeping packaged apps light. Locales not listed still work but fall back to root/English formatting data.",
+      "examples": [["en"], ["en", "de", "ja"]]
+    },
     "window": {
       "type": "object",
       "description": "Main window configuration.",

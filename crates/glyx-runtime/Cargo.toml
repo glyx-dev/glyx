@@ -55,8 +55,13 @@ windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader"] }
 notify             = { workspace = true }
 
 [features]
-default = ["v8"]
+default = ["v8", "embed-icu"]
 v8 = []       # V8 backend (current only backend; rusty_v8 dep is always required for now)
+# Embed the full icudtl.dat (ICU 77) into the binary. ON for tests/dev and any
+# build that wants a zero-external-file binary. App builds go through glyx-core
+# with `default-features = false`, so this is OFF there — packaged apps instead
+# ship a trimmed icudtl.dat next to the executable (see glyx-icu-integration.md).
+embed-icu = []
 dev = ["websocket"]      # dev overlay, hot-reload, CDP inspector (needs WS transport)
 full     = ["audio", "gamepad", "canvas3d", "ai", "hid", "updater", "fetch", "websocket"]
 fetch     = ["dep:reqwest"]

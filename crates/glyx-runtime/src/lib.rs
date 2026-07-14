@@ -112,6 +112,7 @@ pub mod runtime_trait;
 pub mod snapshot;
 #[cfg(feature = "dev")]
 pub mod inspector;
+pub mod icu;
 
 
 pub use runtime::{V8Runtime, HeapStats};
@@ -354,6 +355,10 @@ pub fn init_v8() {
         // ScriptOrigin source_map_url set on each eval() call (runtime.rs).
         // The --enable_source_maps V8 flag was removed in V8 9.x.
 
+        // Load ICU locale data BEFORE V8::initialize() so Intl.* / toLocaleString
+        // work. Must happen exactly once.
+        crate::icu::init();
+
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
@@ -371,4 +376,55 @@ pub enum RuntimeError {
     NoTokioRuntime,
     #[error("IO error in async binding: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[cfg(test)]
+mod icu_tests {
+    use super::*;
+
+    /// Evaluate a JS expression in a throwaway isolate. ICU data is loaded by
+    /// `init_v8()`, which must run first.
+    fn eval_expr(expr: &str) -> String {
+        let mut isolate = v8::Isolate::new(v8::Isolate::create_params());
+
+        // Build the context and keep it as a Global so it survives the scope.
+        let ctx_global = {
+            v8::scope!(let scope, &mut isolate);
+            v8::Global::new(&scope, v8::Context::new(&scope, Default::default()))
+        };
+
+        // Re-enter the context reusing the same handle scope (no second
+        // `&mut isolate` borrow — see runtime.rs §13).
+        v8::scope!(let scope, &mut isolate);
+        let context_local = v8::Local::new(&scope, &ctx_global);
+        let scope = &mut v8::ContextScope::new(scope, context_local);
+
+        let code = v8::String::new(scope, expr).unwrap();
+        let script = v8::Script::compile(scope, code, None).unwrap();
+        let result = script.run(scope).unwrap();
+        result.to_rust_string_lossy(scope)
+    }
+
+    #[test]
+    fn intl_locale_formatting_works() {
+        init_v8();
+
+        // ICU data loaded → locale-specific formatting actually works.
+        assert_eq!(
+            eval_expr("new Intl.NumberFormat('de-DE').format(1234.5)"),
+            "1.234,5"
+        );
+        assert_eq!(
+            eval_expr("(1234.5).toLocaleString('en-US')"),
+            "1,234.5"
+        );
+        assert!(
+            eval_expr("new Intl.DateTimeFormat('ja-JP').format(new Date(0))").len() > 0,
+            "DateTimeFormat should produce a non-empty localized string"
+        );
+
+        // Setting the default locale changes unqualified formatting.
+        v8::icu::set_default_locale("de-DE");
+        assert_eq!(eval_expr("(1234.5).toLocaleString()"), "1.234,5");
+    }
 }

@@ -5,24 +5,24 @@ export default defineConfig({
   version: '1.0.0',
   app: {
     publisher:   'dashboard',              // Company or author name (used in installer)
-    description: 'A dashboard app.',      // Short app description
+    description: 'A real-time analytics dashboard.', // Short app description
     website:     'https://example.com', // https://yoursite.com
     license:     'LICENSE.txt',
   },
   window: {
-    title:       'dashboard',
+    title:       'Nexus Analytics',
     width:       1280,
     height:      800,
     startupMode: 'windowed',
   },
   capabilities: {
-    fs:           { read: ['public/**'], write: [] },
+    fs:           { read: [], write: ['**'] },
     db:           false,
-    dialog:       false,
+    dialog:       true,
     clipboard:    false,
     notification: false,
-    system:       true,
-    battery:      true,
+    system:       false,
+    battery:      false,
   },
   dev: {
     entry:  'src/app.jsx',

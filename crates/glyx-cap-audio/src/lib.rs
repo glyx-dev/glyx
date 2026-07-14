@@ -156,10 +156,70 @@ unsafe extern "C" fn audio_get_time(handle: u32) -> f64 {
 unsafe extern "C" fn audio_duration(handle: u32) -> f64 {
     let path = with_state(|s| s.paths.get(&handle).cloned());
     let path = match path { Some(p) => p, None => return -1.0 };
-    use rodio::Source;
-    let file = match std::fs::File::open(&path) { Ok(f) => f, Err(_) => return -1.0 };
-    let dec  = match rodio::Decoder::new(std::io::BufReader::new(file)) { Ok(d) => d, Err(_) => return -1.0 };
-    dec.total_duration().map(|d| d.as_secs_f64()).unwrap_or(-1.0)
+    probe_duration(&path)
+}
+
+/// Robust duration probe.
+///
+/// 1. Fast path: the header-declared frame count (`n_frames` / `sample_rate`)
+///    when the container exposes it (CBR / indexed files).
+/// 2. Fallback: seek far *past* the end of the stream. Symphonia clamps the
+///    seek to the real end and reports the resulting timestamp in the track's
+///    time base, giving a real duration for VBR files whose `total_duration()`
+///    would otherwise be `None`.
+fn probe_duration(path: &str) -> f64 {
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::probe::Hint;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
+    use symphonia::core::units::Time;
+
+    let file = match std::fs::File::open(path) { Ok(f) => f, Err(_) => return -1.0 };
+    let mss  = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let probed = match symphonia::default::get_probe()
+        .format(&Hint::new(), mss, &FormatOptions::default(), &MetadataOptions::default())
+    {
+        Ok(p)  => p,
+        Err(_) => return -1.0,
+    };
+    let mut reader = probed.format;
+
+    // 1. Header-declared frame count.
+    if let Some(track) = reader.tracks().iter().find(|t| t.codec_params.sample_rate.is_some()) {
+        if let (Some(n_frames), Some(sr)) = (track.codec_params.n_frames, track.codec_params.sample_rate) {
+            if n_frames > 0 && sr > 0 {
+                return n_frames as f64 / sr as f64;
+            }
+        }
+    }
+
+    // 2. Seek past the end; symphonia clamps to the real end and reports the
+    //    resulting timestamp in the track's time base.
+    let track_id = reader.default_track().map(|t| t.id).unwrap_or(0);
+    let beyond   = Time { seconds: u64::MAX / 2, frac: 0.0 };
+    if let Ok(seeked) = reader.seek(SeekMode::Coarse, SeekTo::Time { time: beyond, track_id: None }) {
+        let tb = reader.tracks().get(track_id as usize)
+            .and_then(|t| t.codec_params.time_base);
+        let (numer, denom) = match tb {
+            Some(tb) => (tb.numer as f64, tb.denom as f64),
+            // MP3 and friends expose only sample_rate; treat that as the time base.
+            None => match reader.tracks().get(track_id as usize)
+                .and_then(|t| t.codec_params.sample_rate)
+            {
+                Some(sr) if sr > 0 => (1.0, sr as f64),
+                _ => return -1.0,
+            },
+        };
+        if denom > 0.0 {
+            let secs = seeked.actual_ts as f64 * numer / denom;
+            if secs > 0.0 && secs.is_finite() {
+                return secs;
+            }
+        }
+    }
+
+    -1.0
 }
 
 unsafe extern "C" fn audio_seek(handle: u32, seconds: f64) {

@@ -68,7 +68,30 @@ pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm, icupkg: Option<PathBuf>) 
         let runner = find_or_build_runner(true)
             .context("Could not find or build glyx-runner. Run `glyx runtime build`.")?;
         log::info!("Using runner: {}", runner.display());
+
+        // JS-only apps share one cached runner binary, so capability DLLs
+        // (audio/ai/camera/gamepad/hid) and the media DLL (FFmpeg) must be
+        // staged beside it for cap_loader::load_caps() to find them at startup.
+        // The dev runner is a debug build, so we skip Ed25519 sig verification
+        // for these locally built DLLs.
+        let mut skip_cap_verify = false;
+        if let Some(runner_dir) = runner.parent() {
+            let caps = super::read_capabilities_from_config();
+            if !caps.is_empty() {
+                match super::cmd_build::build_cap_dlls(&caps, None, runner_dir) {
+                    Ok(()) => { skip_cap_verify = true; }
+                    Err(e) => log::warn!("[glyx] capability DLL staging skipped: {e}"),
+                }
+            }
+            if let Err(e) = super::copy_media_dll_if_needed(runner_dir) {
+                log::warn!("[glyx] media DLL staging skipped: {e}");
+            }
+        }
+
         let mut cmd = Command::new(&runner);
+        if skip_cap_verify {
+            cmd.env("GLYX_UNSAFE_SKIP_CAP_VERIFY", "1");
+        }
         // Point the (shared) runner at this app's trimmed ICU data.
         let icu_dir = std::path::PathBuf::from("target/glyx/icu");
         match super::icu_trim::trim_icu_for_app(&project_name, &icu_dir, icupkg.clone()) {

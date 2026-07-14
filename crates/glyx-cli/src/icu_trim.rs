@@ -52,14 +52,24 @@ pub(super) fn trim_icu_data(
     let icupkg = ensure_icupkg(icupkg)?;
 
     // 1. List the package items (prefix auto-stripped to `af.res`, etc.).
+    //
+    // `icupkg -l` validates internal dependencies and exits non-zero when the
+    // data is internally inconsistent (e.g. `brkitr/ko.res` references a
+    // `brkitr/line_cj.brk` that isn't present). It still prints the full item
+    // list to stdout first, so we use the listing and only bail when it's
+    // actually empty — the dependency warning is non-fatal for trimming
+    // because the remove step runs with `--ignore-deps`.
     let out = Command::new(&icupkg)
         .args(["-l", "--auto_toc_prefix", in_dat.to_str().unwrap()])
         .output()
         .with_context(|| format!("failed to run icupkg -l on {}", in_dat.display()))?;
-    if !out.status.success() {
-        bail!("icupkg -l failed: {}", String::from_utf8_lossy(&out.stderr));
-    }
     let listing = String::from_utf8_lossy(&out.stdout);
+    if listing.lines().filter(|l| !l.trim().is_empty()).count() == 0 {
+        bail!(
+            "icupkg -l produced no listing: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 
     let keep = keep_set(locales);
     let remove: Vec<String> = listing

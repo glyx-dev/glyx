@@ -32,6 +32,7 @@ keepawake           = { workspace = true }
 gilrs               = { workspace = true, optional = true }
 global-hotkey       = { workspace = true }
 rodio               = { workspace = true, optional = true }
+symphonia           = { version = "0.5", features = ["mp3", "aac", "isomp4", "flac", "vorbis", "wav"], optional = true }
 hidapi              = { workspace = true, optional = true }
 self_update         = { workspace = true, optional = true }
 ed25519-dalek       = { workspace = true, optional = true }
@@ -66,7 +67,7 @@ dev = ["websocket"]      # dev overlay, hot-reload, CDP inspector (needs WS tran
 full     = ["audio", "gamepad", "canvas3d", "ai", "hid", "updater", "fetch", "websocket"]
 fetch     = ["dep:reqwest"]
 websocket = ["dep:tokio-tungstenite", "dep:futures-util"]
-audio    = ["dep:rodio", "dep:glyx-cap-audio"]
+audio    = ["dep:rodio", "dep:glyx-cap-audio", "dep:symphonia"]
 gamepad  = ["dep:gilrs", "dep:glyx-cap-gamepad"]
 canvas3d = ["dep:glyx-3d"]
 ai       = ["dep:glyx-ai", "dep:glyx-cap-ai"]

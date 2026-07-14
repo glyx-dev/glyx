@@ -389,6 +389,17 @@ pub fn build_cap_dlls(caps: &[String], target: Option<&str>, dest: &Path) -> Res
         ("lib", "so")
     };
 
+    // When run from an app subdir (e.g. `examples/media-player`), `cargo` walks
+    // up to the glyx workspace root and emits the cdylib into the workspace
+    // `target/` dir. Resolve that root explicitly so our source path matches
+    // where the artifact actually lands.
+    let home = super::glyx_home().ok();
+    let profile_dir = if let Some(ref t) = rust_target {
+        format!("target/{t}/release")
+    } else {
+        "target/release".to_string()
+    };
+
     for cap in caps {
         let pkg = format!("glyx-cap-{cap}");
         // cdylib stem: glyx_cap_<name>  (hyphens → underscores)
@@ -403,18 +414,19 @@ pub fn build_cap_dlls(caps: &[String], target: Option<&str>, dest: &Path) -> Res
         }
 
         println!("Building cap DLL: {pkg}...");
-        let status = Command::new("cargo")
-            .args(&args)
-            .env("RUST_LOG", "warn")
+        let mut cargo = Command::new("cargo");
+        cargo.args(&args).env("RUST_LOG", "warn");
+        if let Some(ref h) = home { cargo.current_dir(h); }
+        let status = cargo
             .status()
             .with_context(|| format!("Failed to run cargo build for {pkg}"))?;
         if !status.success() { bail!("cargo build for {pkg} failed"); }
 
         let lib_name = format!("{dll_prefix}{stem}.{dll_ext}");
-        let src = if let Some(ref t) = rust_target {
-            PathBuf::from(format!("target/{t}/release/{lib_name}"))
+        let src = if let Some(ref h) = home {
+            h.join(&profile_dir).join(&lib_name)
         } else {
-            PathBuf::from(format!("target/release/{lib_name}"))
+            PathBuf::from(&profile_dir).join(&lib_name)
         };
 
         if !src.exists() {

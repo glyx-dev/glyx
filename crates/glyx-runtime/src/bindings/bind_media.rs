@@ -246,8 +246,9 @@ pub fn audio_get_time_callback(
 
 /// `__glyx_audio_duration(handle)` â†’ Promise<f64> seconds.
 ///
-/// Opens the file with rodio::Decoder and calls `total_duration()`.
-/// May return -1.0 for formats that don't expose a duration header.
+/// Uses a robust probe: the header-declared frame count when available, otherwise
+/// a seek past the end of the stream (Symphonia clamps to the real end and reports
+/// the timestamp) so VBR files report a real duration instead of -1.0.
 #[cfg(feature = "audio")]
 pub fn audio_duration_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -268,15 +269,64 @@ pub fn audio_duration_callback(
     let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
     state.tokio.spawn(async move {
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            use rodio::Source;
-            let file = std::fs::File::open(&path).map_err(|e| format!("{e}"))?;
-            let dec  = rodio::Decoder::new(std::io::BufReader::new(file)).map_err(|e| format!("{e}"))?;
-            let dur  = dec.total_duration().map(|d| d.as_secs_f64()).unwrap_or(-1.0);
-            Ok(dur.to_string())
+            Ok(probe_audio_duration(&path).to_string())
         }).await.map_err(|e| e.to_string()).and_then(|r| r);
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr, result });
     });
     rv.set(promise.into());
+}
+
+/// Robust audio-duration probe (see `glyx-cap-audio`).
+#[cfg(feature = "audio")]
+fn probe_audio_duration(path: &str) -> f64 {
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::probe::Hint;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
+    use symphonia::core::units::Time;
+
+    let file = match std::fs::File::open(path) { Ok(f) => f, Err(_) => return -1.0 };
+    let mss  = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let probed = match symphonia::default::get_probe()
+        .format(&Hint::new(), mss, &FormatOptions::default(), &MetadataOptions::default())
+    {
+        Ok(p)  => p,
+        Err(_) => return -1.0,
+    };
+    let mut reader = probed.format;
+
+    if let Some(track) = reader.tracks().iter().find(|t| t.codec_params.sample_rate.is_some()) {
+        if let (Some(n_frames), Some(sr)) = (track.codec_params.n_frames, track.codec_params.sample_rate) {
+            if n_frames > 0 && sr > 0 {
+                return n_frames as f64 / sr as f64;
+            }
+        }
+    }
+
+    let track_id = reader.default_track().map(|t| t.id).unwrap_or(0);
+    let beyond   = Time { seconds: u64::MAX / 2, frac: 0.0 };
+    if let Ok(seeked) = reader.seek(SeekMode::Coarse, SeekTo::Time { time: beyond, track_id: None }) {
+        let tb = reader.tracks().get(track_id as usize)
+            .and_then(|t| t.codec_params.time_base);
+        let (numer, denom) = match tb {
+            Some(tb) => (tb.numer as f64, tb.denom as f64),
+            None => match reader.tracks().get(track_id as usize)
+                .and_then(|t| t.codec_params.sample_rate)
+            {
+                Some(sr) if sr > 0 => (1.0, sr as f64),
+                _ => return -1.0,
+            },
+        };
+        if denom > 0.0 {
+            let secs = seeked.actual_ts as f64 * numer / denom;
+            if secs > 0.0 && secs.is_finite() {
+                return secs;
+            }
+        }
+    }
+
+    -1.0
 }
 
 /// `__glyx_audio_seek(handle, seconds)` â†’ Promise<void>.

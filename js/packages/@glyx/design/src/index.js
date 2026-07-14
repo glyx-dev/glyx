@@ -41,3 +41,4 @@ export { Alert, ProgressBar, Spinner, Skeleton, ToastProvider, useToast } from '
 export { Modal, ModalFooter, Tooltip, Sheet } from './overlay.js';
 export { Avatar, AvatarGroup, Chip, Empty, Stat, KVRow } from './display.js';
 export { Tabs, Accordion, Stepper, Breadcrumb } from './navigation.js';
+export { WindowControls } from './window.js';

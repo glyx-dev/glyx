@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, ScrollView, Pressable, TextInput,
-  WindowControls, render, db, useWindowSize, DatePicker, Select,
+  render, db, useWindowSize, DatePicker, Select,
 } from '@glyx-dev/react';
-import { ThemeProvider, ToastProvider, useToast } from '@glyx-dev/design';
+import { ThemeProvider, ToastProvider, useToast, WindowControls } from '@glyx-dev/design';
 
 // Fixed light palette — this example always uses the light stone theme
 const P = {

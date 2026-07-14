@@ -98,7 +98,6 @@ mimalloc            = "0.1"
 dark-light          = "1"
 tiny-skia           = "0.11"
 swash               = "0.1"
-femtovg             = { version = "0.25", features = ["wgpu"] }
 rodio               = { version = "0.17", features = ["symphonia-all"] }
 glam                = "0.28"
 gltf                = { version = "1" }
@@ -141,4 +140,3 @@ panic = "abort"        # no unwinding machinery; smaller binary, lower working s
 [patch.crates-io]
 vello            = { path = "vendor/vello" }
 libmimalloc-sys  = { path = "vendor/libmimalloc-sys" }
-femtovg          = { path = "vendor/femtovg" }

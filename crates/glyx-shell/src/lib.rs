@@ -116,9 +116,7 @@ pub enum RenderMode {
     Cpu,
     /// tiny-skia CPU rasterizer. Minimal RAM, pure Rust, no GPU pool.
     TinySkia,
-    /// femtovg GPU triangle renderer. Low GPU buffer footprint, smooth animations.
-    Femtovg,
-    /// Auto-detect: discrete GPU → Gpu, iGPU → Femtovg, no GPU → TinySkia.
+    /// Auto-detect: discrete GPU → Gpu, no GPU → TinySkia.
     Auto,
 }
 

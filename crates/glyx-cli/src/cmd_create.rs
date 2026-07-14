@@ -106,7 +106,7 @@ pub(super) fn cmd_create_native(name: &str, dest: &Path, glyx_home: Option<&Path
     //   Workspace checkout → path deps (contributors iterate on the framework).
     //   Standalone CLI     → git deps pinned to this CLI's release tag, PLUS the
     //   [patch.crates-io] entries so the vendored forks (vello pool cap,
-    //   mimalloc static-CRT, femtovg bind-group cache) apply to the user's
+    //   mimalloc static-CRT) apply to the user's
     //   build graph — patch tables do NOT propagate through dependencies.
     let rust_deps = match glyx_home {
         Some(h) => {
@@ -131,7 +131,6 @@ env_logger  = "0.11"
 [patch.crates-io]
 vello           = {{ git = "https://github.com/glyx-dev/glyx", tag = "{tag}" }}
 libmimalloc-sys = {{ git = "https://github.com/glyx-dev/glyx", tag = "{tag}" }}
-femtovg         = {{ git = "https://github.com/glyx-dev/glyx", tag = "{tag}" }}
 "#)
         }
     };

@@ -905,7 +905,6 @@ pub fn run(mut config: AppConfig) -> bool {
                         "[glyx] renderMode=auto → {} ({})",
                         match &backend_kind {
                             BackendKind::TinySkia                 => "skia",
-                            BackendKind::FemtoVg                  => "femtovg",
                             BackendKind::Vello { use_cpu: false } => "vello",
                             BackendKind::Vello { use_cpu: true  } => "vello/cpu",
                         },
@@ -2179,7 +2178,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 // Run V8 GC + renderer pool trim + mimalloc segment decommit
                 // immediately while no frame is in flight. This is the primary
                 // intelligent trigger for memory recovery; no developer action
-                // required. The renderer pools (Vello GPU buffers, skia/femtovg
+                // required. The renderer pools (Vello GPU buffers, skia
                 // glyph caches) rebuild lazily over the next few frames on return.
                 for s in windows.values_mut() {
                     s.runtime.gc_hint();
@@ -2224,8 +2223,8 @@ mod tests {
     }
 
     #[test]
-    fn auto_selects_femtovg_for_intel_arc() {
-        assert_eq!(resolve_backend(RenderMode::Auto, GpuTier::DiscreteIntel, false), BackendKind::FemtoVg);
+    fn auto_selects_vello_for_intel_arc() {
+        assert_eq!(resolve_backend(RenderMode::Auto, GpuTier::DiscreteIntel, false), BackendKind::Vello { use_cpu: false });
     }
 
     #[test]
@@ -2240,7 +2239,6 @@ mod tests {
     fn explicit_pin_beats_auto_detection() {
         // Even on a discrete GPU, an explicit backend pin must win.
         assert_eq!(resolve_backend(RenderMode::TinySkia, GpuTier::Discrete, false), BackendKind::TinySkia);
-        assert_eq!(resolve_backend(RenderMode::Femtovg, GpuTier::Discrete, false), BackendKind::FemtoVg);
         assert_eq!(
             resolve_backend(RenderMode::Cpu, GpuTier::Discrete, false),
             BackendKind::Vello { use_cpu: true },
@@ -2266,7 +2264,6 @@ mod tests {
     fn render_mode_strings_map_to_variants() {
         assert_eq!(parse_render_mode("auto"), RenderMode::Auto);
         assert_eq!(parse_render_mode("skia"), RenderMode::TinySkia);
-        assert_eq!(parse_render_mode("femtovg"), RenderMode::Femtovg);
         assert_eq!(parse_render_mode("cpu"), RenderMode::Cpu);
         assert_eq!(parse_render_mode("gpu"), RenderMode::Gpu);
         // Unknown values fall back to Gpu rather than erroring.

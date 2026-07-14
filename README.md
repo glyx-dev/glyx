@@ -75,10 +75,10 @@ discrete GPUs:
 |---|---|---|
 | No GPU / software / CI | TinySkia | ~97 MB |
 | Integrated GPU | TinySkia | ~97 MB |
-| Intel Arc dGPU | FemtoVG | ~103 MB |
+| Intel Arc dGPU | Vello | ~285 MB |
 | NVIDIA / AMD dGPU | Vello | ~285 MB |
 
-Override via `glyx.config.ts`: `renderMode: 'skia' | 'femtovg' | 'vello' | 'auto'`
+Override via `glyx.config.ts`: `renderMode: 'skia' | 'vello' | 'auto'`
 
 ## Prerequisites
 

@@ -238,7 +238,6 @@ pub(super) fn parse_render_mode(s: &str) -> RenderMode {
     match s {
         "cpu"     => RenderMode::Cpu,
         "skia"    => RenderMode::TinySkia,
-        "femtovg" => RenderMode::Femtovg,
         "auto"    => RenderMode::Auto,
         _         => RenderMode::Gpu,
     }
@@ -251,14 +250,12 @@ pub(super) fn resolve_backend(mode: RenderMode, tier: GpuTier, force_cpu: bool) 
             let tier = if force_cpu { GpuTier::None } else { tier };
             match tier {
                 GpuTier::None | GpuTier::Integrated => BackendKind::TinySkia,
-                GpuTier::DiscreteIntel              => BackendKind::FemtoVg,
-                GpuTier::Discrete                   => BackendKind::Vello { use_cpu: false },
+                GpuTier::DiscreteIntel | GpuTier::Discrete => BackendKind::Vello { use_cpu: false },
             }
         }
         RenderMode::Cpu      => BackendKind::Vello { use_cpu: true },
         RenderMode::Gpu      => BackendKind::Vello { use_cpu: force_cpu },
         RenderMode::TinySkia => BackendKind::TinySkia,
-        RenderMode::Femtovg  => BackendKind::FemtoVg,
     }
 }
 

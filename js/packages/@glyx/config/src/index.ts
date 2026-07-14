@@ -31,14 +31,13 @@ export interface WindowConfig {
    * - 'auto'    — pick per machine (default): tiny-skia on integrated/no GPU
    *               (software present, no wgpu), Vello on discrete GPUs.
    * - 'skia'    — tiny-skia CPU rasterizer + OS software present (~35 MB RSS).
-   * - 'femtovg' — OpenGL tessellation renderer.
    * - 'gpu'     — Vello GPU compute via wgpu (best visual quality; required
    *               up-front for Canvas3D-heavy apps, though Canvas3D also
    *               upgrades automatically from 'skia'/'auto').
    * - 'cpu'     — Vello's built-in CPU path.
    * TinySkia can also be forced at runtime via GLYX_CPU_RENDER=1.
    */
-  renderMode?:  'auto' | 'skia' | 'femtovg' | 'gpu' | 'cpu';
+  renderMode?:  'auto' | 'skia' | 'gpu' | 'cpu';
   /** V8 heap cap in MB (16–512). Default: auto from bundle size. */
   maxJsHeapMb?: number;
   /**

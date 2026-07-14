@@ -33,7 +33,7 @@ Steps:
 - **Glyx version / commit:**
 - **OS:** (e.g. Windows 11, macOS 14.5, Ubuntu 24.04)
 - **GPU:** (e.g. Intel UHD 620, NVIDIA RTX 3060, Apple M2)
-- **Renderer backend:** (skia / femtovg / vello / auto — printed at startup)
+- **Renderer backend:** (skia / vello / auto — printed at startup)
 - **Node / Bun version:**
 
 ## Logs

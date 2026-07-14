@@ -16,16 +16,6 @@ published to crates.io; the workspace `[patch.crates-io]` table in the root
 
 ---
 
-## vendor/femtovg
-
-| | |
-|---|---|
-| **Upstream** | <https://github.com/femtovg/femtovg> |
-| **License** | MIT (see `vendor/femtovg/LICENSE-MIT`) and Apache-2.0 (see `vendor/femtovg/LICENSE-APACHE`) |
-| **Patch** | Deferred bind-group cache work in progress. Per-frame uniform-buffer churn fix (dynamic uniform offsets to avoid creating a new `BindGroup` per distinct draw-state each frame) is tracked but not yet landed. Current vendored copy is otherwise at upstream HEAD. **Note:** FemtoVG is planned for removal once the custom Vello-based renderer reaches full 2D feature parity — see the renderer roadmap. |
-
----
-
 ## vendor/libmimalloc-sys
 
 | | |

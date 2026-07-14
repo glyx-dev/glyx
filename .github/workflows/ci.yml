@@ -26,7 +26,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Zero-warnings bar (see CONTRIBUTING.md). RUSTFLAGS="-D warnings" is not
       # used because it would also deny warnings inside vendored path deps
-      # (vendor/vello, vendor/femtovg); instead, fail on any warning whose
+      # (vendor/vello); instead, fail on any warning whose
       # source location is in our own crates/.
       - name: cargo check (zero warnings in crates/)
         run: |

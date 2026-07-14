@@ -45,7 +45,7 @@ changes.
   [README](./README.md#project-structure) for the full map.
 - `js/packages/@glyx/` — the JS/TS packages. `@glyx-dev/react` is the
   reconciler and component layer; most JS-visible behavior lives there.
-- `vendor/` — patched third-party crates (`vello`, `femtovg`,
+- `vendor/` — patched third-party crates (`vello`,
   `libmimalloc-sys`). Changes here need a comment explaining the deviation
   from upstream.
 - `examples/` — runnable apps, also used for manual regression testing.

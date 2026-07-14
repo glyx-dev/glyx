@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use notify::{RecursiveMode, Watcher};
 
 // ── fs.watch / unwatch / poll ─────────────────────────────────────────────────
@@ -9,17 +9,19 @@ use notify::{RecursiveMode, Watcher};
 /// Returns a watchId you pass to `__glyx_fs_unwatch` to stop.
 /// Deliver events via `__glyx_fs_watch_poll()` each frame.
 pub fn fs_watch_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let path = v8_arg_to_string(scope, &args, 0);
     // M1: canonicalize+check before open -- closes TOCTOU window.
     let path = match glyx_security::resolve_and_check_read(std::path::Path::new(&path)) {
         Ok(c)  => c.to_string_lossy().into_owned(),
         Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.watch denied: {e}")).into()); return; }
     };
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -81,11 +83,13 @@ pub fn fs_watch_callback(
 ///
 /// Stops the watcher registered under `watchId`.
 pub fn fs_unwatch_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id = args.get(0).uint32_value(scope).unwrap_or(0);
@@ -98,11 +102,13 @@ pub fn fs_unwatch_callback(
 ///
 /// Called every frame from `_pollFsWatch()` in JS.
 pub fn fs_watch_poll_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -122,17 +128,19 @@ pub fn fs_watch_poll_callback(
 }
 
 pub fn write_file_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let path = v8_arg_to_string(scope, &args, 0);
     // M1: canonicalize+check before open -- closes TOCTOU window.
     let path = match glyx_security::resolve_and_check_write(std::path::Path::new(&path)) {
         Ok(c)  => c.to_string_lossy().into_owned(),
         Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.write denied: {e}")).into()); return; }
     };
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -152,17 +160,19 @@ pub fn write_file_callback(
 
 /// `__glyx_appendFile(path, content) -> Promise<void>`
 pub fn append_file_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let path = v8_arg_to_string(scope, &args, 0);
     // M1: canonicalize+check before open -- closes TOCTOU window.
     let path = match glyx_security::resolve_and_check_write(std::path::Path::new(&path)) {
         Ok(c)  => c.to_string_lossy().into_owned(),
         Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.write denied: {e}")).into()); return; }
     };
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -189,17 +199,19 @@ pub fn append_file_callback(
 
 /// `__glyx_listDir(path) -> Promise<string>` â€” JSON array of `{ name, isDir }` objects.
 pub fn list_dir_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let path = v8_arg_to_string(scope, &args, 0);
     // M1: canonicalize+check before open -- closes TOCTOU window.
     let path = match glyx_security::resolve_and_check_read(std::path::Path::new(&path)) {
         Ok(c)  => c.to_string_lossy().into_owned(),
         Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.watch denied: {e}")).into()); return; }
     };
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -227,10 +239,12 @@ pub fn list_dir_callback(
 
 /// `__glyx_deleteFile(path) -> Promise<void>`
 pub fn delete_file_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let path = v8_arg_to_string(scope, &args, 0);
     // M1: canonicalize+check before delete -- closes TOCTOU window.
     let path = match path.as_str() {
@@ -249,7 +263,7 @@ pub fn delete_file_callback(
             }
         }
     };
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -267,17 +281,19 @@ pub fn delete_file_callback(
 
 /// `__glyx_mkdirp(path) -> Promise<void>` â€” creates the directory and all parents.
 pub fn mkdirp_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let path = v8_arg_to_string(scope, &args, 0);
     // M1: canonicalize+check before open -- closes TOCTOU window.
     let path = match glyx_security::resolve_and_check_write(std::path::Path::new(&path)) {
         Ok(c)  => c.to_string_lossy().into_owned(),
         Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.write denied: {e}")).into()); return; }
     };
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -295,17 +311,19 @@ pub fn mkdirp_callback(
 
 /// `__glyx_stat(path) -> Promise<string>` â€” JSON `{ size, mtime, isDir, isFile }`.
 pub fn stat_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let path = v8_arg_to_string(scope, &args, 0);
     // M1: canonicalize+check before open -- closes TOCTOU window.
     let path = match glyx_security::resolve_and_check_read(std::path::Path::new(&path)) {
         Ok(c)  => c.to_string_lossy().into_owned(),
         Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.watch denied: {e}")).into()); return; }
     };
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -334,10 +352,12 @@ pub fn stat_callback(
 
 /// `__glyx_rename(src, dst) -> Promise<void>`
 pub fn rename_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let src = v8_arg_to_string(scope, &args, 0);
     let dst = v8_arg_to_string(scope, &args, 1);
     // M1: canonicalize+check src (read) and dst (write).
@@ -349,7 +369,7 @@ pub fn rename_callback(
         Ok(c)  => c.to_string_lossy().into_owned(),
         Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.rename dst denied: {e}")).into()); return; }
     };
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -367,10 +387,12 @@ pub fn rename_callback(
 
 /// `__glyx_copyFile(src, dst) -> Promise<void>`
 pub fn copy_file_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let src = v8_arg_to_string(scope, &args, 0);
     let dst = v8_arg_to_string(scope, &args, 1);
     // M1: canonicalize+check src (read) and dst (write).
@@ -382,7 +404,7 @@ pub fn copy_file_callback(
         Ok(c)  => c.to_string_lossy().into_owned(),
         Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.rename dst denied: {e}")).into()); return; }
     };
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 

@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use std::net::IpAddr;
 
 // ── H3: Network SSRF hardening ────────────────────────────────────────────────
@@ -150,10 +150,12 @@ fn safe_http_client() -> Result<reqwest::Client, String> {
 /// Use `"*"` to allow all outbound requests.
 #[cfg(feature = "fetch")]
 pub fn fetch_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let url  = v8_arg_to_string(scope, &args, 0);
 
     // ── H3 checks (scheme → private-IP → capability) ─────────────────────────
@@ -176,7 +178,7 @@ pub fn fetch_callback(
         return;
     }
 
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -311,10 +313,12 @@ pub fn fetch_callback(
 ///   - write task: forwards messages from `outbox_tx` to the socket sink.
 #[cfg(feature = "websocket")]
 pub fn ws_connect_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let url  = v8_arg_to_string(scope, &args, 0);
 
     // ── H3 checks (scheme → private-IP → capability) ─────────────────────────
@@ -337,7 +341,7 @@ pub fn ws_connect_callback(
         return;
     }
 
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -401,11 +405,13 @@ pub fn ws_connect_callback(
 /// `__glyx_ws_send(handle, message)` â€" sync fire-and-forget.
 #[cfg(feature = "websocket")]
 pub fn ws_send_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -423,11 +429,13 @@ pub fn ws_send_callback(
 /// Returns `["__GLYX_WS_CLOSED__"]` when the server has closed the connection.
 #[cfg(feature = "websocket")]
 pub fn ws_poll_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -448,11 +456,13 @@ pub fn ws_poll_callback(
 /// `__glyx_ws_close(handle)` â€" sync, removes handle (drops outbox tx â†' write task exits).
 #[cfg(feature = "websocket")]
 pub fn ws_close_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -474,11 +484,13 @@ pub fn ws_close_callback(
 /// fully initialised â€" they queue in the inbox and are consumed once the
 /// secondary runtime starts polling.
 pub fn window_create_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -555,11 +567,13 @@ pub fn window_create_callback(
 /// Pushes a string message into the target window's IPC inbox.
 /// The target window drains its inbox each frame via `__glyx_ipc_poll`.
 pub fn ipc_send_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -577,11 +591,13 @@ pub fn ipc_send_callback(
 /// Drains this window's own IPC inbox.  Returns `"[]"` when empty.
 /// Called each frame from the JS frame callback alongside WS polling.
 pub fn ipc_poll_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -608,15 +624,17 @@ pub fn ipc_poll_callback(
 ///
 /// Requires `mdns: true` in glyx.config.json capabilities.
 pub fn mdns_discover_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().can_mdns() {
         rv.set(reject_cap_promise(scope, "mdns").into());
         return;
     }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 

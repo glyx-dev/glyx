@@ -64,11 +64,13 @@ fn pending_js_sig_path() -> Option<std::path::PathBuf> {
 /// JS passes only the current version - it cannot choose the source.
 #[cfg(feature = "updater")]
 pub fn updater_check_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -120,11 +122,13 @@ pub fn updater_check_callback(
 /// or unsigned binary is never applied.
 #[cfg(feature = "updater")]
 pub fn updater_update_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -227,10 +231,12 @@ pub fn updater_update_callback(
 /// `__glyx_updater_get_version() → string`
 #[cfg(feature = "updater")]
 pub fn updater_get_version_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     _args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let v = v8::String::new(scope, glyx_security::app_version()).unwrap();
     rv.set(v.into());
 }
@@ -244,11 +250,13 @@ pub fn updater_get_version_callback(
 /// updates - without it `updater_download_js` will reject.
 #[cfg(feature = "updater")]
 pub fn updater_check_manifest_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -307,11 +315,13 @@ pub fn updater_check_manifest_callback(
 /// A valid `js_sig_hex` is always required.
 #[cfg(feature = "updater")]
 pub fn updater_download_js_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -378,10 +388,12 @@ pub fn crash_reports_dir() -> std::path::PathBuf {
 }
 
 pub fn crash_report_js_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().crash {
         throw_cap_error(scope, "crash"); return;
     }
@@ -397,11 +409,13 @@ pub fn crash_report_js_callback(
 }
 
 pub fn crash_get_reports_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -437,10 +451,12 @@ pub fn crash_get_reports_callback(
 }
 
 pub fn crash_clear_reports_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     _args: v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().crash {
         throw_cap_error(scope, "crash"); return;
     }
@@ -456,22 +472,24 @@ pub fn crash_clear_reports_callback(
 }
 
 pub fn splash_hide_callback(
-    _scope: &mut v8::HandleScope,
+    _scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     state.scene.lock().push_back(SceneCommand::HideSplash);
 }
 
 pub fn backend_call_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 

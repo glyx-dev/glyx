@@ -1,16 +1,18 @@
-﻿use super::*;
+use super::*;
 pub fn canvas_update_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let id   = args.get(0).number_value(scope).unwrap_or_default() as u32;
     let json = args.get(1).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
 
     let cmds: Vec<CanvasCmd> = match serde_json::from_str(&json) {
@@ -28,11 +30,13 @@ pub fn canvas_update_callback(
 /// allocation). Falls back via the JSON `__glyx_canvas_update` binding when
 /// the binary protocol isn't active.
 pub fn canvas_flush_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -44,12 +48,12 @@ pub fn canvas_flush_callback(
     // Extract (data ptr, byte length) for a typed-array view over the shared
     // backing store. The store is an external (non-moving) backing store kept
     // alive by the globals, so the pointer is stable for this synchronous read.
-    fn view_ptr_len(scope: &mut v8::HandleScope, v: v8::Local<v8::Value>) -> Option<(*const u8, usize)> {
+    fn view_ptr_len(scope: &mut v8::PinScope<'_, '_, v8::Context>, v: v8::Local<v8::Value>) -> Option<(*const u8, usize)> {
         let view = v8::Local::<v8::ArrayBufferView>::try_from(v).ok()?;
         let buf  = view.buffer(scope)?;
         let raw  = buf.get_backing_store().data();
-        if raw.is_null() { return None; }
-        let ptr  = unsafe { (raw as *const u8).add(view.byte_offset()) };
+        if raw.is_none() { return None; }
+        let ptr  = unsafe { (raw.unwrap().as_ptr() as *const u8).add(view.byte_offset()) };
         Some((ptr, view.byte_length()))
     }
 
@@ -79,17 +83,19 @@ pub fn canvas_flush_callback(
 /// Parses a JSON Scene3D and pushes a Canvas3DUpdate scene command.
 #[cfg(feature = "canvas3d")]
 pub fn canvas3d_update_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let id   = args.get(0).number_value(scope).unwrap_or_default() as u32;
     let json = args.get(1).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
 
     let scene: glyx_3d::Scene3D = match serde_json::from_str(&json) {
@@ -104,17 +110,19 @@ pub fn canvas3d_update_callback(
 /// (Actual loading happens in glyx-core on next frame via renderer_3d.)
 #[cfg(feature = "canvas3d")]
 pub fn canvas3d_load_gltf_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let id   = args.get(0).number_value(scope).unwrap_or_default() as u32;
     let path = args.get(1).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
 
     // M2: gate GLTF loads behind fs.read capability.
@@ -145,16 +153,18 @@ pub fn canvas3d_load_gltf_callback(
 /// Useful before loading a large new model to reclaim GPU memory immediately.
 #[cfg(feature = "canvas3d")]
 pub fn canvas3d_unload_gltf_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let path = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
 
     state.scene.lock().push_back(SceneCommand::Canvas3DUnloadGltf { path });

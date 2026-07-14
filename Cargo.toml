@@ -50,7 +50,7 @@ parley    = "0.10"
 taffy     = "0.10"
 
 # JS Runtime
-v8        = { package = "rusty_v8", version = "0.32" }
+v8        = "150"
 
 # Async
 tokio     = { version = "1", features = ["rt-multi-thread", "fs", "sync", "time"] }

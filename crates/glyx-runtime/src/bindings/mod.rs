@@ -1,4 +1,4 @@
-﻿//! Native function bindings exposed to JavaScript.
+//! Native function bindings exposed to JavaScript.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -10,6 +10,8 @@ use parking_lot::Mutex;
 use base64::Engine as _;
 use tokio::runtime::Handle;
 use notify::RecommendedWatcher;
+
+use crate::Scope;
 
 mod bind_core;
 mod bind_fs;
@@ -673,7 +675,7 @@ pub enum SceneCommand {
 pub type StatePtrUsize = usize;
 
 pub fn register_all(
-    scope:        &mut v8::HandleScope,
+    scope:        &mut v8::PinScope<'_, '_, v8::Context>,
     global:       v8::Local<v8::Object>,
     queue:        CompletionQueue,
     tokio:        Handle,
@@ -779,18 +781,17 @@ pub fn register_all(
             .collect::<Vec<_>>()
             .join(";\n");
         if let Some(code_str) = v8::String::new(scope, &combined) {
-            let mut try_catch = v8::TryCatch::new(scope);
-            if let Some(script) = v8::Script::compile(&mut try_catch, code_str, None) {
-                script.run(&mut try_catch);
+            v8::tc_scope!(let try_catch, scope);
+            if let Some(script) = v8::Script::compile(try_catch, code_str, None) {
+                let _ = script.run(try_catch);
             }
             if try_catch.has_caught() {
                 let msg = try_catch.exception()
-                    .and_then(|e| e.to_string(&mut try_catch))
-                    .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                    .and_then(|e| e.to_string(try_catch))
+                    .map(|s| s.to_rust_string_lossy(try_catch.as_ref()))
                     .unwrap_or_else(|| "unknown error".into());
                 log::error!("[plugins] eval error: {msg}");
             }
-            drop(try_catch);
         }
     }
     for plugin in js_plugins.iter() {
@@ -812,14 +813,14 @@ pub fn register_all(
         };
 
         // Walk own property names and collect Function values.
-        let prop_names = exports.get_own_property_names(scope);
+        let prop_names = exports.get_own_property_names(scope, Default::default());
         let prop_names = match prop_names { Some(p) => p, None => continue };
         for i in 0..prop_names.length() {
             let key = match prop_names.get_index(scope, i) { Some(k) => k, None => continue };
             let val = match exports.get(scope, key) { Some(v) => v, None => continue };
             if let Ok(fn_local) = v8::Local::<v8::Function>::try_from(val) {
                 let key_str = key.to_string(scope)
-                    .map(|s| s.to_rust_string_lossy(scope))
+                    .map(|s| s.to_rust_string_lossy(scope.as_ref()))
                     .unwrap_or_default();
                 if key_str.is_empty() { continue; }
                 let cmd_name = match &plugin.prefix {
@@ -1196,7 +1197,7 @@ struct AsyncState {
 /// Called on plugin file-change in dev mode.  The V8 scope must be active.
 /// Clears all old commands for this plugin's prefix before re-registering.
 pub fn reload_plugin_in_scope(
-    scope:      &mut v8::HandleScope,
+    scope:      &mut v8::PinScope<'_, '_, v8::Context>,
     state_ptr:  StatePtrUsize,
     global_name: &str,
     prefix:     Option<&str>,
@@ -1220,40 +1221,39 @@ pub fn reload_plugin_in_scope(
     let ctx = scope.get_current_context();
     let global_obj = ctx.global(scope);
     if let Some(code_str) = v8::String::new(scope, bundled_js) {
-        let mut try_catch = v8::TryCatch::new(scope);
+        v8::tc_scope!(let try_catch, scope);
         let origin_name: v8::Local<v8::Value> =
-            v8::String::new(&mut try_catch, &format!("plugin:{}", global_name))
+            v8::String::new(try_catch, &format!("plugin:{}", global_name))
                 .unwrap().into();
-        let empty: v8::Local<v8::Value> = v8::String::new(&mut try_catch, "").unwrap().into();
+        let empty: v8::Local<v8::Value> = v8::String::new(try_catch, "").unwrap().into();
         let origin = v8::ScriptOrigin::new(
-            &mut *try_catch, origin_name, 0, 0, false, -1, empty, false, false, false,
+            try_catch, origin_name, 0, 0, false, -1, Some(empty), false, false, false, None,
         );
-        if let Some(script) = v8::Script::compile(&mut try_catch, code_str, Some(&origin)) {
-            let _ = script.run(&mut try_catch);
+        if let Some(script) = v8::Script::compile(try_catch, code_str, Some(&origin)) {
+            let _ = script.run(try_catch);
         }
         if try_catch.has_caught() {
             let msg = try_catch.exception()
-                .and_then(|e| e.to_string(&mut try_catch))
-                .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                .and_then(|e| e.to_string(try_catch))
+                .map(|s| s.to_rust_string_lossy(try_catch.as_ref()))
                 .unwrap_or_default();
             log::error!("[plugin HMR] eval error for '{}': {msg}", global_name);
             return;
         }
-        drop(try_catch);
     }
 
     // Re-collect exports from globalThis.<global_name>.
     if let Some(gname) = v8::String::new(scope, global_name) {
         if let Some(exports_val) = global_obj.get(scope, gname.into()) {
             if let Ok(exports) = v8::Local::<v8::Object>::try_from(exports_val) {
-                let names = exports.get_own_property_names(scope);
+                let names = exports.get_own_property_names(scope, Default::default());
                 let names = match names { Some(n) => n, None => return };
                 for i in 0..names.length() {
                     let key     = match names.get_index(scope, i) { Some(k) => k, None => continue };
                     let val     = match exports.get(scope, key)   { Some(v) => v, None => continue };
                     let Ok(fn_local) = v8::Local::<v8::Function>::try_from(val) else { continue };
                     let key_str = key.to_string(scope)
-                        .map(|s| s.to_rust_string_lossy(scope))
+                        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
                         .unwrap_or_default();
                     if key_str.is_empty() { continue; }
                     let cmd_name = match prefix {
@@ -1297,7 +1297,7 @@ struct HotkeyState {
 }
 
 fn set_func(
-    scope:  &mut v8::HandleScope,
+    scope:  &mut v8::PinScope<'_, '_, v8::Context>,
     global: v8::Local<v8::Object>,
     name:   &str,
     cb:     impl v8::MapFnTo<v8::FunctionCallback>,
@@ -1309,10 +1309,10 @@ fn set_func(
 
 //  Prop parsing €€€
 
-fn parse_node_type(scope: &mut v8::HandleScope, value: v8::Local<v8::Value>) -> NodeType {
+fn parse_node_type(scope: &mut v8::PinScope<'_, '_, v8::Context>, value: v8::Local<v8::Value>) -> NodeType {
     let s = value
         .to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default()
         .to_lowercase();
     match s.as_str() {
@@ -1357,14 +1357,14 @@ fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
 
 /// Read a string property from a JS object, if present.
 fn get_str_prop(
-    scope: &mut v8::HandleScope,
+    scope: &mut Scope,
     obj:   v8::Local<v8::Object>,
     key:   &str,
 ) -> Option<String> {
     let k = v8::String::new(scope, key).unwrap();
     let v = obj.get(scope, k.into())?;
     if v.is_string() || v.is_number() {
-        Some(v.to_string(scope)?.to_rust_string_lossy(scope))
+        Some(v.to_string(scope)?.to_rust_string_lossy(scope.as_ref()))
     } else {
         None
     }
@@ -1372,7 +1372,7 @@ fn get_str_prop(
 
 /// Read a number property from a JS object as f32, if present.
 fn get_num_prop(
-    scope: &mut v8::HandleScope,
+    scope: &mut Scope,
     obj:   v8::Local<v8::Object>,
     key:   &str,
 ) -> Option<f32> {
@@ -1388,7 +1388,7 @@ fn get_num_prop(
 /// Read a length value from a JS object: either a plain number (px) or a
 /// `"50%"` string (percent). Returns `None` if the property is absent.
 fn get_length_prop(
-    scope: &mut v8::HandleScope,
+    scope: &mut Scope,
     obj:   v8::Local<v8::Object>,
     key:   &str,
 ) -> Option<LengthValue> {
@@ -1397,7 +1397,7 @@ fn get_length_prop(
 
     // String: "50%" †’ Percent(0.5), "123" †’ Px(123.0)
     if v.is_string() {
-        let s = v.to_string(scope)?.to_rust_string_lossy(scope);
+        let s = v.to_string(scope)?.to_rust_string_lossy(scope.as_ref());
         if let Some(pct) = s.strip_suffix('%') {
             return pct.parse::<f32>().ok().map(|n| LengthValue::Percent(n / 100.0));
         }
@@ -1414,7 +1414,7 @@ fn get_length_prop(
 
 /// Read a boolean property from a JS object, if present.
 fn get_bool_prop(
-    scope: &mut v8::HandleScope,
+    scope: &mut Scope,
     obj:   v8::Local<v8::Object>,
     key:   &str,
 ) -> Option<bool> {
@@ -1429,7 +1429,7 @@ fn get_bool_prop(
 
 /// Read a hex colour string property, if present and parseable.
 fn get_color_prop(
-    scope: &mut v8::HandleScope,
+    scope: &mut Scope,
     obj:   v8::Local<v8::Object>,
     key:   &str,
 ) -> Option<[u8; 4]> {
@@ -1438,7 +1438,7 @@ fn get_color_prop(
 }
 
 fn parse_props(
-    scope: &mut v8::HandleScope,
+    scope: &mut Scope,
     value: v8::Local<v8::Value>,
 ) -> NodeProps {
     let mut props = NodeProps::default();
@@ -1554,19 +1554,19 @@ fn parse_props(
 //  Sync bindings 
 
 fn v8_arg_to_string(
-    scope: &mut v8::HandleScope,
+    scope: &mut Scope,
     args:  &v8::FunctionCallbackArguments,
     idx:   i32,
 ) -> String {
     args.get(idx)
         .to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default()
 }
 
 /// Allocate a `PromiseResolver`, return `(resolver_ptr, promise, queue_clone)`.
 fn make_promise<'s>(
-    scope: &mut v8::HandleScope<'s>,
+    scope: &mut Scope<'s, '_>,
     state: &AsyncState,
 ) -> (usize, v8::Local<'s, v8::Promise>, CompletionQueue, Option<RedrawRequest>) {
     let resolver     = v8::PromiseResolver::new(scope).unwrap();
@@ -1590,7 +1590,7 @@ fn enqueue_completion(
 }
 
 /// Throw a JS Error for a missing capability (sync bindings only).
-fn throw_cap_error(scope: &mut v8::HandleScope, cap: &str) {
+fn throw_cap_error(scope: &mut v8::PinScope<'_, '_, v8::Context>, cap: &str) {
     let msg = format!(
         "Capability required: {cap}  add it to glyx.config.json under \"capabilities\""
     );
@@ -1599,7 +1599,7 @@ fn throw_cap_error(scope: &mut v8::HandleScope, cap: &str) {
 
 /// Return a pre-rejected Promise with a JS Error  use this in **async** bindings
 /// so the caller always gets a settled Promise instead of a synchronous exception.
-fn reject_promise_with_error<'s>(scope: &mut v8::HandleScope<'s>, msg: &str) -> v8::Local<'s, v8::Promise> {
+fn reject_promise_with_error<'s>(scope: &mut v8::PinScope<'s, '_, v8::Context>, msg: &str) -> v8::Local<'s, v8::Promise> {
     let s        = v8::String::new(scope, msg).unwrap_or_else(|| v8::String::empty(scope));
     let exc      = v8::Exception::error(scope, s);
     let resolver = v8::PromiseResolver::new(scope).unwrap();
@@ -1608,7 +1608,7 @@ fn reject_promise_with_error<'s>(scope: &mut v8::HandleScope<'s>, msg: &str) -> 
 }
 
 /// Convenience wrapper for capability-gate rejections in async bindings.
-fn reject_cap_promise<'s>(scope: &mut v8::HandleScope<'s>, cap: &str) -> v8::Local<'s, v8::Promise> {
+fn reject_cap_promise<'s>(scope: &mut v8::PinScope<'s, '_, v8::Context>, cap: &str) -> v8::Local<'s, v8::Promise> {
     let msg = format!(
         "Capability required: {cap}  add it to glyx.config.json under \"capabilities\""
     );
@@ -1627,7 +1627,7 @@ fn fs_denied_msg(kind: &str, path: &str) -> String {
 }
 
 /// Throw a generic JS Error with the given message.
-fn throw_js_error(scope: &mut v8::HandleScope, msg: &str) {
+fn throw_js_error(scope: &mut v8::PinScope<'_, '_, v8::Context>, msg: &str) {
     let s  = v8::String::new(scope, msg).unwrap();
     let ex = v8::Exception::error(scope, s);
     scope.throw_exception(ex);

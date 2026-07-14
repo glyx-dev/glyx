@@ -4,11 +4,13 @@ use super::*;
 
 #[cfg(feature = "ai")]
 pub fn ai_embed_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().ai {
@@ -40,11 +42,13 @@ pub fn ai_embed_callback(
 
 #[cfg(not(feature = "ai"))]
 pub fn ai_embed_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().ai {
@@ -78,11 +82,13 @@ pub fn ai_embed_callback(
 
 #[cfg(feature = "ai")]
 pub fn ai_generate_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().ai {
@@ -119,11 +125,13 @@ pub fn ai_generate_callback(
 
 #[cfg(not(feature = "ai"))]
 pub fn ai_generate_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().ai {
@@ -160,11 +168,13 @@ pub fn ai_generate_callback(
 
 #[cfg(feature = "ai")]
 pub fn ai_transcribe_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().ai {
@@ -198,11 +208,13 @@ pub fn ai_transcribe_callback(
 
 #[cfg(not(feature = "ai"))]
 pub fn ai_transcribe_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().ai {
@@ -236,11 +248,11 @@ pub fn ai_transcribe_callback(
 
 #[cfg(feature = "ai")]
 pub fn ai_unload_embed_callback(
-    _scope: &mut v8::HandleScope,
+    _scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     *state.ai_embed_model.lock() = None;
@@ -248,11 +260,11 @@ pub fn ai_unload_embed_callback(
 
 #[cfg(not(feature = "ai"))]
 pub fn ai_unload_embed_callback(
-    _scope: &mut v8::HandleScope,
+    _scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if let Some(cap) = state.caps.ai { unsafe { (cap.unload)(0) }; }
@@ -260,11 +272,11 @@ pub fn ai_unload_embed_callback(
 
 #[cfg(feature = "ai")]
 pub fn ai_unload_generate_callback(
-    _scope: &mut v8::HandleScope,
+    _scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     *state.ai_generate_model.lock() = None;
@@ -272,11 +284,11 @@ pub fn ai_unload_generate_callback(
 
 #[cfg(not(feature = "ai"))]
 pub fn ai_unload_generate_callback(
-    _scope: &mut v8::HandleScope,
+    _scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if let Some(cap) = state.caps.ai { unsafe { (cap.unload)(1) }; }
@@ -284,11 +296,11 @@ pub fn ai_unload_generate_callback(
 
 #[cfg(feature = "ai")]
 pub fn ai_unload_transcribe_callback(
-    _scope: &mut v8::HandleScope,
+    _scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     *state.ai_whisper_model.lock() = None;
@@ -296,11 +308,11 @@ pub fn ai_unload_transcribe_callback(
 
 #[cfg(not(feature = "ai"))]
 pub fn ai_unload_transcribe_callback(
-    _scope: &mut v8::HandleScope,
+    _scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if let Some(cap) = state.caps.ai { unsafe { (cap.unload)(2) }; }

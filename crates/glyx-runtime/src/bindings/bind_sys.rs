@@ -49,11 +49,13 @@ fn watch_payload(kind: &str, mem_sys: &mut Option<sysinfo::System>) -> String {
 
 /// `__glyx_system_watch(kind: string, intervalMs: number) → id`
 pub fn system_watch_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -96,10 +98,12 @@ pub fn system_watch_callback(
 
 /// `__glyx_system_unwatch(id: number) → void`
 pub fn system_unwatch_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let id = args.get(0).number_value(scope).unwrap_or_default() as u32;
     if let Some(alive) = watchers().lock().remove(&id) {
         alive.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -107,11 +111,13 @@ pub fn system_unwatch_callback(
 }
 
 pub fn set_fullscreen_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -122,11 +128,13 @@ pub fn set_fullscreen_callback(
 }
 
 pub fn set_maximized_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -137,11 +145,11 @@ pub fn set_maximized_callback(
 }
 
 pub fn set_minimized_callback(
-    _scope: &mut v8::HandleScope,
+    _scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -151,11 +159,13 @@ pub fn set_minimized_callback(
 }
 
 pub fn is_fullscreen_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -164,11 +174,13 @@ pub fn is_fullscreen_callback(
 }
 
 pub fn is_maximized_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -184,11 +196,13 @@ pub fn is_maximized_callback(
 
 /// `__glyx_writeFile(path, content) -> Promise<void>`
 pub fn set_always_on_top_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let on    = args.get(0).boolean_value(scope);
@@ -199,11 +213,13 @@ pub fn set_always_on_top_callback(
 
 /// `__glyx_setTitle(title: string) -> void`
 pub fn set_title_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let title = v8_arg_to_string(scope, &args, 0);
@@ -214,11 +230,13 @@ pub fn set_title_callback(
 
 /// `__glyx_setCursor(name: string) -> void` — set the mouse cursor icon.
 pub fn set_cursor_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let name  = v8_arg_to_string(scope, &args, 0);
@@ -250,15 +268,17 @@ pub fn parse_dialog_filters(json: &str) -> Vec<(String, Vec<String>)> {
 
 /// `__glyx_dialog_openFile(filtersJson, multiple) -> Promise<string>` â€" JSON path[].
 pub fn dialog_open_file_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().dialog {
         rv.set(reject_cap_promise(scope, "dialog").into());
         return;
     }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -304,15 +324,17 @@ pub fn dialog_open_file_callback(
 
 /// `__glyx_dialog_saveFile(defaultName, filtersJson) -> Promise<string>` â€" JSON path | null.
 pub fn dialog_save_file_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().dialog {
         rv.set(reject_cap_promise(scope, "dialog").into());
         return;
     }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -343,15 +365,17 @@ pub fn dialog_save_file_callback(
 
 /// `__glyx_dialog_openFolder() -> Promise<string>` â€" JSON path | null.
 pub fn dialog_open_folder_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().dialog {
         rv.set(reject_cap_promise(scope, "dialog").into());
         return;
     }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -379,10 +403,12 @@ pub fn dialog_open_folder_callback(
 
 /// `__glyx_clipboard_readText() -> Promise<string>` â€" clipboard text content.
 pub fn clipboard_read_text_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     _args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().clipboard {
         rv.set(reject_cap_promise(scope, "clipboard").into());
         return;
@@ -403,10 +429,12 @@ pub fn clipboard_read_text_callback(
 
 /// `__glyx_clipboard_writeText(text) -> Promise<void>`
 pub fn clipboard_write_text_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().clipboard {
         rv.set(reject_cap_promise(scope, "clipboard").into());
         return;
@@ -430,15 +458,17 @@ pub fn clipboard_write_text_callback(
 /// Sends a native desktop notification. Fire-and-forget; errors are logged but
 /// do not reject the Promise (notifications are best-effort).
 pub fn notification_send_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().notification {
         rv.set(reject_cap_promise(scope, "notification").into());
         return;
     }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -489,11 +519,13 @@ pub fn notification_send_callback(
 
 /// `__glyx_vectorDb_open(path) -> Promise<string>` â€" handle number.
 pub fn battery_get_status_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().battery {
@@ -518,11 +550,13 @@ pub fn battery_get_status_callback(
 
 /// `__glyx_system_getInfo()` â†' Promise<JSON>
 pub fn system_get_info_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().system {
@@ -548,10 +582,12 @@ pub fn system_get_info_callback(
 /// NSUserDefaults, Linux gsettings.  No blocking I/O; safe to call every frame
 /// if needed (though polling once per second is sufficient for most apps).
 pub fn system_get_dark_mode_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     _args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().system {
         let s = v8::String::new(scope, "unknown").unwrap();
         rv.set(s.into());
@@ -568,10 +604,12 @@ pub fn system_get_dark_mode_callback(
 /// Uses `GetSystemPowerStatus()` on Windows (one kernel call, no extra crate).
 /// Returns `false` on macOS/Linux until native support lands.
 pub fn system_get_battery_saver_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     _args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().system {
         rv.set(v8::Boolean::new(scope, false).into());
         return;
@@ -582,11 +620,13 @@ pub fn system_get_battery_saver_callback(
 
 /// `__glyx_power_preventSleep(reason)` â†' string guard-id (sync)
 pub fn power_prevent_sleep_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().power {
@@ -611,11 +651,13 @@ pub fn power_prevent_sleep_callback(
 
 /// `__glyx_power_allowSleep(id)` â€" sync, drops the guard
 pub fn power_allow_sleep_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id_str = v8_arg_to_string(scope, &args, 0);
@@ -626,11 +668,13 @@ pub fn power_allow_sleep_callback(
 
 /// `__glyx_storage_getDrives()` â†' Promise<JSON>
 pub fn storage_get_drives_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().storage {
@@ -654,11 +698,13 @@ pub fn storage_get_drives_callback(
 /// `__glyx_gamepad_poll()` â†' JSON string (sync, drain gilrs events)
 #[cfg(feature = "gamepad")]
 pub fn gamepad_poll_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().gamepads {
@@ -703,11 +749,13 @@ pub fn gamepad_poll_callback(
 
 #[cfg(not(feature = "gamepad"))]
 pub fn gamepad_poll_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let _ = args;
@@ -729,11 +777,13 @@ pub fn gamepad_poll_callback(
 
 /// `__glyx_shortcut_register(accelerator)` â†' string id (sync)
 pub fn shortcut_register_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().global_shortcuts {
@@ -767,11 +817,13 @@ pub fn shortcut_register_callback(
 
 /// `__glyx_shortcut_unregister(id)` â€" sync
 pub fn shortcut_unregister_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id_str = v8_arg_to_string(scope, &args, 0);
@@ -786,11 +838,13 @@ pub fn shortcut_unregister_callback(
 
 /// `__glyx_shortcut_poll()` â†' JSON string array of fired glyx IDs (sync)
 pub fn shortcut_poll_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let hs_opt = state.hotkey_state.borrow();
@@ -828,20 +882,22 @@ fn credential_app_prefix() -> String {
 /// Stores `value` in the OS credential store under `service`+`key`.
 /// Encrypted by the OS, tied to the logged-in user account.
 pub fn credentials_set_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().credentials {
         rv.set(reject_cap_promise(scope, "credentials").into()); return;
     }
-    let service = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let service = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
     let service = format!("{}::{}", credential_app_prefix(), service);
-    let key     = args.get(1).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
-    let value   = args.get(2).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let key     = args.get(1).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
+    let value   = args.get(2).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
     let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
     state.tokio.spawn(async move {
         let result = tokio::task::spawn_blocking(move || {
@@ -857,19 +913,21 @@ pub fn credentials_set_callback(
 ///
 /// Returns the stored secret, or JSON `null` if no entry exists.
 pub fn credentials_get_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().credentials {
         rv.set(reject_cap_promise(scope, "credentials").into()); return;
     }
-    let service = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let service = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
     let service = format!("{}::{}", credential_app_prefix(), service);
-    let key     = args.get(1).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let key     = args.get(1).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
     let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
     state.tokio.spawn(async move {
         let result = tokio::task::spawn_blocking(move || {
@@ -885,19 +943,21 @@ pub fn credentials_get_callback(
 
 /// `__glyx_credentials_delete(service, key)` â†' Promise<void>
 pub fn credentials_delete_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().credentials {
         rv.set(reject_cap_promise(scope, "credentials").into()); return;
     }
-    let service = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let service = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
     let service = format!("{}::{}", credential_app_prefix(), service);
-    let key     = args.get(1).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let key     = args.get(1).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
     let (resolver_ptr, promise, queue, redraw) = make_promise(scope, state);
     state.tokio.spawn(async move {
         let result = tokio::task::spawn_blocking(move || {
@@ -971,11 +1031,13 @@ pub fn str_to_code(key: &str) -> Option<global_hotkey::hotkey::Code> {
 
 /// `__glyx_perf_snapshot()` â†' JSON string with current perf metrics.
 pub fn perf_snapshot_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -1003,12 +1065,14 @@ pub fn perf_snapshot_callback(
 
 /// `__glyx_perf_set_budget(ms)` â€" sync, sets the frame-budget threshold.
 pub fn perf_set_budget_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if args.length() < 1 { return; }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let ms = args.get(0).number_value(scope).unwrap_or(16.667);
@@ -1017,11 +1081,13 @@ pub fn perf_set_budget_callback(
 
 /// `__glyx_perf_poll_leak_warnings()` â†' JSON array string; drains leak warnings (dev mode).
 pub fn perf_poll_leak_warnings_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let warnings: Vec<String> = {
@@ -1039,11 +1105,13 @@ pub fn perf_poll_leak_warnings_callback(
 
 /// `__glyx_perf_poll_violations()` â†' JSON array string; drains the violation queue.
 pub fn perf_poll_violations_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let violations: Vec<String> = {
@@ -1064,11 +1132,11 @@ pub fn perf_poll_violations_callback(
 /// Calls the quit closure stored in `WindowController`, which sends
 /// `GlyxUserEvent::Quit` to the winit event loop causing it to exit.
 pub fn quit_callback(
-    _scope: &mut v8::HandleScope,
+    _scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if let Some(ref ctrl) = state.window {
@@ -1082,7 +1150,7 @@ pub fn quit_callback(
 /// The framework calls this automatically on focus loss; developers can call it manually
 /// at natural pause points (level transitions, loading screens, menu opens).
 pub fn collect_memory_callback(
-    _scope: &mut v8::HandleScope,
+    _scope: &mut v8::PinScope<'_, '_, v8::Context>,
     _args:  v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
@@ -1132,11 +1200,13 @@ fn validate_external_url(url: &str) -> Result<(), &'static str> {
 /// shell metacharacters before dispatch.  Never passes through `cmd /C` or
 /// any other shell - each platform uses the direct OS API/binary.
 pub fn open_external_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -1147,7 +1217,7 @@ pub fn open_external_callback(
     }
 
     let url = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
 
     // ── URL validation ───────────────────────────────────────────────────────
@@ -1180,11 +1250,11 @@ pub fn open_external_callback(
 
 /// `__glyx_restart()` â€" sync, requests app restart (quit + re-launch).
 pub fn restart_callback(
-    _scope: &mut v8::HandleScope,
+    _scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     _rv:    v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if let Some(ref ctrl) = state.window {
@@ -1196,10 +1266,12 @@ pub fn restart_callback(
 
 /// `__glyx_platform()` â†' `"windows"` | `"macos"` | `"linux"` (compile-time constant).
 pub fn platform_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     _args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let s = if cfg!(target_os = "windows") { "windows" }
             else if cfg!(target_os = "macos") { "macos" }
             else { "linux" };
@@ -1214,10 +1286,12 @@ pub fn platform_callback(
 /// if the app was opened normally.  The value is set by glyx-core at startup
 /// via the `GLYX_LAUNCH_URL` environment variable before the runtime starts.
 pub fn deeplink_get_initial_url_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     _args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let url = std::env::var("GLYX_LAUNCH_URL").unwrap_or_default();
     let s = v8::String::new(scope, &url).unwrap();
     rv.set(s.into());
@@ -1229,11 +1303,13 @@ pub fn deeplink_get_initial_url_callback(
 /// when a second process connects and sends a URL).  Called each frame inside
 /// `__glyx_frameCallback`; JS fires `deeplink.onOpen` for each URL.
 pub fn deeplink_poll_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 

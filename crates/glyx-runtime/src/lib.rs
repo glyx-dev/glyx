@@ -128,6 +128,14 @@ pub use snapshot::{SnapshotBlob, create_stub_bindings_script};
 pub use cap_loader::load_caps;
 pub use glyx_cap_abi::CapSet;
 
+/// Pinned V8 scope accepted by all internal helper functions.
+///
+/// The `()` context type param lets this type coerce (via `Deref`) from any of
+/// the three scope flavours we use: a plain `HandleScope`, a `ContextScope`, and
+/// a callback `CallbackScope`.  Functions that need to *create* handles take
+/// `&mut Scope<'s, 'i>`; the returned `Local`s are tied to the `'s` lifetime.
+pub(crate) type Scope<'s, 'i> = v8::PinScope<'s, 'i, v8::Context>;
+
 // ── JS plugin type ────────────────────────────────────────────────────────────
 
 /// A bundled JS plugin ready to be evaluated in the V8 context.
@@ -245,7 +253,7 @@ pub trait GlyxExtension: Send + Sync {
 
     /// Register native V8 bindings directly. Called once after the isolate is created.
     /// Default: no-op.
-    fn register(&self, _scope: &mut v8::HandleScope, _global: v8::Local<v8::Object>) {}
+    fn register(&self, _scope: &mut Scope, _global: v8::Local<v8::Object>) {}
 
     /// Register named async backend commands callable from JS as `backend.<name>(args)`.
     /// Default: no commands.

@@ -1,9 +1,11 @@
-﻿use super::*;
+use super::*;
 pub fn get_time(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     _args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -17,11 +19,13 @@ pub fn get_time(
 /// (canvas, React scheduler) wake the winit event loop at the right time
 /// without spinning the GPU on static screens.
 pub fn request_frame_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let ext   = v8::Local::<v8::External>::try_from(args.data().unwrap()).unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let ext   = v8::Local::<v8::External>::try_from(args.data()).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let ms = args.get(0)
         .number_value(scope)
@@ -38,19 +42,21 @@ pub fn request_frame_callback(
 }
 
 pub fn js_log(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let msg = args
         .get(0)
         .to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_else(|| "<no message>".into());
     log::info!("[JS] {}", msg);
 
     // Forward to CDP inspector console if connected.
-    let ext   = v8::Local::<v8::External>::try_from(args.data().unwrap()).unwrap();
+    let ext   = v8::Local::<v8::External>::try_from(args.data()).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if let Some(tx) = state.cdp_log_tx.lock().as_ref() {
         let ts = std::time::SystemTime::now()
@@ -75,11 +81,13 @@ pub fn js_log(
 //   { type: "scroll",      deltaY }
 
 pub fn poll_events_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -190,11 +198,13 @@ pub fn poll_events_callback(
 // or `null` if the node has not been laid out yet.
 
 pub fn get_layout_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -232,20 +242,22 @@ pub fn get_layout_callback(
 // table column auto-sizing and rich-text cursor/layout math.
 
 pub fn measure_text_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let text      = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let text      = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
     let font_size = args.get(1).number_value(scope).unwrap_or(14.0) as f32;
     let mw = args.get(2).number_value(scope).unwrap_or(0.0);
     let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
     // Optional 4th arg: "bold" | "italic" | "bold italic" | omit for normal
-    let style_str = args.get(3).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let style_str = args.get(3).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
     let bold   = style_str.contains("bold");
     let italic = style_str.contains("italic");
 
@@ -275,15 +287,17 @@ pub fn measure_text_callback(
 // Signature: __glyx_text_char_at_x(text, fontSize, maxWidth, x) â†’ number
 
 pub fn text_char_at_x_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let text      = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let text      = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
     let font_size = args.get(1).number_value(scope).unwrap_or(16.0) as f32;
     let mw        = args.get(2).number_value(scope).unwrap_or(0.0);
     let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
@@ -302,15 +316,17 @@ pub fn text_char_at_x_callback(
 // Signature: __glyx_text_pos_at(text, fontSize, maxWidth, x, y) → number
 
 pub fn text_pos_at_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let text      = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope)).unwrap_or_default();
+    let text      = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
     let font_size = args.get(1).number_value(scope).unwrap_or(16.0) as f32;
     let mw        = args.get(2).number_value(scope).unwrap_or(0.0);
     let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
@@ -330,14 +346,16 @@ pub fn text_pos_at_callback(
 // not a programmer error; the app should handle missing values gracefully.
 
 pub fn get_env_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let name = args
         .get(0)
         .to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
 
     // Silent null for undeclared names â€” does not reveal that the var exists.
@@ -355,14 +373,16 @@ pub fn get_env_callback(
 // â”€â”€ Async binding: __glyx_readFile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub fn read_file_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let path = args
         .get(0)
         .to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
 
     // Capability gate â€” per-path glob check; throws a JS Error when denied.
@@ -372,7 +392,7 @@ pub fn read_file_callback(
         Err(e) => { throw_js_error(scope, &format!("fs.read denied: {e}")); return; }
     };
 
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -399,12 +419,14 @@ pub fn read_file_callback(
 // `__glyx_readFileBytes(path) -> Promise<string>`   (base64)
 
 pub fn read_file_bytes_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     let path = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
 
     // M1: canonicalize then check -- TOCTOU-safe; open the returned canonical path.
@@ -413,7 +435,7 @@ pub fn read_file_bytes_callback(
         Err(e) => { throw_js_error(scope, &format!("fs.read denied: {e}")); return; }
     };
 
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -433,11 +455,13 @@ pub fn read_file_bytes_callback(
 // â”€â”€ Scene graph bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub fn create_node_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -452,18 +476,20 @@ pub fn create_node_callback(
 }
 
 pub fn create_image_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let path = args
         .get(0)
         .to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
 
     // M2: gate local-path image loads behind fs.read capability.
@@ -492,11 +518,13 @@ pub fn create_image_callback(
 }
 
 pub fn append_child_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -510,11 +538,13 @@ pub fn append_child_callback(
 }
 
 pub fn insert_before_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -529,11 +559,13 @@ pub fn insert_before_callback(
 }
 
 pub fn update_node_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -545,11 +577,13 @@ pub fn update_node_callback(
 }
 
 pub fn remove_node_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -559,11 +593,13 @@ pub fn remove_node_callback(
 }
 
 pub fn set_root_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -575,11 +611,13 @@ pub fn set_root_callback(
 // â”€â”€ Window control bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub fn get_window_size_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -602,11 +640,13 @@ pub fn get_window_size_callback(
 }
 
 pub fn get_screen_size_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 

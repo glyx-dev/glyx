@@ -2,21 +2,23 @@ use super::*;
 
 #[cfg(feature = "audio")]
 pub fn audio_play_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().audio {
         rv.set(reject_cap_promise(scope, "audio").into()); return;
     }
     let src = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
     let opts_raw = args.get(1).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_else(|| "{}".into());
 
     // Parse opts: { volume?: f32, loop?: bool }
@@ -75,11 +77,13 @@ pub fn audio_play_callback(
 /// `__glyx_audio_pause(handle)` â†’ void (sync)
 #[cfg(feature = "audio")]
 pub fn audio_pause_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -95,11 +99,13 @@ pub fn audio_pause_callback(
 /// `__glyx_audio_resume(handle)` â†’ void (sync)
 #[cfg(feature = "audio")]
 pub fn audio_resume_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -116,11 +122,13 @@ pub fn audio_resume_callback(
 /// Stops playback and removes the sink from the map.
 #[cfg(feature = "audio")]
 pub fn audio_stop_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -133,11 +141,13 @@ pub fn audio_stop_callback(
 /// `__glyx_audio_setVolume(handle, volume)` â†’ void (sync)
 #[cfg(feature = "audio")]
 pub fn audio_set_volume_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id  = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -150,11 +160,13 @@ pub fn audio_set_volume_callback(
 /// `__glyx_audio_getVolume(handle)` â†’ f32 (sync)
 #[cfg(feature = "audio")]
 pub fn audio_get_volume_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id  = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -168,11 +180,13 @@ pub fn audio_get_volume_callback(
 /// Finished sinks are removed from the map.
 #[cfg(feature = "audio")]
 pub fn audio_poll_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -216,11 +230,13 @@ pub fn audio_poll_callback(
 /// rodio 0.17 has no built-in get_pos(). Returns 0.0 for unknown handles.
 #[cfg(feature = "audio")]
 pub fn audio_get_time_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -234,11 +250,13 @@ pub fn audio_get_time_callback(
 /// May return -1.0 for formats that don't expose a duration header.
 #[cfg(feature = "audio")]
 pub fn audio_duration_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id   = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -267,11 +285,13 @@ pub fn audio_duration_callback(
 /// `skip_duration`, and inserts a fresh sink. Updates the tracker.
 #[cfg(feature = "audio")]
 pub fn audio_seek_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id   = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -333,11 +353,13 @@ pub fn audio_seek_callback(
 
 #[cfg(not(feature = "audio"))]
 pub fn audio_play_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().audio {
@@ -348,10 +370,10 @@ pub fn audio_play_callback(
         None => { rv.set(reject_promise_with_error(scope, "audio capability not loaded").into()); return; }
     };
     let src = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
     let opts_raw = args.get(1).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_else(|| "{}".into());
     let volume: f32 = serde_json::from_str::<serde_json::Value>(&opts_raw)
         .ok()
@@ -377,11 +399,13 @@ pub fn audio_play_callback(
 
 #[cfg(not(feature = "audio"))]
 pub fn audio_pause_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -390,11 +414,13 @@ pub fn audio_pause_callback(
 
 #[cfg(not(feature = "audio"))]
 pub fn audio_resume_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -403,11 +429,13 @@ pub fn audio_resume_callback(
 
 #[cfg(not(feature = "audio"))]
 pub fn audio_stop_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -416,11 +444,13 @@ pub fn audio_stop_callback(
 
 #[cfg(not(feature = "audio"))]
 pub fn audio_set_volume_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id  = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -430,11 +460,13 @@ pub fn audio_set_volume_callback(
 
 #[cfg(not(feature = "audio"))]
 pub fn audio_get_volume_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id  = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -446,11 +478,13 @@ pub fn audio_get_volume_callback(
 
 #[cfg(not(feature = "audio"))]
 pub fn audio_poll_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let _ = args;
@@ -472,11 +506,13 @@ pub fn audio_poll_callback(
 
 #[cfg(not(feature = "audio"))]
 pub fn audio_get_time_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -488,11 +524,13 @@ pub fn audio_get_time_callback(
 
 #[cfg(not(feature = "audio"))]
 pub fn audio_duration_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id  = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -513,11 +551,13 @@ pub fn audio_duration_callback(
 
 #[cfg(not(feature = "audio"))]
 pub fn audio_seek_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let id   = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -540,11 +580,13 @@ pub fn audio_seek_callback(
 /// Parse `"ctrl+shift+v"` into a `global_hotkey::hotkey::HotKey`.
 #[cfg(feature = "camera")]
 pub fn camera_list_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -569,11 +611,13 @@ pub fn camera_list_callback(
 /// `__glyx_camera_open(deviceIndex) â†’ Promise<string>` â€” resolves with handle ID string.
 #[cfg(feature = "camera")]
 pub fn camera_open_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -605,16 +649,18 @@ pub fn camera_open_callback(
 /// `__glyx_camera_close(handleId)` â€” sync. Pushes CloseCamera scene command.
 #[cfg(feature = "camera")]
 pub fn camera_close_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let handle_id = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default()
         .parse::<u32>().unwrap_or(0);
 
@@ -625,11 +671,13 @@ pub fn camera_close_callback(
 /// Resolves with the absolute path to the saved PNG file.
 #[cfg(feature = "camera")]
 pub fn camera_capture_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -638,7 +686,7 @@ pub fn camera_capture_callback(
     }
 
     let handle_id = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default()
         .parse::<u32>().unwrap_or(0);
 
@@ -660,16 +708,18 @@ pub fn camera_capture_callback(
 /// `__glyx_camera_record_start(handleId, outputPath)` â€” sync. Starts MP4 recording via ffmpeg.
 #[cfg(feature = "camera")]
 pub fn camera_record_start_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let handle_id   = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default()
         .parse::<u32>().unwrap_or(0);
     let output_path = v8_arg_to_string(scope, &args, 1);
@@ -681,16 +731,18 @@ pub fn camera_record_start_callback(
 /// Resolves with the absolute path to the finished MP4 file.
 #[cfg(feature = "camera")]
 pub fn camera_record_stop_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let handle_id = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default()
         .parse::<u32>().unwrap_or(0);
 
@@ -711,11 +763,13 @@ pub fn camera_record_stop_callback(
 
 #[cfg(not(feature = "camera"))]
 pub fn camera_list_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().camera {
@@ -741,11 +795,13 @@ pub fn camera_list_callback(
 
 #[cfg(not(feature = "camera"))]
 pub fn camera_open_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().camera {
@@ -770,15 +826,17 @@ pub fn camera_open_callback(
 
 #[cfg(not(feature = "camera"))]
 pub fn camera_close_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let handle_id = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default()
         .parse::<u32>().unwrap_or(0);
     if let Some(cap) = state.caps.camera { unsafe { (cap.close)(handle_id) }; }
@@ -786,11 +844,13 @@ pub fn camera_close_callback(
 
 #[cfg(not(feature = "camera"))]
 pub fn camera_capture_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().camera {
@@ -801,7 +861,7 @@ pub fn camera_capture_callback(
         None => { rv.set(reject_promise_with_error(scope, "camera capability not loaded").into()); return; }
     };
     let handle_id = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default()
         .parse::<u32>().unwrap_or(0);
     let (resolver, promise, queue, redraw) = make_promise(scope, state);
@@ -823,15 +883,17 @@ pub fn camera_capture_callback(
 
 #[cfg(not(feature = "camera"))]
 pub fn camera_record_start_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let handle_id = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default()
         .parse::<u32>().unwrap_or(0);
     if let Some(cap) = state.caps.camera { unsafe { (cap.record_start)(handle_id) }; }
@@ -839,11 +901,13 @@ pub fn camera_record_start_callback(
 
 #[cfg(not(feature = "camera"))]
 pub fn camera_record_stop_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let cap = match state.caps.camera {
@@ -851,7 +915,7 @@ pub fn camera_record_stop_callback(
         None => { rv.set(reject_promise_with_error(scope, "camera capability not loaded").into()); return; }
     };
     let handle_id = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default()
         .parse::<u32>().unwrap_or(0);
     let (resolver, promise, queue, redraw) = make_promise(scope, state);
@@ -872,11 +936,13 @@ pub fn camera_record_stop_callback(
 
 /// `__glyx_microphone_list() â†’ Promise<string>` â€” JSON array of mic devices.
 pub fn microphone_list_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -900,11 +966,13 @@ pub fn microphone_list_callback(
 
 /// `__glyx_microphone_record(deviceName, durationMs) â†’ Promise<string>` â€” path to WAV file.
 pub fn microphone_record_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -936,11 +1004,13 @@ pub fn microphone_record_callback(
 /// `__glyx_hid_enumerate() â†’ Promise<JSON>` â€” list HID devices.
 #[cfg(feature = "hid")]
 pub fn hid_enumerate_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -979,11 +1049,13 @@ pub fn hid_enumerate_callback(
 /// `__glyx_hid_open(vendorId, productId) â†’ Promise<handleId>` â€” open a HID device.
 #[cfg(feature = "hid")]
 pub fn hid_open_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -1018,11 +1090,13 @@ pub fn hid_open_callback(
 /// `__glyx_hid_read(handleId, timeoutMs) â†’ Promise<JSON>` â€” read bytes from device.
 #[cfg(feature = "hid")]
 pub fn hid_read_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -1055,11 +1129,13 @@ pub fn hid_read_callback(
 /// `__glyx_hid_write(handleId, dataJson) â†’ Promise<bytesWritten>` â€” write bytes to device.
 #[cfg(feature = "hid")]
 pub fn hid_write_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -1091,11 +1167,13 @@ pub fn hid_write_callback(
 /// `__glyx_hid_close(handleId)` â€” close a HID device handle (sync, no promise).
 #[cfg(feature = "hid")]
 pub fn hid_close_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -1105,11 +1183,13 @@ pub fn hid_close_callback(
 
 #[cfg(not(feature = "hid"))]
 pub fn hid_enumerate_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().hid {
@@ -1135,11 +1215,13 @@ pub fn hid_enumerate_callback(
 
 #[cfg(not(feature = "hid"))]
 pub fn hid_open_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().hid {
@@ -1165,11 +1247,13 @@ pub fn hid_open_callback(
 
 #[cfg(not(feature = "hid"))]
 pub fn hid_read_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().hid {
@@ -1194,11 +1278,13 @@ pub fn hid_read_callback(
 
 #[cfg(not(feature = "hid"))]
 pub fn hid_write_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     if !glyx_security::get().hid {
@@ -1225,11 +1311,13 @@ pub fn hid_write_callback(
 
 #[cfg(not(feature = "hid"))]
 pub fn hid_close_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let handle_id = args.get(0).number_value(scope).unwrap_or(0.0) as u32;
@@ -1243,11 +1331,13 @@ pub fn hid_close_callback(
 /// Fetches the latest GitHub release and returns:
 ///   `{ hasUpdate: bool, latestVersion: string, body: string }`
 pub fn video_open_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -1280,11 +1370,13 @@ pub fn video_open_callback(
 ///
 /// Seeks the video to `seconds`. No-op if the handle is not active.
 pub fn video_seek_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -1301,11 +1393,13 @@ pub fn video_seek_callback(
 /// Sets playback volume (0.0 = mute, 1.0 = normal, up to 2.0).
 /// Applied to the audio sink within ~50ms.
 pub fn video_set_volume_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -1320,11 +1414,13 @@ pub fn video_set_volume_callback(
 ///
 /// Stops playback and releases all resources for this video handle.
 pub fn video_close_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -1339,11 +1435,13 @@ pub fn video_close_callback(
 ///
 /// Pauses the decode thread (spin-wait) and the audio sink.
 pub fn video_pause_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let handle_id = v8_arg_to_string(scope, &args, 0).parse::<u32>().unwrap_or(0);
@@ -1354,11 +1452,13 @@ pub fn video_pause_callback(
 ///
 /// Resumes the decode thread and audio sink after a pause.
 pub fn video_play_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     _rv:   v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let handle_id = v8_arg_to_string(scope, &args, 0).parse::<u32>().unwrap_or(0);
@@ -1371,11 +1471,13 @@ pub fn video_play_callback(
 /// Each event: `{type:"ended",id:N}` or `{type:"metadata",id:N,width:W,height:H,fps:F,durationSecs:D}`.
 /// Called each frame from JS (inside `__glyx_frameCallback`).
 pub fn video_poll_callback(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let data  = args.data().unwrap();
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
     let _ = args; // no arguments

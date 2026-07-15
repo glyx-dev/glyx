@@ -25,6 +25,13 @@
 //! Async:
 //!   - `__glyx_readFile(path)` → Promise<string>
 
+// The prebuilt V8 static library is compiled with mimalloc support and
+// references `mi_collect`.  Force-linking the mimalloc native lib ensures any
+// binary that embeds V8 (e.g. glyx-snapshot) resolves that symbol.  The search
+// path is provided by libmimalloc-sys via `mimalloc` (declared in Cargo.toml).
+#[link(name = "mimalloc", kind = "static")]
+extern "C" {}
+
 pub use glyx_macros::{glyx_plugin, glyx_command};
 
 use std::sync::Once;

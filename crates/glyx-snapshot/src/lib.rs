@@ -28,37 +28,41 @@ pub fn create_snapshot(
     let stubs = glyx_runtime::create_stub_bindings_script();
     let combined_source = format!("{}\n{}\n{}\n{}", stubs, polyfills, framework, app_js);
 
-    // v8 150: `SnapshotCreator::new` returns the `OwnedIsolate` directly — the
-    // isolate is created and registered with the snapshot creator internally.
-    // We no longer call `get_owned_isolate()` / `std::mem::forget()`.
-    let mut isolate = v8::SnapshotCreator::new(None, None);
+    // v8 150.1.0: `SnapshotCreator` is crate-private; create the snapshot
+    // isolate via `Isolate::snapshot_creator`, which returns an `OwnedIsolate`
+    // already registered with the (internal) snapshot creator. `set_default_context`
+    // and `create_blob` are then called on the isolate.
+    let mut isolate = v8::Isolate::snapshot_creator(None, None);
 
     {
         v8::scope!(let scope, &mut isolate);
-        let context = v8::Context::new(&scope);
+        let context = v8::Context::new(&scope, Default::default());
         let ctx_global = v8::Global::new(&scope, context);
 
-        // Re-enter the context for script execution.
-        v8::scope_with_context!(let scope, &mut isolate, &ctx_global);
+        // Run the combined script inside the context.  `ContextScope::new`
+        // borrows the *handle* scope (not `isolate` again).
+        {
+            let scope = &mut v8::ContextScope::new(scope, v8::Local::new(&scope, &ctx_global));
 
-        // Compile and run the combined script
-        let source = v8::String::new(&scope, &combined_source)
-            .ok_or_else(|| SnapshotError::ExecutionFailed("Failed to create source string".into()))?;
+            let source = v8::String::new(scope, &combined_source)
+                .ok_or_else(|| SnapshotError::ExecutionFailed("Failed to create source string".into()))?;
 
-        let script = v8::Script::compile(&scope, source, None)
-            .ok_or_else(|| SnapshotError::ExecutionFailed("Failed to compile snapshot".into()))?;
+            let script = v8::Script::compile(scope, source, None)
+                .ok_or_else(|| SnapshotError::ExecutionFailed("Failed to compile snapshot".into()))?;
 
-        script.run(&scope)
-            .ok_or_else(|| SnapshotError::ExecutionFailed("Failed to execute snapshot".into()))?;
+            script.run(scope)
+                .ok_or_else(|| SnapshotError::ExecutionFailed("Failed to execute snapshot".into()))?;
+        }
 
-        // Register the context as the snapshot's default context.  `context` is
-        // a `Local` valid within this scope block.
-        let context = v8::Local::new(&scope, &ctx_global);
-        isolate.set_default_context(context);
+        // Register the context as the snapshot's default context.  This is called
+        // on the handle *scope* (which derefs to `Isolate`) so it reuses the
+        // existing borrow of `isolate` instead of taking a conflicting one.
+        let default_context = v8::Local::new(&scope, &ctx_global);
+        scope.set_default_context(default_context);
     }
 
-    // `create_blob` consumes the isolate (it internally forgets it so the
-    // SnapshotCreator owns its lifetime) and returns the serialized heap.
+    // `create_blob` consumes the isolate and returns the serialized heap as
+    // `Option<StartupData>` (derefs to `&[u8]`).
     let startup_data = isolate.create_blob(v8::FunctionCodeHandling::Clear)
         .ok_or_else(|| SnapshotError::ExecutionFailed("Failed to create snapshot blob".into()))?;
 

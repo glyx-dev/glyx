@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 v8             = { workspace = true }
+mimalloc       = { workspace = true }
 tokio          = { workspace = true }
 log            = { workspace = true }
 parking_lot    = { workspace = true }

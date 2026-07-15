@@ -3167,6 +3167,7 @@ dependencies = [
  "libloading",
  "log",
  "mdns-sd",
+ "mimalloc",
  "notify",
  "notify-rust",
  "parking_lot",
@@ -3213,6 +3214,7 @@ dependencies = [
  "env_logger",
  "glyx-runtime",
  "log",
+ "mimalloc",
  "v8",
 ]
 

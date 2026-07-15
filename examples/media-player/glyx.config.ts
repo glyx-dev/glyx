@@ -21,6 +21,7 @@ export default defineConfig({
     video:  true,
     dialog: true,
     db:     true,
+    tray:   true,
   },
   dev: {
     entry:  'src/app.jsx',

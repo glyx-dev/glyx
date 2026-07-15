@@ -280,6 +280,9 @@ pub struct Capabilities {
     pub clipboard:    bool,
     #[serde(default)]
     pub notification: bool,
+    /// System tray icon and menu.
+    #[serde(default)]
+    pub tray: bool,
     #[serde(default)]
     pub battery:          bool,
     #[serde(default)]

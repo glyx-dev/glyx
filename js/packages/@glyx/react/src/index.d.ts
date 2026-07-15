@@ -225,3 +225,52 @@ export declare const glyxWindow: {
   /** Close this window. */
   close(): void;
 };
+
+// ── System tray ─────────────────────────────────────────────────────────────
+
+export interface TrayMenuItem {
+  id: string;
+  label: string;
+  enabled?: boolean;
+  checked?: boolean;
+  separator?: boolean;
+  accelerator?: string;
+  children?: TrayMenuItem[];
+}
+
+export type TrayEvent =
+  | { Click: { tray_id: number } }
+  | { DoubleClick: { tray_id: number } }
+  | { MenuItemClick: { tray_id: number; item_id: string } };
+
+export interface TrayHandle {
+  readonly id: number;
+}
+
+/** System tray icon API (requires `tray: true` capability). */
+export const tray: {
+  /**
+   * Create a system tray icon from raw RGBA pixel data.
+   * @returns A handle (0 on failure).
+   * @example
+   * const icon = ... // RGBA bytes from an <img> canvas
+   * const id = tray.create(iconBytes, 32, 32, 'My App', [
+   *   { id: 'play', label: 'Play/Pause' },
+   *   { id: '', separator: true },
+   *   { id: 'quit', label: 'Quit' },
+   * ]);
+   */
+  create(rgba: ArrayBuffer, width: number, height: number, tooltip: string, menu?: TrayMenuItem[]): number;
+
+  /** Destroy a tray icon. */
+  destroy(trayId: number): boolean;
+
+  /** Update the tray menu. */
+  updateMenu(trayId: number, menu: TrayMenuItem[]): boolean;
+
+  /** Update the tooltip text. */
+  setTooltip(trayId: number, tooltip: string): void;
+
+  /** Poll for pending tray events (menu clicks, double-clicks). Call each frame. Returns JSON array. */
+  pollEvents(): string;
+};

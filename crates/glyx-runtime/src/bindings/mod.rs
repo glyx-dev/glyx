@@ -22,6 +22,7 @@ mod bind_media;
 mod bind_canvas;
 mod bind_ai;
 mod bind_updater;
+mod bind_tray;
 
 pub use self::bind_core::*;
 pub use self::bind_fs::*;
@@ -32,6 +33,7 @@ pub use self::bind_media::*;
 pub use self::bind_canvas::*;
 pub use self::bind_ai::*;
 pub use self::bind_updater::*;
+pub use self::bind_tray::*;
 
 // IPC bus 
 //
@@ -927,6 +929,13 @@ pub fn register_all(
 
     //  Notifications 
     register!("__glyx_notification_send", notification_send_callback);
+
+    // System tray
+    register!("__glyx_tray_create",        tray_create_callback);
+    register!("__glyx_tray_destroy",       tray_destroy_callback);
+    register!("__glyx_tray_update_menu",   tray_update_menu_callback);
+    register!("__glyx_tray_set_tooltip",   tray_set_tooltip_callback);
+    register!("__glyx_tray_poll_events",   tray_poll_events_callback);
 
     //  Network 
     #[cfg(feature = "fetch")]

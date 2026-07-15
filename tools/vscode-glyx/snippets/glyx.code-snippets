@@ -355,5 +355,33 @@
       "});"
     ],
     "description": "Scaffold glyx.config.ts"
+  },
+
+  // ── System tray ─────────────────────────────────────────────────────────
+  "Glyx System Tray Icon": {
+    "prefix": "gtray",
+    "body": [
+      "import { tray } from '@glyx/react';",
+      "",
+      "const id = tray.create(rgbaBytes, ${1:32}, ${2:32}, '${3:My App}', [",
+      "  { id: '${4:show}', label: '${5:Show}' },",
+      "  { id: '', separator: true },",
+      "  { id: '${6:quit}', label: '${7:Quit}' },",
+      "]);",
+      "",
+      "// Poll tray events each frame (call in your frame loop)",
+      "function pollTray() {",
+      "  const raw = tray.pollEvents();",
+      "  if (!raw) return;",
+      "  const events = JSON.parse(raw);",
+      "  for (const ev of events) {",
+      "    if (ev.MenuItemClick?.item_id === '${4:show}') window.show();",
+      "    if (ev.MenuItemClick?.item_id === '${6:quit}') { tray.destroy(id); window.quit(); }",
+      "  }",
+      "}",
+      "",
+      "$0"
+    ],
+    "description": "Create a system tray icon with menu"
   }
 }

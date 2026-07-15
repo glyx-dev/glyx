@@ -13,6 +13,7 @@ thiserror      = { workspace = true }
 anyhow         = { workspace = true }
 glyx-security = { path = "../glyx-security" }
 glyx-db       = { path = "../glyx-db" }
+glyx-tray     = { path = "../glyx-tray" }
 serde_json     = { workspace = true }
 rfd                 = { workspace = true }
 arboard             = { workspace = true }

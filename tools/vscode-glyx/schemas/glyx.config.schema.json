@@ -158,6 +158,10 @@
           "type": "boolean",
           "description": "Send native OS notifications."
         },
+        "tray": {
+          "type": "boolean",
+          "description": "Create system tray icons with menus."
+        },
         "crash": {
           "type": "boolean",
           "description": "Crash reporting — collect JS and Rust panics to ~/.glyx/crashes/."

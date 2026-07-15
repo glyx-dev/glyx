@@ -29,6 +29,11 @@
 // references `mi_collect`.  Force-linking the mimalloc native lib ensures any
 // binary that embeds V8 (e.g. glyx-snapshot) resolves that symbol.  The search
 // path is provided by libmimalloc-sys via `mimalloc` (declared in Cargo.toml).
+//
+// When the `glyx-v8` feature is enabled, V8 is supplied by a glyx-v8 build
+// where mimalloc is already merged into the V8 archive, so this force-link is
+// unnecessary and is disabled (flip back by dropping the feature).
+#[cfg(not(feature = "glyx-v8"))]
 #[link(name = "mimalloc", kind = "static")]
 extern "C" {}
 
@@ -343,20 +348,19 @@ pub fn init_v8() {
         //   Tells every tier (parser, bytecode, JIT) to prefer smaller output
         //   over maximum throughput.  Works in tandem with --lite-mode.
         //
-        // --no-expose-wasm:
-        //   Disable WebAssembly (unused; saves the Wasm engine's own structures).
+        // (--no-expose-wasm / --expose-gc were removed in V8 15.x.)
         // In release, also pass --disallow-code-generation-from-strings so
         // eval() and new Function() throw at the V8 flag level (applies to
         // every context in this process, including any created by extensions).
         // Debug builds leave this off so hot-reload and devtools work normally.
         #[cfg(not(debug_assertions))]
         v8::V8::set_flags_from_string(
-            "--lite-mode --optimize-for-size --no-expose-wasm --expose-gc \
+            "--lite-mode --optimize-for-size \
              --disallow-code-generation-from-strings"
         );
         #[cfg(debug_assertions)]
         v8::V8::set_flags_from_string(
-            "--lite-mode --optimize-for-size --no-expose-wasm --expose-gc"
+            "--lite-mode --optimize-for-size"
         );
         // Source-map position translation in stack traces is handled via the
         // ScriptOrigin source_map_url set on each eval() call (runtime.rs).

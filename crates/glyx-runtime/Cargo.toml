@@ -59,6 +59,12 @@ notify             = { workspace = true }
 [features]
 default = ["v8", "embed-icu"]
 v8 = []       # V8 backend (current only backend; rusty_v8 dep is always required for now)
+# Use a custom V8 build from the glyx-v8 repo instead of rusty_v8's prebuilt.
+# When enabled, mimalloc is already merged into the V8 archive, so the
+# force-link hack in lib.rs is disabled. You must also point the `v8` crate at
+# the glyx-v8 artifact (see .cargo/config.toml `[env]` example / CI). Flip off to
+# return to the default prebuilt + force-link behaviour.
+glyx-v8 = []
 # Embed the full icudtl.dat (ICU 77) into the binary. ON for tests/dev and any
 # build that wants a zero-external-file binary. App builds go through glyx-core
 # with `default-features = false`, so this is OFF there — packaged apps instead

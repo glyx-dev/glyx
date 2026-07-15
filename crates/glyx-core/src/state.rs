@@ -144,6 +144,7 @@ impl ByteBudgetImageCache {
 // ── Per-window state ──────────────────────────────────────────────────────────
 
 /// Per-window rendering + runtime state.
+#[allow(dead_code)]
 pub(super) struct PerWindowState {
     pub(super) gpu:          Present,
     /// Window handle — needed to lazily create a wgpu context when a

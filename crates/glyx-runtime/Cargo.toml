@@ -48,6 +48,7 @@ glyx-cap-ai        = { path = "../glyx-cap-ai", optional = true }
 glyx-cap-gamepad   = { path = "../glyx-cap-gamepad", optional = true }
 glyx-cap-hid       = { path = "../glyx-cap-hid", optional = true }
 glyx-cap-camera    = { path = "../glyx-cap-camera", optional = true }
+glyx-cap-webview   = { path = "../glyx-cap-webview", optional = true }
 glyx-macros        = { path = "../glyx-macros" }
 glyx-verify        = { path = "../glyx-verify" }
 libloading         = { workspace = true }
@@ -81,6 +82,7 @@ canvas3d = ["dep:glyx-3d"]
 ai       = ["dep:glyx-ai", "dep:glyx-cap-ai"]
 hid      = ["dep:hidapi", "dep:glyx-cap-hid"]
 camera   = ["dep:glyx-cap-camera"]
+webview  = ["dep:glyx-cap-webview"]
 updater  = ["dep:self_update", "dep:ed25519-dalek"]
 # jsc = []    # future: JavaScriptCore (iOS/macOS)
 # quickjs = [] # future: QuickJS (embedded/WASM)

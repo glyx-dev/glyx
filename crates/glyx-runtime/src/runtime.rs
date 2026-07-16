@@ -7,9 +7,11 @@ use crate::{
     bindings::{
         new_completion_queue, new_event_queue, new_layout_cache, new_scene_queue,
         new_ipc_bus, new_db_pools, new_video_events, register_all, reload_plugin_in_scope,
+        new_webview_events,
         CompletionQueue, DbPools, EventQueue, InputEvent, IpcBus, LayoutCache, SceneCommand,
         SceneQueue, VideoEvents, WindowController, StatePtrUsize,
     },
+    bindings::WebviewEvents,
     runtime_trait::JsRuntime,
     BackendRegistry, RuntimeError, GlyxExtension, Scope,
 };
@@ -96,6 +98,8 @@ pub struct V8Runtime {
     pub db_pools: DbPools,
     /// Video events pushed by decode threads and forwarded to JS via `__glyx_video_poll`.
     pub video_events: VideoEvents,
+    /// Webview page messages drained by glyx-core each frame, forwarded to JS via `__glyx_webview_poll`.
+    pub webview_events: WebviewEvents,
     /// Opaque pointer to the heap-allocated `AsyncState` created in `register_all`.
     /// Used by `reload_plugin` to update `js_backend_commands` after a dev-mode rebundle.
     state_ptr: StatePtrUsize,
@@ -151,6 +155,7 @@ impl V8Runtime {
         let deeplink_url_queue = Arc::new(parking_lot::Mutex::new(VecDeque::new()));
         let db_pools           = new_db_pools();
         let video_events       = new_video_events();
+        let webview_events     = new_webview_events();
         let cdp_log_tx         = Arc::new(parking_lot::Mutex::new(None::<tokio::sync::mpsc::UnboundedSender<String>>));
 
         // Clone handle before moving into register_all; keep one for inspector.
@@ -182,6 +187,7 @@ impl V8Runtime {
                 Arc::clone(&deeplink_url_queue),
                 Arc::clone(&db_pools),
                 Arc::clone(&video_events),
+                Arc::clone(&webview_events),
                 Arc::clone(&cdp_log_tx),
                 backend_commands,
                 js_plugins,
@@ -201,7 +207,7 @@ impl V8Runtime {
             #[cfg(feature = "dev")]
             inspector,
             isolate, context, queue, scene, events, layout_cache,
-            perf_state, deeplink_url_queue, db_pools, video_events, state_ptr,
+            perf_state, deeplink_url_queue, db_pools, video_events, webview_events, state_ptr,
         }
     }
 
@@ -249,6 +255,7 @@ impl V8Runtime {
         let deeplink_url_queue = Arc::new(parking_lot::Mutex::new(VecDeque::new()));
         let db_pools           = new_db_pools();
         let video_events       = new_video_events();
+        let webview_events     = new_webview_events();
         let cdp_log_tx         = Arc::new(parking_lot::Mutex::new(None::<tokio::sync::mpsc::UnboundedSender<String>>));
 
         // Clone handle before moving into register_all; keep one for inspector.
@@ -283,6 +290,7 @@ impl V8Runtime {
                 Arc::clone(&deeplink_url_queue),
                 Arc::clone(&db_pools),
                 Arc::clone(&video_events),
+                Arc::clone(&webview_events),
                 Arc::clone(&cdp_log_tx),
                 backend_commands,
                 js_plugins,
@@ -301,7 +309,7 @@ impl V8Runtime {
             #[cfg(feature = "dev")]
             inspector,
             isolate, context, queue, scene, events, layout_cache,
-            perf_state, deeplink_url_queue, db_pools, video_events, state_ptr,
+            perf_state, deeplink_url_queue, db_pools, video_events, webview_events, state_ptr,
         })
     }
 

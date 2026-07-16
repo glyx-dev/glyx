@@ -90,6 +90,12 @@ pub fn new_db_pools() -> DbPools { Arc::new(Mutex::new(HashMap::new())) }
 pub type VideoEvents = Arc<Mutex<VecDeque<String>>>;
 pub fn new_video_events() -> VideoEvents { Arc::new(Mutex::new(VecDeque::new())) }
 
+/// Shared webview message-in queue — glyx-core drains each webview instance's
+/// `poll_messages` cap call every frame and pushes JSON `{"id":N,"message":"..."}`
+/// strings here; `__glyx_webview_poll` drains them for JS's `onMessage` dispatch.
+pub type WebviewEvents = Arc<Mutex<VecDeque<String>>>;
+pub fn new_webview_events() -> WebviewEvents { Arc::new(Mutex::new(VecDeque::new())) }
+
 /// An input event pushed by the Rust side and consumed by JS via __glyx_pollEvents.
 #[derive(Debug, Clone)]
 pub enum InputEvent {
@@ -202,9 +208,12 @@ pub enum NodeType {
     Camera,
     Video,
     /// Explicit render-layer boundary.  When the subtree rooted here has no
-    /// dirty nodes, the cached Vello scene fragment is replayed directly 
+    /// dirty nodes, the cached Vello scene fragment is replayed directly
     /// skipping all child traversal and draw-call construction for this frame.
     RepaintBoundary,
+    /// Native OS-embedded webview (via the `webview` capability). Composited
+    /// by the OS as a real child window, not drawn into the Vello scene.
+    WebView,
 }
 
 /// A length value that can be either absolute (px) or relative (%).
@@ -335,6 +344,16 @@ pub struct NodeProps {
     /// Handle ID returned by `__glyx_video_open`. The render loop maps this
     /// to a `VideoStream` in `PerWindowState` and renders the current decoded frame.
     pub video_handle: Option<u32>,
+
+    //  WebView €€€
+    /// URL to load. Mutually exclusive with `webview_html` — `webview_html`
+    /// wins if both are set (matches the ABI's `is_html` flag semantics).
+    pub webview_src: Option<String>,
+    /// Raw HTML to load in place of navigating to a URL.
+    pub webview_html: Option<String>,
+    /// JSON-encoded creation options — `{ sandbox?, allowedOrigins?, assetsRoot? }`.
+    /// See `glyx_cap_abi::WebviewCap::create` doc comment for the shape.
+    pub webview_opts: Option<String>,
 
     //  Margin (uniform + per-side, px or %) €
     /// Uniform margin (applied to all four sides).
@@ -638,6 +657,10 @@ pub enum SceneCommand {
     Canvas3DUpdate { id: u32, scene: glyx_3d::Scene3D },
     #[cfg(feature = "canvas3d")]
     Canvas3DUnloadGltf { path: String },
+    /// Post a message INTO a webview page's `window` (delivered as a
+    /// `message` event) — the JS→page half of the postMessage bridge.
+    #[cfg(feature = "webview")]
+    WebviewPostMessage { id: u32, msg: String },
     /// Open a camera device and start the capture loop in glyx-core.
     #[cfg(feature = "camera")]
     OpenCamera  { handle_id: u32, device_index: u32 },
@@ -692,6 +715,7 @@ pub fn register_all(
     deeplink_url_queue: Arc<Mutex<VecDeque<String>>>,
     db_pools:     DbPools,
     video_events: VideoEvents,
+    webview_events: WebviewEvents,
     cdp_log_tx:   Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
     backend_commands: crate::BackendRegistry,
     js_plugins:   crate::JsPlugins,
@@ -750,6 +774,7 @@ pub fn register_all(
         next_camera_id: std::sync::atomic::AtomicU32::new(1),
         next_video_id:  std::sync::atomic::AtomicU32::new(1),
         video_events,
+        webview_events,
         #[cfg(feature = "hid")]
         hid_api:     Arc::new(Mutex::new(None)),
         #[cfg(feature = "hid")]
@@ -1021,6 +1046,12 @@ pub fn register_all(
     #[cfg(feature = "canvas3d")]
     register!("__glyx_canvas3d_unload_gltf", canvas3d_unload_gltf_callback);
 
+    //  WebView
+    #[cfg(feature = "webview")]
+    register!("__glyx_webview_post_message", webview_post_message_callback);
+    #[cfg(feature = "webview")]
+    register!("__glyx_webview_poll",         webview_poll_callback);
+
     //  Local AI — registered when AI cap is available (static or DLL)
     if has_ai {
         register!("__glyx_ai_embed",             ai_embed_callback);
@@ -1160,6 +1191,11 @@ struct AsyncState {
     next_video_id: std::sync::atomic::AtomicU32,
     /// Events from VideoStream threads: `{"type":"ended","id":N}` / `{"type":"metadata","id":N,...}`.
     video_events: Arc<Mutex<VecDeque<String>>>,
+    //  WebView €€€
+    /// Messages drained from webview pages each frame by glyx-core:
+    /// `{"id":N,"message":"..."}`. See `WebviewEvents` type doc.
+    #[allow(dead_code)] // read by webview_poll_callback when the "webview" feature is enabled
+    webview_events: WebviewEvents,
     //  Local AI model cache (glyx-ai / Candle) €
     /// Lazily initialised embedding model. Locked during init, then shared.
     #[cfg(feature = "ai")]
@@ -1332,6 +1368,7 @@ fn parse_node_type(scope: &mut v8::PinScope<'_, '_, v8::Context>, value: v8::Loc
         "camera"          => NodeType::Camera,
         "video"           => NodeType::Video,
         "repaintboundary" => NodeType::RepaintBoundary,
+        "webview"         => NodeType::WebView,
         _                 => NodeType::View,
     }
 }
@@ -1508,6 +1545,9 @@ fn parse_props(
     props.camera_handle   = get_num_prop(scope, obj, "cameraHandle").map(|v| v as u32);
     props.mirror          = get_bool_prop(scope, obj, "mirror");
     props.video_handle    = get_num_prop(scope, obj, "videoHandle").map(|v| v as u32);
+    props.webview_src     = get_str_prop(scope, obj, "webviewSrc");
+    props.webview_html    = get_str_prop(scope, obj, "webviewHtml");
+    props.webview_opts    = get_str_prop(scope, obj, "webviewOpts");
 
     //  Margin 
     props.margin            = get_length_prop(scope, obj, "margin");

@@ -4,7 +4,7 @@
 
 **Native desktop apps with React and GPU rendering.**
 
-No Electron. No WebView. No Rust required.
+No Electron. No browser engine for your UI. No Rust required.
 
 [glyx.dev](https://glyx.dev) · [Docs](https://glyx.dev/docs/getting-started) · [Examples](https://glyx.dev/examples) · [Discussions](https://github.com/glyx-dev/glyx/discussions)
 
@@ -117,6 +117,7 @@ for the full walkthrough.
 - **Custom title bar** — full native window control (macOS traffic lights, Windows chrome)
 - **CDP debugger** — Chrome DevTools (breakpoints, console, network) via the built-in inspector
 - **Canvas 2D + 3D** — GPU drawing, textured GLTF models, dynamic lights, one wgpu pipeline
+- **Embedded WebView** — opt-in native OS webview (WebView2/WKWebView/WebKitGTK) for real web content — OAuth, embeds — with a two-way postMessage bridge; separate from the GPU-rendered UI everything else uses
 - **Cross-platform** — Windows, macOS, Linux from one codebase
 
 ## Project structure
@@ -142,6 +143,16 @@ crates/
   glyx-runner/         App runner / process entrypoint
   glyx-perf/           Performance monitoring
   glyx-cli/            CLI: create, dev, build
+  glyx-tray/           System tray icons + menus
+  glyx-verify/         Ed25519 signature verification for capability DLLs
+  glyx-macros/         Shared proc macros
+  glyx-cap-abi/        Stable C ABI for optional capability DLLs
+  glyx-cap-audio/      Audio capability (static or DLL)
+  glyx-cap-ai/         Local AI capability (static or DLL)
+  glyx-cap-camera/     Camera capability (static or DLL)
+  glyx-cap-gamepad/    Gamepad capability (static or DLL)
+  glyx-cap-hid/        HID device capability (static or DLL)
+  glyx-cap-webview/    Native embedded webview capability (wry; static or DLL)
 
 js/packages/@glyx/
   react/               React reconciler, components, hooks, APIs
@@ -153,15 +164,32 @@ js/packages/@glyx/
   three/               Three.js-style 3D API over Canvas3D
   config/              glyx.config.ts schema + types
   drizzle/             Drizzle ORM adapter for glyx-db
+  charts/              Line/Area/Bar/Pie charts on Canvas
+  table/               Sortable, resizable, virtualized data table
+  command/             Cmd+K command palette
+  markdown/            Markdown renderer
+  form/                Form validation orchestration (Zod-compatible)
+  drag-drop/           Draggable + drop zone
+  split-pane/          Draggable-divider split layout
+  context-menu/        Right-click context menus
+  auth/                Auth flow helpers
+  icons/               Icon set
+  rich-text/           Rich text (in progress)
 
 tools/
-  vscode-glyx/         VS Code extension
+  vscode-glyx/         VS Code extension (snippets, glyx.config.json JSON schema)
 
 examples/
-  hello-world/
-  notes-app/           Full-featured reference app
-  design-regular/      @glyx-dev/design showcase
+  hello-world/         Minimal starting point
+  notes-app/           Full-featured reference app (SQLite, vector search, multi-window)
   calculator/
+  dashboard/           Stat cards + nav layout
+  files/               File system / dialog demo
+  log-viewer/          Streaming log viewer
+  media-player/        Audio/video playback demo
+  model-viewer/        Canvas3D + GLTF viewer
+  tasks/               Todo list demo
+  webview-demo/        Native embedded WebView + two-way postMessage bridge
 ```
 
 ## Feedback

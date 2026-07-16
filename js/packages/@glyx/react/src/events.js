@@ -35,6 +35,13 @@ const scrollRegistry = new Map();
 // Draggable nodes (e.g. Slider thumb) register here.
 const dragRegistry = new Map();
 
+// Map from nodeId -> { onIncrement?, onDecrement?, onSetValue? }
+// Numeric controls (e.g. Slider) register here so a screen reader's
+// Increment/Decrement/SetValue actions (Narrator arrow keys on a focused
+// slider, etc.) can actually change the value — Rust has no concept of the
+// control's own min/max/step, so it just forwards the action here.
+const a11yValueRegistry = new Map();
+
 // Map from nodeId -> true/false — prevents event dispatch to the node.
 // Children of a disabled node are also blocked (ancestor check during dispatch).
 const disabledRegistry = new Map();
@@ -187,6 +194,20 @@ export function registerDraggable(nodeId, handlers) {
 export function unregisterDraggable(nodeId) {
   if (activeDragId === nodeId) activeDragId = null;
   dragRegistry.delete(nodeId);
+}
+
+/**
+ * Register a node's screen-reader value actions (Increment/Decrement/SetValue).
+ * @param {number} nodeId
+ * @param {{ onIncrement?: () => void, onDecrement?: () => void, onSetValue?: (v:number) => void }} handlers
+ */
+export function registerA11yValue(nodeId, handlers) {
+  a11yValueRegistry.set(nodeId, handlers);
+}
+
+/** Unregister a node's screen-reader value actions (on unmount). */
+export function unregisterA11yValue(nodeId) {
+  a11yValueRegistry.delete(nodeId);
 }
 
 /**
@@ -589,6 +610,43 @@ export function dispatchEvents() {
         if (!handlers) break;
 
         handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld });
+        break;
+      }
+
+      case 'accessibilityFocus': {
+        // Screen reader (or other AT) moved focus — sync JS's own focus
+        // tracker the same way a mouse click would, so onFocus/styling fire.
+        setFocus(ev.nodeId);
+        break;
+      }
+
+      case 'accessibilityValueChange': {
+        const h = a11yValueRegistry.get(ev.nodeId);
+        if (!h) break;
+        if (ev.action === 'increment') h.onIncrement?.();
+        else if (ev.action === 'decrement') h.onDecrement?.();
+        else if (ev.action === 'setValue' && ev.numericValue !== undefined) h.onSetValue?.(ev.numericValue);
+        break;
+      }
+
+      case 'ime': {
+        // Only reaches JS at all when Rust's own focus registry has a node
+        // focused (see glyx-core's ShellEvent::Ime handling) — but re-check
+        // the JS-side registry too, since the two are independent trackers.
+        if (focusedNodeId === null) break;
+        const handlers = inputRegistry.get(focusedNodeId);
+        if (!handlers) break;
+        if (ev.kind === 'preedit') {
+          handlers.onImePreedit?.({
+            text: ev.text ?? '',
+            cursorStart: ev.cursorStart ?? 0,
+            cursorEnd: ev.cursorEnd ?? 0,
+          });
+        } else if (ev.kind === 'commit') {
+          handlers.onImeCommit?.(ev.text ?? '');
+        } else if (ev.kind === 'disabled') {
+          handlers.onImePreedit?.({ text: '', cursorStart: 0, cursorEnd: 0 });
+        }
         break;
       }
 

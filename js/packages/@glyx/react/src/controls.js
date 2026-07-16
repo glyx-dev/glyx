@@ -4,6 +4,7 @@ import {
   registerDraggable, unregisterDraggable,
   registerPressable, unregisterPressable,
   registerScrollView, unregisterScrollView,
+  registerA11yValue, unregisterA11yValue,
   addGlobalClickListener, removeGlobalClickListener,
   addKeyListener,
 } from './events.js';
@@ -98,6 +99,13 @@ export function TextInput({
   // When anchor === focus_: no selection, cursor blinks at that position.
   const [anchor, setAnchor]   = useState(() => value.length);
   const [focus_,  setFocus_]  = useState(() => value.length);
+  // IME composition in progress (CJK/etc). Spliced into the DISPLAYED text
+  // only — `value`/caret math are untouched until the IME commits, matching
+  // how every other native text field defers the actual edit until commit.
+  // KNOWN LIMITATION: caret positioning during active composition stays at
+  // the pre-composition cursor spot rather than tracking within the preedit
+  // text — acceptable for a first pass, not pixel-perfect IME UX yet.
+  const [preedit, setPreedit] = useState('');
   const [scrollX, setScrollX] = useState(0);
   const scrollXRef = useRef(0);
   // Vertical scroll for multiline mode (wheel, scrollbar drag, caret-follow).
@@ -224,9 +232,24 @@ export function TextInput({
     },
     onBlur: () => {
       setFocused(false);
+      setPreedit('');
       if (typeof __glyx_setFocus !== 'undefined') {
         __glyx_setFocus(null);
       }
+    },
+    // IME composition (CJK/etc). `text` is the in-progress candidate string
+    // ("preedit") — displayed inline but NOT yet part of `value`.
+    onImePreedit: ({ text }) => {
+      setPreedit(text);
+    },
+    // Final composed string from the IME — inserted exactly like typed text
+    // (replacing any active selection), then composition state clears.
+    onImeCommit: (text) => {
+      if (!text) { setPreedit(''); return; }
+      const ss = Math.min(anchor, focus_);
+      const se = Math.max(anchor, focus_);
+      commit(value.slice(0, ss) + text + value.slice(se), ss + text.length);
+      setPreedit('');
     },
     onKeyPress: async ({ key, text, ctrl, shift }) => {
       const ss     = Math.min(anchor, focus_);
@@ -480,7 +503,10 @@ export function TextInput({
 
   // Show placeholder only when unfocused and value is empty (masked for
   // password fields so the real text never renders).
-  const displayText  = (focused || value) ? renderValue : placeholder;
+  const displayValue = preedit
+    ? renderValue.slice(0, focus_) + preedit + renderValue.slice(focus_)
+    : renderValue;
+  const displayText  = (focused || value) ? displayValue : placeholder;
   const displayingPlaceholder = !focused && !value;
   const textColor    = displayingPlaceholder
     ? C.triggerPlaceholder
@@ -502,7 +528,7 @@ export function TextInput({
 
   return React.createElement(
     'view',
-    { _glyxOnMount: onMount, style: inputStyle, width: nodeWidth, height: resolvedHeight, ...props },
+    { _glyxOnMount: onMount, style: inputStyle, width: nodeWidth, height: resolvedHeight, role: 'textbox', ...props },
     React.createElement('text', {
       text:           displayText,
       fontSize,
@@ -514,6 +540,10 @@ export function TextInput({
       cursorPosition: focused ? focus_ : undefined,
       selectionStart: (focused && selStart < selEnd) ? selStart : undefined,
       selectionEnd:   (focused && selStart < selEnd) ? selEnd   : undefined,
+      // IME composition underline — char range within `displayText` (not
+      // `value`), since preedit is spliced in for display only.
+      imePreeditStart: preedit ? focus_ : undefined,
+      imePreeditEnd:   preedit ? focus_ + [...preedit].length : undefined,
       textAlign:      'left',
       textScrollX:    multiline ? undefined : scrollX,
     })
@@ -575,6 +605,9 @@ export function Checkbox({ checked = false, onChange, disabled = false, label, s
   return React.createElement(Pressable, {
     onPress: () => { if (!disabled && onChange) onChange(!checked); },
     style: { flexDirection: 'row', alignItems: 'center', gap: 8, ...style },
+    role: 'checkbox',
+    checked,
+    ariaLabel: label != null ? String(label) : undefined,
     ...rest,
   }, box, lbl);
 }
@@ -597,6 +630,8 @@ export function Switch({ value = false, onValueChange, disabled = false, style, 
       padding: 2,
       ...style,
     },
+    role: 'switch',
+    checked: value,
     ...rest,
   },
     React.createElement(View, {
@@ -652,6 +687,9 @@ export function Radio({ value, label, disabled = false, style, ...rest }) {
   return React.createElement(Pressable, {
     onPress: () => { if (!disabled && ctx && ctx.onValueChange) ctx.onValueChange(value); },
     style: { flexDirection: 'row', alignItems: 'center', gap: 8, ...style },
+    role: 'radio',
+    checked: selected,
+    ariaLabel: label != null ? String(label) : undefined,
     ...rest,
   }, circle, lbl);
 }
@@ -703,6 +741,8 @@ export function FileInput({
 
   return React.createElement(Pressable, {
     onPress: handlePress,
+    role: 'button',
+    ariaLabel: label,
     style: {
       paddingVertical: 8,
       paddingHorizontal: 14,
@@ -770,6 +810,7 @@ export function Slider({
   const stepRef     = useRef(step);  stepRef.current     = step;
   const disabledRef = useRef(disabled); disabledRef.current = disabled;
   const onChangeRef = useRef(_cb); onChangeRef.current = _cb;
+  const valueRef    = useRef(value); valueRef.current    = value;
 
   // Shared update logic: compute value from absolute cursor x position.
   // Using absolute x (not delta) means each dragMove is independent — no
@@ -799,12 +840,44 @@ export function Slider({
   const onTrackMount = useCallback((id) => {
     trackNodeId.current = id;
     registerDraggable(id, {
-      onDragStart({ x }) { updateFromX(x); },
+      onDragStart({ x }) {
+        if (typeof __glyx_setFocus !== 'undefined') __glyx_setFocus(id);
+        updateFromX(x);
+      },
       onDragMove({ x })  { updateFromX(x); },
     });
     registerPressable(id, {
-      onPress({ x }) { updateFromX(x); },
+      // Slider is a raw View + registerPressable, NOT the <Pressable>
+      // component — so it never went through core.js's focus-registry fix.
+      // Same class of bug as Checkbox/Switch/etc before that fix: without
+      // this, clicking/dragging the slider never moves `focused_node`.
+      onPress({ x }) {
+        if (typeof __glyx_setFocus !== 'undefined') __glyx_setFocus(id);
+        updateFromX(x);
+      },
       onPressIn() {}, onPressOut() {}, onHoverIn() {}, onHoverOut() {},
+    });
+    // Makes the slider operable by a screen reader, not just clickable/
+    // draggable by a sighted mouse user — Increment/Decrement step by the
+    // slider's own `step` (or 1% of the range if unstepped), SetValue clamps
+    // to [min, max] the same way updateFromX's drag math does.
+    registerA11yValue(id, {
+      onIncrement() {
+        if (disabledRef.current || !onChangeRef.current) return;
+        const range = maxRef.current - minRef.current;
+        const step = stepRef.current > 0 ? stepRef.current : range / 100;
+        onChangeRef.current(Math.min(maxRef.current, valueRef.current + step));
+      },
+      onDecrement() {
+        if (disabledRef.current || !onChangeRef.current) return;
+        const range = maxRef.current - minRef.current;
+        const step = stepRef.current > 0 ? stepRef.current : range / 100;
+        onChangeRef.current(Math.max(minRef.current, valueRef.current - step));
+      },
+      onSetValue(v) {
+        if (disabledRef.current || !onChangeRef.current) return;
+        onChangeRef.current(Math.max(minRef.current, Math.min(maxRef.current, v)));
+      },
     });
     setTimeout(measureWidth, 0); // measure after the first native layout pass
   }, []); // stable — updateFromX and all refs are stable
@@ -818,6 +891,7 @@ export function Slider({
       if (trackNodeId.current !== null) {
         unregisterDraggable(trackNodeId.current);
         unregisterPressable(trackNodeId.current);
+        unregisterA11yValue(trackNodeId.current);
       }
     };
   }, []);
@@ -830,6 +904,10 @@ export function Slider({
     width: widthProp,
     pressable: true, // mark interactive so clicks hit-test to this node
     style: { flexDirection: 'row', alignItems: 'center', ...style },
+    role: 'slider',
+    numericValue: value,
+    numericMin: min,
+    numericMax: max,
     ...rest,
   },
     React.createElement(View, { width: fillW,  height: TRACK, style: { backgroundColor: accent } }),
@@ -878,7 +956,19 @@ export function Select({
   const onContainerMount = useCallback((id) => { containerNodeId.current = id; }, []);
 
   const OPTION_H = 40;
-  const close = () => { if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; } };
+  const close = () => {
+    if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; }
+    // Return focus to the (stable) trigger — without this, focus was last on
+    // the option/day-cell that just got removed by closing the popover, and
+    // `focused_node` snaps back to the root before a screen reader ever gets
+    // a chance to observe or announce the selection (found via manual
+    // Narrator testing: clicking a Select option or DatePicker day never
+    // announced anything, unlike Checkbox/Switch/Radio which don't remove
+    // themselves on click and so don't have this race).
+    if (typeof __glyx_setFocus !== 'undefined' && containerNodeId.current != null) {
+      __glyx_setFocus(containerNodeId.current);
+    }
+  };
 
   const toggle = () => {
     if (disabled) return;
@@ -913,6 +1003,12 @@ export function Select({
 
   return React.createElement(View, {
     _glyxOnMount: onContainerMount,
+    // Mirrors the trigger Pressable's role/label — `close()` returns focus
+    // to THIS container (not the trigger, which Pressable doesn't expose an
+    // id ref for) when the popover closes, so it needs to be meaningful to
+    // an AT on its own, not a label-less generic container.
+    role: 'combobox',
+    ariaLabel: selected ? selected.label : placeholder,
     // Default to a sensible width (not full-window). alignSelf:flex-start stops
     // the parent's default `alignItems: stretch` from expanding it. User `style`
     // (incl. width) overrides.
@@ -922,6 +1018,8 @@ export function Select({
     // Trigger button — fixed height so text never overflows.
     React.createElement(Pressable, {
       onPress: toggle,
+      role: 'combobox',
+      ariaLabel: selected ? selected.label : placeholder,
       style: {
         flexDirection: 'row',
         justifyContent: 'space-between',
@@ -1130,7 +1228,19 @@ export function DatePicker({ value = null, onValueChange, disabled = false, styl
   const popoverId = useRef(null);
   const onContainerMount = useCallback((id) => { containerNodeId.current = id; }, []);
 
-  const close = () => { if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; } };
+  const close = () => {
+    if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; }
+    // Return focus to the (stable) trigger — without this, focus was last on
+    // the option/day-cell that just got removed by closing the popover, and
+    // `focused_node` snaps back to the root before a screen reader ever gets
+    // a chance to observe or announce the selection (found via manual
+    // Narrator testing: clicking a Select option or DatePicker day never
+    // announced anything, unlike Checkbox/Switch/Radio which don't remove
+    // themselves on click and so don't have this race).
+    if (typeof __glyx_setFocus !== 'undefined' && containerNodeId.current != null) {
+      __glyx_setFocus(containerNodeId.current);
+    }
+  };
   const toggle = () => {
     if (disabled) return;
     if (open) { close(); return; }
@@ -1156,11 +1266,15 @@ export function DatePicker({ value = null, onValueChange, disabled = false, styl
 
   return React.createElement(View, {
     _glyxOnMount: onContainerMount,
+    role: 'combobox',
+    ariaLabel: dlabel,
     style: _sizedRootStyle(style, 240),
     ...rest,
   },
     React.createElement(Pressable, {
       onPress: toggle,
+      role: 'combobox',
+      ariaLabel: dlabel,
       style: {
         flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
         paddingLeft: 12, paddingRight: 10, height: 40, borderRadius: 8,
@@ -1241,7 +1355,19 @@ export function TimePicker({
   const hour   = Number.isFinite(hh) ? Math.max(0, Math.min(23, hh)) : 12;
   const minute = Number.isFinite(mm) ? Math.max(0, Math.min(59, mm)) : 0;
 
-  const close = () => { if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; } };
+  const close = () => {
+    if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; }
+    // Return focus to the (stable) trigger — without this, focus was last on
+    // the option/day-cell that just got removed by closing the popover, and
+    // `focused_node` snaps back to the root before a screen reader ever gets
+    // a chance to observe or announce the selection (found via manual
+    // Narrator testing: clicking a Select option or DatePicker day never
+    // announced anything, unlike Checkbox/Switch/Radio which don't remove
+    // themselves on click and so don't have this race).
+    if (typeof __glyx_setFocus !== 'undefined' && containerNodeId.current != null) {
+      __glyx_setFocus(containerNodeId.current);
+    }
+  };
   const emit  = (h, m) => onValueChange?.(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
 
   const toggle = () => {
@@ -1268,11 +1394,15 @@ export function TimePicker({
 
   return React.createElement(View, {
     _glyxOnMount: onContainerMount,
+    role: 'combobox',
+    ariaLabel: label,
     style: _sizedRootStyle(style, 160),
     ...rest,
   },
     React.createElement(Pressable, {
       onPress: toggle,
+      role: 'combobox',
+      ariaLabel: label,
       style: {
         flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
         paddingLeft: 12, paddingRight: 10, height: 40, borderRadius: 8,
@@ -1316,7 +1446,19 @@ export function DateTimePicker({
   const onContainerMount = useCallback((id) => { containerNodeId.current = id; }, []);
 
   const d = value ? new Date(value) : null;
-  const close = () => { if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; } };
+  const close = () => {
+    if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; }
+    // Return focus to the (stable) trigger — without this, focus was last on
+    // the option/day-cell that just got removed by closing the popover, and
+    // `focused_node` snaps back to the root before a screen reader ever gets
+    // a chance to observe or announce the selection (found via manual
+    // Narrator testing: clicking a Select option or DatePicker day never
+    // announced anything, unlike Checkbox/Switch/Radio which don't remove
+    // themselves on click and so don't have this race).
+    if (typeof __glyx_setFocus !== 'undefined' && containerNodeId.current != null) {
+      __glyx_setFocus(containerNodeId.current);
+    }
+  };
 
   const toggle = () => {
     if (disabled) return;
@@ -1345,11 +1487,15 @@ export function DateTimePicker({
 
   return React.createElement(View, {
     _glyxOnMount: onContainerMount,
+    role: 'combobox',
+    ariaLabel: label,
     style: _sizedRootStyle(style, 280),
     ...rest,
   },
     React.createElement(Pressable, {
       onPress: toggle,
+      role: 'combobox',
+      ariaLabel: label,
       style: {
         flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
         paddingLeft: 12, paddingRight: 10, height: 40, borderRadius: 8,

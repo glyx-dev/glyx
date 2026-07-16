@@ -9,7 +9,7 @@ import { dispatchEvents, addGlobalClickListener, removeGlobalClickListener, addK
 import {
   _pollWebSockets, _pollIpc, _pollDeeplinks, _pollGamepads,
   _pollGlobalShortcuts, _pollPerfViolations, _pollLeakWarnings,
-  _pollAudio, _pollVideo, _pollFsWatch,
+  _pollAudio, _pollVideo, _pollFsWatch, _pollWebview,
 } from './api.js';
 import { View } from './core.js';
 import { PopoverHost } from './popover.js';
@@ -21,6 +21,7 @@ export * from './popover.js';
 export * from './controls.js';
 export * from './canvas.js';
 export * from './media.js';
+export * from './webview.js';
 
 // Event-registry helpers used by companion packages (@glyx-dev/context-menu, …).
 export { addGlobalClickListener, removeGlobalClickListener, addKeyListener };
@@ -58,6 +59,7 @@ globalThis.__glyx_frameCallback = function glyxFrameCallback() {
     _pollAudio();
     _pollVideo();
     _pollFsWatch();
+    _pollWebview();
     dispatchEvents();
   });
 };

@@ -33,13 +33,13 @@ use std::collections::VecDeque;
 // String, FixedArray) -> Option<Local<Promise>>`.  The second parameter is the
 // host-defined options (a `Data`) rather than the `Context`.
 #[cfg(not(debug_assertions))]
-fn deny_dynamic_import(
-    _scope:             &mut v8::PinScope,
-    _host_defined_opts: v8::Local<v8::Data>,
-    _resource_name:     v8::Local<v8::Value>,
-    _specifier:         v8::Local<v8::String>,
-    _import_attributes: v8::Local<v8::FixedArray>,
-) -> Option<v8::Local<v8::Promise>> {
+fn deny_dynamic_import<'s, 'i>(
+    _scope:             &mut v8::PinScope<'s, 'i>,
+    _host_defined_opts: v8::Local<'s, v8::Data>,
+    _resource_name:     v8::Local<'s, v8::Value>,
+    _specifier:         v8::Local<'s, v8::String>,
+    _import_attributes: v8::Local<'s, v8::FixedArray>,
+) -> Option<v8::Local<'s, v8::Promise>> {
     None
 }
 

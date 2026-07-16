@@ -351,9 +351,17 @@ fn run() -> Result<()> {
 ///
 /// Search order:
 ///   1. ~/.glyx/runners/{dev|prod}/glyx-runner[.exe]  (cached)
-///   2. glyx_home/target/{debug|release}/glyx-runner[.exe]  (workspace)
-///   3. Download the prebuilt runner from GitHub Releases → cache
-///   4. Build from source → copy to cache
+///   2. Download the prebuilt runner from GitHub Releases → cache
+///   3. Build from source (isolated `-p glyx-runner`) → copy to cache
+///
+/// NOTE: deliberately does NOT reuse glyx_home/target/{debug|release}/glyx-runner —
+/// a plain workspace-wide `cargo build --release` (e.g. run while hacking on
+/// glyx-cli or an example) unifies Cargo features across every workspace member
+/// that depends on glyx-core (model-viewer enables `canvas3d`, etc.), so any
+/// glyx-runner binary sitting in the shared target/ dir may have been fattened
+/// by features it never asked for. Always going through the isolated `-p
+/// glyx-runner --no-default-features` build guarantees a lean prod binary;
+/// cargo no-ops when the fingerprint already matches, so repeat calls are fast.
 fn find_or_build_runner(dev_mode: bool) -> Result<PathBuf> {
     let profile = if dev_mode { "dev" } else { "prod" };
     let bin_name = runner_bin_name();
@@ -363,14 +371,7 @@ fn find_or_build_runner(dev_mode: bool) -> Result<PathBuf> {
     let cached    = cache_dir.join(bin_name);
     if cached.exists() { return Ok(cached); }
 
-    // 2. Check glyx workspace target/ (fastest for developers inside the workspace)
-    if let Ok(home) = glyx_home() {
-        let ws_profile = if dev_mode { "debug" } else { "release" };
-        let ws_bin = home.join("target").join(ws_profile).join(bin_name);
-        if ws_bin.exists() { return Ok(ws_bin); }
-    }
-
-    // 3. Download the prebuilt runner for this CLI version from GitHub
+    // 2. Download the prebuilt runner for this CLI version from GitHub
     //    Releases — the NORMAL path for users who installed the CLI binary
     //    and don't have the glyx source workspace.  Falls through to a
     //    source build (workspace devs) if unavailable.
@@ -378,7 +379,7 @@ fn find_or_build_runner(dev_mode: bool) -> Result<PathBuf> {
         return Ok(cached);
     }
 
-    // 4. Build from source
+    // 3. Build from source
     let home = glyx_home().context("Cannot locate glyx workspace — needed to build glyx-runner")?;
     let label = if dev_mode { "dev (with hot-reload)" } else { "prod (lean)" };
     println!("Building glyx-runner [{label}] from source (first-run, one-time cost)...");

@@ -83,6 +83,10 @@ ai       = ["dep:glyx-ai", "dep:glyx-cap-ai"]
 hid      = ["dep:hidapi", "dep:glyx-cap-hid"]
 camera   = ["dep:glyx-cap-camera"]
 webview  = ["dep:glyx-cap-webview"]
+# No accesskit dependency here — glyx-runtime only needs to know whether to
+# register __glyx_hasA11y (a JS-facing capability query), the actual
+# accesskit integration lives in glyx-shell/glyx-core.
+a11y     = []
 updater  = ["dep:self_update", "dep:ed25519-dalek"]
 # jsc = []    # future: JavaScriptCore (iOS/macOS)
 # quickjs = [] # future: QuickJS (embedded/WASM)

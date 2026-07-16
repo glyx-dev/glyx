@@ -3,7 +3,12 @@ name    = "glyx-shell"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+a11y = ["dep:accesskit", "dep:accesskit_winit"]
+
 [dependencies]
 winit     = { workspace = true }
 log       = { workspace = true }
 thiserror = { workspace = true }
+accesskit       = { workspace = true, optional = true }
+accesskit_winit = { workspace = true, optional = true }

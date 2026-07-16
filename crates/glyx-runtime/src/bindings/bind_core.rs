@@ -167,6 +167,31 @@ pub fn poll_events_callback(
                 set_num!("id", id);
                 set_str!("payload", &payload);
             }
+            InputEvent::AccessibilityFocus { node_id } => {
+                set_str!("type", "accessibilityFocus");
+                set_num!("nodeId", node_id);
+            }
+            InputEvent::AccessibilityValueChange { node_id, action, numeric_value } => {
+                set_str!("type", "accessibilityValueChange");
+                set_num!("nodeId", node_id);
+                set_str!("action", &action);
+                if let Some(v) = numeric_value {
+                    set_num!("numericValue", v);
+                }
+            }
+            InputEvent::Ime { kind, text, cursor_start, cursor_end } => {
+                set_str!("type", "ime");
+                set_str!("kind", &kind);
+                if let Some(t) = text {
+                    set_str!("text", &t);
+                }
+                if let Some(cs) = cursor_start {
+                    set_num!("cursorStart", cs);
+                }
+                if let Some(ce) = cursor_end {
+                    set_num!("cursorEnd", ce);
+                }
+            }
             InputEvent::DragStart { x, y } => {
                 set_str!("type", "dragStart");
                 set_num!("x", x);
@@ -630,6 +655,22 @@ pub fn set_focus_callback(
         Some(arg.number_value(scope).unwrap_or_default() as u32)
     };
     state.scene.lock().push_back(SceneCommand::SetFocus { id });
+    rv.set(v8::Boolean::new(scope, true).into());
+}
+
+/// Lets JS detect whether the `a11y` Cargo feature was actually compiled in
+/// (the snapshot stub in `snapshot.rs` returns `false`; this real binding —
+/// only registered under `#[cfg(feature = "a11y")]` — overrides it with
+/// `true`). Without this, JS has no way to know whether setting `role`/
+/// `ariaLabel` props does anything at all.
+#[cfg(feature = "a11y")]
+pub fn has_a11y_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     rv.set(v8::Boolean::new(scope, true).into());
 }
 

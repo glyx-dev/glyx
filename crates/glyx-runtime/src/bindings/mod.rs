@@ -122,6 +122,22 @@ pub enum InputEvent {
     /// A Rust-side system watcher (battery/memory/darkMode/…) detected a
     /// CHANGE.  Pushed only on deltas — JS stays idle between changes.
     SystemWatch { id: u32, payload: String },
+    /// IME composition event, routed only to the currently-focused node
+    /// (see `PerWindowState.focused_node`). `kind` is one of "enabled" /
+    /// "preedit" / "commit" / "disabled"; `cursor` is a byte-offset (start,
+    /// end) range within `text` for the actively-edited clause ("preedit" only).
+    Ime { kind: String, text: Option<String>, cursor_start: Option<u32>, cursor_end: Option<u32> },
+    /// An assistive technology requested keyboard focus on a node. Rust's
+    /// `PerWindowState.focused_node` is already updated by the time this is
+    /// pushed — this just tells JS's own (separate) focus tracker to follow,
+    /// so React-side focus styling/onFocus stays in sync with an AT-driven
+    /// focus change (as opposed to a mouse click, which JS already owns).
+    AccessibilityFocus { node_id: u32 },
+    /// An assistive technology requested a value change on a node —
+    /// Increment/Decrement/SetValue from a screen reader's slider/spinbutton
+    /// controls. `action` is "increment" / "decrement" / "setValue";
+    /// `numeric_value` is only set for "setValue".
+    AccessibilityValueChange { node_id: u32, action: String, numeric_value: Option<f64> },
 }
 
 /// Callbacks for window control operations.
@@ -281,6 +297,28 @@ pub struct NodeProps {
     pub selection_start: Option<u32>,
     /// Selection end character index (exclusive).  `None` †’ no selection.
     pub selection_end: Option<u32>,
+    /// IME composition (preedit) underline range — character indices into
+    /// this node's `text`, `None` → no active composition. Set by TextInput
+    /// while the user is composing CJK/etc input via an IME.
+    pub ime_preedit_start: Option<u32>,
+    pub ime_preedit_end:   Option<u32>,
+
+    //  Accessibility €€€
+    /// Explicit accessibility role ("button","textbox","checkbox","link",
+    /// "image","heading", ...). `None` → inferred from `NodeType` (View →
+    /// generic container, Text → label/static-text, etc).
+    pub role: Option<String>,
+    /// Accessible name (screen-reader label). Falls back to `text` for Text
+    /// nodes when unset.
+    pub aria_label: Option<String>,
+    /// Toggled/checked state for checkbox/radio/switch roles. `None` → the
+    /// AT reports no toggle state at all (use for non-toggle controls).
+    pub checked: Option<bool>,
+    /// Current/min/max for range-like roles (slider, progress). `None` →
+    /// omitted from the accessibility tree.
+    pub numeric_value: Option<f64>,
+    pub numeric_min:   Option<f64>,
+    pub numeric_max:   Option<f64>,
 
     //  Text alignment 
     /// `"left"` | `"center"` (default). Controls horizontal text origin.
@@ -901,6 +939,8 @@ pub fn register_all(
     register!("__glyx_removeNode",  remove_node_callback);
     register!("__glyx_setRoot",     set_root_callback);
     register!("__glyx_setFocus",    set_focus_callback);
+    #[cfg(feature = "a11y")]
+    register!("__glyx_hasA11y",     has_a11y_callback);
     register!("__glyx_pollEvents",  poll_events_callback);
     register!("__glyx_getLayout",   get_layout_callback);
     register!("__glyx_measure_text",    measure_text_callback);
@@ -1535,6 +1575,14 @@ fn parse_props(
     props.cursor_position = get_num_prop(scope, obj, "cursorPosition").map(|v| v as u32);
     props.selection_start = get_num_prop(scope, obj, "selectionStart").map(|v| v as u32);
     props.selection_end   = get_num_prop(scope, obj, "selectionEnd").map(|v| v as u32);
+    props.ime_preedit_start = get_num_prop(scope, obj, "imePreeditStart").map(|v| v as u32);
+    props.ime_preedit_end   = get_num_prop(scope, obj, "imePreeditEnd").map(|v| v as u32);
+    props.role       = get_str_prop(scope, obj, "role");
+    props.aria_label = get_str_prop(scope, obj, "ariaLabel");
+    props.checked        = get_bool_prop(scope, obj, "checked");
+    props.numeric_value  = get_num_prop(scope, obj, "numericValue").map(|v| v as f64);
+    props.numeric_min    = get_num_prop(scope, obj, "numericMin").map(|v| v as f64);
+    props.numeric_max    = get_num_prop(scope, obj, "numericMax").map(|v| v as f64);
     props.text_align    = get_str_prop(scope, obj, "textAlign");
     props.border_width  = get_num_prop(scope, obj, "borderWidth");
     props.border_color  = get_color_prop(scope, obj, "borderColor");

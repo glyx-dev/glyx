@@ -246,6 +246,81 @@ pub struct HidCap {
     pub shutdown: unsafe extern "C" fn(),
 }
 
+// ── WebView ───────────────────────────────────────────────────────────────────
+
+pub const SYM_WEBVIEW: &[u8] = b"glyx_cap_webview\0";
+
+/// Embeds an OS-native child webview (wry: WebView2 / WKWebView / WebKitGTK)
+/// positioned over a region of a parent window. One handle == one embedded
+/// webview instance, keyed by the caller (glyx-core keys by scene node id).
+///
+/// `parent_handle` is the platform-native window handle (HWND on Windows,
+/// NSView* on macOS, GtkWindow* on Linux) as an opaque pointer — glyx-cap-abi
+/// stays dependency-free, so it does not know about `raw-window-handle`; the
+/// caller extracts the right pointer for the host platform before calling in.
+#[repr(C)]
+pub struct WebviewCap {
+    pub version: u32,
+
+    /// Initialise the webview subsystem. Called once before any other function.
+    /// Returns 0 on success, non-zero on error.
+    pub init: unsafe extern "C" fn() -> i32,
+
+    /// Create a child webview attached to `parent_handle`, loading `url`
+    /// (or raw `html` if `is_html` != 0), positioned at (x,y,w,h) in logical
+    /// pixels relative to the parent window's client area.
+    ///
+    /// `opts_json` is a UTF-8 JSON object (may be empty/`{}`):
+    /// ```json
+    /// {
+    ///   "sandbox": true,                          // devtools off, strict nav (default true)
+    ///   "allowedOrigins": ["https://example.com"], // navigation allowlist; [] or absent = only the initial url's origin
+    ///   "assetsRoot": "C:/app/assets"               // enables glyx-asset://<path> serving files under this dir
+    /// }
+    /// ```
+    /// Returns a non-zero handle, or 0 on error.
+    pub create: unsafe extern "C" fn(
+        parent_handle: *mut core::ffi::c_void,
+        url_or_html:   *const u8,
+        len:           usize,
+        is_html:       u8,
+        x: f32, y: f32, w: f32, h: f32,
+        opts_json:     *const u8,
+        opts_json_len: usize,
+    ) -> u32,
+
+    /// Reposition/resize an existing webview (called every frame the node's
+    /// layout rect changes — implementations should no-op on unchanged bounds).
+    pub set_bounds: unsafe extern "C" fn(handle: u32, x: f32, y: f32, w: f32, h: f32),
+
+    /// Show or hide the webview without destroying it (e.g. off-screen/occluded).
+    pub set_visible: unsafe extern "C" fn(handle: u32, visible: u8),
+
+    /// Navigate an existing webview to a new URL.
+    pub load_url: unsafe extern "C" fn(handle: u32, url: *const u8, url_len: usize),
+
+    /// Post a message INTO the webview page (delivered as a `message` event
+    /// on the page's `window.chrome.webview`/`window.ipc` bridge, whichever
+    /// the implementation wires up). `msg` is a UTF-8 string (JSON expected).
+    pub post_message: unsafe extern "C" fn(handle: u32, msg: *const u8, msg_len: usize),
+
+    /// Drain the queue of messages the page has posted OUT (via the injected
+    /// `window.ipc.postMessage(str)`) into `out_buf` as a JSON array of
+    /// strings, e.g. `["hello","world"]`. Same truncation contract as
+    /// `AudioCap::poll` — never overflows `buf_cap`.
+    pub poll_messages: unsafe extern "C" fn(
+        handle:  u32,
+        out_buf: *mut u8,
+        out_len: *mut usize,
+        buf_cap: usize,
+    ),
+
+    /// Destroy a webview instance, tearing down its native child surface.
+    pub destroy: unsafe extern "C" fn(handle: u32),
+
+    pub shutdown: unsafe extern "C" fn(),
+}
+
 // ── CapSet ────────────────────────────────────────────────────────────────────
 
 /// Resolved set of capability vtables.  Each field is `None` when the
@@ -256,10 +331,11 @@ pub struct CapSet {
     pub camera:  Option<&'static CameraCap>,
     pub gamepad: Option<&'static GamepadCap>,
     pub hid:     Option<&'static HidCap>,
+    pub webview: Option<&'static WebviewCap>,
 }
 
 impl CapSet {
     pub const fn empty() -> Self {
-        Self { audio: None, ai: None, camera: None, gamepad: None, hid: None }
+        Self { audio: None, ai: None, camera: None, gamepad: None, hid: None, webview: None }
     }
 }

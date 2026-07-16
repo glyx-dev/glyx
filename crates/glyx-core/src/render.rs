@@ -11,6 +11,10 @@ pub(crate) struct RenderCtx<'a> {
     /// Accumulated (canvas3d_id, x, y, w, h) for post-Vello 3D overlay rendering.
     #[cfg(feature = "canvas3d")]
     pub canvas3d_overlays: &'a mut Vec<(u32, f32, f32, f32, f32)>,
+    /// Accumulated (webview_id, x, y, w, h) for post-render native child-window
+    /// positioning — a webview is a real OS child window, not Vello content.
+    #[cfg(feature = "webview")]
+    pub webview_overlays: &'a mut Vec<(u32, f32, f32, f32, f32)>,
     /// Window dimensions in physical pixels — used for viewport culling.
     pub win_w: f64,
     pub win_h: f64,
@@ -138,7 +142,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
         if let Some(node_peek) = ctx.nodes.get(&id) {
             let is_leaf      = node_peek.children.is_empty();
             let never_cache  = matches!(node_peek.node_type,
-                NodeType::Canvas3D | NodeType::Camera | NodeType::Video);
+                NodeType::Canvas3D | NodeType::Camera | NodeType::Video | NodeType::WebView);
             if is_leaf && !never_cache && ctx.frame.supports_caching() {
                 if let Some(cached) = ctx.scene_cache.remove(&id) {
                     if opacity >= 1.0 {
@@ -217,7 +221,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     let is_cacheable = ctx.frame.supports_caching()
         && node.children.is_empty()
         && !matches!(node.node_type,
-            NodeType::Canvas3D | NodeType::Camera | NodeType::Video)
+            NodeType::Canvas3D | NodeType::Camera | NodeType::Video | NodeType::WebView)
         && opacity >= 1.0;
     let capture_parent: Option<Scene> = if is_cacheable {
         Some(ctx.frame.replace_scene(Scene::new()))
@@ -596,6 +600,12 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                     ctx.frame.fill_rect(rx, ry, rw, rh, bg);
                 }
                 ctx.canvas3d_overlays.push((id, rx as f32, ry as f32, rw as f32, rh as f32));
+            }
+        }
+        NodeType::WebView => {
+            #[cfg(feature = "webview")]
+            {
+                ctx.webview_overlays.push((id, rx as f32, ry as f32, rw as f32, rh as f32));
             }
         }
         NodeType::Camera => {

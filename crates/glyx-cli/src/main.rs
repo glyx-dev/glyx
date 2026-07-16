@@ -929,7 +929,7 @@ fn copy_runtime_files(dest_root: &Path) -> Result<()> {
 /// Read the `capabilities` object from glyx.config (e.g. `{ "audio": true, "camera": false }`).
 /// Returns the full known set when the config has no capabilities key.
 fn read_capabilities_from_config() -> Vec<String> {
-    let known = ["audio", "ai", "camera", "gamepad", "hid"];
+    let known = ["audio", "ai", "camera", "gamepad", "hid", "webview"];
     let src = resolve_config_json().unwrap_or_default();
     let v: serde_json::Value = serde_json::from_str(&src).unwrap_or_default();
     match v.get("capabilities").and_then(|c| c.as_object()) {

@@ -1261,6 +1261,22 @@ pub fn run(mut config: AppConfig) -> bool {
                     #[cfg(feature = "camera")]
                     camera_streams:  std::collections::HashMap::new(),
                     video_streams:   std::collections::HashMap::new(),
+                    #[cfg(feature = "webview")]
+                    webview_cap: {
+                        let cap = glyx_runtime::load_caps().webview;
+                        if let Some(c) = cap { unsafe { (c.init)(); } }
+                        cap
+                    },
+                    #[cfg(feature = "webview")]
+                    webview_instances: std::collections::HashMap::new(),
+                    #[cfg(feature = "webview")]
+                    webview_last_src:    std::collections::HashMap::new(),
+                    #[cfg(feature = "webview")]
+                    webview_last_bounds: std::collections::HashMap::new(),
+                    #[cfg(feature = "webview")]
+                    webview_hidden:      std::collections::HashSet::new(),
+                    #[cfg(feature = "webview")]
+                    webview_overlays:    Vec::new(),
                     // Splash only applies to the main window; secondary windows get None.
                     splash_state: if window_handle == 0 { main_splash_state.take() } else { None },
                     decorations:     window_decorations,
@@ -1494,6 +1510,34 @@ pub fn run(mut config: AppConfig) -> bool {
                         0.0
                     }
                 };
+
+                // 0. Drain page→JS webview messages (window.ipc.postMessage from
+                // inside each webview) BEFORE the JS tick below, so a message that
+                // just arrived (and woke this frame via InvalidateRect — see
+                // glyx-cap-webview's wake_parent) is visible to THIS frame's
+                // __glyx_webview_poll() call, not next frame's. Draining this after
+                // frame_tick (where the video-events queue is drained, for example)
+                // is fine for continuous streams but introduces a one-frame lag for
+                // discrete click-triggered messages, which IS perceptible.
+                #[cfg(feature = "webview")]
+                if let Some(cap) = s.webview_cap {
+                    let mut buf = vec![0u8; 64 * 1024];
+                    for (&id, &handle) in s.webview_instances.iter() {
+                        let mut out_len: usize = 0;
+                        unsafe {
+                            (cap.poll_messages)(handle, buf.as_mut_ptr(), &mut out_len, buf.len());
+                        }
+                        if out_len == 0 { continue; }
+                        let Ok(json) = std::str::from_utf8(&buf[..out_len]) else { continue };
+                        let Ok(messages) = serde_json::from_str::<Vec<String>>(json) else { continue };
+                        if messages.is_empty() { continue; }
+                        let mut events = s.runtime.webview_events.lock();
+                        for msg in messages {
+                            let Ok(wrapped) = serde_json::to_string(&serde_json::json!({ "id": id, "message": msg })) else { continue };
+                            events.push_back(wrapped);
+                        }
+                    }
+                }
 
                 // 1. Resolve async JS Promises.
                 s.runtime.tick();
@@ -1781,6 +1825,8 @@ pub fn run(mut config: AppConfig) -> bool {
                 let mut any_cursor_active = false;
                 #[cfg(feature = "canvas3d")]
                 let mut canvas3d_overlays: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
+                #[cfg(feature = "webview")]
+                let mut webview_overlays: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
 
                 if let Some(root_id) = s.js_root {
                     let mut render_ctx = RenderCtx {
@@ -1793,6 +1839,8 @@ pub fn run(mut config: AppConfig) -> bool {
                         canvas_cmds:       &s.canvas_cmds,
                         #[cfg(feature = "canvas3d")]
                         canvas3d_overlays: &mut canvas3d_overlays,
+                        #[cfg(feature = "webview")]
+                        webview_overlays: &mut webview_overlays,
                         #[cfg(feature = "camera")]
                         camera_streams:    &s.camera_streams,
                         video_streams:     &s.video_streams,
@@ -1808,6 +1856,90 @@ pub fn run(mut config: AppConfig) -> bool {
                         win_h: s.gpu.height() as f64,
                     };
                     render_subtree(root_id, 0.0, 1.0, &mut render_ctx);
+                }
+
+                // Native webview children: create/reposition/hide to match this
+                // frame's `webview_overlays`. A webview is a real OS child window
+                // the OS composites itself — not Vello content — so this runs
+                // unconditionally here rather than inside the Present::Gpu-only
+                // 3D-overlay blit block below.
+                #[cfg(feature = "webview")]
+                if let Some(cap) = s.webview_cap {
+                    use raw_window_handle::HasWindowHandle;
+                    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                    for (id, x, y, w, h) in &webview_overlays {
+                        seen.insert(*id);
+                        if let Some(&handle) = s.webview_instances.get(id) {
+                            // Only call set_bounds on an actual change — calling it every
+                            // frame with an unchanged rect made WebView2 behave as if
+                            // continuously resizing and stop repainting until an input
+                            // event (e.g. mouse hover) forced it to catch up.
+                            let bounds_changed = s.webview_last_bounds.get(id) != Some(&(*x, *y, *w, *h));
+                            if bounds_changed {
+                                unsafe { (cap.set_bounds)(handle, *x, *y, *w, *h); }
+                                s.webview_last_bounds.insert(*id, (*x, *y, *w, *h));
+                            }
+                            if s.webview_hidden.remove(id) {
+                                unsafe { (cap.set_visible)(handle, 1); }
+                            }
+                            // Reconcile URL/HTML changes without recreating the instance.
+                            if let Some(node) = s.js_nodes.get(id) {
+                                let src = node.props.webview_html.as_deref()
+                                    .or(node.props.webview_src.as_deref());
+                                if let Some(src) = src {
+                                    let changed = s.webview_last_src.get(id).map(|s| s.as_str()) != Some(src);
+                                    if changed {
+                                        unsafe { (cap.load_url)(handle, src.as_ptr(), src.len()); }
+                                        s.webview_last_src.insert(*id, src.to_string());
+                                    }
+                                }
+                            }
+                        } else if let Some(node) = s.js_nodes.get(id) {
+                            let (content, is_html) = match (&node.props.webview_html, &node.props.webview_src) {
+                                (Some(html), _) => (html.as_str(), 1u8),
+                                (None, Some(src)) => (src.as_str(), 0u8),
+                                (None, None) => continue,
+                            };
+                            let opts = node.props.webview_opts.as_deref().unwrap_or("{}");
+                            let Ok(raw) = s.window.window_handle() else { continue };
+                            let parent_ptr = match raw.as_raw() {
+                                #[cfg(target_os = "windows")]
+                                raw_window_handle::RawWindowHandle::Win32(h) => {
+                                    h.hwnd.get() as *mut std::ffi::c_void
+                                }
+                                #[cfg(target_os = "macos")]
+                                raw_window_handle::RawWindowHandle::AppKit(h) => {
+                                    h.ns_view.as_ptr()
+                                }
+                                #[cfg(all(unix, not(target_os = "macos")))]
+                                raw_window_handle::RawWindowHandle::Xlib(h) => {
+                                    h.window as *mut std::ffi::c_void
+                                }
+                                _ => continue,
+                            };
+                            let handle = unsafe {
+                                (cap.create)(
+                                    parent_ptr,
+                                    content.as_ptr(), content.len(), is_html,
+                                    *x, *y, *w, *h,
+                                    opts.as_ptr(), opts.len(),
+                                )
+                            };
+                            if handle != 0 {
+                                s.webview_instances.insert(*id, handle);
+                                s.webview_last_src.insert(*id, content.to_string());
+                                s.webview_last_bounds.insert(*id, (*x, *y, *w, *h));
+                            }
+                        }
+                    }
+                    // Anything tracked but not seen this frame (display:none,
+                    // scrolled out, node about to be removed next tick) — hide
+                    // rather than destroy, so quick re-shows don't pay init cost.
+                    for (&id, &handle) in s.webview_instances.iter() {
+                        if !seen.contains(&id) && s.webview_hidden.insert(id) {
+                            unsafe { (cap.set_visible)(handle, 0); }
+                        }
+                    }
                 }
 
                 // Splash screen overlay — drawn on top of JS scene.

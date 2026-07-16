@@ -206,6 +206,33 @@ pub(super) struct PerWindowState {
     #[cfg(feature = "camera")]
     pub(super) camera_streams: std::collections::HashMap<u32, CameraStream>,
     pub(super) video_streams: std::collections::HashMap<u32, VideoStream>,
+    /// Resolved once at window-creation time (mirrors `renderer_3d`'s lazy-init
+    /// style, except the webview cap vtable itself is stateless to resolve —
+    /// only the native webview instances it creates carry per-window state).
+    #[cfg(feature = "webview")]
+    pub(super) webview_cap: Option<&'static glyx_cap_abi::WebviewCap>,
+    /// node id -> cap-returned webview handle.
+    #[cfg(feature = "webview")]
+    pub(super) webview_instances: std::collections::HashMap<u32, u32>,
+    /// node id -> last URL/HTML content sent to that instance, so the
+    /// per-frame reconcile loop only calls `load_url` when it actually changes.
+    #[cfg(feature = "webview")]
+    pub(super) webview_last_src: std::collections::HashMap<u32, String>,
+    /// node id -> last (x,y,w,h) sent via `set_bounds`. Calling `set_bounds`
+    /// every frame with an UNCHANGED rect made WebView2 behave as if it were
+    /// under continuous resize and stop repainting until an input event (e.g.
+    /// mouse hover) forced it to catch up — only call it on an actual change.
+    #[cfg(feature = "webview")]
+    pub(super) webview_last_bounds: std::collections::HashMap<u32, (f32, f32, f32, f32)>,
+    /// node ids currently `set_visible(0)`d — tracked so the reconcile loop
+    /// only calls `set_visible` on an actual show/hide transition, not every
+    /// frame (same repeated-call-suppresses-repaint issue as bounds above).
+    #[cfg(feature = "webview")]
+    pub(super) webview_hidden: std::collections::HashSet<u32>,
+    /// (node_id, x, y, w, h) accumulated during `render_subtree` each frame,
+    /// consumed right after to create/reposition/hide native webview children.
+    #[cfg(feature = "webview")]
+    pub(super) webview_overlays: Vec<(u32, f32, f32, f32, f32)>,
     pub(super) splash_state: Option<SplashState>,
     pub(super) decorations: bool,
     pub(super) drag_window_fn: Option<Arc<dyn Fn() + Send + Sync>>,

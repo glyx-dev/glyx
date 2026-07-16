@@ -396,6 +396,17 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         }
                     }
                 }
+                #[cfg(feature = "webview")]
+                {
+                    if let Some(handle) = state.webview_instances.remove(&id) {
+                        if let Some(cap) = state.webview_cap {
+                            unsafe { (cap.destroy)(handle); }
+                        }
+                    }
+                    state.webview_last_src.remove(&id);
+                    state.webview_last_bounds.remove(&id);
+                    state.webview_hidden.remove(&id);
+                }
                 state.js_nodes.remove(&id);
                 // Clean up all per-node state for the removed node.
                 state.dirty_nodes.remove(&id);
@@ -451,6 +462,14 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
             SceneCommand::Canvas3DUnloadGltf { path } => {
                 if let Some(r3d) = state.renderer_3d.as_mut() {
                     r3d.unload_gltf(&path);
+                }
+            }
+            #[cfg(feature = "webview")]
+            SceneCommand::WebviewPostMessage { id, msg } => {
+                if let Some(&handle) = state.webview_instances.get(&id) {
+                    if let Some(cap) = state.webview_cap {
+                        unsafe { (cap.post_message)(handle, msg.as_ptr(), msg.len()); }
+                    }
                 }
             }
             #[cfg(feature = "camera")]

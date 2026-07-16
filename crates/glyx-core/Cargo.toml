@@ -18,6 +18,7 @@ ai       = ["glyx-runtime/ai"]
 fetch    = ["glyx-runtime/fetch"]
 websocket = ["glyx-runtime/websocket"]
 updater  = ["glyx-runtime/updater"]
+webview  = ["glyx-runtime/webview", "dep:glyx-cap-abi", "dep:raw-window-handle"]
 
 [dependencies]
 glyx-gpu      = { path = "../glyx-gpu" }
@@ -48,6 +49,8 @@ sysinfo        = { workspace = true }
 lru            = { workspace = true }
 smallvec       = { workspace = true }
 glyx-3d        = { path = "../glyx-3d", optional = true }
+glyx-cap-abi   = { path = "../glyx-cap-abi", optional = true }
+raw-window-handle = { workspace = true, optional = true }
 nokhwa         = { workspace = true, optional = true }
 glyx-media    = { path = "../glyx-media" }
 rodio          = { workspace = true, optional = true }

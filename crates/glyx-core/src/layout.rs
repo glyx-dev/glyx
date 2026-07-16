@@ -232,7 +232,7 @@ pub(super) fn to_taffy_style(node_type: &NodeType, props: &NodeProps) -> taffy::
 
             style
         }
-        NodeType::Text | NodeType::Image | NodeType::Canvas | NodeType::Canvas3D | NodeType::Camera | NodeType::Video => {
+        NodeType::Text | NodeType::Image | NodeType::Canvas | NodeType::Canvas3D | NodeType::Camera | NodeType::Video | NodeType::WebView => {
             let mut style = taffy::prelude::Style::default();
             if let Some(w) = props.width  { style.size.width  = to_dim(w); }
             if let Some(h) = props.height { style.size.height = to_dim(h); }
@@ -332,7 +332,7 @@ pub(crate) fn rebuild_layout_from_scene(
                     };
                     layout.add_text_node(style, ctx, Some(format!("js-{}", id))).ok()?
                 }
-                NodeType::View | NodeType::Image | NodeType::Canvas | NodeType::Canvas3D | NodeType::Camera | NodeType::Video | NodeType::RepaintBoundary => {
+                NodeType::View | NodeType::Image | NodeType::Canvas | NodeType::Canvas3D | NodeType::Camera | NodeType::Video | NodeType::RepaintBoundary | NodeType::WebView => {
                     layout.add_node(style, Some(format!("js-{}", id))).ok()?
                 }
             }

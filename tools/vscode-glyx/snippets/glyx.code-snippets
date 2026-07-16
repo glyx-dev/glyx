@@ -176,6 +176,36 @@
     "description": "Glyx Canvas3D element"
   },
 
+  // ── WebView ───────────────────────────────────────────────────────────────
+  "WebView": {
+    "prefix": "gwebview",
+    "body": [
+      "<WebView",
+      "  src=\"${1:https://example.com}\"",
+      "  style={{ flex: 1 }}",
+      "  onMessage={(msg) => { $0 }}",
+      "/>"
+    ],
+    "description": "Glyx WebView — native OS-embedded webview (requires the webview capability)"
+  },
+  "WebView (with ref + postMessage)": {
+    "prefix": "gwebviewref",
+    "body": [
+      "const ${1:webviewRef} = useRef(null);",
+      "",
+      "<WebView",
+      "  ref={${1:webviewRef}}",
+      "  src=\"${2:https://example.com}\"",
+      "  allowedOrigins={['${2:https://example.com}']}",
+      "  style={{ flex: 1 }}",
+      "  onMessage={(msg) => { $0 }}",
+      "/>",
+      "",
+      "// ${1:webviewRef}.current.postMessage('hello from JS');"
+    ],
+    "description": "Glyx WebView with ref for postMessage"
+  },
+
   // ── @glyx/design components ───────────────────────────────────────────────
   "Button (design)": {
     "prefix": "gbtn",

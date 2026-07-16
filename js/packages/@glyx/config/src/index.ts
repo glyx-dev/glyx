@@ -91,6 +91,8 @@ export interface Capabilities {
   video?:           boolean;
   camera?:          boolean;
   microphone?:      boolean;
+  /** Native OS-embedded webview (WebView2/WKWebView/WebKitGTK) via the <WebView> component. */
+  webview?:         boolean;
   ai?:              boolean;
   hid?:             boolean;
   updater?:         boolean;

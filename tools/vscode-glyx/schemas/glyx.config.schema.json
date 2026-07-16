@@ -186,6 +186,10 @@
           "type": "boolean",
           "description": "Camera capture."
         },
+        "webview": {
+          "type": "boolean",
+          "description": "Native OS-embedded webview (WebView2/WKWebView/WebKitGTK) via the <WebView> component — a real child window for content that needs a browser engine, separate from the app's own GPU-rendered UI."
+        },
         "microphone": {
           "type": "boolean",
           "description": "Microphone access."

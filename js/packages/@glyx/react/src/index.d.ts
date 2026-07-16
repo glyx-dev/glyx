@@ -132,6 +132,42 @@ export declare const DateTimePicker: React.FC<{
   style?: GlyxStyle;
 }>;
 
+// ── WebView (native OS-embedded webview; requires the `webview` capability) ──
+
+export interface WebViewRef {
+  /** Native scene-graph node id once mounted, else null. */
+  readonly nodeId: number | null;
+  /** Send a message INTO the page — delivered as a `message` DOM event (`e.data`). */
+  postMessage: (message: string) => void;
+}
+
+export interface WebViewProps {
+  /** URL to load. Ignored if `html` is set. */
+  src?:    string;
+  /** Raw HTML to load in place of navigating to a URL. */
+  html?:   string;
+  /** Default true — disables devtools on the embedded webview. */
+  sandbox?: boolean;
+  /** Navigation allowlist (exact origins). Defaults to `src`'s own origin if unset. */
+  allowedOrigins?: string[];
+  /** Enables `glyx-asset://<path>` serving files under this directory (not raw `file://`). */
+  assetsRoot?: string;
+  /** Called when the page posts a message via `window.ipc.postMessage(str)`. */
+  onMessage?: (message: string) => void;
+  style?:  GlyxStyle;
+  [key: string]: unknown;
+}
+
+/** Native OS-embedded webview (WebView2 / WKWebView / WebKitGTK), position-tracked like any other node. */
+export declare const WebView: React.ForwardRefExoticComponent<
+  WebViewProps & React.RefAttributes<WebViewRef>
+>;
+
+/** JS → page half of the postMessage bridge; prefer `WebViewRef.postMessage` when you have a ref. */
+export declare const webview: {
+  postMessage: (nodeId: number, message: string | object) => void;
+};
+
 export declare function render(element: React.ReactElement): void;
 
 // ── Responsive hooks ──────────────────────────────────────────────────────────

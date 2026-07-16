@@ -64,6 +64,7 @@ globalThis.__glyx_appendChild = function() {};
 globalThis.__glyx_updateNode = function() {};
 globalThis.__glyx_removeNode = function() {};
 globalThis.__glyx_setRoot = function() {};
+globalThis.__glyx_setFocus = function() {};
 globalThis.__glyx_pollEvents = function() { return []; };
 globalThis.__glyx_getLayout = function() { return null; };
 globalThis.__glyx_measure_text    = function() { return { width: 0, height: 0 }; };

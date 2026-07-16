@@ -408,6 +408,9 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     state.webview_hidden.remove(&id);
                 }
                 state.js_nodes.remove(&id);
+                if state.focused_node == Some(id) {
+                    state.focused_node = None;
+                }
                 // Clean up all per-node state for the removed node.
                 state.dirty_nodes.remove(&id);
                 state.dirty_subtrees.remove(&id);
@@ -441,6 +444,9 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 state.dirty_nodes.insert(id);
                 layout_changed   = true;
                 structure_changed = true;
+            }
+            SceneCommand::SetFocus { id } => {
+                state.focused_node = id;
             }
             SceneCommand::CanvasUpdate { id, cmds, append } => {
                 if append {

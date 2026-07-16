@@ -1226,6 +1226,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
                     cursor_was_active:     false,
                     cursor_node_rect:      None,
+                    focused_node:          None,
                     cursor_blink_tx:       None,
                     perf:          shared_perf,
                     rss_bytes:     {

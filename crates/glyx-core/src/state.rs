@@ -189,6 +189,12 @@ pub(super) struct PerWindowState {
     /// Screen rect of the focused TextInput (captured during render) — the
     /// damage region for blink-only frames under software present.
     pub(super) cursor_node_rect: Option<(f64, f64, f64, f64)>,
+    /// Global keyboard-focus registry — the node id JS last reported as
+    /// focused via `__glyx_setFocus`, or `None`. Foundation for IME
+    /// composition routing (attach to this node's rect) and, later,
+    /// accessibility (expose focus to the AT). Not yet consumed by anything;
+    /// this is step 1 of that work — see [[accessibility-and-ime-plan]].
+    pub(super) focused_node: Option<u32>,
     /// Sender to the persistent blink-timer thread (spawned lazily on first
     /// focused TextInput). Sending a deadline schedules one redraw at that
     /// instant; newer deadlines received while waiting replace the pending one.

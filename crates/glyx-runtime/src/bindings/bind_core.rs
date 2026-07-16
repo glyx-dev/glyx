@@ -608,6 +608,31 @@ pub fn set_root_callback(
     rv.set(v8::Boolean::new(scope, true).into());
 }
 
+/// `__glyx_set_focus(nodeId | null)` — sync.
+/// Updates the global keyboard-focus registry. Called from JS on a control's
+/// onFocus (with its node id) and onBlur (with `null`, if nothing else is
+/// about to claim focus in the same tick).
+pub fn set_focus_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let arg = args.get(0);
+    let id = if arg.is_null_or_undefined() {
+        None
+    } else {
+        Some(arg.number_value(scope).unwrap_or_default() as u32)
+    };
+    state.scene.lock().push_back(SceneCommand::SetFocus { id });
+    rv.set(v8::Boolean::new(scope, true).into());
+}
+
 // â”€â”€ Window control bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub fn get_window_size_callback(

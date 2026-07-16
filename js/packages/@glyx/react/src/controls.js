@@ -216,9 +216,17 @@ export function TextInput({
       const end = value.length;
       setAnchor(end);
       setFocus_(end);
+      // Tell the Rust-side focus registry — foundation for IME composition
+      // routing and (later) accessibility focus events.
+      if (typeof __glyx_setFocus !== 'undefined' && nodeIdRef.current != null) {
+        __glyx_setFocus(nodeIdRef.current);
+      }
     },
     onBlur: () => {
       setFocused(false);
+      if (typeof __glyx_setFocus !== 'undefined') {
+        __glyx_setFocus(null);
+      }
     },
     onKeyPress: async ({ key, text, ctrl, shift }) => {
       const ss     = Math.min(anchor, focus_);

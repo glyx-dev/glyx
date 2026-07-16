@@ -650,6 +650,11 @@ pub enum SceneCommand {
     UpdateNode    { id: u32, props: NodeProps },
     RemoveNode    { id: u32 },
     SetRoot       { id: u32 },
+    /// Global keyboard-focus registry — set by JS on a control's onFocus/onBlur.
+    /// `None` clears focus (e.g. blur with no next focus target). Rust-side
+    /// consumers: IME composition routing (attach to the focused node's rect)
+    /// and, later, accessibility (expose the focused node to the AT).
+    SetFocus      { id: Option<u32> },
     /// `append=false` replaces the canvas's command list (normal flush);
     /// `append=true` extends it (overflow continuation chunk in binary mode).
     CanvasUpdate  { id: u32, cmds: Vec<CanvasCmd>, append: bool },
@@ -895,6 +900,7 @@ pub fn register_all(
     register!("__glyx_updateNode",    update_node_callback);
     register!("__glyx_removeNode",  remove_node_callback);
     register!("__glyx_setRoot",     set_root_callback);
+    register!("__glyx_setFocus",    set_focus_callback);
     register!("__glyx_pollEvents",  poll_events_callback);
     register!("__glyx_getLayout",   get_layout_callback);
     register!("__glyx_measure_text",    measure_text_callback);

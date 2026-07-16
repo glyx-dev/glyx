@@ -89,6 +89,8 @@ mod scene;
 mod layout;
 mod render;
 mod soft_present;
+#[cfg(feature = "a11y")]
+mod a11y;
 
 use self::config::*;
 use self::state::*;
@@ -886,7 +888,7 @@ pub fn run(mut config: AppConfig) -> bool {
     let restart = glyx_shell::run(window, move |event| {
         match event {
             // ── Window ready — initialise per-window subsystems ──────────
-            ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy } => {
+            ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy, #[cfg(feature = "a11y")] a11y_update } => {
                 // Resolve RenderMode → BackendKind.
                 // GLYX_CPU_RENDER=1 forces the cheapest CPU path (TinySkia) for
                 // CI, headless testing, or machines without a supported GPU.
@@ -1227,6 +1229,10 @@ pub fn run(mut config: AppConfig) -> bool {
                     cursor_was_active:     false,
                     cursor_node_rect:      None,
                     focused_node:          None,
+                    #[cfg(feature = "a11y")]
+                    a11y_update,
+                    #[cfg(feature = "a11y")]
+                    a11y_dirty: true, // force the first-ever tree push
                     cursor_blink_tx:       None,
                     perf:          shared_perf,
                     rss_bytes:     {
@@ -1484,6 +1490,75 @@ pub fn run(mut config: AppConfig) -> bool {
                         }
                     }
                     s.runtime.push_event(InputEvent::KeyInput { key, text, pressed });
+                }
+            }
+
+            // ── Accessibility action requests (screen reader, etc.) ──────
+            #[cfg(feature = "a11y")]
+            ShellEvent::AccessibilityAction { window_handle, target, action, numeric_value } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
+                    match action.as_str() {
+                        "focus" => {
+                            if s.js_nodes.contains_key(&target) {
+                                s.focused_node = Some(target);
+                                s.window.set_ime_allowed(true);
+                                s.runtime.push_event(InputEvent::AccessibilityFocus { node_id: target });
+                                // This path bypasses apply_scene_commands (which
+                                // marks a11y_dirty for SceneCommand-driven focus
+                                // changes), so the AT-driven focus move would
+                                // otherwise never get re-announced until an
+                                // unrelated scene command happened to fire.
+                                s.a11y_dirty = true;
+                                (s.request_redraw)();
+                            }
+                        }
+                        "click" => {
+                            if let Some(node) = s.js_nodes.get(&target) {
+                                if let Some(layout_id) = node.layout_id {
+                                    if let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == layout_id) {
+                                        let cx = rl.x + rl.width  / 2.0;
+                                        let cy = rl.y + rl.height / 2.0;
+                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: true });
+                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: false });
+                                        (s.request_redraw)();
+                                    }
+                                }
+                            }
+                        }
+                        // Increment/Decrement/SetValue don't have a generic
+                        // scene-graph meaning (unlike click, which is just a
+                        // synthesized mouse event) — the actual step/range
+                        // logic lives in the JS control (e.g. Slider knows
+                        // its own min/max/step), so these are just forwarded
+                        // for JS's a11yValueRegistry to act on.
+                        "increment" | "decrement" | "setValue" => {
+                            if s.js_nodes.contains_key(&target) {
+                                s.runtime.push_event(InputEvent::AccessibilityValueChange {
+                                    node_id: target,
+                                    action: action.clone(),
+                                    numeric_value,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // ── IME (CJK/etc composition) ────────────────────────────────
+            // Only forwarded to JS when a node currently has keyboard focus —
+            // matches the OS's own behavior of routing IME to the focused
+            // control, and avoids composition events reaching JS with no
+            // target to attach to.
+            ShellEvent::Ime { window_handle, kind, text, cursor } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
+                    if s.focused_node.is_some() {
+                        let (cursor_start, cursor_end) = match cursor {
+                            Some((a, b)) => (Some(a), Some(b)),
+                            None => (None, None),
+                        };
+                        s.runtime.push_event(InputEvent::Ime { kind, text, cursor_start, cursor_end });
+                    }
                 }
             }
 
@@ -1857,6 +1932,33 @@ pub fn run(mut config: AppConfig) -> bool {
                         win_h: s.gpu.height() as f64,
                     };
                     render_subtree(root_id, 0.0, 1.0, &mut render_ctx);
+                }
+
+                // Position the OS IME candidate window at the focused text
+                // field's caret. Only meaningful while a node is focused —
+                // `cursor_node_rect` is written by render.rs's Text case
+                // whenever a focused, cursor-showing TextInput is drawn.
+                if s.focused_node.is_some() {
+                    if let Some((cx, cy, cw, ch)) = s.cursor_node_rect {
+                        s.window.set_ime_cursor_area(
+                            winit::dpi::PhysicalPosition::new(cx, cy),
+                            winit::dpi::PhysicalSize::new(cw.max(1.0), ch.max(1.0)),
+                        );
+                    }
+                }
+
+                // Push the accessibility tree — only when something actually
+                // changed since the last push (`a11y_dirty`, set by
+                // `apply_scene_commands`). `update_if_active` is cheap when no
+                // AT is running, but rebuilding the whole tree from `js_nodes`
+                // every frame is real work once one IS running, so this is
+                // gated rather than unconditional.
+                #[cfg(feature = "a11y")]
+                if s.a11y_dirty {
+                    if let Some(update) = a11y::build_tree(s) {
+                        (s.a11y_update.0)(update);
+                    }
+                    s.a11y_dirty = false;
                 }
 
                 // Native webview children: create/reposition/hide to match this
@@ -2344,6 +2446,8 @@ pub fn run(mut config: AppConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glyx_gpu::GpuTier;
+    use glyx_security::Capabilities;
 
     // ── Backend selection (renderMode + GPU tier → concrete backend) ──────────
 

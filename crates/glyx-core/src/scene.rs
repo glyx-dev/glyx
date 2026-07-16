@@ -248,6 +248,14 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
     if commands.is_empty() {
         return false;
     }
+    // Mark the a11y tree dirty whenever any scene command actually ran, rather
+    // than rebuilding it every rendered frame regardless of activity — the
+    // tree only needs to change when the scene graph does. Slightly
+    // conservative (canvas/media commands don't affect the tree but still
+    // set this), which is fine: idle frames where NOTHING changed are the
+    // case this actually needs to avoid.
+    #[cfg(feature = "a11y")]
+    { state.a11y_dirty = true; }
     let mut layout_changed   = false;
     // Tracks whether the Taffy tree structure itself changed (nodes added / removed /
     // reparented).  When only style props changed we skip the full rebuild and rely
@@ -447,6 +455,10 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
             }
             SceneCommand::SetFocus { id } => {
                 state.focused_node = id;
+                // Only allow IME composition while a text field is actually
+                // focused — otherwise the OS may show a candidate window with
+                // nowhere for composed text to go.
+                state.window.set_ime_allowed(id.is_some());
             }
             SceneCommand::CanvasUpdate { id, cmds, append } => {
                 if append {

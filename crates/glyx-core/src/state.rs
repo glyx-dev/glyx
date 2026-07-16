@@ -195,6 +195,17 @@ pub(super) struct PerWindowState {
     /// accessibility (expose focus to the AT). Not yet consumed by anything;
     /// this is step 1 of that work — see [[accessibility-and-ime-plan]].
     pub(super) focused_node: Option<u32>,
+    /// Push an accessibility tree update to this window's `accesskit_winit`
+    /// adapter. `None` when built without the `a11y` feature. Cheap to call
+    /// every frame — no-ops internally when no AT is actually running.
+    #[cfg(feature = "a11y")]
+    pub(super) a11y_update: glyx_shell::A11yUpdateFn,
+    /// Set whenever a scene command actually changes something (see
+    /// `scene::apply_scene_commands`); cleared after the tree is rebuilt and
+    /// pushed. Avoids rebuilding the accessibility tree on frames where
+    /// nothing changed (e.g. a blink-only caret redraw).
+    #[cfg(feature = "a11y")]
+    pub(super) a11y_dirty: bool,
     /// Sender to the persistent blink-timer thread (spawned lazily on first
     /// focused TextInput). Sending a deadline schedules one redraw at that
     /// instant; newer deadlines received while waiting replace the pending one.

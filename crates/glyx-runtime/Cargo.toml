@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-v8             = { workspace = true }
+# Optional so a `quickjs`-only build genuinely drops the V8 static lib —
+# see the `v8`/`quickjs` feature definitions below.
+v8             = { workspace = true, optional = true }
+rquickjs       = { workspace = true, optional = true }
 mimalloc       = { workspace = true }
 tokio          = { workspace = true }
 log            = { workspace = true }
@@ -60,7 +63,14 @@ notify             = { workspace = true }
 
 [features]
 default = ["v8", "embed-icu"]
-v8 = []       # V8 backend (current only backend; rusty_v8 dep is always required for now)
+# V8 and quickjs are mutually exclusive JsRuntime backends — see the
+# compile_error! in lib.rs. V8 stays the desktop default (set above); an app
+# opts into QuickJS explicitly (mobile builds, or a dev choosing the
+# lightweight desktop profile) via `default-features = false, features =
+# ["quickjs", ...]`. Picking one is meant to drop the other's dependency
+# entirely, not just leave it unused — see memory/backend-droppability-goals.md.
+v8 = ["dep:v8"]       # V8 backend — rusty_v8 dep required when enabled
+quickjs = ["dep:rquickjs"]  # QuickJS backend — required for mobile, optional lightweight desktop profile
 # Use a custom V8 build from the glyx-v8 repo instead of rusty_v8's prebuilt.
 # When enabled, mimalloc is already merged into the V8 archive, so the
 # force-link hack in lib.rs is disabled. You must also point the `v8` crate at

@@ -221,3 +221,54 @@ pub fn canvas3d_unload_gltf_callback(
 
     state.scene.lock().push_back(SceneCommand::Canvas3DUnloadGltf { path });
 }
+
+/// `__glyx_canvas3d_raycast(id, ndcX, ndcY) -> reqId` — sync, returns
+/// immediately with a request id (NOT a promise — raycasting needs the live
+/// `Renderer3D`, which only glyx-core has; it's answered on the next frame,
+/// polled via `__glyx_canvas3d_raycast_poll` like video/webview events).
+#[cfg(feature = "canvas3d")]
+pub fn canvas3d_raycast_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let id     = args.get(0).number_value(scope).unwrap_or_default() as u32;
+    let ndc_x  = args.get(1).number_value(scope).unwrap_or_default() as f32;
+    let ndc_y  = args.get(2).number_value(scope).unwrap_or_default() as f32;
+
+    let req_id = state.next_raycast_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state.raycast_requests.lock().push_back(RaycastRequest { req_id, canvas_id: id, ndc_x, ndc_y });
+    rv.set_uint32(req_id);
+}
+
+/// `__glyx_canvas3d_raycast_poll() -> string` — JSON array of pending
+/// raycast results (`{"reqId":N,"meshIndex":..,"point":[...],"distance":..}`
+/// or `{"reqId":N,"hit":null}`), drained each frame from JS.
+#[cfg(feature = "canvas3d")]
+pub fn canvas3d_raycast_poll_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let _ = args;
+
+    let mut results = state.raycast_results.lock();
+    let json = if results.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", results.drain(..).collect::<Vec<_>>().join(","))
+    };
+    let s = v8::String::new(scope, &json).unwrap_or_else(|| v8::String::empty(scope));
+    rv.set(s.into());
+}

@@ -7,12 +7,12 @@ use crate::{
     bindings::{
         new_completion_queue, new_event_queue, new_layout_cache, new_scene_queue,
         new_ipc_bus, new_db_pools, new_video_events, register_all, reload_plugin_in_scope,
-        new_webview_events,
+        new_webview_events, new_raycast_request_queue, new_raycast_results,
         CompletionQueue, DbPools, EventQueue, InputEvent, IpcBus, LayoutCache, SceneCommand,
         SceneQueue, VideoEvents, WindowController, StatePtrUsize,
     },
-    bindings::WebviewEvents,
-    runtime_trait::JsRuntime,
+    bindings::{WebviewEvents, RaycastRequestQueue, RaycastResults},
+    runtime_trait::{JsRuntime, HeapStats},
     BackendRegistry, RuntimeError, GlyxExtension, Scope,
 };
 
@@ -100,14 +100,13 @@ pub struct V8Runtime {
     pub video_events: VideoEvents,
     /// Webview page messages drained by glyx-core each frame, forwarded to JS via `__glyx_webview_poll`.
     pub webview_events: WebviewEvents,
+    /// Pending `__glyx_canvas3d_raycast` requests, drained by glyx-core once per frame.
+    pub raycast_requests: RaycastRequestQueue,
+    /// JSON raycast results, forwarded to JS via `__glyx_canvas3d_raycast_poll`.
+    pub raycast_results: RaycastResults,
     /// Opaque pointer to the heap-allocated `AsyncState` created in `register_all`.
     /// Used by `reload_plugin` to update `js_backend_commands` after a dev-mode rebundle.
     state_ptr: StatePtrUsize,
-}
-
-pub struct HeapStats {
-    pub used_heap_size: usize,
-    pub total_heap_size: usize,
 }
 
 impl V8Runtime {
@@ -156,6 +155,8 @@ impl V8Runtime {
         let db_pools           = new_db_pools();
         let video_events       = new_video_events();
         let webview_events     = new_webview_events();
+        let raycast_requests   = new_raycast_request_queue();
+        let raycast_results    = new_raycast_results();
         let cdp_log_tx         = Arc::new(parking_lot::Mutex::new(None::<tokio::sync::mpsc::UnboundedSender<String>>));
 
         // Clone handle before moving into register_all; keep one for inspector.
@@ -188,6 +189,8 @@ impl V8Runtime {
                 Arc::clone(&db_pools),
                 Arc::clone(&video_events),
                 Arc::clone(&webview_events),
+                Arc::clone(&raycast_requests),
+                Arc::clone(&raycast_results),
                 Arc::clone(&cdp_log_tx),
                 backend_commands,
                 js_plugins,
@@ -207,7 +210,8 @@ impl V8Runtime {
             #[cfg(feature = "dev")]
             inspector,
             isolate, context, queue, scene, events, layout_cache,
-            perf_state, deeplink_url_queue, db_pools, video_events, webview_events, state_ptr,
+            perf_state, deeplink_url_queue, db_pools, video_events, webview_events,
+            raycast_requests, raycast_results, state_ptr,
         }
     }
 
@@ -256,6 +260,8 @@ impl V8Runtime {
         let db_pools           = new_db_pools();
         let video_events       = new_video_events();
         let webview_events     = new_webview_events();
+        let raycast_requests   = new_raycast_request_queue();
+        let raycast_results    = new_raycast_results();
         let cdp_log_tx         = Arc::new(parking_lot::Mutex::new(None::<tokio::sync::mpsc::UnboundedSender<String>>));
 
         // Clone handle before moving into register_all; keep one for inspector.
@@ -291,6 +297,8 @@ impl V8Runtime {
                 Arc::clone(&db_pools),
                 Arc::clone(&video_events),
                 Arc::clone(&webview_events),
+                Arc::clone(&raycast_requests),
+                Arc::clone(&raycast_results),
                 Arc::clone(&cdp_log_tx),
                 backend_commands,
                 js_plugins,
@@ -309,7 +317,8 @@ impl V8Runtime {
             #[cfg(feature = "dev")]
             inspector,
             isolate, context, queue, scene, events, layout_cache,
-            perf_state, deeplink_url_queue, db_pools, video_events, webview_events, state_ptr,
+            perf_state, deeplink_url_queue, db_pools, video_events, webview_events,
+            raycast_requests, raycast_results, state_ptr,
         })
     }
 
@@ -486,7 +495,7 @@ impl V8Runtime {
     pub fn tick(&mut self) {
         let completions: Vec<(usize, Result<String, String>)> = {
             let mut q = self.queue.lock();
-            q.drain(..).map(|c| (c.resolver_ptr, c.result)).collect()
+            q.drain(..).map(|c| (c.resolver_ptr.into_raw(), c.result)).collect()
         };
 
         if completions.is_empty() {
@@ -496,6 +505,9 @@ impl V8Runtime {
         v8::scope_with_context!(let scope, &mut self.isolate, &self.context);
 
         for (resolver_ptr, result) in completions {
+            // `into_raw()` above is only safe to call from the backend that
+            // minted the handle (V8Runtime, via `make_promise`) — see
+            // `PromiseHandle`'s doc comment in bindings/mod.rs.
             let resolver_global = unsafe {
                 *Box::from_raw(resolver_ptr as *mut v8::Global<v8::PromiseResolver>)
             };
@@ -643,6 +655,10 @@ impl JsRuntime for V8Runtime {
         self.eval(source)
     }
 
+    fn init_canvas_buffers(&mut self, protocol: &str, buffer_kb: usize) {
+        self.init_canvas_buffers(protocol, buffer_kb);
+    }
+
     fn tick(&mut self) {
         self.tick();
     }
@@ -693,5 +709,29 @@ impl JsRuntime for V8Runtime {
 
     fn db_pools(&self) -> DbPools {
         Arc::clone(&self.db_pools)
+    }
+
+    fn webview_events(&self) -> WebviewEvents {
+        Arc::clone(&self.webview_events)
+    }
+
+    fn video_events(&self) -> VideoEvents {
+        Arc::clone(&self.video_events)
+    }
+
+    fn raycast_requests(&self) -> RaycastRequestQueue {
+        Arc::clone(&self.raycast_requests)
+    }
+
+    fn raycast_results(&self) -> RaycastResults {
+        Arc::clone(&self.raycast_results)
+    }
+
+    fn reload_plugin(&mut self, global_name: &str, prefix: Option<&str>, bundled_js: &str) {
+        self.reload_plugin(global_name, prefix, bundled_js);
+    }
+
+    fn gc_hint(&mut self) {
+        self.gc_hint();
     }
 }

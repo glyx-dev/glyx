@@ -25,6 +25,19 @@
 //! Async:
 //!   - `__glyx_readFile(path)` → Promise<string>
 
+// V8 and QuickJS are mutually exclusive JsRuntime backends — see
+// memory/backend-droppability-goals.md: picking one is meant to actually
+// drop the other's dependency from the binary, not just leave it unused.
+// A build enabling both would silently link V8's ~17-21 MB static lib into
+// what's supposed to be a QuickJS-only (e.g. mobile) binary.
+#[cfg(all(feature = "v8", feature = "quickjs"))]
+compile_error!(
+    "glyx-runtime: the `v8` and `quickjs` features are mutually exclusive — \
+     enable exactly one JsRuntime backend, not both. Use \
+     `default-features = false, features = [\"quickjs\", ...]` to build \
+     without V8."
+);
+
 // The prebuilt V8 static library is compiled with mimalloc support and
 // references `mi_collect`.  Force-linking the mimalloc native lib ensures any
 // binary that embeds V8 (e.g. glyx-snapshot) resolves that symbol.  The search
@@ -32,8 +45,9 @@
 //
 // When the `glyx-v8` feature is enabled, V8 is supplied by a glyx-v8 build
 // where mimalloc is already merged into the V8 archive, so this force-link is
-// unnecessary and is disabled (flip back by dropping the feature).
-#[cfg(not(feature = "glyx-v8"))]
+// unnecessary and is disabled (flip back by dropping the feature). Not
+// needed at all in a `quickjs`-only (V8-free) build.
+#[cfg(all(feature = "v8", not(feature = "glyx-v8")))]
 #[link(name = "mimalloc", kind = "static")]
 extern "C" {}
 
@@ -117,36 +131,86 @@ pub fn window_registry_find_and_focus(key: &str) -> Option<u32> {
     None
 }
 
+// `bindings` always compiles — it holds both the shared, engine-neutral data
+// model (InputEvent, SceneCommand, NodeProps, NodeType, CanvasCmd, ...) and,
+// gated internally behind `#[cfg(feature = "v8")]`, the V8-specific
+// binding-registration glue (register_all, the bind_*.rs submodules,
+// make_promise, etc.). See PromiseHandle's doc comment for why the queue
+// types are already engine-neutral; a QuickJS backend will need its own
+// registration glue but reuses the same data model unchanged.
 pub mod bindings;
 pub mod cap_loader;
+#[cfg(feature = "v8")]
 pub mod runtime;
 pub mod runtime_trait;
+// V8-only: QuickJS has no equivalent to V8 heap snapshots (see
+// memory/quickjs-plan-status.md) — a quickjs-only build has no use for this.
+#[cfg(feature = "v8")]
 pub mod snapshot;
-#[cfg(feature = "dev")]
+#[cfg(all(feature = "dev", feature = "v8"))]
 pub mod inspector;
+#[cfg(feature = "v8")]
 pub mod icu;
+#[cfg(feature = "quickjs")]
+pub mod quickjs_runtime;
+#[cfg(feature = "quickjs")]
+mod quickjs_props;
+#[cfg(feature = "quickjs")]
+mod quickjs_fs;
+#[cfg(feature = "quickjs")]
+mod quickjs_db;
+#[cfg(feature = "quickjs")]
+mod quickjs_net;
+#[cfg(feature = "quickjs")]
+mod quickjs_sys;
+#[cfg(all(feature = "quickjs", feature = "audio"))]
+mod quickjs_media;
+#[cfg(feature = "quickjs")]
+mod quickjs_canvas;
+#[cfg(feature = "quickjs")]
+mod quickjs_ai;
+#[cfg(feature = "quickjs")]
+mod quickjs_updater;
+#[cfg(feature = "quickjs")]
+mod quickjs_tray;
+#[cfg(feature = "quickjs")]
+mod quickjs_ipc;
+#[cfg(feature = "quickjs")]
+mod quickjs_video;
 
 
-pub use runtime::{V8Runtime, HeapStats};
-pub use runtime_trait::JsRuntime;
+#[cfg(feature = "v8")]
+pub use runtime::V8Runtime;
+#[cfg(feature = "quickjs")]
+pub use quickjs_runtime::QuickJsRuntime;
+pub use runtime_trait::{JsRuntime, HeapStats};
 
-/// Backward-compatible alias — all existing call sites in glyx-core continue
-/// to compile unchanged. Switch to `Box<dyn JsRuntime>` when adding a second backend.
+/// Backward-compatible alias — existing V8-only call sites keep compiling
+/// unchanged. Only meaningful when the `v8` feature is enabled; glyx-core
+/// now goes through `Box<dyn JsRuntime>` (see runtime_trait.rs) rather than
+/// this concrete type, so a `quickjs`-only build doesn't need this alias.
+#[cfg(feature = "v8")]
 pub type GlyxRuntime = V8Runtime;
 pub use bindings::{
     LengthValue, NodeProps, NodeType, CanvasCmd, SceneCommand, InputEvent, WindowController,
-    IpcBus, IpcInbox, new_ipc_bus, StatePtrUsize, reload_plugin_in_scope,
+    IpcBus, IpcInbox, new_ipc_bus,
 };
+#[cfg(feature = "v8")]
+pub use bindings::{StatePtrUsize, reload_plugin_in_scope};
+#[cfg(feature = "v8")]
 pub use snapshot::{SnapshotBlob, create_stub_bindings_script};
 pub use cap_loader::load_caps;
 pub use glyx_cap_abi::CapSet;
 
-/// Pinned V8 scope accepted by all internal helper functions.
+/// Pinned V8 scope accepted by all V8-specific internal helper functions.
+/// Only meaningful under the `v8` feature — a QuickJS backend has its own
+/// (differently-shaped) scope/context type, not this alias.
 ///
 /// The `()` context type param lets this type coerce (via `Deref`) from any of
 /// the three scope flavours we use: a plain `HandleScope`, a `ContextScope`, and
 /// a callback `CallbackScope`.  Functions that need to *create* handles take
 /// `&mut Scope<'s, 'i>`; the returned `Local`s are tied to the `'s` lifetime.
+#[cfg(feature = "v8")]
 pub(crate) type Scope<'s, 'i> = v8::PinScope<'s, 'i, v8::Context>;
 
 // ── JS plugin type ────────────────────────────────────────────────────────────
@@ -265,7 +329,11 @@ pub trait GlyxExtension: Send + Sync {
     fn name(&self) -> &str;
 
     /// Register native V8 bindings directly. Called once after the isolate is created.
-    /// Default: no-op.
+    /// Default: no-op. Only meaningful under the `v8` feature — a QuickJS
+    /// build has no isolate/scope to register against this way; extensions
+    /// wanting QuickJS support use `register_commands` instead, which is
+    /// engine-neutral.
+    #[cfg(feature = "v8")]
     fn register(&self, _scope: &mut Scope, _global: v8::Local<v8::Object>) {}
 
     /// Register named async backend commands callable from JS as `backend.<name>(args)`.
@@ -328,12 +396,14 @@ impl Drop for CancellableTask {
 
 // ── V8 platform init ──────────────────────────────────────────────────────────
 
+#[cfg(feature = "v8")]
 static V8_INIT: Once = Once::new();
 
 /// Initialise the V8 platform.
 ///
 /// Must be called exactly once before any `GlyxRuntime` is created.
 /// Safe to call multiple times — subsequent calls are no-ops.
+#[cfg(feature = "v8")]
 pub fn init_v8() {
     V8_INIT.call_once(|| {
         // Set flags BEFORE platform init — V8 ignores flags set afterwards.
@@ -389,7 +459,7 @@ pub enum RuntimeError {
     Io(#[from] std::io::Error),
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "v8"))]
 mod icu_tests {
     use super::*;
 

@@ -11,28 +11,54 @@ use base64::Engine as _;
 use tokio::runtime::Handle;
 use notify::RecommendedWatcher;
 
+#[cfg(feature = "v8")]
 use crate::Scope;
 
+// All of these bind_*.rs submodules are V8 FunctionCallback-based glue —
+// 100% V8-specific, unlike the shared data model below (InputEvent,
+// SceneCommand, NodeProps, etc.). A QuickJS backend needs its own parallel
+// binding layer written against rquickjs's callback signature; it cannot
+// reuse these files as-is (see memory/quickjs-milestone0-progress.md).
+#[cfg(feature = "v8")]
 mod bind_core;
+#[cfg(feature = "v8")]
 mod bind_fs;
+#[cfg(feature = "v8")]
 mod bind_db;
+#[cfg(feature = "v8")]
 mod bind_net;
+#[cfg(feature = "v8")]
 mod bind_sys;
+#[cfg(feature = "v8")]
 mod bind_media;
+#[cfg(feature = "v8")]
 mod bind_canvas;
+#[cfg(feature = "v8")]
 mod bind_ai;
+#[cfg(feature = "v8")]
 mod bind_updater;
+#[cfg(feature = "v8")]
 mod bind_tray;
 
+#[cfg(feature = "v8")]
 pub use self::bind_core::*;
+#[cfg(feature = "v8")]
 pub use self::bind_fs::*;
+#[cfg(feature = "v8")]
 pub use self::bind_db::*;
+#[cfg(feature = "v8")]
 pub use self::bind_net::*;
+#[cfg(feature = "v8")]
 pub use self::bind_sys::*;
+#[cfg(feature = "v8")]
 pub use self::bind_media::*;
+#[cfg(feature = "v8")]
 pub use self::bind_canvas::*;
+#[cfg(feature = "v8")]
 pub use self::bind_ai::*;
+#[cfg(feature = "v8")]
 pub use self::bind_updater::*;
+#[cfg(feature = "v8")]
 pub use self::bind_tray::*;
 
 // IPC bus 
@@ -67,9 +93,37 @@ pub fn new_ipc_bus() -> IpcBus {
 //   3. It is read and dropped on the V8 thread in tick().
 //   No two threads ever hold the Global simultaneously.
 
+/// Opaque handle to a pending promise resolution, created by `make_promise`
+/// and reconstructed only by the engine backend that created it (today,
+/// `V8Runtime::tick()` — see `runtime.rs`). Binding code (`bind_*.rs`) only
+/// ever moves this value from `make_promise` into a `Completion`; it must
+/// never inspect or construct one, which is what keeps the ~90 async
+/// binding call sites unaware of which JS engine is actually running.
+/// This is the `PromiseHandle` building block QUICKJS_PERFORMANCE_PLAN.md's
+/// Opt-1 (PromiseBridge) calls for — a QuickJS backend can wrap whatever
+/// its own resolver representation needs behind the same opaque type
+/// without touching a single binding file.
+#[derive(Debug, Clone, Copy)]
+pub struct PromiseHandle(usize);
+
+impl PromiseHandle {
+    /// Wrap a raw engine-specific pointer/id. Only an engine backend's own
+    /// promise-allocator should call this (V8's `make_promise` here; the
+    /// QuickJS backend has its own equivalent in `quickjs_runtime.rs`) —
+    /// it's the single place per engine a handle is minted.
+    pub(crate) fn from_raw(raw: usize) -> Self { PromiseHandle(raw) }
+
+    /// Unwrap back to the raw value. Only an engine backend's own tick/poll
+    /// implementation may call this — it's the one place that knows how to
+    /// turn the raw value back into a real resolver (today: casting back to
+    /// `*mut v8::Global<v8::PromiseResolver>` in `runtime.rs`).
+    pub(crate) fn into_raw(self) -> usize { self.0 }
+}
+
 pub struct Completion {
-    /// Raw pointer to a Box<v8::Global<v8::PromiseResolver>>, cast to usize.
-    pub resolver_ptr: usize,
+    /// Opaque handle back to whatever promise-resolver representation the
+    /// engine backend that created it uses. See `PromiseHandle`'s doc.
+    pub resolver_ptr: PromiseHandle,
     pub result:       Result<String, String>,
 }
 
@@ -95,6 +149,32 @@ pub fn new_video_events() -> VideoEvents { Arc::new(Mutex::new(VecDeque::new()))
 /// strings here; `__glyx_webview_poll` drains them for JS's `onMessage` dispatch.
 pub type WebviewEvents = Arc<Mutex<VecDeque<String>>>;
 pub fn new_webview_events() -> WebviewEvents { Arc::new(Mutex::new(VecDeque::new())) }
+
+/// A pending `__glyx_canvas3d_raycast` request, queued by the binding and
+/// drained by glyx-core once per frame (raycasting needs the live
+/// `Renderer3D`/`Scene3D`, which only glyx-core has access to). `ndc_x`/
+/// `ndc_y` are already-converted NDC coordinates (`[-1, 1]`), not raw
+/// screen-space pixels — the JS wrapper does that conversion.
+#[derive(Debug, Clone, Copy)]
+pub struct RaycastRequest {
+    pub req_id:    u32,
+    pub canvas_id: u32,
+    pub ndc_x:     f32,
+    pub ndc_y:     f32,
+}
+pub type RaycastRequestQueue = Arc<Mutex<VecDeque<RaycastRequest>>>;
+pub fn new_raycast_request_queue() -> RaycastRequestQueue { Arc::new(Mutex::new(VecDeque::new())) }
+
+/// JSON-encoded raycast results (`{"reqId":N,"meshIndex":..,"point":[...],
+/// "distance":..}` or `{"reqId":N,"hit":null}`), pushed by glyx-core once a
+/// frame after draining `RaycastRequestQueue`; `__glyx_canvas3d_raycast_poll`
+/// drains them for the JS-side pending-promise dispatch. Same
+/// request/polled-response shape as `VideoEvents`/`WebviewEvents` above —
+/// deliberately not routed through the engine's own promise-resolution
+/// queue, since that machinery is kept engine-internal by design (V8
+/// `Global`/QuickJS `Persistent` aren't interchangeable at this boundary).
+pub type RaycastResults = Arc<Mutex<VecDeque<String>>>;
+pub fn new_raycast_results() -> RaycastResults { Arc::new(Mutex::new(VecDeque::new())) }
 
 /// An input event pushed by the Rust side and consumed by JS via __glyx_pollEvents.
 #[derive(Debug, Clone)]
@@ -142,6 +222,7 @@ pub enum InputEvent {
 
 /// Callbacks for window control operations.
 /// Constructed by glyx-core from Arc<winit::window::Window> and passed to register_all.
+#[derive(Clone)]
 pub struct WindowController {
     pub get_window_size:   Arc<dyn Fn() -> (u32, u32) + Send + Sync>,
     pub get_screen_size:   Arc<dyn Fn() -> Option<(u32, u32)> + Send + Sync>,
@@ -200,6 +281,258 @@ pub fn new_completion_queue() -> CompletionQueue {
     Arc::new(Mutex::new(VecDeque::new()))
 }
 
+// ── H3: Network SSRF hardening (engine-neutral — shared by V8's
+//    bind_net.rs and QuickJS's quickjs_net.rs) ─────────────────────────────
+
+/// Extract just the hostname (no port, no userinfo, no path) from a URL string.
+///
+/// Uses `reqwest::Url` (which re-exports the `url` crate) for correct parsing,
+/// matching what reqwest itself connects to.  Falls back to an empty string for
+/// URLs that don't parse (non-http schemes, malformed).
+pub(crate) fn extract_host(url: &str) -> String {
+    #[cfg(feature = "fetch")]
+    {
+        reqwest::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
+            .unwrap_or_default()
+    }
+    #[cfg(not(feature = "fetch"))]
+    {
+        // Minimal fallback when reqwest is not compiled in.
+        let after_scheme = url.find("://").map(|i| &url[i + 3..]).unwrap_or(url);
+        let authority = after_scheme.find('@').map(|i| &after_scheme[i + 1..]).unwrap_or(after_scheme);
+        let host_port = authority.split(['/', '?', '#']).next().unwrap_or(authority);
+        let host = if host_port.starts_with('[') {
+            host_port.split(']').next().unwrap_or("").trim_start_matches('[')
+        } else {
+            host_port.split(':').next().unwrap_or(host_port)
+        };
+        host.to_lowercase()
+    }
+}
+
+/// Returns `true` if `host` is a private, loopback, or link-local address that
+/// should never be reachable from JS fetch/WebSocket (SSRF guard).
+///
+/// Checked ranges:
+/// - `127.0.0.0/8`   -- IPv4 loopback
+/// - `10.0.0.0/8`    -- private class A
+/// - `172.16.0.0/12` -- private class B
+/// - `192.168.0.0/16`-- private class C
+/// - `169.254.0.0/16`-- link-local / AWS IMDS
+/// - `0.0.0.0`        -- unspecified
+/// - `::1/128`        -- IPv6 loopback
+/// - `fc00::/7`       -- IPv6 unique-local
+/// - `fe80::/10`      -- IPv6 link-local
+/// - `"localhost"`, `"*.local"`, `"*.internal"`, `"*.localhost"` hostnames
+pub(crate) fn is_private_host(host: &str) -> bool {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.octets()[0] == 0
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback() || v6.is_unspecified() || {
+                    let s = v6.segments();
+                    (s[0] & 0xfe00) == 0xfc00   // fc00::/7 unique-local
+                        || (s[0] & 0xffc0) == 0xfe80  // fe80::/10 link-local
+                }
+            }
+        };
+    }
+    // Hostname heuristics.
+    host == "localhost"
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host.ends_with(".localhost")
+}
+
+/// Scheme allowlist for fetch -- only `http://` and `https://`.
+pub(crate) fn check_fetch_scheme(url: &str) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("https://") || lower.starts_with("http://") {
+        Ok(())
+    } else {
+        let scheme = url.split("://").next().unwrap_or(url);
+        Err(format!("fetch: scheme {scheme:?} not allowed; only http/https"))
+    }
+}
+
+/// Scheme allowlist for WebSocket -- only `ws://` and `wss://`.
+pub(crate) fn check_ws_scheme(url: &str) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("wss://") || lower.starts_with("ws://") {
+        Ok(())
+    } else {
+        let scheme = url.split("://").next().unwrap_or(url);
+        Err(format!("ws.connect: scheme {scheme:?} not allowed; only ws/wss"))
+    }
+}
+
+/// Build a reqwest client with a redirect policy that re-checks `can_network`
+/// and blocks private IPs on every redirect hop.
+#[cfg(feature = "fetch")]
+pub(crate) fn safe_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+            let next_host = extract_host(attempt.url().as_str());
+            if is_private_host(&next_host) {
+                return attempt.error(format!(
+                    "redirect to private/loopback host {next_host:?} denied (SSRF)"
+                ));
+            }
+            if !glyx_security::get().can_network(&next_host) {
+                return attempt.error(format!(
+                    "redirect to host {next_host:?} not in network.allow"
+                ));
+            }
+            attempt.follow()
+        }))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+// Validate a URL before passing it to the OS shell (engine-neutral — shared
+// by V8's bind_sys.rs and QuickJS's quickjs_sys.rs `open_external`).
+//
+// Enforces:
+// - Scheme must be `http`, `https`, or `mailto` (prevents `file://`, `javascript:`, etc.)
+// - No ASCII control characters (0x00-0x1F, 0x7F)
+// - No shell metacharacters that could cause re-interpretation if a platform
+//   handler mis-uses them: `|  &  ;  $  (  )  >  <  \`  {  }`
+//
+// Returns `Err` with a log-safe reason string on denial.
+pub(crate) fn validate_external_url(url: &str) -> Result<(), &'static str> {
+    let lower = url.to_ascii_lowercase();
+    let valid_scheme = lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:");
+    if !valid_scheme {
+        return Err("scheme not in allowlist (http, https, mailto)");
+    }
+    if url.bytes().any(|b| b < 0x20 || b == 0x7F) {
+        return Err("URL contains control characters");
+    }
+    const SHELL_META: &[char] = &['|', '&', ';', '$', '(', ')', '>', '<', '`', '{', '}'];
+    if url.chars().any(|c| SHELL_META.contains(&c)) {
+        return Err("URL contains shell metacharacters");
+    }
+    Ok(())
+}
+
+// ── H4: DB path safety (engine-neutral — used by both V8's bind_db.rs and
+//    QuickJS's quickjs_db.rs) ──────────────────────────────────────────────
+
+/// Compute the app-local DB data directory:
+///   Windows:  %APPDATA%\{exe}\data\
+///   macOS:    ~/Library/Application Support/{exe}/data/
+///   Linux:    $XDG_DATA_HOME/{exe}/data/  (falls back to ~/.local/share)
+pub(crate) fn app_db_dir() -> std::path::PathBuf {
+    let exe_stem = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "glyx".to_string());
+
+    #[cfg(target_os = "windows")]
+    let base = std::env::var("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::var("USERPROFILE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(".")));
+
+    #[cfg(target_os = "macos")]
+    let base = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("Library").join("Application Support");
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::var("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".local").join("share"))
+            .unwrap_or_else(|_| std::path::PathBuf::from(".")));
+
+    base.join(&exe_stem).join("data")
+}
+
+/// Resolve and security-check a DB path supplied by JS.
+///
+/// Rules (H4):
+/// - `:memory:` requires `capabilities.db.path: true` (explicit grant).
+/// - Absolute paths require `capabilities.db.path: true`.
+/// - Relative paths are rooted at the app data dir and verified via
+///   `glyx_security::resolve_and_check_write` -- symlinks are resolved and
+///   the result must fall within a declared `fs.write` glob OR the app data
+///   dir is added to the allowlist implicitly (see note below).
+///
+/// Returns `Ok(resolved_string)` for use in `glyx_db::open`, or `Err` with
+/// a user-visible message on denial.
+///
+/// Note on implicit data-dir grant: apps using `db: true` but no `fs.write`
+/// are the common case. We allow the resolved path if it is a descendant of
+/// `app_db_dir()` -- that directory is the intended default scope for db files.
+pub fn resolve_db_path_checked(path: &str) -> Result<String, String> {
+    let caps = glyx_security::get();
+
+    // ── :memory: -- requires explicit db.path grant ───────────────────────────
+    if path == ":memory:" {
+        if caps.db_path {
+            return Ok(":memory:".to_string());
+        }
+        return Err("db.open(\":memory:\") requires capabilities.db.path: true".to_string());
+    }
+
+    let p = std::path::Path::new(path);
+
+    // ── Absolute paths -- require explicit db.path grant ──────────────────────
+    if p.is_absolute() {
+        if !caps.db_path {
+            return Err(format!(
+                "db.open with absolute path requires capabilities.db.path: true (got {path:?})"
+            ));
+        }
+        // Still canonicalize + check via fs.write if declared.
+        return glyx_security::resolve_and_check_write(p)
+            .map(|c| c.to_string_lossy().into_owned())
+            .map_err(|e| format!("db path denied: {e}"));
+    }
+
+    // ── Relative path -- root under app data dir ───────────────────────────────
+    let data_dir = app_db_dir();
+    let _ = std::fs::create_dir_all(&data_dir);
+    let joined = data_dir.join(path);
+
+    // Resolve symlinks. For a new file the parent must exist (created above).
+    let canonical = if joined.exists() {
+        joined.canonicalize()
+    } else {
+        joined.parent()
+            .unwrap_or(&data_dir)
+            .canonicalize()
+            .map(|p| p.join(joined.file_name().unwrap_or_default()))
+    }.map_err(|e| format!("db path resolve error: {e}"))?;
+
+    // Accept if canonical path is within the app data dir (implicit grant).
+    let canon_data = data_dir.canonicalize().unwrap_or(data_dir.clone());
+    if canonical.starts_with(&canon_data) {
+        return Ok(canonical.to_string_lossy().into_owned());
+    }
+
+    // Fall back: check fs.write allowlist.
+    glyx_security::resolve_and_check_write(&canonical)
+        .map(|c| c.to_string_lossy().into_owned())
+        .map_err(|e| format!("db path outside app data dir and not in fs.write grant: {e}"))
+}
+
 pub fn new_scene_queue() -> SceneQueue {
     Arc::new(Mutex::new(VecDeque::new()))
 }
@@ -214,7 +547,7 @@ pub fn new_layout_cache() -> LayoutCache {
 
 // Node types & props   
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NodeType {
     View,
     Text,
@@ -248,7 +581,7 @@ impl Default for LengthValue {
 ///
 /// All fields are `Option`  `None` means "not set / inherit / use default".
 /// `parse_props` only sets fields that are present in the JS object.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct NodeProps {
     // Dimensions (px or %)
     pub width:  Option<LengthValue>,
@@ -555,7 +888,7 @@ mod canvas_op {
 ///
 /// Fully bounds-checked  the buffer is JS-controlled, so a malformed or
 /// truncated stream must never panic: any out-of-range read stops decoding.
-fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_bytes: &[u8]) -> Vec<CanvasCmd> {
+pub(crate) fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_bytes: &[u8]) -> Vec<CanvasCmd> {
     let slots = (cmd_bytes.len() / 4).min(float_count);
     let f32_at = |i: usize| -> f32 {
         let b = i * 4;
@@ -740,8 +1073,10 @@ pub enum SceneCommand {
 
 /// Returned by `register_all`; cast back to `*mut AsyncState` for `reload_plugin`.
 /// Stored as `usize` so it is `Copy + Send + Sync` (V8Runtime is `!Send` regardless).
+#[cfg(feature = "v8")]
 pub type StatePtrUsize = usize;
 
+#[cfg(feature = "v8")]
 pub fn register_all(
     scope:        &mut v8::PinScope<'_, '_, v8::Context>,
     global:       v8::Local<v8::Object>,
@@ -759,6 +1094,8 @@ pub fn register_all(
     db_pools:     DbPools,
     video_events: VideoEvents,
     webview_events: WebviewEvents,
+    raycast_requests: RaycastRequestQueue,
+    raycast_results: RaycastResults,
     cdp_log_tx:   Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
     backend_commands: crate::BackendRegistry,
     js_plugins:   crate::JsPlugins,
@@ -818,6 +1155,9 @@ pub fn register_all(
         next_video_id:  std::sync::atomic::AtomicU32::new(1),
         video_events,
         webview_events,
+        raycast_requests,
+        raycast_results,
+        next_raycast_id: std::sync::atomic::AtomicU32::new(1),
         #[cfg(feature = "hid")]
         hid_api:     Arc::new(Mutex::new(None)),
         #[cfg(feature = "hid")]
@@ -1091,6 +1431,10 @@ pub fn register_all(
     register!("__glyx_canvas3d_load_gltf",   canvas3d_load_gltf_callback);
     #[cfg(feature = "canvas3d")]
     register!("__glyx_canvas3d_unload_gltf", canvas3d_unload_gltf_callback);
+    #[cfg(feature = "canvas3d")]
+    register!("__glyx_canvas3d_raycast",      canvas3d_raycast_callback);
+    #[cfg(feature = "canvas3d")]
+    register!("__glyx_canvas3d_raycast_poll", canvas3d_raycast_poll_callback);
 
     //  WebView
     #[cfg(feature = "webview")]
@@ -1164,6 +1508,7 @@ pub fn register_all(
     state_usize
 }
 
+#[cfg(feature = "v8")]
 struct AsyncState {
     queue:        CompletionQueue,
     tokio:        Handle,
@@ -1242,6 +1587,19 @@ struct AsyncState {
     /// `{"id":N,"message":"..."}`. See `WebviewEvents` type doc.
     #[allow(dead_code)] // read by webview_poll_callback when the "webview" feature is enabled
     webview_events: WebviewEvents,
+    //  Canvas3D raycasting €€€
+    /// Pending `__glyx_canvas3d_raycast` requests, drained by glyx-core once
+    /// per frame. See `RaycastRequestQueue`'s type doc.
+    #[allow(dead_code)] // read by canvas3d_raycast_callback when the "canvas3d" feature is enabled
+    raycast_requests: RaycastRequestQueue,
+    /// JSON raycast results, pushed by glyx-core once a frame; drained by
+    /// `__glyx_canvas3d_raycast_poll`. See `RaycastResults`'s type doc.
+    #[allow(dead_code)] // read by canvas3d_raycast_poll_callback when the "canvas3d" feature is enabled
+    raycast_results: RaycastResults,
+    /// Monotonic id generator for raycast requests, so the JS wrapper can
+    /// correlate a `__glyx_canvas3d_raycast` call with its eventual result.
+    #[allow(dead_code)]
+    next_raycast_id: std::sync::atomic::AtomicU32,
     //  Local AI model cache (glyx-ai / Candle) €
     /// Lazily initialised embedding model. Locked during init, then shared.
     #[cfg(feature = "ai")]
@@ -1287,6 +1645,7 @@ struct AsyncState {
 ///
 /// Called on plugin file-change in dev mode.  The V8 scope must be active.
 /// Clears all old commands for this plugin's prefix before re-registering.
+#[cfg(feature = "v8")]
 pub fn reload_plugin_in_scope(
     scope:      &mut v8::PinScope<'_, '_, v8::Context>,
     state_ptr:  StatePtrUsize,
@@ -1361,32 +1720,94 @@ pub fn reload_plugin_in_scope(
 
 /// Tracks playback position for a rodio audio handle.
 /// rodio 0.17 has no `get_pos()`  we maintain wall-clock state manually.
+/// Engine-neutral — shared by V8's `bind_media.rs` and QuickJS's
+/// `quickjs_media.rs` (only gated on the `audio` feature, not `v8`).
 #[cfg(feature = "audio")]
-struct AudioTracker {
-    path:        String,
-    offset_secs: f64,                        // saved offset when paused / seeked
-    started_at:  Option<std::time::Instant>, // None = paused
+pub(crate) struct AudioTracker {
+    pub(crate) path:        String,
+    pub(crate) offset_secs: f64,                        // saved offset when paused / seeked
+    pub(crate) started_at:  Option<std::time::Instant>, // None = paused
 }
 #[cfg(feature = "audio")]
 impl AudioTracker {
-    fn current_time(&self) -> f64 {
+    pub(crate) fn current_time(&self) -> f64 {
         self.offset_secs
             + self.started_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0)
     }
 }
 
+/// Engine-neutral — used by both V8's `bind_net.rs` and QuickJS's
+/// `quickjs_net.rs`. Not gated behind `v8`, only `websocket` (glyx-runtime's
+/// own optional-dependency feature, independent of engine choice).
 #[cfg(feature = "websocket")]
-struct WsHandle {
-    outbox_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    inbox:     Arc<Mutex<VecDeque<String>>>,
+pub(crate) struct WsHandle {
+    pub(crate) outbox_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    pub(crate) inbox:     Arc<Mutex<VecDeque<String>>>,
 }
 
-struct HotkeyState {
-    manager: global_hotkey::GlobalHotKeyManager,
+pub(crate) struct HotkeyState {
+    pub(crate) manager: global_hotkey::GlobalHotKeyManager,
     /// Maps glyx-assigned ID †’ registered HotKey (needed for unregister).
-    hotkeys: HashMap<u32, global_hotkey::hotkey::HotKey>,
+    pub(crate) hotkeys: HashMap<u32, global_hotkey::hotkey::HotKey>,
 }
 
+pub(crate) fn parse_accelerator(acc: &str) -> Option<global_hotkey::hotkey::HotKey> {
+    use global_hotkey::hotkey::{HotKey, Modifiers};
+    let mut mods     = Modifiers::empty();
+    let mut key_code = None;
+    for part in acc.to_lowercase().split('+') {
+        match part.trim() {
+            "ctrl" | "control" => mods |= Modifiers::CONTROL,
+            "shift"            => mods |= Modifiers::SHIFT,
+            "alt"              => mods |= Modifiers::ALT,
+            "meta" | "cmd" | "super" | "win" => mods |= Modifiers::META,
+            key => key_code = str_to_code(key),
+        }
+    }
+    let code = key_code?;
+    Some(HotKey::new(if mods.is_empty() { None } else { Some(mods) }, code))
+}
+
+pub(crate) fn str_to_code(key: &str) -> Option<global_hotkey::hotkey::Code> {
+    use global_hotkey::hotkey::Code;
+    Some(match key {
+        "a" => Code::KeyA,    "b" => Code::KeyB,    "c" => Code::KeyC,
+        "d" => Code::KeyD,    "e" => Code::KeyE,    "f" => Code::KeyF,
+        "g" => Code::KeyG,    "h" => Code::KeyH,    "i" => Code::KeyI,
+        "j" => Code::KeyJ,    "k" => Code::KeyK,    "l" => Code::KeyL,
+        "m" => Code::KeyM,    "n" => Code::KeyN,    "o" => Code::KeyO,
+        "p" => Code::KeyP,    "q" => Code::KeyQ,    "r" => Code::KeyR,
+        "s" => Code::KeyS,    "t" => Code::KeyT,    "u" => Code::KeyU,
+        "v" => Code::KeyV,    "w" => Code::KeyW,    "x" => Code::KeyX,
+        "y" => Code::KeyY,    "z" => Code::KeyZ,
+        "0" => Code::Digit0,  "1" => Code::Digit1,  "2" => Code::Digit2,
+        "3" => Code::Digit3,  "4" => Code::Digit4,  "5" => Code::Digit5,
+        "6" => Code::Digit6,  "7" => Code::Digit7,  "8" => Code::Digit8,
+        "9" => Code::Digit9,
+        "f1"  => Code::F1,  "f2"  => Code::F2,  "f3"  => Code::F3,
+        "f4"  => Code::F4,  "f5"  => Code::F5,  "f6"  => Code::F6,
+        "f7"  => Code::F7,  "f8"  => Code::F8,  "f9"  => Code::F9,
+        "f10" => Code::F10, "f11" => Code::F11, "f12" => Code::F12,
+        "space"                    => Code::Space,
+        "enter" | "return"         => Code::Enter,
+        "escape" | "esc"           => Code::Escape,
+        "tab"                      => Code::Tab,
+        "backspace"                => Code::Backspace,
+        "delete"                   => Code::Delete,
+        "insert"                   => Code::Insert,
+        "home"                     => Code::Home,
+        "end"                      => Code::End,
+        "pageup"                   => Code::PageUp,
+        "pagedown"                 => Code::PageDown,
+        "up"    | "arrowup"        => Code::ArrowUp,
+        "down"  | "arrowdown"      => Code::ArrowDown,
+        "left"  | "arrowleft"      => Code::ArrowLeft,
+        "right" | "arrowright"     => Code::ArrowRight,
+        _ => return None,
+    })
+}
+
+#[cfg(feature = "v8")]
 fn set_func(
     scope:  &mut v8::PinScope<'_, '_, v8::Context>,
     global: v8::Local<v8::Object>,
@@ -1400,6 +1821,7 @@ fn set_func(
 
 //  Prop parsing €€€
 
+#[cfg(feature = "v8")]
 fn parse_node_type(scope: &mut v8::PinScope<'_, '_, v8::Context>, value: v8::Local<v8::Value>) -> NodeType {
     let s = value
         .to_string(scope)
@@ -1420,8 +1842,10 @@ fn parse_node_type(scope: &mut v8::PinScope<'_, '_, v8::Context>, value: v8::Loc
 }
 
 /// Parse a CSS hex colour string (`#RGB`, `#RRGGBB`, `#RRGGBBAA`) into RGBA bytes.
-/// Returns `None` if the string is not a valid hex colour.
-fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
+/// Returns `None` if the string is not a valid hex colour. Engine-neutral —
+/// used by both the V8 `parse_props` (below) and QuickJS's JSON-based
+/// equivalent in `quickjs_runtime.rs`.
+pub(crate) fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
     let s = s.trim().trim_start_matches('#');
     match s.len() {
         3 => {
@@ -1448,6 +1872,7 @@ fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
 }
 
 /// Read a string property from a JS object, if present.
+#[cfg(feature = "v8")]
 fn get_str_prop(
     scope: &mut Scope,
     obj:   v8::Local<v8::Object>,
@@ -1463,6 +1888,7 @@ fn get_str_prop(
 }
 
 /// Read a number property from a JS object as f32, if present.
+#[cfg(feature = "v8")]
 fn get_num_prop(
     scope: &mut Scope,
     obj:   v8::Local<v8::Object>,
@@ -1479,6 +1905,7 @@ fn get_num_prop(
 
 /// Read a length value from a JS object: either a plain number (px) or a
 /// `"50%"` string (percent). Returns `None` if the property is absent.
+#[cfg(feature = "v8")]
 fn get_length_prop(
     scope: &mut Scope,
     obj:   v8::Local<v8::Object>,
@@ -1505,6 +1932,7 @@ fn get_length_prop(
 }
 
 /// Read a boolean property from a JS object, if present.
+#[cfg(feature = "v8")]
 fn get_bool_prop(
     scope: &mut Scope,
     obj:   v8::Local<v8::Object>,
@@ -1520,6 +1948,7 @@ fn get_bool_prop(
 }
 
 /// Read a hex colour string property, if present and parseable.
+#[cfg(feature = "v8")]
 fn get_color_prop(
     scope: &mut Scope,
     obj:   v8::Local<v8::Object>,
@@ -1529,6 +1958,7 @@ fn get_color_prop(
     parse_hex_color(&s)
 }
 
+#[cfg(feature = "v8")]
 fn parse_props(
     scope: &mut Scope,
     value: v8::Local<v8::Value>,
@@ -1656,6 +2086,7 @@ fn parse_props(
 
 //  Sync bindings 
 
+#[cfg(feature = "v8")]
 fn v8_arg_to_string(
     scope: &mut Scope,
     args:  &v8::FunctionCallbackArguments,
@@ -1667,20 +2098,22 @@ fn v8_arg_to_string(
         .unwrap_or_default()
 }
 
-/// Allocate a `PromiseResolver`, return `(resolver_ptr, promise, queue_clone)`.
+/// Allocate a `PromiseResolver`, return `(resolver_handle, promise, queue_clone)`.
+#[cfg(feature = "v8")]
 fn make_promise<'s>(
     scope: &mut Scope<'s, '_>,
     state: &AsyncState,
-) -> (usize, v8::Local<'s, v8::Promise>, CompletionQueue, Option<RedrawRequest>) {
+) -> (PromiseHandle, v8::Local<'s, v8::Promise>, CompletionQueue, Option<RedrawRequest>) {
     let resolver     = v8::PromiseResolver::new(scope).unwrap();
     let promise      = resolver.get_promise(scope);
     let global_res   = v8::Global::new(scope, resolver);
     let resolver_ptr = Box::into_raw(Box::new(global_res)) as usize;
     let queue_clone  = Arc::clone(&state.queue);
     let redraw       = state.request_redraw.as_ref().map(Arc::clone);
-    (resolver_ptr, promise, queue_clone, redraw)
+    (PromiseHandle::from_raw(resolver_ptr), promise, queue_clone, redraw)
 }
 
+#[cfg(feature = "v8")]
 fn enqueue_completion(
     queue: &CompletionQueue,
     redraw: Option<&RedrawRequest>,
@@ -1693,6 +2126,7 @@ fn enqueue_completion(
 }
 
 /// Throw a JS Error for a missing capability (sync bindings only).
+#[cfg(feature = "v8")]
 fn throw_cap_error(scope: &mut v8::PinScope<'_, '_, v8::Context>, cap: &str) {
     let msg = format!(
         "Capability required: {cap}  add it to glyx.config.json under \"capabilities\""
@@ -1702,6 +2136,7 @@ fn throw_cap_error(scope: &mut v8::PinScope<'_, '_, v8::Context>, cap: &str) {
 
 /// Return a pre-rejected Promise with a JS Error  use this in **async** bindings
 /// so the caller always gets a settled Promise instead of a synchronous exception.
+#[cfg(feature = "v8")]
 fn reject_promise_with_error<'s>(scope: &mut v8::PinScope<'s, '_, v8::Context>, msg: &str) -> v8::Local<'s, v8::Promise> {
     let s        = v8::String::new(scope, msg).unwrap_or_else(|| v8::String::empty(scope));
     let exc      = v8::Exception::error(scope, s);
@@ -1711,6 +2146,7 @@ fn reject_promise_with_error<'s>(scope: &mut v8::PinScope<'s, '_, v8::Context>, 
 }
 
 /// Convenience wrapper for capability-gate rejections in async bindings.
+#[cfg(feature = "v8")]
 fn reject_cap_promise<'s>(scope: &mut v8::PinScope<'s, '_, v8::Context>, cap: &str) -> v8::Local<'s, v8::Promise> {
     let msg = format!(
         "Capability required: {cap}  add it to glyx.config.json under \"capabilities\""
@@ -1721,6 +2157,7 @@ fn reject_cap_promise<'s>(scope: &mut v8::PinScope<'s, '_, v8::Context>, cap: &s
 //  OS system APIs €€€
 
 /// `__glyx_battery_getStatus()` †’ Promise<JSON | null>
+#[cfg(feature = "v8")]
 fn fs_denied_msg(kind: &str, path: &str) -> String {
     format!(
         "Capability denied: fs.{kind} does not cover {path:?}. Add a matching \
@@ -1730,6 +2167,7 @@ fn fs_denied_msg(kind: &str, path: &str) -> String {
 }
 
 /// Throw a generic JS Error with the given message.
+#[cfg(feature = "v8")]
 fn throw_js_error(scope: &mut v8::PinScope<'_, '_, v8::Context>, msg: &str) {
     let s  = v8::String::new(scope, msg).unwrap();
     let ex = v8::Exception::error(scope, s);
@@ -1899,6 +2337,7 @@ mod tests {
 
     //  extract_host (network capability gate input) €
 
+    #[cfg(feature = "v8")]
     #[test]
     fn extract_host_strips_scheme_path_and_port() {
         assert_eq!(extract_host("https://api.example.com/v1/users"), "api.example.com");
@@ -1907,11 +2346,13 @@ mod tests {
         assert_eq!(extract_host("wss://ws.example.com/socket"), "ws.example.com");
     }
 
+    #[cfg(feature = "v8")]
     #[test]
     fn extract_host_lowercases() {
         assert_eq!(extract_host("https://API.Example.COM/x"), "api.example.com");
     }
 
+    #[cfg(feature = "v8")]
     #[test]
     fn extract_host_hostile_urls_fail_closed() {
         // Userinfo trick: "http://allowed.com@evil.com/x" — the actual host is

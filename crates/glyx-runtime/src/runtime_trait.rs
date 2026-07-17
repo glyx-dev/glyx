@@ -1,23 +1,28 @@
 //! `JsRuntime` — backend-agnostic trait for the embedded JS engine.
 //!
-//! The V8 backend (`V8Runtime`) implements this trait. Future backends
-//! (JavaScriptCore for iOS, QuickJS for embedded) will implement it without
-//! requiring changes to `glyx-core`.
+//! The V8 backend (`V8Runtime`) implements this trait. A QuickJS backend
+//! (see glyx_rough_docs/QUICKJS_PERFORMANCE_PLAN.md) implements it too,
+//! without requiring changes to `glyx-core`.
 //!
-//! ## Migration path
-//!
-//! Currently `glyx-core` uses `pub type GlyxRuntime = V8Runtime`, so all
-//! field access and method calls work unchanged. When a second backend is
-//! added, change `PerWindowState.runtime` from the concrete type to
-//! `Box<dyn JsRuntime>` and use the accessor methods below for field access.
+//! `glyx-core`'s `PerWindowState.runtime` is `Box<dyn JsRuntime>` — see
+//! `state.rs`. Field/method access goes through this trait's methods below,
+//! not through either backend's own inherent methods.
 
 use std::sync::Arc;
 use std::collections::VecDeque;
 
 use crate::{
     bindings::{EventQueue, LayoutCache, InputEvent, SceneCommand, DbPools},
-    RuntimeError, HeapStats, GlyxExtension,
+    RuntimeError, GlyxExtension,
 };
+
+/// Heap/memory usage snapshot — engine-neutral shape (defined here, not in
+/// `runtime.rs`, since it's this trait's own return type and must exist
+/// regardless of which engine backend is actually compiled in).
+pub struct HeapStats {
+    pub used_heap_size: usize,
+    pub total_heap_size: usize,
+}
 
 /// A JavaScript runtime that Glyx can drive.
 ///
@@ -33,6 +38,11 @@ pub trait JsRuntime {
 
     /// Evaluate a JS source string, returning the result as a string.
     fn eval(&mut self, source: &str) -> Result<String, RuntimeError>;
+
+    /// Set up the Canvas2D binary command buffer (or mark json mode).
+    /// Default: no-op — canvas bindings are V8-only for now (not yet ported
+    /// to the QuickJS backend, see memory/quickjs-milestone0-progress.md).
+    fn init_canvas_buffers(&mut self, _protocol: &str, _buffer_kb: usize) {}
 
     // ── Async tick ────────────────────────────────────────────────────────
 
@@ -73,6 +83,19 @@ pub trait JsRuntime {
     /// Read V8 heap statistics.
     fn heap_stats(&mut self) -> HeapStats;
 
+    // ── Plugin hot-reload (dev mode) ────────────────────────────────────────
+
+    /// Re-eval a plugin IIFE and refresh its exported commands. Called by
+    /// glyx-core's dev-mode file-change handler.
+    fn reload_plugin(&mut self, global_name: &str, prefix: Option<&str>, bundled_js: &str);
+
+    // ── GC pressure relief ───────────────────────────────────────────────────
+
+    /// Hint the engine to run a full GC pass. Call periodically during
+    /// high-frequency animation loops to counteract heap growth from
+    /// short-lived React render objects outpacing incremental GC.
+    fn gc_hint(&mut self);
+
     // ── Shared-state accessors ────────────────────────────────────────────
     // These Arc clones let `Box<dyn JsRuntime>` consumers read shared state
     // without downcasting. glyx-core currently uses the concrete type alias
@@ -83,4 +106,8 @@ pub trait JsRuntime {
     fn perf_state(&self) -> Arc<parking_lot::Mutex<glyx_perf::PerfState>>;
     fn deeplink_url_queue(&self) -> Arc<parking_lot::Mutex<VecDeque<String>>>;
     fn db_pools(&self) -> DbPools;
+    fn webview_events(&self) -> crate::bindings::WebviewEvents;
+    fn video_events(&self) -> crate::bindings::VideoEvents;
+    fn raycast_requests(&self) -> crate::bindings::RaycastRequestQueue;
+    fn raycast_results(&self) -> crate::bindings::RaycastResults;
 }

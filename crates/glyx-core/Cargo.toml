@@ -7,7 +7,15 @@ edition = "2021"
 # "dev" gates hot-reload: file watcher, bun subprocess, dev overlay.
 # Production builds (glyx build --mode snapshot/bundle) disable this feature
 # so notify and std::process::Command are never compiled in.
-default = ["dev", "camera", "canvas3d", "audio", "gamepad", "hid", "ai", "fetch", "websocket", "updater"]
+default = ["v8", "dev", "camera", "canvas3d", "audio", "gamepad", "hid", "ai", "fetch", "websocket", "updater"]
+# JsRuntime backend selection — mutually exclusive, forwarded straight to
+# glyx-runtime's own `v8`/`quickjs` features (see
+# memory/quickjs-milestone0-progress.md). V8 is the desktop default (in
+# `default` above); quickjs is opt-in via `default-features = false,
+# features = ["quickjs", ...]`, same pattern the runner/CLI will use for a
+# mobile or lightweight-desktop build.
+v8       = ["glyx-runtime/v8"]
+quickjs  = ["glyx-runtime/quickjs"]
 dev      = ["notify", "glyx-runtime/dev", "ffmpeg-sidecar", "arboard"]
 camera   = ["dep:nokhwa", "glyx-runtime/camera"]
 canvas3d = ["dep:glyx-3d", "glyx-runtime/canvas3d"]
@@ -28,7 +36,7 @@ glyx-shell    = { path = "../glyx-shell" }
 glyx-renderer = { path = "../glyx-renderer" }
 glyx-text     = { path = "../glyx-text" }
 glyx-layout   = { path = "../glyx-layout" }
-glyx-runtime  = { path = "../glyx-runtime", default-features = false, features = ["v8"] }
+glyx-runtime  = { path = "../glyx-runtime", default-features = false }
 glyx-perf     = { path = "../glyx-perf" }
 winit          = { workspace = true }
 tokio          = { workspace = true }

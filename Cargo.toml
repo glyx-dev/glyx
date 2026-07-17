@@ -23,6 +23,7 @@ members = [
     "examples/model-viewer",
     "examples/webview-demo",
     "examples/a11y-ime-demo",
+    "examples/bench-app",
     "crates/glyx-snapshot",
     "crates/glyx-media",
     "crates/glyx-cap-abi",
@@ -135,6 +136,11 @@ wry                 = "0.50"
 # Accessibility (accesskit surfaces to NSAccessibility / UIAutomation / AT-SPI)
 accesskit           = "0.19"
 accesskit_winit     = "0.27"
+
+# QuickJS (mobile-required, desktop-optional lightweight engine — see
+# glyx_rough_docs/QUICKJS_PERFORMANCE_PLAN.md). Mutually exclusive with `v8`
+# at the glyx-runtime feature level — never both linked into one binary.
+rquickjs            = { version = "0.12", features = ["full-async", "parallel"] }
 
 # AI / ML — Candle (Hugging Face minimalist ML framework, CPU-only by default)
 candle-core         = { version = "0.8", default-features = false }

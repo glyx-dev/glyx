@@ -276,6 +276,15 @@ struct Primitive {
     tex_bg: Option<wgpu::BindGroup>,
 }
 
+/// A loaded GLTF model: its drawable primitives plus a local-space AABB
+/// (computed once at load time from the raw vertex positions) used for
+/// AABB-precision raycasting — see [`Renderer3D::raycast`].
+struct GltfModel {
+    prims:    Vec<Primitive>,
+    aabb_min: Vec3,
+    aabb_max: Vec3,
+}
+
 /// Vertex = position(3) + normal(3) + uv(2) = 8 floats.
 const VERT_FLOATS: usize = 8;
 
@@ -463,7 +472,7 @@ pub struct Renderer3D {
     /// Loaded GLTF models, keyed by path. Capped at 16 models (LRU eviction).
     /// Each evicted model's wgpu buffers are freed when its Arc refcount hits 0.
     /// Call `unload_gltf` to evict a specific model ahead of the LRU limit.
-    gltf_cache:  LruCache<String, Vec<Primitive>>,
+    gltf_cache:  LruCache<String, GltfModel>,
 
     targets:  HashMap<u32, Canvas3DTarget>,
 
@@ -866,10 +875,10 @@ impl Renderer3D {
                 pass.set_bind_group(1, &self.per_obj_bgs[i], &[]);
                 match &mesh.geometry {
                     Geometry3D::Gltf { path } => {
-                        if let Some(prims) = self.gltf_cache.get(path) {
+                        if let Some(model_data) = self.gltf_cache.get(path) {
                             // A model is all its primitives — each with its own
                             // geometry + (optional) base-color texture.
-                            for prim in prims {
+                            for prim in &model_data.prims {
                                 let tex = prim.tex_bg.as_ref().unwrap_or(&self.white_tex_bg);
                                 pass.set_bind_group(3, tex, &[]);
                                 pass.set_vertex_buffer(0, prim.geom.vbuf.slice(..));
@@ -970,12 +979,19 @@ impl Renderer3D {
         // texture shared by several primitives is uploaded to the GPU only once.
         let mut tex_views: HashMap<usize, wgpu::TextureView> = HashMap::new();
         let mut prims_out: Vec<Primitive> = Vec::new();
+        let mut aabb_min = Vec3::splat(f32::INFINITY);
+        let mut aabb_max = Vec3::splat(f32::NEG_INFINITY);
         for mesh in doc.meshes() {
             for prim in mesh.primitives() {
                 let reader = prim.reader(|b| Some(&buffers[b.index()]));
                 let Some(pos_iter) = reader.read_positions() else { continue };
                 let pos: Vec<[f32; 3]> = pos_iter.collect();
                 if pos.is_empty() { continue; }
+                for p in &pos {
+                    let v = Vec3::from(*p);
+                    aabb_min = aabb_min.min(v);
+                    aabb_max = aabb_max.max(v);
+                }
                 let nor: Vec<[f32; 3]> = reader.read_normals().map(|r| r.collect()).unwrap_or_default();
                 let uvs: Vec<[f32; 2]> = reader.read_tex_coords(0)
                     .map(|r| r.into_f32().collect())
@@ -995,18 +1011,26 @@ impl Renderer3D {
 
                 // Base-color texture (if the material declares one and we can
                 // decode it). Untextured primitives fall back to the shared white.
-                let tex_bg = self.load_base_color_bg(device, queue, &prim, &images, &mut tex_views);
+                // `baseColorFactor` is baked into the texture bytes at load time
+                // (rather than a new per-primitive uniform/bind-group slot) so
+                // this needs no shader/pipeline/uniform-layout changes at all.
+                let factor = prim.material().pbr_metallic_roughness().base_color_factor();
+                let tex_bg = self.load_base_color_bg(device, queue, &prim, &images, &mut tex_views, factor);
                 prims_out.push(Primitive { geom, tex_bg });
             }
         }
 
         if prims_out.is_empty() { return Err("gltf: no drawable primitives".into()); }
-        self.gltf_cache.put(path.to_string(), prims_out);
+        self.gltf_cache.put(path.to_string(), GltfModel { prims: prims_out, aabb_min, aabb_max });
         Ok(())
     }
 
-    /// Build a group-3 bind group for a primitive's base-color texture, or
-    /// `None` if it has no texture / the format is unsupported (→ shared white).
+    /// Build a group-3 bind group for a primitive's base-color texture
+    /// (with `factor` baked in), or `None` if there's no texture AND the
+    /// factor is the default white (→ caller falls back to the renderer's
+    /// shared white texture). `factor` is glTF's `baseColorFactor` — a
+    /// constant tint multiplied into the texture (or the sole color, for
+    /// untextured primitives).
     fn load_base_color_bg(
         &self,
         device:    &wgpu::Device,
@@ -1014,22 +1038,53 @@ impl Renderer3D {
         prim:      &gltf::Primitive,
         images:    &[gltf::image::Data],
         tex_views: &mut HashMap<usize, wgpu::TextureView>,
+        factor:    [f32; 4],
     ) -> Option<wgpu::BindGroup> {
-        let info = prim.material().pbr_metallic_roughness().base_color_texture()?;
-        let idx  = info.texture().source().index();
-        // Upload the image once per model; reuse the view for later primitives.
-        if !tex_views.contains_key(&idx) {
-            let img  = images.get(idx)?;
-            let rgba = gltf_image_to_rgba8(img)?;
-            tex_views.insert(idx, make_rgba_texture(device, queue, img.width, img.height, &rgba));
-        }
-        let view = tex_views.get(&idx)?;
+        const DEFAULT_FACTOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+        let tinted = factor != DEFAULT_FACTOR;
+
+        let view: wgpu::TextureView = if let Some(info) = prim.material().pbr_metallic_roughness().base_color_texture() {
+            let idx = info.texture().source().index();
+            if !tinted {
+                // Common case: no tint, share one decoded+uploaded texture
+                // across every primitive in this model that references it.
+                if !tex_views.contains_key(&idx) {
+                    let img  = images.get(idx)?;
+                    let rgba = gltf_image_to_rgba8(img)?;
+                    tex_views.insert(idx, make_rgba_texture(device, queue, img.width, img.height, &rgba));
+                }
+                tex_views.get(&idx)?.clone()
+            } else {
+                // Tinted: bake the factor into a fresh copy of the decoded
+                // bytes. Not cached/shared (tinted primitives referencing the
+                // same source image are rare), but correctness-first is fine
+                // here — this only runs once per model load, not per frame.
+                let img  = images.get(idx)?;
+                let mut rgba = gltf_image_to_rgba8(img)?;
+                tint_rgba8(&mut rgba, factor);
+                make_rgba_texture(device, queue, img.width, img.height, &rgba)
+            }
+        } else if tinted {
+            // Untextured but tinted: synthesize a 1×1 texture of the factor
+            // color instead of falling back to shared white.
+            let rgba = [
+                (factor[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (factor[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (factor[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (factor[3].clamp(0.0, 1.0) * 255.0).round() as u8,
+            ];
+            make_rgba_texture(device, queue, 1, 1, &rgba)
+        } else {
+            // Untextured, untinted — use the shared white texture.
+            return None;
+        };
+
         // The bind group holds an internal ref to the texture, so it stays alive
         // after `tex_views` (and its views) are dropped at end of load.
         Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("gltf-tex-bg"), layout: &self.tex_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.mesh_sampler) },
             ],
         }))
@@ -1042,6 +1097,131 @@ impl Renderer3D {
     }
 
     pub fn remove_canvas(&mut self, id: u32) { self.targets.remove(&id); }
+
+    /// Cast a ray from the camera through NDC point `(ndc_x, ndc_y)` (each in
+    /// `[-1, 1]`, standard NDC — caller converts screen-space click coords
+    /// before calling this) and return the closest hit, if any.
+    ///
+    /// Box/Sphere/Plane get exact analytic intersection in local space (all
+    /// three are unit-sized primitives — see `gen_box`/`gen_sphere`/
+    /// `gen_plane` — so testing in local space after inverse-transforming the
+    /// ray is both simpler and exact, not an approximation). GLTF models use
+    /// their cached local-space AABB (computed once at load time in
+    /// `load_gltf`) — good enough for "click to select a model", triangle
+    /// precision is a documented future refinement, not required for Tier 1.
+    pub fn raycast(&self, canvas_id: u32, scene: &Scene3D, ndc_x: f32, ndc_y: f32) -> Option<RaycastHit> {
+        let target = self.targets.get(&canvas_id)?;
+        let aspect = target.width as f32 / target.height.max(1) as f32;
+        let cam = &scene.camera;
+        let proj = Mat4::perspective_rh(cam.fov_deg.to_radians(), aspect, cam.near, cam.far);
+        let view = Mat4::look_at_rh(Vec3::from(cam.position), Vec3::from(cam.target), Vec3::from(cam.up));
+        let inv_vp = (proj * view).inverse();
+
+        // Unproject the near/far NDC points (wgpu clip-space z in [0, 1]) to
+        // build a world-space ray.
+        let near = inv_vp * glam::Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
+        let far  = inv_vp * glam::Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+        let near = near.truncate() / near.w;
+        let far  = far.truncate()  / far.w;
+        let ray_origin = near;
+        let ray_dir = (far - near).normalize();
+
+        let mut best: Option<RaycastHit> = None;
+        for (i, mesh) in scene.meshes.iter().enumerate() {
+            let model = Mat4::from_cols_array(&mesh.transform);
+            let inv_model = model.inverse();
+            let local_origin = inv_model.transform_point3(ray_origin);
+            let local_dir = inv_model.transform_vector3(ray_dir).normalize();
+
+            let local_t = match &mesh.geometry {
+                Geometry3D::Box {}    => ray_aabb(local_origin, local_dir, Vec3::splat(-0.5), Vec3::splat(0.5)),
+                Geometry3D::Sphere {} => ray_sphere(local_origin, local_dir, 0.5),
+                Geometry3D::Plane {}  => ray_plane_bounded(local_origin, local_dir),
+                Geometry3D::Gltf { path } => self.gltf_cache.peek(path)
+                    .and_then(|m| ray_aabb(local_origin, local_dir, m.aabb_min, m.aabb_max)),
+            };
+
+            let Some(t_local) = local_t else { continue };
+            // Measure distance in world space (not local `t`), since a
+            // non-uniform scale would make local-space `t` incomparable
+            // across meshes with different transforms.
+            let local_point = local_origin + local_dir * t_local;
+            let world_point = model.transform_point3(local_point);
+            let distance = (world_point - ray_origin).length();
+            if best.as_ref().is_none_or(|b| distance < b.distance) {
+                best = Some(RaycastHit { mesh_index: i, point: world_point.to_array(), distance });
+            }
+        }
+        best
+    }
+}
+
+/// Result of [`Renderer3D::raycast`] — the closest mesh the ray hit.
+#[derive(Debug, Clone, Copy)]
+pub struct RaycastHit {
+    /// Index into `Scene3D.meshes` of the hit mesh.
+    pub mesh_index: usize,
+    /// World-space hit point.
+    pub point: [f32; 3],
+    /// World-space distance from the ray origin (camera near plane) to the hit.
+    pub distance: f32,
+}
+
+/// Ray-vs-axis-aligned-box intersection in local space. Returns the nearest
+/// non-negative `t` along `dir` (assumed normalized), or `None` if the ray
+/// misses or the box is entirely behind the origin.
+fn ray_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
+    let mut tmin = 0.0f32;
+    let mut tmax = f32::INFINITY;
+    for axis in 0..3 {
+        let o = origin[axis];
+        let d = dir[axis];
+        if d.abs() < 1e-8 {
+            if o < min[axis] || o > max[axis] { return None; }
+        } else {
+            let inv_d = 1.0 / d;
+            let mut t0 = (min[axis] - o) * inv_d;
+            let mut t1 = (max[axis] - o) * inv_d;
+            if t0 > t1 { std::mem::swap(&mut t0, &mut t1); }
+            tmin = tmin.max(t0);
+            tmax = tmax.min(t1);
+            if tmin > tmax { return None; }
+        }
+    }
+    Some(tmin)
+}
+
+/// Ray-vs-sphere intersection in local space (sphere centered at origin).
+fn ray_sphere(origin: Vec3, dir: Vec3, radius: f32) -> Option<f32> {
+    let b = origin.dot(dir);
+    let c = origin.dot(origin) - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 { return None; }
+    let sq = disc.sqrt();
+    let (t0, t1) = (-b - sq, -b + sq);
+    if t0 >= 0.0 { Some(t0) } else if t1 >= 0.0 { Some(t1) } else { None }
+}
+
+/// Ray-vs-bounded-plane intersection: the plane `y = 0`, bounded to
+/// `|x| <= 0.5, |z| <= 0.5` (matching `gen_plane`'s extents) in local space.
+fn ray_plane_bounded(origin: Vec3, dir: Vec3) -> Option<f32> {
+    if dir.y.abs() < 1e-8 { return None; }
+    let t = -origin.y / dir.y;
+    if t < 0.0 { return None; }
+    let p = origin + dir * t;
+    if p.x.abs() <= 0.5 && p.z.abs() <= 0.5 { Some(t) } else { None }
+}
+
+/// Multiply a tightly-packed RGBA8 buffer in-place by a `[0,1]` factor —
+/// used to bake glTF's `baseColorFactor` into a decoded texture at load
+/// time, since the renderer has no per-primitive material uniform.
+fn tint_rgba8(rgba: &mut [u8], factor: [f32; 4]) {
+    for px in rgba.chunks_exact_mut(4) {
+        px[0] = (px[0] as f32 * factor[0]).round().clamp(0.0, 255.0) as u8;
+        px[1] = (px[1] as f32 * factor[1]).round().clamp(0.0, 255.0) as u8;
+        px[2] = (px[2] as f32 * factor[2]).round().clamp(0.0, 255.0) as u8;
+        px[3] = (px[3] as f32 * factor[3]).round().clamp(0.0, 255.0) as u8;
+    }
 }
 
 /// Convert a decoded GLTF image to tightly-packed RGBA8. Returns `None` for

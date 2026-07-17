@@ -61,10 +61,12 @@ use glyx_gpu::GpuContext;
 use glyx_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
 use glyx_renderer::{colors, peniko, AnyRenderer, AnyFrame, BackendKind, Scene};
 use glyx_runtime::{
-    init_v8, new_ipc_bus,
+    new_ipc_bus,
     CanvasCmd, InputEvent, LengthValue, NodeProps, NodeType, SceneCommand,
-    GlyxRuntime, WindowController,
+    WindowController,
 };
+#[cfg(feature = "v8")]
+use glyx_runtime::{init_v8, GlyxRuntime};
 
 pub use glyx_runtime::GlyxExtension;
 use glyx_security;
@@ -446,7 +448,8 @@ fn try_start_scrollbar_drag(s: &mut PerWindowState) -> Option<ScrollbarDragState
     let cy = s.cursor_y as f64;
     let mut result: Option<(ScrollbarDragState, Option<f64>, f64)> = None;
     {
-        let cache = s.runtime.layout_cache.lock();
+        let layout_cache = s.runtime.layout_cache();
+        let cache = layout_cache.lock();
         for (&id, node) in &s.js_nodes {
             // Only clip containers (ScrollViews) own scrollbars.
             let overflows = matches!(node.props.overflow.as_deref(), Some("hidden" | "scroll"));
@@ -834,10 +837,13 @@ pub fn run(mut config: AppConfig) -> bool {
         .expect("Failed to build Tokio runtime");
     let tokio_handle = tokio_rt.handle().clone();
 
+    #[cfg(feature = "v8")]
     init_v8();
 
     // Apply the app's default ICU locale (first declared `locales` entry) so
     // `Intl.*` / `.toLocaleString()` format correctly when no locale is passed.
+    // V8-only — QuickJS's own Intl support (if any) isn't wired up yet.
+    #[cfg(feature = "v8")]
     if let Some(locale) = config.locales.first().filter(|l| !l.is_empty()) {
         glyx_runtime::icu::set_default_locale(locale);
     }
@@ -1015,7 +1021,14 @@ pub fn run(mut config: AppConfig) -> bool {
                     });
                 }
 
-                let mut rt = if let Some(ref blob) = *snapshot_blob_arc {
+                // Construct the selected JsRuntime backend. Compile-time choice
+                // (see memory/backend-droppability-goals.md — picking one drops
+                // the other's dependency entirely, not a runtime toggle).
+                // `Box<dyn JsRuntime>` from here on — everything past this point
+                // (canvas init, register_extensions, eval, deeplink wiring) goes
+                // through trait methods only, uniformly across backends.
+                #[cfg(feature = "v8")]
+                let mut rt: Box<dyn glyx_runtime::JsRuntime> = if let Some(ref blob) = *snapshot_blob_arc {
                     match GlyxRuntime::new_from_snapshot_with_ipc(
                         blob, tokio_handle.clone(), Some(window_ctrl),
                         Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
@@ -1026,7 +1039,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     ) {
                         Ok(rt) => {
                             log::info!("Window {}: restored from snapshot", window_handle);
-                            rt
+                            Box::new(rt)
                         }
                         Err(e) => {
                             log::warn!("Window {}: snapshot restore failed ({}); eval mode", window_handle, e);
@@ -1047,28 +1060,46 @@ pub fn run(mut config: AppConfig) -> bool {
                                     let _ = proxy_rfb.send_event(GlyxUserEvent::Restart);
                                 })),
                             );
-                            GlyxRuntime::new_with_ipc(
+                            Box::new(GlyxRuntime::new_with_ipc(
                                 tokio_handle.clone(), Some(wc),
                                 Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
                                 Arc::clone(&shared_perf),
                                 Arc::clone(&backend_registry),
                                 Arc::clone(&js_plugins_arc),
                                 heap_cap_mb,
-                            )
+                            ))
                         }
                     }
                 } else {
-                    GlyxRuntime::new_with_ipc(
+                    Box::new(GlyxRuntime::new_with_ipc(
                         tokio_handle.clone(), Some(window_ctrl),
                         Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
                         Arc::clone(&shared_perf),
                         Arc::clone(&backend_registry),
                         Arc::clone(&js_plugins_arc),
                         heap_cap_mb,
-                    )
+                    ))
                 };
 
+                // QuickJS has no snapshot equivalent — this uses eval-from-source
+                // every time, no bytecode precompilation path yet. IPC/multi-window
+                // and the async-Rust-command half of backend_call are wired via
+                // `new_with_ipc`; the sync-JS-registered-handler half of backend_call
+                // (dev-mode plugin hot-reload) is still V8-only — see
+                // memory/quickjs-milestone0-progress.md.
+                #[cfg(feature = "quickjs")]
+                let mut rt: Box<dyn glyx_runtime::JsRuntime> = Box::new(
+                    glyx_runtime::QuickJsRuntime::new_with_ipc(
+                        Arc::clone(&shared_perf), tokio_handle.clone(),
+                        Some(Arc::clone(&window_ctrl.request_redraw)),
+                        Some(window_ctrl.clone()),
+                        Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
+                        Arc::clone(&backend_registry),
+                    ).expect("QuickJsRuntime::new_with_ipc")
+                );
+
                 // Set up the Canvas2D binary command buffer (or mark json mode).
+                // No-op under quickjs (canvas bindings aren't ported yet).
                 rt.init_canvas_buffers(&canvas_protocol, canvas_buffer_kb);
 
                 rt.register_extensions(&*extensions_arc);
@@ -1078,7 +1109,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 // forwarded deep-link URLs into the runtime's url queue.
                 if window_handle == 0 {
                     if let Some(ipc_name) = single_instance_ipc.take() {
-                        let queue_clone = Arc::clone(&rt.deeplink_url_queue);
+                        let queue_clone = rt.deeplink_url_queue();
 
                         // F1: Build SD before spawning to avoid holding *mut c_void across await.
                         // Transmit as usize (Send); valid for the lifetime of sd_guard below.
@@ -1401,7 +1432,8 @@ pub fn run(mut config: AppConfig) -> bool {
                             let cx = s.cursor_x;
                             let cy = s.cursor_y;
                             let hit = {
-                                let cache = s.runtime.layout_cache.lock();
+                                let layout_cache = s.runtime.layout_cache();
+                                let cache = layout_cache.lock();
                                 s.js_nodes.iter().any(|(&id, node)| {
                                     node.props.draggable == Some(true)
                                         && cache.get(&id).map_or(false, |&[x, y, w, h]| {
@@ -1607,7 +1639,8 @@ pub fn run(mut config: AppConfig) -> bool {
                         let Ok(json) = std::str::from_utf8(&buf[..out_len]) else { continue };
                         let Ok(messages) = serde_json::from_str::<Vec<String>>(json) else { continue };
                         if messages.is_empty() { continue; }
-                        let mut events = s.runtime.webview_events.lock();
+                        let webview_events = s.runtime.webview_events();
+                        let mut events = webview_events.lock();
                         for msg in messages {
                             let Ok(wrapped) = serde_json::to_string(&serde_json::json!({ "id": id, "message": msg })) else { continue };
                             events.push_back(wrapped);
@@ -1673,7 +1706,8 @@ pub fn run(mut config: AppConfig) -> bool {
                     }
                     let pending: Vec<_> = stream.events.lock().drain(..).collect();
                     if !pending.is_empty() {
-                        let mut ve = s.runtime.video_events.lock();
+                        let video_events = s.runtime.video_events();
+                        let mut ve = video_events.lock();
                         ve.extend(pending);
                     }
                 }
@@ -2220,6 +2254,34 @@ pub fn run(mut config: AppConfig) -> bool {
                                                   *id, *x, *y, *w, *h,
                                                   &surface_view, sw, sh);
                                 }
+                            }
+                        }
+
+                        // Drain pending __glyx_canvas3d_raycast requests — needs the
+                        // live Renderer3D + Scene3D, which only glyx-core has, so
+                        // this can't be answered synchronously from the binding
+                        // call site. Answered as JSON, polled by JS each frame via
+                        // __glyx_canvas3d_raycast_poll (same shape as video/webview
+                        // events) rather than resolving a promise directly, since
+                        // promise-resolution machinery is kept engine-internal.
+                        #[cfg(feature = "canvas3d")]
+                        {
+                            let pending: Vec<_> = s.runtime.raycast_requests().lock().drain(..).collect();
+                            if !pending.is_empty() {
+                                let mut out = Vec::with_capacity(pending.len());
+                                for req in pending {
+                                    let hit = s.renderer_3d.as_ref()
+                                        .zip(s.canvas3d_scenes.get(&req.canvas_id))
+                                        .and_then(|(r3d, scene)| r3d.raycast(req.canvas_id, scene, req.ndc_x, req.ndc_y));
+                                    out.push(match hit {
+                                        Some(h) => format!(
+                                            r#"{{"reqId":{},"meshIndex":{},"point":[{},{},{}],"distance":{}}}"#,
+                                            req.req_id, h.mesh_index, h.point[0], h.point[1], h.point[2], h.distance,
+                                        ),
+                                        None => format!(r#"{{"reqId":{},"hit":null}}"#, req.req_id),
+                                    });
+                                }
+                                s.runtime.raycast_results().lock().extend(out);
                             }
                         }
 

@@ -11,6 +11,7 @@ import {
   _pollGlobalShortcuts, _pollPerfViolations, _pollLeakWarnings,
   _pollAudio, _pollVideo, _pollFsWatch, _pollWebview,
 } from './api.js';
+import { _pollCanvas3DRaycasts } from './canvas.js';
 import { View } from './core.js';
 import { PopoverHost } from './popover.js';
 
@@ -60,6 +61,7 @@ globalThis.__glyx_frameCallback = function glyxFrameCallback() {
     _pollVideo();
     _pollFsWatch();
     _pollWebview();
+    _pollCanvas3DRaycasts();
     dispatchEvents();
   });
 };

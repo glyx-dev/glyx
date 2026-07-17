@@ -7,7 +7,7 @@ use smallvec::SmallVec;
 
 use glyx_layout::{LayoutTree, ResolvedLayout, NodeId};
 use glyx_renderer::{peniko, AnyRenderer, Scene};
-use glyx_runtime::{CanvasCmd, NodeProps, NodeType, GlyxRuntime};
+use glyx_runtime::{CanvasCmd, NodeProps, NodeType, JsRuntime};
 use glyx_gpu::GpuContext;
 use glyx_text::TextSystem;
 
@@ -166,7 +166,7 @@ pub(super) struct PerWindowState {
     pub(super) renderer:     AnyRenderer,
     pub(super) text_sys:     TextSystem,
     pub(super) layout:       LayoutTree,
-    pub(super) runtime:      GlyxRuntime,
+    pub(super) runtime:      Box<dyn JsRuntime>,
     pub(super) layout_dirty: bool,
     pub(super) layout_structure_dirty: bool,
     pub(super) resolved:     Vec<(NodeId, ResolvedLayout)>,

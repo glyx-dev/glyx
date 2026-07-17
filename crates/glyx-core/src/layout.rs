@@ -484,7 +484,8 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
 
 pub(crate) fn update_scroll_positions(state: &PerWindowState) {
     if let Some(root_id) = state.js_root {
-        let mut cache = state.runtime.layout_cache.lock();
+        let layout_cache = state.runtime.layout_cache();
+        let mut cache = layout_cache.lock();
         scroll_walk(root_id, &state.js_nodes, &state.resolved, 0.0, None, &mut cache);
     }
 }

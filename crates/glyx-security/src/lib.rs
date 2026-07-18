@@ -116,6 +116,21 @@ pub fn resolve_and_check_write(path: &Path) -> Result<PathBuf, DenyReason> {
     }
 }
 
+/// Canonicalize `requested` and verify it lies within `shellAgent.scopeDir`
+/// (also canonicalized). Used to hard-scope a spawned agent-shell process's
+/// cwd — `..`/absolute-path escapes are rejected here, not just discouraged.
+pub fn resolve_shell_agent_cwd(requested: &Path) -> Result<PathBuf, DenyReason> {
+    let caps = get();
+    let Some(scope) = caps.shell_agent_scope() else { return Err(DenyReason::CapabilityMissing) };
+    let scope_canonical = Path::new(scope).canonicalize().map_err(DenyReason::Canonicalize)?;
+    let requested_canonical = requested.canonicalize().map_err(DenyReason::Canonicalize)?;
+    if requested_canonical.starts_with(&scope_canonical) {
+        Ok(requested_canonical)
+    } else {
+        Err(DenyReason::NotAllowed)
+    }
+}
+
 // ── Capability definitions ────────────────────────────────────────────────────
 
 /// File-system access declarations.
@@ -224,6 +239,38 @@ pub struct NetworkCapability {
     pub allow: Vec<String>,
 }
 
+/// Scoped shell access — an explicit allowlist of exact binary names.
+///
+/// Binaries are matched by exact name (never glob/prefix, to avoid PATH
+/// tricks) and resolved to an explicit path before spawning. Arguments are
+/// always passed as a real argv array via `std::process::Command` — never
+/// through a shell interpreter (`sh -c`/`cmd /c`) — so this capability
+/// cannot be used for shell-metacharacter injection regardless of what a
+/// caller passes as arguments; that's a structural property of how the
+/// process is spawned, not a filter applied on top of it.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ShellCapability {
+    /// Exact binary names (or absolute paths) the app may spawn, e.g.
+    /// `["git", "ffmpeg"]`.
+    pub allow: Vec<String>,
+}
+
+/// Open-ended shell access for agent-style apps (e.g. an AI coding
+/// assistant) that can't enumerate which binaries they'll need ahead of
+/// time. No binary allowlist — any command runs — but every spawned
+/// process is hard-scoped to `scope_dir` (canonicalized; `..`/absolute-path
+/// escapes are rejected before spawn, not just discouraged) and every
+/// invocation must be shown via the native (JS-independent) activity
+/// overlay — see `crates/glyx-core/src/lib.rs`'s `shell_agent_log`. This is
+/// deliberately a much higher trust level than `ShellCapability` and is
+/// meant to require an explicit, loud opt-in, not a boolean flip.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ShellAgentCapability {
+    /// The only filesystem root spawned processes' cwd may resolve within.
+    #[serde(rename = "scopeDir")]
+    pub scope_dir: String,
+}
+
 /// Environment variable access declarations.
 ///
 /// Only variables whose names match an entry in `allow` are readable from JS.
@@ -287,8 +334,21 @@ pub struct Capabilities {
     pub battery:          bool,
     #[serde(default)]
     pub usb:              bool,
+    /// `open_external()` — opens a URL/file via the OS (rundll32/open/
+    /// xdg-open), no shell interpreter involved. NOT the same capability as
+    /// `shellExec`/`shellAgent` below — this one predates them and only
+    /// permits handing a URL to the OS's default handler.
     #[serde(default)]
     pub shell:            bool,
+    /// Scoped shell access (Tier 1) — explicit binary allowlist. Distinct
+    /// from `shell` above — this permits spawning arbitrary declared
+    /// binaries with arbitrary args, `shell` only opens URLs.
+    #[serde(rename = "shellExec")]
+    pub shell_exec:       Option<ShellCapability>,
+    /// Agent-style shell access (Tier 2) — no allowlist, cwd-scoped, requires
+    /// the native activity overlay. See `ShellAgentCapability`'s docs.
+    #[serde(rename = "shellAgent")]
+    pub shell_agent:      Option<ShellAgentCapability>,
     #[serde(default)]
     pub mdns:             bool,
     #[serde(default)]
@@ -393,6 +453,16 @@ impl Capabilities {
     /// True if the app declared `mdns: true`.
     pub fn can_mdns(&self) -> bool { self.mdns }
 
+    /// True if `bin` (exact name) is in the `shellExec.allow` list.
+    pub fn can_shell_run(&self, bin: &str) -> bool {
+        self.shell_exec.as_ref().is_some_and(|s| s.allow.iter().any(|b| b == bin))
+    }
+
+    /// The declared `shellAgent.scopeDir`, if the capability is present.
+    pub fn shell_agent_scope(&self) -> Option<&str> {
+        self.shell_agent.as_ref().map(|s| s.scope_dir.as_str())
+    }
+
     /// True if the app declared `aiModelDownload: true`.
     /// Without this, AI model downloads are blocked; APIs only succeed if the
     /// model weights are already present in the HuggingFace cache.
@@ -470,6 +540,9 @@ mod tests {
         assert!(!caps.can_get_env("PATH"));
         assert!(!caps.db);
         assert!(!caps.shell);
+        assert!(caps.shell_exec.is_none());
+        assert!(!caps.can_shell_run("git"));
+        assert!(caps.shell_agent.is_none());
         assert!(!caps.credentials);
         assert!(!caps.ai);
         assert!(caps.deeplink.is_none());

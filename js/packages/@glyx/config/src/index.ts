@@ -68,6 +68,27 @@ export interface DeeplinkCapability {
   singleInstance?: boolean;
 }
 
+/** Scoped shell access (Tier 1) — explicit binary allowlist. Distinct from
+ *  the `shell` capability below, which only permits `openExternal()`. */
+export interface ShellExecCapability {
+  /** Exact binary names (or absolute paths) the app may spawn, e.g. `['git', 'ffmpeg']`. */
+  allow: string[];
+}
+
+/** Agent-style shell access (Tier 2) — no binary allowlist, but every
+ *  spawned process is hard-scoped to `scopeDir` and every invocation must
+ *  be shown via the native activity overlay. A much higher trust level than
+ *  `shellExec` — meant for apps like an AI coding assistant that can't
+ *  enumerate which binaries they'll need ahead of time.
+ *
+ *  Status: capability + security enforcement exist; the native activity
+ *  overlay and streaming `shell.spawn()`/`shell.poll()` API are designed
+ *  but not yet implemented. */
+export interface ShellAgentCapability {
+  /** The only filesystem root spawned processes' cwd may resolve within. */
+  scopeDir: string;
+}
+
 export interface Capabilities {
   fs?:              FsCapability;
   network?:         NetworkCapability;
@@ -79,7 +100,11 @@ export interface Capabilities {
   notification?:    boolean;
   battery?:         boolean;
   usb?:             boolean;
+  /** Opens a URL/file via the OS (rundll32/open/xdg-open) — `openExternal()`.
+   *  NOT the same capability as `shellExec`/`shellAgent` below. */
   shell?:           boolean;
+  shellExec?:       ShellExecCapability;
+  shellAgent?:      ShellAgentCapability;
   mdns?:            boolean;
   system?:          boolean;
   power?:           boolean;

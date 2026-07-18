@@ -172,6 +172,28 @@
           "type": "boolean",
           "description": "Crash reporting — collect JS and Rust panics to ~/.glyx/crashes/."
         },
+        "shell": {
+          "type": "boolean",
+          "description": "Opens a URL/file via the OS (rundll32/open/xdg-open) — openExternal(). Not the same capability as shellExec/shellAgent below, which spawn arbitrary declared binaries."
+        },
+        "shellExec": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allow"],
+          "properties": {
+            "allow": { "type": "array", "items": { "type": "string" }, "description": "Exact binary names (or absolute paths) the app may spawn, e.g. ['git', 'ffmpeg']." }
+          },
+          "description": "Scoped shell exec (Tier 1) — explicit binary allowlist. Args are always passed as a real argv array, never through a shell interpreter."
+        },
+        "shellAgent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scopeDir"],
+          "properties": {
+            "scopeDir": { "type": "string", "description": "The only filesystem root spawned processes' cwd may resolve within." }
+          },
+          "description": "Agent-style shell exec (Tier 2) — no binary allowlist; every command runs, but cwd is hard-scoped to scopeDir. A much higher trust level than shellExec, meant for apps (e.g. an AI coding assistant) that can't enumerate binaries ahead of time. Note: the native activity-overlay requirement and streaming spawn/poll API are designed but not yet implemented."
+        },
         "credentials": {
           "type": "boolean",
           "description": "Store and retrieve secrets in the OS keychain (Windows DPAPI / macOS Keychain / Linux Secret Service)."

@@ -83,7 +83,7 @@ glyx-v8 = []
 # ship a trimmed icudtl.dat next to the executable (see glyx-icu-integration.md).
 embed-icu = []
 dev = ["websocket"]      # dev overlay, hot-reload, CDP inspector (needs WS transport)
-full     = ["audio", "gamepad", "canvas3d", "ai", "hid", "updater", "fetch", "websocket"]
+full     = ["audio", "gamepad", "canvas3d", "ai", "hid", "updater", "fetch", "websocket", "shell"]
 fetch     = ["dep:reqwest"]
 websocket = ["dep:tokio-tungstenite", "dep:futures-util"]
 audio    = ["dep:rodio", "dep:glyx-cap-audio", "dep:symphonia"]
@@ -98,5 +98,8 @@ webview  = ["dep:glyx-cap-webview"]
 # accesskit integration lives in glyx-shell/glyx-core.
 a11y     = []
 updater  = ["dep:self_update", "dep:ed25519-dalek"]
+# Scoped shell exec (Tier 1: explicit binary allowlist). No new dep — spawns
+# via tokio::process::Command (argv-only, never a shell interpreter).
+shell    = []
 # jsc = []    # future: JavaScriptCore (iOS/macOS)
 # quickjs = [] # future: QuickJS (embedded/WASM)

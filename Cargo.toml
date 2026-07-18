@@ -59,7 +59,7 @@ taffy     = "0.10"
 v8        = "150"
 
 # Async
-tokio     = { version = "1", features = ["rt-multi-thread", "fs", "sync", "time"] }
+tokio     = { version = "1", features = ["rt-multi-thread", "fs", "sync", "time", "process", "io-util"] }
 
 # Serialisation
 serde      = { version = "1", features = ["derive"] }

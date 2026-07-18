@@ -177,6 +177,8 @@ mod quickjs_tray;
 mod quickjs_ipc;
 #[cfg(feature = "quickjs")]
 mod quickjs_video;
+#[cfg(all(feature = "quickjs", feature = "shell"))]
+mod quickjs_shell;
 
 
 #[cfg(feature = "v8")]

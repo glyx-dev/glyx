@@ -872,6 +872,18 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_vectorDb_close", f)?;
     }
 
+    // ── Shell (crate::quickjs_shell — ported from bind_shell.rs) ────────
+    #[cfg(feature = "shell")]
+    {
+        let queue = reg.queue.clone();
+        let tokio = reg.tokio.clone();
+        let redraw = reg.redraw.clone();
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, bin: String, args: Opt<String>| {
+            crate::quickjs_shell::shell_run(ctx, bin, args, Arc::clone(&queue), tokio.clone(), redraw.clone())
+        })?;
+        globals.set("__glyx_shell_run", f)?;
+    }
+
     // ── Network (crate::quickjs_net — ported from bind_net.rs) ──────────
     #[cfg(feature = "fetch")]
     {

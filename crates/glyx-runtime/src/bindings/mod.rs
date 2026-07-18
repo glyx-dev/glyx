@@ -39,6 +39,8 @@ mod bind_ai;
 mod bind_updater;
 #[cfg(feature = "v8")]
 mod bind_tray;
+#[cfg(all(feature = "v8", feature = "shell"))]
+mod bind_shell;
 
 #[cfg(feature = "v8")]
 pub use self::bind_core::*;
@@ -60,6 +62,8 @@ pub use self::bind_ai::*;
 pub use self::bind_updater::*;
 #[cfg(feature = "v8")]
 pub use self::bind_tray::*;
+#[cfg(all(feature = "v8", feature = "shell"))]
+pub use self::bind_shell::*;
 
 // IPC bus 
 //
@@ -441,6 +445,101 @@ pub(crate) fn validate_external_url(url: &str) -> Result<(), &'static str> {
         return Err("URL contains shell metacharacters");
     }
     Ok(())
+}
+
+// ── Scoped shell exec (Tier 1 — engine-neutral, shared by V8's bind_shell.rs
+//    and QuickJS's quickjs_shell.rs) ────────────────────────────────────────
+//
+// Guardrails (see glyx-security::ShellCapability's docs for the full
+// rationale): `bin` must exact-match `shell.allow`; args are always passed
+// as a real argv array via `tokio::process::Command`, never through a shell
+// interpreter, which is what actually prevents injection. The metacharacter
+// check below is defense-in-depth on top of that, not the primary defense.
+
+#[cfg(feature = "shell")]
+const SHELL_ARG_META: &[char] = &['|', '&', ';', '$', '`'];
+
+/// Result of a completed `shell.run()` call.
+#[cfg(feature = "shell")]
+pub(crate) struct ShellRunResult {
+    pub(crate) stdout:    String,
+    pub(crate) stderr:    String,
+    pub(crate) exit_code: i32,
+}
+
+/// Max buffered bytes per stream before the process is killed — guards
+/// against a runaway/misbehaving command exhausting memory.
+#[cfg(feature = "shell")]
+const SHELL_OUTPUT_CAP: usize = 8 * 1024 * 1024; // 8 MiB
+
+/// Default timeout for `shell.run()` — killed and reported as an error if
+/// exceeded.
+#[cfg(feature = "shell")]
+const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Validate `bin` against the `shell.allow` allowlist and reject
+/// defense-in-depth-flagged args, then spawn (argv-only) and wait for
+/// completion with a timeout + output cap. Capability check happens here so
+/// both engines get identical enforcement.
+#[cfg(feature = "shell")]
+pub(crate) async fn shell_run_core(bin: &str, args: Vec<String>) -> Result<ShellRunResult, String> {
+    if !glyx_security::get().can_shell_run(bin) {
+        return Err(format!(
+            "shell.allow[\"{bin}\"] — add to glyx.config.json under \"capabilities\": \
+             {{ \"shell\": {{ \"allow\": [\"{bin}\"] }} }}"
+        ));
+    }
+    if let Some(bad) = args.iter().find(|a| a.chars().any(|c| SHELL_ARG_META.contains(&c))) {
+        return Err(format!("shell.run: argument {bad:?} contains disallowed characters"));
+    }
+
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("shell.run: failed to spawn {bin:?}: {e}"))?;
+
+    let stdout_task = child.stdout.take().map(|s| tokio::spawn(read_capped(s)));
+    let stderr_task = child.stderr.take().map(|s| tokio::spawn(read_capped(s)));
+
+    let wait = tokio::time::timeout(
+        std::time::Duration::from_secs(SHELL_DEFAULT_TIMEOUT_SECS),
+        child.wait(),
+    ).await;
+
+    let exit_code = match wait {
+        Ok(Ok(status)) => status.code().unwrap_or(-1),
+        Ok(Err(e))     => return Err(format!("shell.run: wait failed: {e}")),
+        Err(_)         => {
+            let _ = child.kill().await;
+            return Err(format!("shell.run: {bin} timed out after {SHELL_DEFAULT_TIMEOUT_SECS}s"));
+        }
+    };
+
+    let stdout = match stdout_task { Some(t) => t.await.unwrap_or_default(), None => String::new() };
+    let stderr = match stderr_task { Some(t) => t.await.unwrap_or_default(), None => String::new() };
+
+    log::info!("[shell] {bin} {args:?} → exit {exit_code}");
+    Ok(ShellRunResult { stdout, stderr, exit_code })
+}
+
+/// Read an async stream to a `String`, stopping (not erroring) once
+/// `SHELL_OUTPUT_CAP` is reached — the process keeps running to completion,
+/// but further output from this stream is silently dropped.
+#[cfg(feature = "shell")]
+async fn read_capped(mut stream: impl tokio::io::AsyncRead + Unpin) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let Ok(n) = stream.read(&mut chunk).await else { break };
+        if n == 0 { break; }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() >= SHELL_OUTPUT_CAP { break; }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 // ── H4: DB path safety (engine-neutral — used by both V8's bind_db.rs and
@@ -1363,7 +1462,11 @@ pub fn register_all(
     register!("__glyx_tray_set_tooltip",   tray_set_tooltip_callback);
     register!("__glyx_tray_poll_events",   tray_poll_events_callback);
 
-    //  Network 
+    //  Shell (Tier 1: scoped exec)
+    #[cfg(feature = "shell")]
+    register!("__glyx_shell_run", shell_run_callback);
+
+    //  Network
     #[cfg(feature = "fetch")]
     register!("__glyx_fetch",      fetch_callback);
 

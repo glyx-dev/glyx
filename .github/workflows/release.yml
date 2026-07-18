@@ -40,7 +40,11 @@ jobs:
           key: ${{ matrix.target }}-runner
 
       - name: Build lean runner
-        run: cargo build --release --no-default-features -p glyx-runner --target ${{ matrix.target }}
+        # --no-default-features drops "dev"; --features v8 must be re-added
+        # explicitly or glyx-core::run() fails to compile (its `rt` local is
+        # cfg-gated on the v8/quickjs engine feature, not linked by default
+        # once neither is implied).
+        run: cargo build --release --no-default-features --features v8 -p glyx-runner --target ${{ matrix.target }}
 
       - name: Stage lean artifact
         shell: bash

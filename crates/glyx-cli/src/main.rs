@@ -385,7 +385,11 @@ fn find_or_build_runner(dev_mode: bool) -> Result<PathBuf> {
     println!("Building glyx-runner [{label}] from source (first-run, one-time cost)...");
 
     let mut args = vec!["build", "-p", "glyx-runner"];
-    if !dev_mode { args.push("--release"); args.push("--no-default-features"); }
+    // --no-default-features drops "dev" for a lean prod binary, but it also
+    // drops the engine feature — glyx-core's `run()` needs `v8` or `quickjs`
+    // explicitly re-added or it fails to compile (`rt` is cfg-gated on one
+    // of them). Desktop default is v8; see glyx-runner/Cargo.toml.
+    if !dev_mode { args.push("--release"); args.push("--no-default-features"); args.push("--features"); args.push("v8"); }
 
     let status = Command::new("cargo")
         .args(&args)
@@ -837,16 +841,6 @@ fn read_dev_inspect_port() -> Option<u16> {
         serde_json::Value::Number(n)     => n.as_u64().map(|p| p as u16),
         _                                => None,
     }
-}
-
-/// Quick lockfile-only PM sniff used before full detection is available
-/// (e.g. when resolving glyx.config.ts, which happens before PM detection).
-fn detect_pm_fast() -> pm::Pm {
-    if Path::new("bun.lock").exists() || Path::new("bun.lockb").exists() { return pm::Pm::Bun; }
-    if Path::new("pnpm-lock.yaml").exists()  { return pm::Pm::Pnpm; }
-    if Path::new("package-lock.json").exists() { return pm::Pm::Npm; }
-    if Path::new("yarn.lock").exists()       { return pm::Pm::Yarn; }
-    pm::Pm::Bun  // safe default — most glyx projects use bun
 }
 
 fn platform_to_rust_target(os: &str) -> Result<String> {

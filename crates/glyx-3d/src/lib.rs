@@ -81,7 +81,20 @@ pub enum Geometry3D {
     Box    {},
     Sphere {},
     Plane  {},
-    Gltf   { path: String },
+    Gltf   { path: String, #[serde(default)] animation: Option<GltfAnimState> },
+}
+
+/// JS-driven animation playback state for a `Geometry3D::Gltf` instance —
+/// consistent with the framework's "JS drives state, Rust is a dumb
+/// renderer" model (same as all 2D animation): JS tracks elapsed time and
+/// sends `{clip, time}` every frame via the existing `canvas3d_update` JSON
+/// payload. `clip` matches an animation by name, or by index if it parses
+/// as an integer; an unresolvable `clip` falls back to animation 0.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GltfAnimState {
+    pub clip: String,
+    pub time: f32,
 }
 
 // ── GPU uniform types (all repr(C), Pod) ──────────────────────────────────────
@@ -271,18 +284,86 @@ struct Geometry {
 /// One drawable piece of a model: geometry + optional base-color texture bind
 /// group (group 3). `tex_bg = None` means "use the renderer's shared 1×1 white
 /// texture" — keeps untextured primitives from each allocating a duplicate.
+///
+/// Also carries the raw rest-pose vertex data (`rest_positions`/`rest_normals`/
+/// `uvs`) plus optional skinning data (`joints`/`weights`) so animated frames
+/// can CPU-recompute and re-upload `geom.vbuf` without touching the GPU
+/// pipeline/vertex format at all — see [`Renderer3D::apply_gltf_animation`].
 struct Primitive {
     geom:   Geometry,
     tex_bg: Option<wgpu::BindGroup>,
+    node_index: usize,
+    skin_index: Option<usize>,
+    rest_positions: Vec<[f32; 3]>,
+    rest_normals:   Vec<[f32; 3]>,
+    uvs:            Vec<[f32; 2]>,
+    /// Up to 4 joint indices (into the skin's `joints` list) per vertex.
+    /// Empty when `skin_index` is `None`.
+    joints:  Vec<[u16; 4]>,
+    /// Blend weights matching `joints`. Empty when `skin_index` is `None`.
+    weights: Vec<[f32; 4]>,
+}
+
+/// A glTF scene-graph node's rest-pose local transform + hierarchy, used to
+/// compose world matrices for both the initial (bind-pose) upload and
+/// per-frame animation sampling.
+#[derive(Clone)]
+struct GltfNode {
+    parent:      Option<usize>,
+    translation: Vec3,
+    rotation:    glam::Quat,
+    scale:       Vec3,
+}
+impl GltfNode {
+    fn local_matrix(&self) -> Mat4 {
+        Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
+    }
+}
+
+/// A skin's joint list (node indices) + matching inverse-bind matrices.
+struct GltfSkin {
+    joints:       Vec<usize>,
+    inverse_bind: Vec<Mat4>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum AnimTarget { Translation, Rotation, Scale }
+
+/// One animated property of one node — a list of (time, value) keyframes.
+/// Rotation values are quaternions (`values4`); translation/scale use
+/// `values3`. Interpolation is always linear (nlerp for rotation) — glTF's
+/// `CubicSpline` mode is sampled as if it were `Linear`, a documented
+/// simplification (adequate for the "ordinary three.js game" target bar).
+struct AnimChannel {
+    node:    usize,
+    target:  AnimTarget,
+    times:   Vec<f32>,
+    values3: Vec<[f32; 3]>,
+    values4: Vec<[f32; 4]>,
+}
+
+struct AnimClip {
+    name:     String,
+    /// Max keyframe time across all channels. Not read yet — JS drives
+    /// playback and doesn't currently query clip length — kept since it's
+    /// already computed for free and a future `get_gltf_animations()`
+    /// introspection binding (so apps can loop by clip duration) would need it.
+    #[allow(dead_code)]
+    duration: f32,
+    channels: Vec<AnimChannel>,
 }
 
 /// A loaded GLTF model: its drawable primitives plus a local-space AABB
 /// (computed once at load time from the raw vertex positions) used for
-/// AABB-precision raycasting — see [`Renderer3D::raycast`].
+/// AABB-precision raycasting — see [`Renderer3D::raycast`] — and the node/
+/// skin/animation data needed to play back GLTF animations.
 struct GltfModel {
-    prims:    Vec<Primitive>,
-    aabb_min: Vec3,
-    aabb_max: Vec3,
+    prims:      Vec<Primitive>,
+    aabb_min:   Vec3,
+    aabb_max:   Vec3,
+    nodes:      Vec<GltfNode>,
+    skins:      Vec<GltfSkin>,
+    animations: Vec<AnimClip>,
 }
 
 /// Vertex = position(3) + normal(3) + uv(2) = 8 floats.
@@ -290,8 +371,11 @@ const VERT_FLOATS: usize = 8;
 
 fn upload_geometry(device: &wgpu::Device, verts: &[f32], indices: &[u32]) -> Geometry {
     use wgpu::util::DeviceExt;
+    // COPY_DST so animated GLTF primitives can have their vbuf re-uploaded
+    // per frame (CPU skinning / node-TRS animation) without recreating it —
+    // see `Renderer3D::apply_gltf_animation`. Free for static geometry.
     let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("geom-verts"), usage: wgpu::BufferUsages::VERTEX,
+        label: Some("geom-verts"), usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         contents: bytemuck::cast_slice(verts),
     });
     let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -837,6 +921,20 @@ impl Renderer3D {
             }));
         }
 
+        // Apply GLTF animation state (if any) before drawing — CPU-samples the
+        // clip's channels at the given time, recomposes joint/node world
+        // matrices, and re-uploads the affected models' vertex buffers.
+        // Note: animation is keyed by model `path`, not by mesh instance — two
+        // instances of the same GLTF sharing a canvas play back in lockstep
+        // (the last-applied `{clip,time}` this frame wins). Adequate for the
+        // "ordinary three.js game" target bar; per-instance animated clones of
+        // one model is a documented future refinement.
+        for mesh in scene.meshes.iter().take(n) {
+            if let Geometry3D::Gltf { path, animation: Some(state) } = &mesh.geometry {
+                self.apply_gltf_animation(queue, path, &state.clip, state.time);
+            }
+        }
+
         // Overlay rect.
         queue.write_buffer(&self.overlay_rect_buf, 0, bytemuck::bytes_of(&OverlayRect {
             x, y, w, h, sw: surface_w, sh: surface_h, _p0: 0., _p1: 0.,
@@ -874,7 +972,7 @@ impl Renderer3D {
             for (i, mesh) in scene.meshes.iter().take(n).enumerate() {
                 pass.set_bind_group(1, &self.per_obj_bgs[i], &[]);
                 match &mesh.geometry {
-                    Geometry3D::Gltf { path } => {
+                    Geometry3D::Gltf { path, .. } => {
                         if let Some(model_data) = self.gltf_cache.get(path) {
                             // A model is all its primitives — each with its own
                             // geometry + (optional) base-color texture.
@@ -975,33 +1073,122 @@ impl Renderer3D {
         if self.gltf_cache.contains(path) { return Ok(()); }
         let (doc, buffers, images) = gltf::import(path).map_err(|e| e.to_string())?;
 
-        // Per-model texture cache: image source index → uploaded view. Ensures a
-        // texture shared by several primitives is uploaded to the GPU only once.
+        // ── Node graph (rest-pose local TRS + hierarchy) ───────────────────
+        // Needed for both the initial bind-pose upload (a node's rest-world
+        // transform is baked into its primitives' vertex data below, since
+        // this was previously ignored entirely — ok because no shipped test
+        // asset used non-identity node transforms) and per-frame animation
+        // sampling. Node indices are stable == `Node::index()`.
+        let mut nodes: Vec<GltfNode> = doc.nodes().map(|n| {
+            let (t, r, s) = n.transform().decomposed();
+            GltfNode {
+                parent: None,
+                translation: Vec3::from(t),
+                rotation: glam::Quat::from_xyzw(r[0], r[1], r[2], r[3]),
+                scale: Vec3::from(s),
+            }
+        }).collect();
+        for n in doc.nodes() {
+            for child in n.children() {
+                nodes[child.index()].parent = Some(n.index());
+            }
+        }
+
+        // ── Skins ───────────────────────────────────────────────────────────
+        let skins: Vec<GltfSkin> = doc.skins().map(|skin| {
+            let joints: Vec<usize> = skin.joints().map(|j| j.index()).collect();
+            let reader = skin.reader(|b| Some(&buffers[b.index()]));
+            let inverse_bind: Vec<Mat4> = match reader.read_inverse_bind_matrices() {
+                Some(it) => it.map(|m| Mat4::from_cols_array_2d(&m)).collect(),
+                None => vec![Mat4::IDENTITY; joints.len()],
+            };
+            GltfSkin { joints, inverse_bind }
+        }).collect();
+
+        // ── Animations ──────────────────────────────────────────────────────
+        let animations: Vec<AnimClip> = doc.animations().map(|anim| {
+            let mut duration = 0.0f32;
+            let channels: Vec<AnimChannel> = anim.channels().filter_map(|ch| {
+                let target = match ch.target().property() {
+                    gltf::animation::Property::Translation => AnimTarget::Translation,
+                    gltf::animation::Property::Rotation    => AnimTarget::Rotation,
+                    gltf::animation::Property::Scale       => AnimTarget::Scale,
+                    gltf::animation::Property::MorphTargetWeights => return None, // unsupported, skip
+                };
+                let node = ch.target().node().index();
+                let reader = ch.reader(|b| Some(&buffers[b.index()]));
+                let times: Vec<f32> = reader.read_inputs()?.collect();
+                if let Some(&last) = times.last() { duration = duration.max(last); }
+                let (values3, values4) = match reader.read_outputs()? {
+                    gltf::animation::util::ReadOutputs::Translations(it) => (it.collect(), Vec::new()),
+                    gltf::animation::util::ReadOutputs::Scales(it)       => (it.collect(), Vec::new()),
+                    gltf::animation::util::ReadOutputs::Rotations(rot)   => (Vec::new(), rot.into_f32().collect()),
+                    gltf::animation::util::ReadOutputs::MorphTargetWeights(_) => return None,
+                };
+                Some(AnimChannel { node, target, times, values3, values4 })
+            }).collect();
+            AnimClip {
+                name: anim.name().unwrap_or_default().to_string(),
+                duration,
+                channels,
+            }
+        }).collect();
+
+        // ── Primitives (walked via nodes, not `doc.meshes()`, so we know
+        //    each primitive's owning node — needed for animation targeting) ──
         let mut tex_views: HashMap<usize, wgpu::TextureView> = HashMap::new();
         let mut prims_out: Vec<Primitive> = Vec::new();
         let mut aabb_min = Vec3::splat(f32::INFINITY);
         let mut aabb_max = Vec3::splat(f32::NEG_INFINITY);
-        for mesh in doc.meshes() {
+        for node in doc.nodes() {
+            let Some(mesh) = node.mesh() else { continue };
+            let skin_index = node.skin().map(|s| s.index());
+            // Rest-pose world transform, used to bake the initial upload for
+            // non-skinned primitives (skinned primitives upload raw bind-pose
+            // data — inverse-bind matrices are defined to cancel the joints'
+            // bind-pose world transform, per the glTF spec).
+            let world = node_world_matrix(&nodes, node.index());
+            let normal_mat = world.inverse().transpose();
+
             for prim in mesh.primitives() {
                 let reader = prim.reader(|b| Some(&buffers[b.index()]));
                 let Some(pos_iter) = reader.read_positions() else { continue };
                 let pos: Vec<[f32; 3]> = pos_iter.collect();
                 if pos.is_empty() { continue; }
-                for p in &pos {
-                    let v = Vec3::from(*p);
-                    aabb_min = aabb_min.min(v);
-                    aabb_max = aabb_max.max(v);
-                }
                 let nor: Vec<[f32; 3]> = reader.read_normals().map(|r| r.collect()).unwrap_or_default();
                 let uvs: Vec<[f32; 2]> = reader.read_tex_coords(0)
                     .map(|r| r.into_f32().collect())
                     .unwrap_or_default();
+                let joints: Vec<[u16; 4]> = if skin_index.is_some() {
+                    reader.read_joints(0).map(|r| r.into_u16().collect()).unwrap_or_default()
+                } else { Vec::new() };
+                let weights: Vec<[f32; 4]> = if skin_index.is_some() {
+                    reader.read_weights(0).map(|r| r.into_f32().collect()).unwrap_or_default()
+                } else { Vec::new() };
+                let skinned = skin_index.is_some() && joints.len() == pos.len() && weights.len() == pos.len();
 
+                // Initial GPU upload: bake the node's rest-world transform in
+                // for non-skinned primitives (matches static rendering);
+                // skinned primitives upload raw bind-pose data unchanged.
                 let mut verts: Vec<f32> = Vec::with_capacity(pos.len() * VERT_FLOATS);
                 for (i, p) in pos.iter().enumerate() {
-                    verts.extend_from_slice(p);
-                    verts.extend_from_slice(nor.get(i).unwrap_or(&[0.0, 1.0, 0.0]));
+                    let n = *nor.get(i).unwrap_or(&[0.0, 1.0, 0.0]);
+                    let (up, un) = if skinned {
+                        (*p, n)
+                    } else {
+                        let wp = world.transform_point3(Vec3::from(*p));
+                        let wn = normal_mat.transform_vector3(Vec3::from(n)).normalize_or_zero();
+                        (wp.to_array(), wn.to_array())
+                    };
+                    verts.extend_from_slice(&up);
+                    verts.extend_from_slice(&un);
                     verts.extend_from_slice(uvs.get(i).unwrap_or(&[0.0, 0.0]));
+                }
+                for p in &pos {
+                    let v = Vec3::from(*p);
+                    let wv = if skinned { v } else { world.transform_point3(v) };
+                    aabb_min = aabb_min.min(wv);
+                    aabb_max = aabb_max.max(wv);
                 }
                 let indices: Vec<u32> = match reader.read_indices() {
                     Some(r) => r.into_u32().collect(),
@@ -1016,12 +1203,23 @@ impl Renderer3D {
                 // this needs no shader/pipeline/uniform-layout changes at all.
                 let factor = prim.material().pbr_metallic_roughness().base_color_factor();
                 let tex_bg = self.load_base_color_bg(device, queue, &prim, &images, &mut tex_views, factor);
-                prims_out.push(Primitive { geom, tex_bg });
+                prims_out.push(Primitive {
+                    geom, tex_bg,
+                    node_index: node.index(),
+                    skin_index: if skinned { skin_index } else { None },
+                    rest_positions: pos,
+                    rest_normals: nor,
+                    uvs,
+                    joints,
+                    weights,
+                });
             }
         }
 
         if prims_out.is_empty() { return Err("gltf: no drawable primitives".into()); }
-        self.gltf_cache.put(path.to_string(), GltfModel { prims: prims_out, aabb_min, aabb_max });
+        self.gltf_cache.put(path.to_string(), GltfModel {
+            prims: prims_out, aabb_min, aabb_max, nodes, skins, animations,
+        });
         Ok(())
     }
 
@@ -1137,7 +1335,7 @@ impl Renderer3D {
                 Geometry3D::Box {}    => ray_aabb(local_origin, local_dir, Vec3::splat(-0.5), Vec3::splat(0.5)),
                 Geometry3D::Sphere {} => ray_sphere(local_origin, local_dir, 0.5),
                 Geometry3D::Plane {}  => ray_plane_bounded(local_origin, local_dir),
-                Geometry3D::Gltf { path } => self.gltf_cache.peek(path)
+                Geometry3D::Gltf { path, .. } => self.gltf_cache.peek(path)
                     .and_then(|m| ray_aabb(local_origin, local_dir, m.aabb_min, m.aabb_max)),
             };
 
@@ -1154,6 +1352,176 @@ impl Renderer3D {
         }
         best
     }
+
+    /// Sample `clip` (by name, or by index if `clip` parses as an integer —
+    /// an unresolvable name falls back to animation 0) at `time` and
+    /// re-upload the vertex buffers of every affected primitive in the
+    /// model at `path`. CPU-side only — no shader/pipeline/vertex-format
+    /// change, per the plan's "CPU skinning over GPU vertex-shader skinning"
+    /// decision. No-op if the model isn't loaded or has no animations.
+    fn apply_gltf_animation(&mut self, queue: &wgpu::Queue, path: &str, clip: &str, time: f32) {
+        let Some(model) = self.gltf_cache.get(path) else { return };
+        if model.animations.is_empty() { return }
+        let clip_data = clip.parse::<usize>().ok()
+            .and_then(|i| model.animations.get(i))
+            .or_else(|| model.animations.iter().find(|a| a.name == clip))
+            .unwrap_or(&model.animations[0]);
+
+        // Sample each animated node's T/R/S independently — a node commonly
+        // has separate translation/rotation/scale channels, so overwriting a
+        // single combined local matrix per channel would silently drop
+        // whichever property was sampled first. Un-targeted nodes/properties
+        // keep their rest-pose value.
+        let mut trans:  Vec<Vec3>       = model.nodes.iter().map(|n| n.translation).collect();
+        let mut rots:   Vec<glam::Quat> = model.nodes.iter().map(|n| n.rotation).collect();
+        let mut scales: Vec<Vec3>       = model.nodes.iter().map(|n| n.scale).collect();
+        for ch in &clip_data.channels {
+            match ch.target {
+                AnimTarget::Translation => if let Some(v) = sample_vec3(ch, time) { trans[ch.node] = v; },
+                AnimTarget::Scale       => if let Some(v) = sample_vec3(ch, time) { scales[ch.node] = v; },
+                AnimTarget::Rotation    => if let Some(q) = sample_quat(ch, time) { rots[ch.node] = q; },
+            }
+        }
+        let local_mats: Vec<Mat4> = (0..model.nodes.len())
+            .map(|i| Mat4::from_scale_rotation_translation(scales[i], rots[i], trans[i]))
+            .collect();
+        // World matrices via the (static) hierarchy — walk to root, composing
+        // the sampled local matrices.
+        let world_mats = compose_world_matrices(&model.nodes, &local_mats);
+
+        for prim in &model.prims {
+            if let Some(skin_idx) = prim.skin_index {
+                let skin = &model.skins[skin_idx];
+                let palette: Vec<Mat4> = skin.joints.iter().zip(&skin.inverse_bind)
+                    .map(|(&joint_node, ibm)| world_mats[joint_node] * *ibm)
+                    .collect();
+                let mut verts: Vec<f32> = Vec::with_capacity(prim.rest_positions.len() * VERT_FLOATS);
+                for i in 0..prim.rest_positions.len() {
+                    let p = Vec3::from(prim.rest_positions[i]);
+                    let n = Vec3::from(*prim.rest_normals.get(i).unwrap_or(&[0.0, 1.0, 0.0]));
+                    let js = prim.joints[i];
+                    let ws = prim.weights[i];
+                    let mut sp = Vec3::ZERO;
+                    let mut sn = Vec3::ZERO;
+                    for k in 0..4 {
+                        if ws[k] == 0.0 { continue }
+                        let m = &palette[js[k] as usize];
+                        sp += m.transform_point3(p) * ws[k];
+                        sn += m.transform_vector3(n) * ws[k];
+                    }
+                    verts.extend_from_slice(&sp.to_array());
+                    verts.extend_from_slice(&sn.normalize_or_zero().to_array());
+                    verts.extend_from_slice(prim.uvs.get(i).unwrap_or(&[0.0, 0.0]));
+                }
+                queue.write_buffer(&prim.geom.vbuf, 0, bytemuck::cast_slice(&verts));
+            } else {
+                // Non-skinned primitive on a (possibly) animated node — only
+                // worth re-uploading if this node (or an ancestor) is
+                // actually targeted by the clip; cheap check via world vs.
+                // rest-world comparison would cost the same as just doing
+                // the transform, so always re-apply when a clip is present.
+                let world = world_mats[prim.node_index];
+                let normal_mat = world.inverse().transpose();
+                let mut verts: Vec<f32> = Vec::with_capacity(prim.rest_positions.len() * VERT_FLOATS);
+                for i in 0..prim.rest_positions.len() {
+                    let p = world.transform_point3(Vec3::from(prim.rest_positions[i]));
+                    let n = normal_mat
+                        .transform_vector3(Vec3::from(*prim.rest_normals.get(i).unwrap_or(&[0.0, 1.0, 0.0])))
+                        .normalize_or_zero();
+                    verts.extend_from_slice(&p.to_array());
+                    verts.extend_from_slice(&n.to_array());
+                    verts.extend_from_slice(prim.uvs.get(i).unwrap_or(&[0.0, 0.0]));
+                }
+                queue.write_buffer(&prim.geom.vbuf, 0, bytemuck::cast_slice(&verts));
+            }
+        }
+    }
+}
+
+/// World-space transform of node `idx`, composed by walking up to the root
+/// via `parent` links and multiplying rest-pose local matrices root-to-leaf.
+/// Used for the initial (bind-pose) GPU upload in `load_gltf`.
+fn node_world_matrix(nodes: &[GltfNode], idx: usize) -> Mat4 {
+    let mut chain = vec![idx];
+    let mut cur = nodes[idx].parent;
+    while let Some(p) = cur {
+        chain.push(p);
+        cur = nodes[p].parent;
+    }
+    let mut m = Mat4::IDENTITY;
+    for &n in chain.iter().rev() {
+        m *= nodes[n].local_matrix();
+    }
+    m
+}
+
+/// Same composition as [`node_world_matrix`] but for every node at once,
+/// using already-sampled (possibly animated) local matrices instead of each
+/// node's rest pose. O(depth) per node via the same parent-walk approach —
+/// fine for typical rig sizes (tens of joints), and avoids needing a
+/// topological sort of the node array (glTF doesn't guarantee parents come
+/// before children by index).
+fn compose_world_matrices(nodes: &[GltfNode], local_mats: &[Mat4]) -> Vec<Mat4> {
+    (0..nodes.len()).map(|idx| {
+        let mut chain = vec![idx];
+        let mut cur = nodes[idx].parent;
+        while let Some(p) = cur {
+            chain.push(p);
+            cur = nodes[p].parent;
+        }
+        let mut m = Mat4::IDENTITY;
+        for &n in chain.iter().rev() {
+            m *= local_mats[n];
+        }
+        m
+    }).collect()
+}
+
+/// Sample an animation channel at `time` (clamped to the channel's own
+/// keyframe range — callers pass a shared clip time, individual channels may
+/// have shorter ranges). Linear interpolation for translation/scale, nlerp
+/// for rotation (adequate — the visual difference vs. slerp is negligible at
+/// typical frame-to-frame rotation deltas). `CubicSpline` keyframes (which
+/// pack `[in-tangent, value, out-tangent]` triples per keyframe) are treated
+/// as plain `Linear` samples of the value component — a documented
+/// simplification, not a full cubic-Hermite implementation.
+/// Find the bracketing keyframe indices + interpolation fraction for `time`
+/// within `ch.times`. Shared by `sample_vec3`/`sample_quat`.
+fn bracket_keyframes(times: &[f32], time: f32) -> Option<(usize, usize, f32)> {
+    if times.is_empty() { return None }
+    let t = time.clamp(times[0], *times.last().unwrap());
+    let idx = match times.binary_search_by(|x| x.partial_cmp(&t).unwrap()) {
+        Ok(i) => i,
+        Err(i) => i,
+    };
+    Some(if idx == 0 {
+        (0, 0, 0.0)
+    } else if idx >= times.len() {
+        let last = times.len() - 1;
+        (last, last, 0.0)
+    } else {
+        let (t0, t1) = (times[idx - 1], times[idx]);
+        let f = if t1 > t0 { (t - t0) / (t1 - t0) } else { 0.0 };
+        (idx - 1, idx, f)
+    })
+}
+
+/// Sample a translation or scale channel at `time`. `CubicSpline` keyframes
+/// are sampled as plain `Linear` (see [`AnimChannel`] docs).
+fn sample_vec3(ch: &AnimChannel, time: f32) -> Option<Vec3> {
+    let (i0, i1, frac) = bracket_keyframes(&ch.times, time)?;
+    let a = Vec3::from(ch.values3[i0]);
+    let b = Vec3::from(ch.values3[i1]);
+    Some(a.lerp(b, frac))
+}
+
+/// Sample a rotation channel at `time` via nlerp (adequate — see
+/// [`AnimChannel`] docs for why full slerp precision isn't needed here).
+fn sample_quat(ch: &AnimChannel, time: f32) -> Option<glam::Quat> {
+    let (i0, i1, frac) = bracket_keyframes(&ch.times, time)?;
+    let a = glam::Quat::from_xyzw(ch.values4[i0][0], ch.values4[i0][1], ch.values4[i0][2], ch.values4[i0][3]);
+    let b = glam::Quat::from_xyzw(ch.values4[i1][0], ch.values4[i1][1], ch.values4[i1][2], ch.values4[i1][3]);
+    Some(a.normalize().slerp(b.normalize(), frac))
 }
 
 /// Result of [`Renderer3D::raycast`] — the closest mesh the ray hit.

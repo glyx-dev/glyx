@@ -7,6 +7,7 @@
 //! `glyx-cap-ai` plugin path, for apps that ship AI as a separate signed
 //! plugin instead of linking it statically.
 
+#[cfg(feature = "ai")]
 use std::sync::Arc;
 #[cfg(feature = "ai")]
 use parking_lot::Mutex;

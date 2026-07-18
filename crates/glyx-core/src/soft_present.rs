@@ -136,7 +136,10 @@ impl SoftPresent {
     }
 
     /// Re-present the previous frame without re-rasterizing (fast path for
-    /// frames where neither the scene nor the overlay changed).
+    /// frames where neither the scene nor the overlay changed). Only called
+    /// from the dev-mode cached-frame fast path in `lib.rs` — unused (and
+    /// correctly compiled out) in non-dev release builds.
+    #[cfg(feature = "dev")]
     pub fn re_present(&mut self) {
         if self.last_frame.is_empty() { return; }
         let mut buffer = match self.surface.buffer_mut() {

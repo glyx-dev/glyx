@@ -439,6 +439,9 @@ struct RegisterState {
     layout_cache:   LayoutCache,
     scene:          SceneQueue,
     next_id:        Arc<std::sync::atomic::AtomicU32>,
+    // Reserved for a QuickJS image-loading binding (V8 has one in
+    // bind_core.rs; not yet ported) — plumbed through but unread until then.
+    #[allow(dead_code)]
     next_image_id:  Arc<std::sync::atomic::AtomicU32>,
     next_db_id:     Arc<std::sync::atomic::AtomicU32>,
     next_vdb_id:    Arc<std::sync::atomic::AtomicU32>,

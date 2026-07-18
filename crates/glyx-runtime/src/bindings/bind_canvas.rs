@@ -190,7 +190,7 @@ pub fn canvas3d_load_gltf_callback(
         camera:     glyx_3d::Camera3D { position: [0.,1.,3.], target: [0.;3], up: [0.,1.,0.], fov_deg: 60., near: 0.1, far: 1000. },
         lights:     vec![],
         meshes:     vec![glyx_3d::Mesh3DInstance {
-            geometry:  glyx_3d::Geometry3D::Gltf { path: path.clone() },
+            geometry:  glyx_3d::Geometry3D::Gltf { path: path.clone(), animation: None },
             transform: [1.,0.,0.,0., 0.,1.,0.,0., 0.,0.,1.,0., 0.,0.,0.,1.],
             color:     [1.;4],
         }],

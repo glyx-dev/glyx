@@ -4,16 +4,20 @@
 //! `is_private_host`, `check_fetch_scheme`, `check_ws_scheme`,
 //! `safe_http_client`) moved to `bindings/mod.rs`'s shared section.
 
+#[cfg(feature = "websocket")]
 use std::collections::{HashMap, VecDeque};
+#[cfg(feature = "websocket")]
 use std::sync::Arc;
+#[cfg(feature = "websocket")]
 use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(feature = "websocket")]
 use parking_lot::Mutex;
 use rquickjs::Ctx;
 use tokio::runtime::Handle;
 
-use crate::bindings::{
-    check_fetch_scheme, extract_host, is_private_host, CompletionQueue, RedrawRequest,
-};
+use crate::bindings::{CompletionQueue, RedrawRequest};
+#[cfg(any(feature = "fetch", feature = "websocket"))]
+use crate::bindings::{check_fetch_scheme, extract_host, is_private_host};
 use crate::quickjs_runtime::QuickJsRuntime;
 
 #[cfg(feature = "websocket")]
@@ -24,6 +28,7 @@ pub(crate) type WsHandles = Arc<Mutex<HashMap<u32, WsHandle>>>;
 
 /// Checks common to fetch and ws.connect: scheme → private-IP → capability.
 /// Returns `Some(rejected promise)` if any check fails, `None` to proceed.
+#[cfg(any(feature = "fetch", feature = "websocket"))]
 fn network_precheck<'js>(
     ctx: &Ctx<'js>, url: &str, scheme_ok: Result<(), String>, action: &str,
 ) -> Option<rquickjs::Result<rquickjs::Promise<'js>>> {

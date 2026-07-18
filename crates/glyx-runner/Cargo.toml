@@ -7,9 +7,17 @@ description = "Prebuilt runtime binary for Glyx apps (no Rust toolchain required
 [features]
 # "dev" gates hot-reload watcher, bun subprocess, and dev overlay in glyx-core.
 # `glyx dev`   → runs runner with default (dev) features.
-# `glyx build` → builds runner with --no-default-features for a lean prod binary.
-default = ["dev"]
+# `glyx build` → builds runner with --no-default-features --features v8 (or
+#                 quickjs) for a lean prod binary — see find_or_build_runner
+#                 in glyx-cli and .github/workflows/release.yml, both of
+#                 which must pass an explicit engine feature alongside
+#                 --no-default-features. Without it, glyx-core's `run()`
+#                 never defines its `rt` local (it's `#[cfg(feature = "v8")]`
+#                 / `#[cfg(feature = "quickjs")]`) and fails to compile.
+default = ["dev", "v8"]
 dev     = ["glyx-core/dev"]
+v8      = ["glyx-core/v8"]
+quickjs = ["glyx-core/quickjs"]
 
 [dependencies]
 glyx-core   = { path = "../glyx-core", default-features = false }

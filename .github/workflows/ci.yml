@@ -24,6 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      # `--workspace` pulls in glyx-ai/glyx-cap-audio/glyx-cap-camera/glyx-cap-hid,
+      # whose deps (cpal/rodio → alsa-sys, nokhwa → v4l, hidapi → libusb) need
+      # these system dev packages on Linux — same set release.yml's cap-linux
+      # job already installs for the actual per-cap builds.
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libv4l-dev libusb-1.0-0-dev
       # Zero-warnings bar (see CONTRIBUTING.md). RUSTFLAGS="-D warnings" is not
       # used because it would also deny warnings inside vendored path deps
       # (vendor/vello); instead, fail on any warning whose

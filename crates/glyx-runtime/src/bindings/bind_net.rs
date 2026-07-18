@@ -575,6 +575,7 @@ pub fn mdns_discover_callback(
 }
 
 #[cfg(test)]
+#[cfg(any(feature = "fetch", feature = "websocket"))]
 mod tests {
     use super::*;
 

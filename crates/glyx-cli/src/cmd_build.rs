@@ -336,7 +336,13 @@ pub(super) fn cargo_build_release(
     app_config: Option<&Path>,
 ) -> Result<PathBuf> {
     let rust_target = target.map(platform_to_rust_target).transpose()?;
-    let mut args = vec!["build", "--release", "--no-default-features", "-p", project_name];
+    // --no-default-features drops "dev" (hot-reload) for a lean prod binary,
+    // but it also drops the engine feature — glyx-core::run() needs `v8` or
+    // `quickjs` explicitly re-added, or it fails to compile (its `rt` local
+    // is cfg-gated on one of them, not linked by default once neither is
+    // implied). Desktop default is v8, matching every example's own
+    // Cargo.toml (`default = ["dev", "v8"]`).
+    let mut args = vec!["build", "--release", "--no-default-features", "--features", "v8", "-p", project_name];
     let target_str;
     if let Some(ref t) = rust_target {
         target_str = t.to_string();

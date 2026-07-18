@@ -254,10 +254,13 @@ pub struct WindowController {
 // rfd::AsyncFileDialog::set_parent() requires impl HasWindowHandle.
 // We construct a minimal wrapper from the raw isize stored in AsyncState.
 
-#[cfg(target_os = "windows")]
+// Only used by bind_sys.rs's dialog binding (V8-only for now — QuickJS's
+// dialog binding doesn't parent native dialogs to the app window yet, a
+// known gap, not addressed here).
+#[cfg(all(target_os = "windows", feature = "v8"))]
 struct WinParent(isize);
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "v8"))]
 impl raw_window_handle::HasWindowHandle for WinParent {
     fn window_handle(
         &self,
@@ -289,12 +292,21 @@ pub fn new_completion_queue() -> CompletionQueue {
 /// Uses `reqwest::Url` (which re-exports the `url` crate) for correct parsing,
 /// matching what reqwest itself connects to.  Falls back to an empty string for
 /// URLs that don't parse (non-http schemes, malformed).
+#[cfg(any(feature = "fetch", feature = "websocket"))]
 pub(crate) fn extract_host(url: &str) -> String {
     #[cfg(feature = "fetch")]
     {
+        // `url::Url::host_str()` keeps the brackets on IPv6 literals
+        // (`"[::1]"`), but `is_private_host` parses the host through
+        // `str::parse::<IpAddr>()`, which rejects bracketed input — an
+        // unbracketed host is required for the SSRF loopback/private-range
+        // check downstream to actually recognize e.g. `https://[::1]/` as
+        // loopback. Strip them here so both call sites agree.
         reqwest::Url::parse(url)
             .ok()
-            .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
+            .and_then(|u| u.host_str().map(|h| {
+                h.trim_start_matches('[').trim_end_matches(']').to_lowercase()
+            }))
             .unwrap_or_default()
     }
     #[cfg(not(feature = "fetch"))]
@@ -326,6 +338,7 @@ pub(crate) fn extract_host(url: &str) -> String {
 /// - `fc00::/7`       -- IPv6 unique-local
 /// - `fe80::/10`      -- IPv6 link-local
 /// - `"localhost"`, `"*.local"`, `"*.internal"`, `"*.localhost"` hostnames
+#[cfg(any(feature = "fetch", feature = "websocket"))]
 pub(crate) fn is_private_host(host: &str) -> bool {
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return match ip {
@@ -353,6 +366,7 @@ pub(crate) fn is_private_host(host: &str) -> bool {
 }
 
 /// Scheme allowlist for fetch -- only `http://` and `https://`.
+#[cfg(feature = "fetch")]
 pub(crate) fn check_fetch_scheme(url: &str) -> Result<(), String> {
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("https://") || lower.starts_with("http://") {
@@ -364,6 +378,7 @@ pub(crate) fn check_fetch_scheme(url: &str) -> Result<(), String> {
 }
 
 /// Scheme allowlist for WebSocket -- only `ws://` and `wss://`.
+#[cfg(feature = "websocket")]
 pub(crate) fn check_ws_scheme(url: &str) -> Result<(), String> {
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("wss://") || lower.starts_with("ws://") {
@@ -2337,22 +2352,31 @@ mod tests {
 
     //  extract_host (network capability gate input) €
 
-    #[cfg(feature = "v8")]
+    #[cfg(all(feature = "v8", any(feature = "fetch", feature = "websocket")))]
     #[test]
     fn extract_host_strips_scheme_path_and_port() {
         assert_eq!(extract_host("https://api.example.com/v1/users"), "api.example.com");
         assert_eq!(extract_host("http://api.example.com:8080/x"), "api.example.com");
-        assert_eq!(extract_host("api.example.com"), "api.example.com");
         assert_eq!(extract_host("wss://ws.example.com/socket"), "ws.example.com");
+        // Bare-hostname (no scheme) input is only supported by the
+        // non-`fetch` fallback parser. Every real call site passes a URL
+        // already validated by check_fetch_scheme/check_ws_scheme (always
+        // schemed) or a redirect target from `reqwest` (also always
+        // schemed) — the `fetch`-enabled `url`-crate-backed branch requires
+        // an absolute URL and fails closed (returns "") on schemeless
+        // input, which is correct/safe (not a bug), just a real behavioral
+        // difference between the two branches.
+        #[cfg(not(feature = "fetch"))]
+        assert_eq!(extract_host("api.example.com"), "api.example.com");
     }
 
-    #[cfg(feature = "v8")]
+    #[cfg(all(feature = "v8", any(feature = "fetch", feature = "websocket")))]
     #[test]
     fn extract_host_lowercases() {
         assert_eq!(extract_host("https://API.Example.COM/x"), "api.example.com");
     }
 
-    #[cfg(feature = "v8")]
+    #[cfg(all(feature = "v8", any(feature = "fetch", feature = "websocket")))]
     #[test]
     fn extract_host_hostile_urls_fail_closed() {
         // Userinfo trick: "http://allowed.com@evil.com/x" — the actual host is

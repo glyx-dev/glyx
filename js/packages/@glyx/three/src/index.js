@@ -12,7 +12,7 @@
 //     background?: [r, g, b, a],
 //     camera: { position, target, up, fovDeg, near, far },
 //     lights: [ { type:'ambient'|'directional', ... } ],
-//     meshes: [ { geometry:{type:'box'|'sphere'|'plane'|'gltf', path?}, transform:[16f], color:[r,g,b,a] } ],
+//     meshes: [ { geometry:{type:'box'|'sphere'|'plane'|'gltf', path?, animation?:{clip,time}}, transform:[16f], color:[r,g,b,a] } ],
 //   }
 //
 // Usage:
@@ -346,6 +346,12 @@ export function Model({
   rotation,
   scale,
   transform,
+  // GLTF animation playback — JS owns the clock (same "JS drives state,
+  // Rust is a dumb renderer" model as everything else), so `animationClip`/
+  // `animationTime` are just the current sample point sent to the renderer
+  // each render. Omit both to render the model's static bind pose.
+  animationClip,
+  animationTime,
 }) {
   const ctx = useContext(SceneCtx);
   if (!ctx) throw new Error('@glyx-dev/three: <Model> must be a descendant of <Scene>');
@@ -359,8 +365,13 @@ export function Model({
   const parentTransform = useContext(GroupCtx);
   const localTransform = transform ?? buildTransform(position, rotation, scale);
   const finalTransform = _mat4mul(parentTransform, localTransform);
+  const hasAnimation = animationClip != null && animationTime != null;
   useRegister('mesh', {
-    geometry:  { type: 'gltf', path: src },
+    geometry: {
+      type: 'gltf',
+      path: src,
+      ...(hasAnimation ? { animation: { clip: String(animationClip), time: animationTime } } : {}),
+    },
     transform: finalTransform,
     color,
   });

@@ -879,7 +879,10 @@ pub fn run(mut config: AppConfig) -> bool {
     // Canvas2D transport config — applied to each runtime after construction.
     let canvas_protocol  = window.canvas_protocol.clone();
     let canvas_buffer_kb = window.canvas_buffer_kb.unwrap_or(256) as usize;
-    // Compute V8 heap cap: explicit config wins; otherwise auto-calculate from bundle size.
+    // Compute V8 heap cap: explicit config wins; otherwise auto-calculate from
+    // bundle size. V8-only — QuickJS has no isolate-heap-limit equivalent
+    // wired up yet (its `new_with_ipc` takes no heap-cap argument), a known gap.
+    #[cfg(feature = "v8")]
     let heap_cap_mb: usize = match window.max_js_heap_mb {
         Some(mb) => mb as usize,
         None => {
@@ -1205,10 +1208,18 @@ pub fn run(mut config: AppConfig) -> bool {
                     }
                 }
 
+                // Captured so the dev-mode error overlay can show it below —
+                // previously only HMR-reload errors set `last_js_error`, so a
+                // syntax/eval error present from the very first launch left
+                // the window blank with only a log line nobody sees.
+                let mut initial_eval_error: Option<String> = None;
                 if let Some(ref js) = *js_src_arc {
                     match rt.eval(js) {
                         Ok(_)  => log::info!("Window {}: JS eval complete.", window_handle),
-                        Err(e) => log::error!("Window {}: JS eval error: {}", window_handle, e),
+                        Err(e) => {
+                            log::error!("Window {}: JS eval error: {}", window_handle, e);
+                            initial_eval_error = Some(format!("Eval error: {}", e));
+                        }
                     }
                 }
 
@@ -1348,7 +1359,7 @@ pub fn run(mut config: AppConfig) -> bool {
                             overlay_lines:         Vec::new(),
                             overlay_next_refresh:  Instant::now(),
                             overlay_next_redraw:    Instant::now(),
-                            last_js_error:          None,
+                            last_js_error:          initial_eval_error,
                             startup_rss_bytes:      0,
                             startup_v8_total_bytes: 0,
                         })
@@ -2232,7 +2243,7 @@ pub fn run(mut config: AppConfig) -> bool {
                                     if let Some(scene) = s.canvas3d_scenes.get(id) {
                                         let gltf_paths: Vec<&str> = scene.meshes.iter()
                                             .filter_map(|m| match &m.geometry {
-                                                glyx_3d::Geometry3D::Gltf { path } => Some(path.as_str()),
+                                                glyx_3d::Geometry3D::Gltf { path, .. } => Some(path.as_str()),
                                                 _ => None,
                                             })
                                             .collect();

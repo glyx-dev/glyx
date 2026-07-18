@@ -143,6 +143,14 @@ export interface GlyxConfig {
   /** Machine-readable app identifier. Used as the binary filename, installer slug,
    *  and bundle ID. No spaces — use hyphens, e.g. 'my-notes'. */
   name?:         string;
+  /**
+   * JsRuntime backend. Mutually exclusive — a build links exactly one.
+   * - 'v8'      — default. Full-featured, larger binary (~58 MB floor).
+   * - 'quickjs' — smaller binary (~3x), no JIT (suits mobile / size-constrained
+   *               targets). See glyx_rough_docs/QUICKJS_PERFORMANCE_PLAN.md
+   *               for the current perf/feature-parity tradeoffs.
+   */
+  engine?:       'v8' | 'quickjs';
   /** App version string, e.g. '1.2.0'. Exposed via updater.getVersion(). */
   version?:      string;
   /** Installer and store metadata (publisher, description, website, license). */

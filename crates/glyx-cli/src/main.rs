@@ -362,12 +362,14 @@ fn run() -> Result<()> {
 /// by features it never asked for. Always going through the isolated `-p
 /// glyx-runner --no-default-features` build guarantees a lean prod binary;
 /// cargo no-ops when the fingerprint already matches, so repeat calls are fast.
-fn find_or_build_runner(dev_mode: bool) -> Result<PathBuf> {
+fn find_or_build_runner(dev_mode: bool, engine: &str) -> Result<PathBuf> {
     let profile = if dev_mode { "dev" } else { "prod" };
     let bin_name = runner_bin_name();
 
-    // 1. Check user cache
-    let cache_dir = glyx_runners_dir().join(profile);
+    // 1. Check user cache — namespaced by engine so switching a project's
+    //    configured engine (glyx.config "engine") doesn't silently reuse a
+    //    stale wrong-engine binary cached under the same path.
+    let cache_dir = glyx_runners_dir().join(engine).join(profile);
     let cached    = cache_dir.join(bin_name);
     if cached.exists() { return Ok(cached); }
 
@@ -375,21 +377,22 @@ fn find_or_build_runner(dev_mode: bool) -> Result<PathBuf> {
     //    Releases — the NORMAL path for users who installed the CLI binary
     //    and don't have the glyx source workspace.  Falls through to a
     //    source build (workspace devs) if unavailable.
-    if download_runner(profile, &cached).unwrap_or(false) {
+    if download_runner(profile, engine, &cached).unwrap_or(false) {
         return Ok(cached);
     }
 
     // 3. Build from source
     let home = glyx_home().context("Cannot locate glyx workspace — needed to build glyx-runner")?;
     let label = if dev_mode { "dev (with hot-reload)" } else { "prod (lean)" };
-    println!("Building glyx-runner [{label}] from source (first-run, one-time cost)...");
+    println!("Building glyx-runner [{label}, {engine}] from source (first-run, one-time cost)...");
 
-    let mut args = vec!["build", "-p", "glyx-runner"];
-    // --no-default-features drops "dev" for a lean prod binary, but it also
-    // drops the engine feature — glyx-core's `run()` needs `v8` or `quickjs`
-    // explicitly re-added or it fails to compile (`rt` is cfg-gated on one
-    // of them). Desktop default is v8; see glyx-runner/Cargo.toml.
-    if !dev_mode { args.push("--release"); args.push("--no-default-features"); args.push("--features"); args.push("v8"); }
+    // Always pass explicit features (both modes) so `engine` is honored
+    // regardless of glyx-runner/Cargo.toml's own default feature set —
+    // relying on defaults here previously meant a dev-mode build always got
+    // v8 no matter what the project's glyx.config asked for.
+    let feat = if dev_mode { format!("dev,{engine}") } else { engine.to_string() };
+    let mut args = vec!["build", "-p", "glyx-runner", "--no-default-features", "--features", feat.as_str()];
+    if !dev_mode { args.push("--release"); }
 
     let status = Command::new("cargo")
         .args(&args)
@@ -414,7 +417,7 @@ fn find_or_build_runner(dev_mode: bool) -> Result<PathBuf> {
     std::fs::copy(&built, &cached)
         .with_context(|| format!("cache runner to {}", cached.display()))?;
 
-    println!("✓ glyx-runner [{profile}] cached at {}", cached.display());
+    println!("✓ glyx-runner [{profile}, {engine}] cached at {}", cached.display());
     Ok(cached)
 }
 
@@ -438,14 +441,17 @@ fn release_target() -> Option<&'static str> {
 /// from GitHub Releases into `dest`.  Returns Ok(true) on success, Ok(false)
 /// when the artifact isn't available (offline, unsupported platform, 404) —
 /// the caller then falls through to building from source.
-fn download_runner(profile: &str, dest: &std::path::Path) -> Result<bool> {
+fn download_runner(profile: &str, engine: &str, dest: &std::path::Path) -> Result<bool> {
     let Some(target) = release_target() else { return Ok(false) };
     let suffix = if cfg!(windows) { ".exe" } else { "" };
-    // Release ships two runner flavors: lean prod and dev (hot-reload + overlay).
+    // Release ships two runner flavors (lean prod, dev hot-reload) per
+    // engine. v8 keeps the original unprefixed names (existing releases,
+    // unchanged); quickjs gets an explicit "quickjs-" segment.
+    let engine_prefix = if engine == "quickjs" { "quickjs-" } else { "" };
     let artifact = if profile == "dev" {
-        format!("glyx-runner-dev-{target}{suffix}")
+        format!("glyx-runner-{engine_prefix}dev-{target}{suffix}")
     } else {
-        format!("glyx-runner-{target}{suffix}")
+        format!("glyx-runner-{engine_prefix}{target}{suffix}")
     };
     let version = env!("CARGO_PKG_VERSION");
     let upstream = [
@@ -460,7 +466,7 @@ fn download_runner(profile: &str, dest: &std::path::Path) -> Result<bool> {
     };
 
     for url in &urls {
-        println!("Downloading prebuilt glyx-runner [{profile}]…");
+        println!("Downloading prebuilt glyx-runner [{profile}, {engine}]…");
         log::info!("  {url}");
         let resp = match ureq::get(url).call() {
             Ok(r) => r,
@@ -918,6 +924,22 @@ fn copy_runtime_files(dest_root: &Path) -> Result<()> {
     write_caps_lock(dest_root)?;
 
     Ok(())
+}
+
+/// Read the `engine` field from glyx.config (`"v8"` | `"quickjs"`). Defaults
+/// to `"v8"` (the desktop default, matching every example's own Cargo.toml)
+/// when absent or unrecognized.
+fn read_engine_from_config() -> String {
+    let src = resolve_config_json().unwrap_or_default();
+    let v: serde_json::Value = serde_json::from_str(&src).unwrap_or_default();
+    match v.get("engine").and_then(|e| e.as_str()) {
+        Some("quickjs") => "quickjs".to_string(),
+        Some("v8") | None => "v8".to_string(),
+        Some(other) => {
+            eprintln!("warning: glyx.config \"engine\": {other:?} not recognized (use \"v8\" or \"quickjs\") — defaulting to v8");
+            "v8".to_string()
+        }
+    }
 }
 
 /// Read the `capabilities` object from glyx.config (e.g. `{ "audio": true, "camera": false }`).

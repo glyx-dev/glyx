@@ -183,6 +183,11 @@ pub(super) struct PerWindowState {
     pub(super) drag_start_x: f32,
     pub(super) drag_start_y: f32,
     pub(super) request_redraw: Arc<dyn Fn() + Send + Sync>,
+    /// Quits the app. Used by the native fallback close control drawn when
+    /// `!decorations && js_root.is_none()` — a custom-titlebar app whose JS
+    /// crashed/failed to eval has no OS chrome and no JS-drawn chrome, so
+    /// without this there is no discoverable way to close the window.
+    pub(super) quit_fn: Arc<dyn Fn() + Send + Sync>,
     pub(super) cursor_blink_on:       bool,
     pub(super) cursor_blink_deadline: Instant,
     pub(super) cursor_was_active: bool,

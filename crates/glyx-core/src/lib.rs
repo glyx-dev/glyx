@@ -77,6 +77,13 @@ use glyx_layout::NodeId;
 
 include!(concat!(env!("OUT_DIR"), "/embedded_snapshot.rs"));
 
+/// Size (px) of the native fallback close control drawn top-right when a
+/// `decorations: false` window's JS has never successfully rendered a scene
+/// — see the `js_root.is_none()` branches in the render loop, `MouseInput`
+/// handler, and keyboard handler below. Shared so the drawn hit-box and the
+/// click hit-test always agree.
+const CLOSE_BTN_SIZE: f64 = 32.0;
+
 // ── JS plugin bundling ────────────────────────────────────────────────────────
 
 pub use glyx_runtime::{JsPlugin, JsPlugins, CancellableTask};
@@ -1211,14 +1218,18 @@ pub fn run(mut config: AppConfig) -> bool {
                 // Captured so the dev-mode error overlay can show it below —
                 // previously only HMR-reload errors set `last_js_error`, so a
                 // syntax/eval error present from the very first launch left
-                // the window blank with only a log line nobody sees.
+                // the window blank with only a log line nobody sees. Only
+                // consumed by the `dev_mode` field below, which is itself
+                // `dev`-only — write-only (and warns) otherwise.
+                #[cfg(feature = "dev")]
                 let mut initial_eval_error: Option<String> = None;
                 if let Some(ref js) = *js_src_arc {
                     match rt.eval(js) {
                         Ok(_)  => log::info!("Window {}: JS eval complete.", window_handle),
                         Err(e) => {
                             log::error!("Window {}: JS eval error: {}", window_handle, e);
-                            initial_eval_error = Some(format!("Eval error: {}", e));
+                            #[cfg(feature = "dev")]
+                            { initial_eval_error = Some(format!("Eval error: {}", e)); }
                         }
                     }
                 }
@@ -1226,6 +1237,10 @@ pub fn run(mut config: AppConfig) -> bool {
                 let win = window.clone();
                 let request_redraw: Arc<dyn Fn() + Send + Sync> =
                     Arc::new(move || win.request_redraw());
+
+                let proxy_quit_fallback = ev_proxy.clone();
+                let quit_fn: Arc<dyn Fn() + Send + Sync> =
+                    Arc::new(move || { let _ = proxy_quit_fallback.send_event(GlyxUserEvent::Quit); });
 
                 // Frameless drag closure — captures the window directly.
                 let drag_window_fn: Option<Arc<dyn Fn() + Send + Sync>> =
@@ -1266,6 +1281,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     drag_start_x: 0.0,
                     drag_start_y: 0.0,
                     request_redraw: Arc::clone(&request_redraw),
+                    quit_fn: Arc::clone(&quit_fn),
                     cursor_blink_on:       true,
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
                     cursor_was_active:     false,
@@ -1435,6 +1451,19 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Mouse button ──────────────────────────────────────────────
             ShellEvent::MouseInput { window_handle, button, pressed } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    // Native fallback close control (see CLOSE_BTN_SIZE doc)
+                    // — only live when JS has never rendered anything, so it
+                    // can never intercept a real app's own clicks.
+                    if button == 0 && pressed && !s.decorations && s.js_root.is_none() {
+                        let win_w = s.gpu.width() as f32;
+                        let btn = CLOSE_BTN_SIZE as f32;
+                        if s.cursor_x >= win_w - btn && s.cursor_x <= win_w
+                            && s.cursor_y >= 0.0 && s.cursor_y <= btn {
+                            (s.quit_fn)();
+                            return;
+                        }
+                    }
+
                     // When frameless and left button pressed: check for a glyxDraggable
                     // node under the cursor. If found, initiate an OS window drag and
                     // skip the normal DragStart event so JS sliders/etc. aren't affected.
@@ -1507,6 +1536,15 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Keyboard ──────────────────────────────────────────────────
             ShellEvent::KeyInput { window_handle, key, text, pressed } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    // Same native fallback as the close control drawn/hit-tested
+                    // above: Escape closes the app, but only while JS has never
+                    // rendered a scene — never intercepts a real app's own
+                    // Escape handling once it's actually running.
+                    if key.as_str() == "Escape" && pressed && !s.decorations && s.js_root.is_none() {
+                        (s.quit_fn)();
+                        return;
+                    }
+
                     #[cfg(feature = "dev")]
                     if let Some(dev) = s.dev_mode.as_mut() {
                         match key.as_str() {
@@ -1977,6 +2015,21 @@ pub fn run(mut config: AppConfig) -> bool {
                         win_h: s.gpu.height() as f64,
                     };
                     render_subtree(root_id, 0.0, 1.0, &mut render_ctx);
+                } else if !s.decorations {
+                    // JS never produced a scene (crashed / failed to eval)
+                    // and there's no OS titlebar to fall back on — the
+                    // window would otherwise be fully blank and
+                    // unclosable via any visible control. Same fixed
+                    // top-right hit-box used by the MouseInput handler
+                    // below and the Escape-key fallback.
+                    let win_w = s.gpu.width()  as f64;
+                    let win_h = s.gpu.height() as f64;
+                    frame.fill_rect(0.0, 0.0, win_w, win_h, peniko::Color::from_rgba8(20, 20, 24, 255));
+                    frame.fill_rect(win_w - CLOSE_BTN_SIZE, 0.0, CLOSE_BTN_SIZE, CLOSE_BTN_SIZE,
+                        peniko::Color::from_rgba8(70, 30, 30, 255));
+                    let x_lbl = s.text_sys.label("✕", 14.0);
+                    frame.draw_text(&x_lbl, win_w - CLOSE_BTN_SIZE + 11.0, 9.0,
+                        peniko::Color::from_rgba8(255, 190, 190, 255));
                 }
 
                 // Position the OS IME candidate window at the focused text

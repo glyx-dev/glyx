@@ -1646,3 +1646,100 @@ fn bgl_uniform(device: &wgpu::Device, label: &str, vis: wgpu::ShaderStages, size
         entries: &[bgl_entry(0, vis, size)],
     })
 }
+
+#[cfg(test)]
+mod math_tests {
+    use super::*;
+
+    fn node(parent: Option<usize>, t: [f32; 3]) -> GltfNode {
+        GltfNode { parent, translation: Vec3::from(t), rotation: glam::Quat::IDENTITY, scale: Vec3::ONE }
+    }
+
+    #[test]
+    fn node_world_matrix_composes_parent_chain() {
+        let nodes = vec![node(None, [1.0, 0.0, 0.0]), node(Some(0), [0.0, 2.0, 0.0])];
+        let m = node_world_matrix(&nodes, 1);
+        assert_eq!(m.transform_point3(Vec3::ZERO), Vec3::new(1.0, 2.0, 0.0));
+    }
+
+    #[test]
+    fn compose_world_matrices_matches_node_world_matrix() {
+        let nodes = vec![node(None, [1.0, 0.0, 0.0]), node(Some(0), [0.0, 2.0, 0.0]), node(Some(1), [0.0, 0.0, 3.0])];
+        let locals: Vec<Mat4> = nodes.iter().map(|n| n.local_matrix()).collect();
+        let world = compose_world_matrices(&nodes, &locals);
+        for i in 0..nodes.len() {
+            assert_eq!(world[i], node_world_matrix(&nodes, i));
+        }
+    }
+
+    #[test]
+    fn bracket_keyframes_interpolates_and_clamps() {
+        let times = [0.0, 1.0, 2.0];
+        assert_eq!(bracket_keyframes(&times, 0.5), Some((0, 1, 0.5)));
+        assert_eq!(bracket_keyframes(&times, -1.0), Some((0, 0, 0.0)));
+        assert_eq!(bracket_keyframes(&times, 5.0), Some((1, 2, 1.0)));
+        assert_eq!(bracket_keyframes(&[], 0.0), None);
+    }
+
+    #[test]
+    fn sample_vec3_lerps_between_keyframes() {
+        let ch = AnimChannel {
+            node: 0, target: AnimTarget::Translation,
+            times: vec![0.0, 2.0],
+            values3: vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            values4: vec![],
+        };
+        assert_eq!(sample_vec3(&ch, 1.0), Some(Vec3::new(1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn sample_quat_slerps_between_keyframes() {
+        let identity = glam::Quat::IDENTITY;
+        let half_turn_y = glam::Quat::from_rotation_y(std::f32::consts::PI);
+        let ch = AnimChannel {
+            node: 0, target: AnimTarget::Rotation,
+            times: vec![0.0, 1.0],
+            values3: vec![],
+            values4: vec![identity.to_array(), half_turn_y.to_array()],
+        };
+        let mid = sample_quat(&ch, 0.5).unwrap();
+        let expected = identity.slerp(half_turn_y, 0.5);
+        assert!((mid.dot(expected)).abs() > 0.999);
+    }
+
+    #[test]
+    fn ray_aabb_hits_and_misses() {
+        let hit = ray_aabb(Vec3::new(0.0, 0.0, -5.0), Vec3::Z, Vec3::splat(-1.0), Vec3::splat(1.0));
+        assert_eq!(hit, Some(4.0));
+        let miss = ray_aabb(Vec3::new(5.0, 0.0, -5.0), Vec3::Z, Vec3::splat(-1.0), Vec3::splat(1.0));
+        assert_eq!(miss, None);
+    }
+
+    #[test]
+    fn ray_sphere_hits_and_misses() {
+        let hit = ray_sphere(Vec3::new(0.0, 0.0, -5.0), Vec3::Z, 1.0);
+        assert_eq!(hit, Some(4.0));
+        let miss = ray_sphere(Vec3::new(5.0, 0.0, -5.0), Vec3::Z, 1.0);
+        assert_eq!(miss, None);
+    }
+
+    #[test]
+    fn ray_plane_bounded_hits_within_extent_and_misses_outside() {
+        let hit = ray_plane_bounded(Vec3::new(0.0, 1.0, 0.0), -Vec3::Y);
+        assert_eq!(hit, Some(1.0));
+        let miss = ray_plane_bounded(Vec3::new(10.0, 1.0, 0.0), -Vec3::Y);
+        assert_eq!(miss, None);
+    }
+
+    #[test]
+    fn tint_rgba8_multiplies_channels_and_clamps() {
+        let mut px = [200u8, 100, 50, 255];
+        tint_rgba8(&mut px, [0.5, 2.0, 1.0, 1.0]);
+        assert_eq!(px, [100, 200, 50, 255]);
+
+        // Values that would overflow 255 are clamped.
+        let mut px2 = [200u8, 0, 0, 0];
+        tint_rgba8(&mut px2, [2.0, 1.0, 1.0, 1.0]);
+        assert_eq!(px2, [255, 0, 0, 0]);
+    }
+}

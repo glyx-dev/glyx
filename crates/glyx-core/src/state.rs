@@ -351,3 +351,26 @@ pub(super) struct DevModeState {
     pub(super) startup_rss_bytes: u64,
     pub(super) startup_v8_total_bytes: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opacity_transition_samples_start_mid_and_end() {
+        let start = Instant::now();
+        let tr = OpacityTransition { from: 0.0, to: 1.0, start, duration_ms: 1000 };
+
+        let (v0, done0) = tr.sample(start);
+        assert_eq!(v0, 0.0);
+        assert!(!done0);
+
+        let (v_end, done_end) = tr.sample(start + std::time::Duration::from_millis(2000));
+        assert_eq!(v_end, 1.0);
+        assert!(done_end);
+
+        let (v_mid, done_mid) = tr.sample(start + std::time::Duration::from_millis(500));
+        assert!(v_mid > 0.0 && v_mid < 1.0);
+        assert!(!done_mid);
+    }
+}

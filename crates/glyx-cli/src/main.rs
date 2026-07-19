@@ -931,7 +931,11 @@ fn copy_runtime_files(dest_root: &Path) -> Result<()> {
 /// when absent or unrecognized.
 fn read_engine_from_config() -> String {
     let src = resolve_config_json().unwrap_or_default();
-    let v: serde_json::Value = serde_json::from_str(&src).unwrap_or_default();
+    parse_engine_from_json(&src)
+}
+
+fn parse_engine_from_json(src: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(src).unwrap_or_default();
     match v.get("engine").and_then(|e| e.as_str()) {
         Some("quickjs") => "quickjs".to_string(),
         Some("v8") | None => "v8".to_string(),
@@ -1127,3 +1131,36 @@ if (typeof MessageChannel === 'undefined') {
   };
 }
 "#;
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn parse_engine_from_json_reads_quickjs() {
+        assert_eq!(parse_engine_from_json(r#"{"engine":"quickjs"}"#), "quickjs");
+    }
+
+    #[test]
+    fn parse_engine_from_json_defaults_to_v8_when_absent() {
+        assert_eq!(parse_engine_from_json("{}"), "v8");
+        assert_eq!(parse_engine_from_json(""), "v8");
+    }
+
+    #[test]
+    fn parse_engine_from_json_falls_back_to_v8_on_unknown_value() {
+        assert_eq!(parse_engine_from_json(r#"{"engine":"nashorn"}"#), "v8");
+    }
+
+    #[test]
+    fn platform_to_rust_target_maps_known_platforms() {
+        assert_eq!(platform_to_rust_target("windows").unwrap(), "x86_64-pc-windows-msvc");
+        assert_eq!(platform_to_rust_target("macos").unwrap(), "aarch64-apple-darwin");
+        assert_eq!(platform_to_rust_target("linux-arm").unwrap(), "aarch64-unknown-linux-gnu");
+    }
+
+    #[test]
+    fn platform_to_rust_target_rejects_unknown_platform() {
+        assert!(platform_to_rust_target("plan9").is_err());
+    }
+}

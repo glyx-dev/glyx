@@ -263,3 +263,4 @@ const HostConfig = {
 };
 
 export default HostConfig;
+export { prepareUpdate };

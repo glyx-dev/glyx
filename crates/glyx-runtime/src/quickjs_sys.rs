@@ -354,7 +354,7 @@ pub(crate) fn system_watch<'js>(
             tokio::time::sleep(interval).await;
         }
     });
-    id
+    Ok(id)
 }
 
 pub(crate) fn system_unwatch(id: u32) {

@@ -1056,8 +1056,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     }
     {
         let events = reg.events.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |kind: String, interval_ms: Opt<f64>| {
-            crate::quickjs_sys::system_watch(kind, interval_ms.0.unwrap_or(0.0), Arc::clone(&events), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'_>, kind: String, interval_ms: Opt<f64>| {
+            crate::quickjs_sys::system_watch(ctx, kind, interval_ms.0.unwrap_or(0.0), Arc::clone(&events), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_system_watch", f)?;
         let f = Function::new(ctx.clone(), move |id: u32| crate::quickjs_sys::system_unwatch(id))?;
@@ -2081,12 +2081,20 @@ mod tests {
         }
     }
 
+    /// Same fail-closed-default reasoning as the other capability tests in
+    /// this file — no test in this shared process may safely call
+    /// `glyx_security::init()`, so `system_watch` should reject immediately
+    /// (proves the capability check is actually wired, not bypassed).
     #[test]
-    fn system_watch_and_unwatch_do_not_panic() {
+    fn system_watch_rejects_without_capability() {
         let (_tokio_rt, mut rt) = new_runtime();
-        let id = rt.eval("__glyx_system_watch('darkMode', 1000)").expect("eval should succeed");
-        let id: u32 = id.trim().parse().expect("system_watch should return a numeric id");
-        rt.eval(&format!("__glyx_system_unwatch({id})")).expect("eval should succeed");
+        let err = rt.eval("__glyx_system_watch('darkMode', 1000)").unwrap_err();
+        match err {
+            RuntimeError::JsException(msg) => {
+                assert!(msg.contains("system") || msg.contains("Capability"), "got: {msg}");
+            }
+            other => panic!("expected JsException, got {other:?}"),
+        }
     }
 
     #[test]

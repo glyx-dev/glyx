@@ -190,23 +190,30 @@ export function PieChart({
     const total = data.reduce((s, d) => s + Math.max(0, d.y), 0) || 1;
     const cx = width / 2, cy = height / 2;
     const r = Math.min(width, height) / 2 - 8;
+    const rInner = innerRadius > 0 ? r * Math.min(0.95, innerRadius) : 0;
     let a0 = -Math.PI / 2;
     data.forEach((d, i) => {
       const a1 = a0 + (Math.max(0, d.y) / total) * Math.PI * 2;
-      // Wedge: center → arc → close (real filled path via arc()).
       ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.arc(cx, cy, r, a0, a1);
+      if (rInner > 0) {
+        // Ring wedge: outer arc a0→a1, in to the inner radius, inner arc
+        // a1→a0 (reversed), close — leaves the center genuinely transparent
+        // instead of painting a hardcoded color over it.
+        ctx.moveTo(cx + rInner * Math.cos(a0), cy + rInner * Math.sin(a0));
+        ctx.lineTo(cx + r * Math.cos(a0), cy + r * Math.sin(a0));
+        ctx.arc(cx, cy, r, a0, a1);
+        ctx.lineTo(cx + rInner * Math.cos(a1), cy + rInner * Math.sin(a1));
+        ctx.arc(cx, cy, rInner, a1, a0, true);
+      } else {
+        // Full pie wedge: center → arc → close.
+        ctx.moveTo(cx, cy);
+        ctx.arc(cx, cy, r, a0, a1);
+      }
       ctx.closePath();
       ctx.fillStyle = d.color || palette[i % palette.length];
       ctx.fill();
       a0 = a1;
     });
-    // Donut hole.
-    if (innerRadius > 0) {
-      ctx.fillStyle = [20, 20, 26, 255];
-      ctx.fillCircle(cx, cy, r * Math.min(0.95, innerRadius));
-    }
   };
   return React.createElement(_ChartCanvas, { width, height, draw, deps: [data, width, height, innerRadius, palette] });
 }

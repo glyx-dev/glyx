@@ -70,7 +70,12 @@ export function useForm({ defaultValues, schema, onSubmit }) {
     finally { setSubmitting(false); }
   }, [values, validateAll, onSubmit]);
 
-  const isValid = Object.values(errors).every((e) => !e);
+  // Derived fresh from the current values every render — not from `errors`,
+  // which only gets populated once a field is touched/blurred/submitted and
+  // would otherwise report `true` for a schema-invalid initial/default state.
+  const isValid = schema
+    ? Object.values(validateAll(values)).every((e) => !e)
+    : true;
 
   return { values, errors, touched, submitting, setValue, setTouched, handleSubmit, isValid, reset: () => {
     setValues(defaultValues || {}); setErrors({}); setTouchedS({}); setSubmitting(false);

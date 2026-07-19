@@ -20,11 +20,11 @@ export function emptyDoc() {
   return { paragraphs: [{ spans: [{ text: '' }] }] };
 }
 
-function paraText(para) {
+export function paraText(para) {
   return para.spans.map(s => s.text).join('');
 }
 
-function splitSpansAt(spans, offset) {
+export function splitSpansAt(spans, offset) {
   const before = [], after = [];
   let rem = offset, split = false;
   for (const span of spans) {
@@ -39,7 +39,7 @@ function splitSpansAt(spans, offset) {
   return [before, after];
 }
 
-function mergeSpans(spans) {
+export function mergeSpans(spans) {
   const out = [];
   for (const s of spans) {
     if (!s.text) continue;
@@ -56,18 +56,18 @@ function mergeSpans(spans) {
 
 // ── Cursor helpers ────────────────────────────────────────────────────────────
 
-function cursorEq(a, b)  { return a.para === b.para && a.offset === b.offset; }
+export function cursorEq(a, b)  { return a.para === b.para && a.offset === b.offset; }
 function cursorLt(a, b)  { return a.para < b.para || (a.para === b.para && a.offset < b.offset); }
-function hasSelection(s) { return !cursorEq(s.anchor, s.focus); }
-function normSel(s)      { return cursorLt(s.anchor, s.focus) ? s : { anchor: s.focus, focus: s.anchor }; }
+export function hasSelection(s) { return !cursorEq(s.anchor, s.focus); }
+export function normSel(s)      { return cursorLt(s.anchor, s.focus) ? s : { anchor: s.focus, focus: s.anchor }; }
 
-function clampCursor(doc, c) {
+export function clampCursor(doc, c) {
   const para = Math.max(0, Math.min(doc.paragraphs.length - 1, c.para));
   const offset = Math.max(0, Math.min(paraText(doc.paragraphs[para]).length, c.offset));
   return { para, offset };
 }
 
-function moveCursorBy(doc, cursor, delta) {
+export function moveCursorBy(doc, cursor, delta) {
   let { para, offset } = cursor;
   offset += delta;
   if (offset < 0 && para > 0) {
@@ -95,7 +95,7 @@ function moveCursorVertical(doc, cursor, dir, lineHeight, defaultFontSize) {
 
 // ── Edit operations ───────────────────────────────────────────────────────────
 
-function insertText(doc, cursor, text) {
+export function insertText(doc, cursor, text) {
   const paras = [...doc.paragraphs];
   const para = paras[cursor.para];
   const [before, after] = splitSpansAt(para.spans, cursor.offset);
@@ -104,7 +104,7 @@ function insertText(doc, cursor, text) {
   return { doc: { ...doc, paragraphs: paras }, cursor: { para: cursor.para, offset: cursor.offset + text.length } };
 }
 
-function insertBreak(doc, cursor) {
+export function insertBreak(doc, cursor) {
   const paras = [...doc.paragraphs];
   const [before, after] = splitSpansAt(paras[cursor.para].spans, cursor.offset);
   paras[cursor.para] = { spans: mergeSpans(before.length ? before : [{ text: '' }]) };
@@ -112,7 +112,7 @@ function insertBreak(doc, cursor) {
   return { doc: { ...doc, paragraphs: paras }, cursor: { para: cursor.para + 1, offset: 0 } };
 }
 
-function deleteChar(doc, cursor, backward) {
+export function deleteChar(doc, cursor, backward) {
   const paras = [...doc.paragraphs];
   if (backward) {
     if (cursor.offset === 0) {
@@ -141,7 +141,7 @@ function deleteChar(doc, cursor, backward) {
   }
 }
 
-function deleteSelection(doc, sel) {
+export function deleteSelection(doc, sel) {
   const { anchor, focus } = normSel(sel);
   const paras = [...doc.paragraphs];
   if (anchor.para === focus.para) {
@@ -156,7 +156,7 @@ function deleteSelection(doc, sel) {
   return { doc: { ...doc, paragraphs: paras }, cursor: anchor };
 }
 
-function applyFormat(doc, sel, key, value) {
+export function applyFormat(doc, sel, key, value) {
   const { anchor, focus } = normSel(sel);
   const paras = [...doc.paragraphs];
   for (let pi = anchor.para; pi <= focus.para; pi++) {
@@ -170,7 +170,7 @@ function applyFormat(doc, sel, key, value) {
   return { ...doc, paragraphs: paras };
 }
 
-function selectionHasFormat(doc, sel, key) {
+export function selectionHasFormat(doc, sel, key) {
   if (!hasSelection(sel)) return false;
   const { anchor, focus } = normSel(sel);
   for (let pi = anchor.para; pi <= focus.para; pi++) {
@@ -184,7 +184,7 @@ function selectionHasFormat(doc, sel, key) {
   return true;
 }
 
-function selectedText(doc, sel) {
+export function selectedText(doc, sel) {
   if (!hasSelection(sel)) return '';
   const { anchor, focus } = normSel(sel);
   const parts = [];

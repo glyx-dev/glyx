@@ -5,7 +5,7 @@ import './polyfills.js';
 import React from 'react';
 import Reconciler from 'react-reconciler';
 import HostConfig from './hostConfig.js';
-import { dispatchEvents, addGlobalClickListener, removeGlobalClickListener, addKeyListener } from './events.js';
+import { dispatchEvents, addGlobalClickListener, removeGlobalClickListener, addKeyListener, removeKeyListener } from './events.js';
 import {
   _pollWebSockets, _pollIpc, _pollDeeplinks, _pollGamepads,
   _pollGlobalShortcuts, _pollPerfViolations, _pollLeakWarnings,
@@ -25,7 +25,7 @@ export * from './media.js';
 export * from './webview.js';
 
 // Event-registry helpers used by companion packages (@glyx-dev/context-menu, …).
-export { addGlobalClickListener, removeGlobalClickListener, addKeyListener };
+export { addGlobalClickListener, removeGlobalClickListener, addKeyListener, removeKeyListener };
 
 // ── Reconciler ────────────────────────────────────────────────────────────────
 

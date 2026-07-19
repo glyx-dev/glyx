@@ -1709,16 +1709,25 @@ pub fn run(mut config: AppConfig) -> bool {
                 let js_start = Instant::now();
                 let frame_tick_err = s.runtime.frame_tick();
                 let js_time_ms = js_start.elapsed().as_secs_f64() * 1000.0;
-                #[cfg(not(feature = "dev"))]
-                let _ = frame_tick_err;
 
-                // In dev mode, surface JS exceptions as a visual overlay.
+                // An uncaught exception here never reaches JS's own
+                // `globalThis.onerror` shim (nothing in either engine fires
+                // that global for engine-caught errors) — so this is the
+                // only place a JS crash gets persisted in a release build.
+                // Runs in every build, not just dev; see record_js_crash's docs.
+                if let Some(err) = &frame_tick_err {
+                    glyx_runtime::bindings::record_js_crash(err, "frame_tick");
+                }
+
+                // In dev mode, also surface JS exceptions as a visual overlay.
                 #[cfg(feature = "dev")]
                 if let Some(err) = frame_tick_err {
                     if let Some(dev) = s.dev_mode.as_mut() {
                         dev.last_js_error = Some(err);
                     }
                 }
+                #[cfg(not(feature = "dev"))]
+                let _ = frame_tick_err;
 
                 // 4. Post-frame commands (React re-renders from step 3 events).
                 let post_commands = s.runtime.drain_scene_commands();

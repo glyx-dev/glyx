@@ -14,6 +14,51 @@ use notify::RecommendedWatcher;
 #[cfg(feature = "v8")]
 use crate::Scope;
 
+// ── Crash reporter — shared, engine-neutral (V8 and QuickJS both call this) ───
+
+/// Returns the path where crash reports are written. Both `bind_updater.rs`
+/// (V8) and `quickjs_updater.rs` (QuickJS) keep their own copy of this same
+/// path logic for their JS-facing `crash.getReports()`/`crash.clearReports()`
+/// bindings; this one is for the native capture path below, which needs to
+/// be reachable regardless of which engine is compiled in.
+pub fn crash_reports_dir() -> std::path::PathBuf {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    home.join(".glyx").join("crashes")
+}
+
+/// Write a JS crash report straight from Rust — for uncaught exceptions the
+/// engine itself catches (a `frame_tick()` error, or a rejected promise
+/// nobody handled) that never reach the JS-side `globalThis.onerror`/
+/// `onunhandledrejection` shim, since nothing in the runtime actually fires
+/// those globals for engine-caught errors. Same file format/location as the
+/// JS-facing `crash_report_js` binding, so both paths land in the same
+/// `crash.getReports()` listing regardless of whether the capture originated
+/// in JS or was caught natively. Called from `glyx-core`'s frame loop in
+/// *every* build, not just dev — a JS crash in production is exactly the
+/// case this exists to cover.
+///
+/// Gated behind the `crash` capability like the JS-facing binding, so a build
+/// without `{ "capabilities": { "crash": true } }` writes nothing to disk.
+pub fn record_js_crash(message: &str, source: &str) {
+    if !glyx_security::get().crash { return; }
+    let dir = crash_reports_dir();
+    let _   = std::fs::create_dir_all(&dir);
+    let ts  = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let json = serde_json::json!({
+        "message":   message,
+        "source":    source,
+        "timestamp": ts,
+    }).to_string();
+    let path = dir.join(format!("js_{}.json", ts));
+    let _    = std::fs::write(path, json.as_bytes());
+}
+
 // All of these bind_*.rs submodules are V8 FunctionCallback-based glue —
 // 100% V8-specific, unlike the shared data model below (InputEvent,
 // SceneCommand, NodeProps, etc.). A QuickJS backend needs its own parallel

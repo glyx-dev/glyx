@@ -1626,6 +1626,7 @@ impl JsRuntime for QuickJsRuntime {
                 Ok(_) => {}
                 Err(e) => {
                     log::warn!("QuickJsRuntime: job execution error: {:?}", e);
+                    crate::bindings::record_js_crash(&format!("{e:?}"), "pending_job");
                     break;
                 }
             }

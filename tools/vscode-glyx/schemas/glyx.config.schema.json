@@ -303,6 +303,13 @@
           "minimum": 0,
           "description": "Minimum duration to show the splash in milliseconds (useful to prevent flash on fast loads).",
           "default": 0
+        },
+        "imageScale": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 1,
+          "description": "Max fraction of the smaller window dimension `image` may occupy. Keeps a full-bleed source image (e.g. an app icon with no transparent margin) from filling the whole window. Set closer to 1 for an image intentionally designed as a full splash background.",
+          "default": 0.5
         }
       }
     },

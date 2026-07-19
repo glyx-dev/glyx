@@ -131,6 +131,14 @@ export interface SplashConfig {
   background?: string;
   /** Minimum display time in ms before hideSplash() takes effect. */
   minimumMs?:  number;
+  /**
+   * Max fraction (0.0-1.0) of the smaller window dimension `image` may
+   * occupy. Default 0.5 — keeps a full-bleed source image (e.g. an app
+   * icon with no transparent margin) from filling the whole window and
+   * swallowing `background`. Set closer to 1.0 for an image intentionally
+   * designed as a full splash background.
+   */
+  imageScale?: number;
 }
 
 export interface PluginConfig {

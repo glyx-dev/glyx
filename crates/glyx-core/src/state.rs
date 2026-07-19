@@ -55,6 +55,11 @@ use std::sync::mpsc::Receiver;
 /// Splash screen overlay state. Active from window open until dismissed.
 pub(super) struct SplashState {
     pub(super) image:        Option<peniko::ImageData>,
+    /// Max fraction (0.0-1.0) of the smaller window dimension the splash
+    /// image may occupy — keeps a full-bleed source image (e.g. an app
+    /// icon with no transparent margin) from filling the whole window and
+    /// swallowing `background`. Default 0.5 (see `load_splash_state`).
+    pub(super) image_scale:  f64,
     pub(super) background:   [u8; 4],
     pub(super) min_until:    Instant,
     pub(super) auto_hide_at: Instant,

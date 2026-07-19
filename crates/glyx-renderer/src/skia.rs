@@ -604,8 +604,17 @@ impl TinySkiaFrame {
             // Scaled blit — draw into a temporary pixmap at destination size,
             // then blit the temporary to (x, y).
             let Some(mut tmp) = tiny_skia::Pixmap::new(dw, dh) else { return };
-            let sx = iw as f32 / dw as f32;
-            let sy = ih as f32 / dh as f32;
+            // `Pattern`'s transform maps PATTERN space -> destination space,
+            // so shrinking a `iw`x`ih` source to fit a `dw`x`dh` box needs
+            // scale = dw/iw (< 1 for downscale), not iw/dw. The inverted
+            // version previously here *enlarged* the pattern before
+            // filling a `dw`x`dh` rect, so only a small corner of the
+            // enlarged source ever landed inside the fill — visible as the
+            // image being cropped to its top-left corner on any real
+            // downscale (mild ratios looked like odd "zoomed in" framing;
+            // more aggressive ratios showed it outright).
+            let sx = dw as f32 / iw as f32;
+            let sy = dh as f32 / ih as f32;
             let shader = tiny_skia::Pattern::new(
                 src_pm,
                 tiny_skia::SpreadMode::Pad,

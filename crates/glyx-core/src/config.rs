@@ -20,6 +20,10 @@ pub(super) struct SplashCfgJson {
     pub(super) background:  Option<String>,
     #[serde(rename = "minimumMs", default)]
     pub(super) minimum_ms:  u64,
+    /// Max fraction (0.0-1.0) of the smaller window dimension `image` may
+    /// occupy. Default 0.5 when unset — see `SplashState::image_scale`.
+    #[serde(rename = "imageScale")]
+    pub(super) image_scale: Option<f64>,
 }
 
 /// A single JS plugin entry from `glyx.config.json`.
@@ -508,7 +512,8 @@ pub(super) fn load_splash_state() -> Option<SplashState> {
         }
     });
 
-    Some(SplashState { image: img, background, min_until, auto_hide_at, hidden: false })
+    let image_scale = cfg.image_scale.unwrap_or(0.5).clamp(0.05, 1.0);
+    Some(SplashState { image: img, image_scale, background, min_until, auto_hide_at, hidden: false })
 }
 
 /// Calculate a sensible V8 max-heap cap from the JS bundle size.

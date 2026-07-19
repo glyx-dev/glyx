@@ -2171,7 +2171,16 @@ pub fn run(mut config: AppConfig) -> bool {
                         if let Some(img) = &sp.image {
                             let iw = img.width  as f64;
                             let ih = img.height as f64;
-                            let scale  = (sw / iw).min(sh / ih).min(1.0);
+                            // Two caps, take the smaller: (1) fit within the
+                            // window at all, (2) never exceed `image_scale`
+                            // of the smaller window dimension — this is what
+                            // keeps a full-bleed source image (an app icon
+                            // with no transparent margin, say) from filling
+                            // the whole window and swallowing `background`.
+                            let fit_scale = (sw / iw).min(sh / ih).min(1.0);
+                            let max_dim   = sw.min(sh) * sp.image_scale;
+                            let cap_scale = (max_dim / iw).min(max_dim / ih);
+                            let scale = fit_scale.min(cap_scale);
                             let dw = iw * scale;
                             let dh = ih * scale;
                             let dx = (sw - dw) * 0.5;

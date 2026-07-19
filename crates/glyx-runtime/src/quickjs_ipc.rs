@@ -11,10 +11,9 @@
 //! now ported — `eval_js_plugins` below mirrors V8's identical pass in
 //! `bindings/mod.rs`'s `register_all`: eval each plugin's bundled IIFE, walk
 //! its exports object's own function properties into a
-//! `cmd_name -> (global_name, export_key)` map. **Static registration
-//! only** — unlike V8's `reload_plugin`, there's no dev-mode hot-reload
-//! port yet, so editing a plugin during `glyx dev` needs a full window
-//! restart on QuickJS today.
+//! `cmd_name -> (global_name, export_key)` map. Dev-mode hot-reload (`reload_js_plugin`,
+//! mirroring V8's `reload_plugin`) is ported too — editing a plugin during
+//! `glyx dev` picks up live on QuickJS the same as V8.
 //!
 //! Deliberately NOT storing `Persistent<Function>` handles here: an earlier
 //! version did, and crashed on runtime teardown
@@ -25,8 +24,13 @@
 //! GC can see through. Storing plain owned Strings and re-resolving the
 //! function fresh from `globalThis` on every call sidesteps the cycle
 //! entirely, at the cost of a cheap property lookup per call instead of a
-//! pre-resolved handle.
+//! pre-resolved handle. This also makes hot-reload simpler than V8's: since
+//! nothing is pre-resolved, reloading a plugin only needs to re-eval its
+//! IIFE and refresh the command-name map for any added/removed exports —
+//! unchanged exports need no bookkeeping at all, the next call just
+//! resolves the (already-updated-by-eval) function fresh as usual.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -40,16 +44,46 @@ use crate::BackendRegistry;
 /// `cmd_name -> (global_name, export_key)` for every exported function across
 /// all loaded JS plugins, prefixed per `JsPlugin::prefix` (e.g. `"db.getAll"`
 /// -> `("__glyx_plugin_db", "getAll")`). No JS values held in Rust — see the
-/// module doc for why.
-pub(crate) type JsBackendCommands = Rc<HashMap<String, (String, String)>>;
+/// module doc for why. `RefCell`-wrapped so `reload_js_plugin` can mutate it
+/// in place after startup (single-threaded, same as everything else on
+/// `QuickJsRuntime`).
+pub(crate) type JsBackendCommands = Rc<RefCell<HashMap<String, (String, String)>>>;
 
-/// Eval every JS plugin's bundled IIFE and collect its exported function
-/// locations. Mirrors `bindings::mod::register_all`'s V8 pass (same
-/// combined-eval + walk-own-properties approach), just via rquickjs.
-pub(crate) fn eval_js_plugins<'js>(ctx: &Ctx<'js>, plugins: &crate::JsPlugins) -> JsBackendCommands {
-    let mut out: HashMap<String, (String, String)> = HashMap::new();
+/// Eval one plugin's bundled IIFE and walk its exports object's own function
+/// properties into `out`, prefixed per `JsPlugin::prefix`. Shared by initial
+/// registration (`eval_js_plugins`, all plugins at once) and hot-reload
+/// (`reload_js_plugin`, one plugin).
+fn collect_plugin_exports<'js>(ctx: &Ctx<'js>, plugin: &crate::JsPlugin, out: &mut HashMap<String, (String, String)>) {
+    let globals = ctx.globals();
+    let exports_val: Value = match globals.get(plugin.global_name.as_str()) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let Some(exports) = exports_val.into_object() else {
+        log::warn!("[plugins] plugin {:?} did not set global '{}'", plugin.prefix, plugin.global_name);
+        return;
+    };
+    for result in exports.props::<String, Value>() {
+        let Ok((key, val)) = result else { continue };
+        if key.is_empty() || !val.is_function() { continue; }
+        let cmd_name = match &plugin.prefix {
+            Some(ns) => format!("{ns}.{key}"),
+            None     => key.clone(),
+        };
+        out.insert(cmd_name, (plugin.global_name.clone(), key.clone()));
+        log::info!("[plugins] registered JS command '{}' from plugin {:?}", key, plugin.prefix);
+    }
+}
+
+/// Eval every JS plugin's bundled IIFE and populate `commands` with their
+/// exported function locations — mirrors `bindings::mod::register_all`'s V8
+/// pass (same combined-eval + walk-own-properties approach), just via
+/// rquickjs. Populates the given (already-constructed) shared cell in place
+/// rather than returning a new one, so the exact same `Rc<RefCell<...>>` is
+/// shared between the registered `backend_call` closure and `reload_plugin`.
+pub(crate) fn eval_js_plugins<'js>(ctx: &Ctx<'js>, plugins: &crate::JsPlugins, commands: &JsBackendCommands) {
     if plugins.is_empty() {
-        return Rc::new(out);
+        return;
     }
 
     let combined: String = plugins.iter()
@@ -60,28 +94,50 @@ pub(crate) fn eval_js_plugins<'js>(ctx: &Ctx<'js>, plugins: &crate::JsPlugins) -
         log::error!("[plugins] eval error: {e}");
     }
 
-    let globals = ctx.globals();
+    let mut map = commands.borrow_mut();
     for plugin in plugins.iter() {
-        let exports_val: Value = match globals.get(plugin.global_name.as_str()) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let Some(exports) = exports_val.into_object() else {
-            log::warn!("[plugins] plugin {:?} did not set global '{}'", plugin.prefix, plugin.global_name);
-            continue;
-        };
-        for result in exports.props::<String, Value>() {
-            let Ok((key, val)) = result else { continue };
-            if key.is_empty() || !val.is_function() { continue; }
-            let cmd_name = match &plugin.prefix {
-                Some(ns) => format!("{ns}.{key}"),
-                None     => key.clone(),
-            };
-            out.insert(cmd_name, (plugin.global_name.clone(), key.clone()));
-            log::info!("[plugins] registered JS command '{}' from plugin {:?}", key, plugin.prefix);
+        collect_plugin_exports(ctx, plugin, &mut map);
+    }
+}
+
+/// Re-eval one plugin's bundled IIFE (a fresh rebundle after a dev-mode file
+/// edit) and refresh `commands` for its exports — mirrors V8's
+/// `reload_plugin_in_scope` exactly (remove old entries for this plugin's
+/// prefix, re-eval, re-collect), just without any `Persistent<Function>`
+/// bookkeeping since nothing is pre-resolved here.
+pub(crate) fn reload_js_plugin<'js>(
+    ctx: &Ctx<'js>, commands: &JsBackendCommands,
+    global_name: &str, prefix: Option<&str>, bundled_js: &str,
+) {
+    {
+        let mut map = commands.borrow_mut();
+        match prefix {
+            Some(ns) => {
+                let pfx = format!("{ns}.");
+                map.retain(|k, _| !k.starts_with(&pfx));
+            }
+            None => {
+                // Flat prefix: remove keys that don't contain '.' — same
+                // convention as V8's reload_plugin_in_scope.
+                map.retain(|k, _| k.contains('.'));
+            }
         }
     }
-    Rc::new(out)
+
+    if let Err(e) = ctx.eval::<(), _>(bundled_js.to_string()) {
+        log::error!("[plugin HMR] eval error for '{global_name}': {e}");
+        return;
+    }
+
+    let plugin = crate::JsPlugin {
+        prefix: prefix.map(String::from),
+        bundled_js: String::new(), // already eval'd above, unused by collect_plugin_exports
+        global_name: global_name.to_string(),
+        capabilities: vec![],
+        entry: None,
+    };
+    let mut map = commands.borrow_mut();
+    collect_plugin_exports(ctx, &plugin, &mut map);
 }
 
 /// Look up a registered JS command's function fresh from `globalThis` — see
@@ -166,8 +222,9 @@ pub(crate) fn backend_call<'js>(
     js_commands: crate::quickjs_ipc::JsBackendCommands,
     queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>,
 ) -> rquickjs::Result<rquickjs::Promise<'js>> {
-    if let Some((global_name, key)) = js_commands.get(&name) {
-        let f = resolve_js_command(&ctx, global_name, key)?;
+    let found = js_commands.borrow().get(&name).cloned();
+    if let Some((global_name, key)) = found {
+        let f = resolve_js_command(&ctx, &global_name, &key)?;
         let parsed_args: Value<'js> = ctx.json_parse(args_json)?;
         return f.call((parsed_args,));
     }

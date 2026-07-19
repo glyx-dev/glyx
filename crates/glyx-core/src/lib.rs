@@ -2742,6 +2742,17 @@ mod tests {
     }
 
     #[test]
+    fn config_webview_capability_defaults_false_and_parses_true() {
+        // webview used to be entirely unenforced (no field on Capabilities at
+        // all) — declaring it a real, parsed capability so a <WebView> node
+        // fails closed without it, matching every other capability.
+        let (_, caps_off) = apply(r#"{ "capabilities": { "db": true } }"#);
+        assert!(!caps_off.webview);
+        let (_, caps_on) = apply(r#"{ "capabilities": { "webview": true } }"#);
+        assert!(caps_on.webview);
+    }
+
+    #[test]
     fn config_invalid_json_yields_defaults() {
         // A corrupt config must not panic — it logs and leaves defaults intact.
         let (cfg, caps) = apply("{ this is not json");

@@ -204,6 +204,26 @@ pub(super) struct PerWindowState {
     pub(super) cursor_blink_on:       bool,
     pub(super) cursor_blink_deadline: Instant,
     pub(super) cursor_was_active: bool,
+    /// Consecutive frames that hit the early-return gate (nothing changed).
+    /// Once this crosses the trim threshold, GPU scratch buffers are
+    /// reclaimed via `trim_resources()` even though the window never lost
+    /// focus/occlusion — bounds RSS if a stray timer keeps waking the loop.
+    pub(super) idle_gate_frames: u32,
+    /// GPU capability tier probed at window creation — reused (not
+    /// re-probed) to scale the idle-trim check interval: integrated/none
+    /// tiers pay real system RAM for the GPU pool and get checked often,
+    /// discrete tiers have their own VRAM budget and are checked rarely.
+    pub(super) gpu_tier: glyx_gpu::GpuTier,
+    /// Wall-clock time of the last idle-trim check (not necessarily the
+    /// last actual trim — a check can decide the pool hasn't grown enough
+    /// to bother). Independent of `idle_gate_frames` so a periodically
+    /// (but not fully) idle screen — e.g. a blinking text cursor resetting
+    /// the frame-streak counter every ~500ms — still gets checked.
+    pub(super) last_idle_trim_check: Instant,
+    /// `allocator_reserved_bytes` (from `memory_counters()`) as of the last
+    /// actual trim. The next check only trims again once reserved bytes
+    /// have grown past this by the trim margin.
+    pub(super) last_trim_reserved_bytes: u64,
     /// Screen rect of the focused TextInput (captured during render) — the
     /// damage region for blink-only frames under software present.
     pub(super) cursor_node_rect: Option<(f64, f64, f64, f64)>,

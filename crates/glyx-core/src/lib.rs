@@ -922,6 +922,21 @@ pub fn run(mut config: AppConfig) -> bool {
                     pollster::block_on(glyx_gpu::probe_adapter_info())
                         .unwrap_or((glyx_gpu::GpuTier::None, "no adapter".into()));
                 let backend_kind = resolve_backend(render_mode_config, probe_tier, force_cpu);
+                // renderMode:'gpu' forced on a tier the 'auto' heuristic would have
+                // routed to TinySkia (integrated/virtual GPU, or no adapter) puts
+                // Vello's persistent compute buffer pool on what is effectively
+                // system RAM — a real cost, not a false alarm. One-time warning so
+                // apps that explicitly opted into 'gpu' know what they're trading.
+                if render_mode_config == RenderMode::Gpu
+                    && matches!(probe_tier, glyx_gpu::GpuTier::Integrated | glyx_gpu::GpuTier::None)
+                {
+                    log::warn!(
+                        "[glyx] renderMode='gpu' forced on an integrated/virtual GPU ({}) — \
+                         Vello's GPU buffer pool counts as system RAM here; 'auto' or \
+                         'skia' would use TinySkia instead and use significantly less memory",
+                        probe_name,
+                    );
+                }
                 if render_mode_config == RenderMode::Auto {
                     log::info!(
                         "[glyx] renderMode=auto → {} ({})",
@@ -1291,6 +1306,10 @@ pub fn run(mut config: AppConfig) -> bool {
                     cursor_blink_on:       true,
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
                     cursor_was_active:     false,
+                    idle_gate_frames:      0,
+                    gpu_tier:              probe_tier,
+                    last_idle_trim_check:  Instant::now(),
+                    last_trim_reserved_bytes: 0,
                     cursor_node_rect:      None,
                     focused_node:          None,
                     #[cfg(feature = "a11y")]
@@ -1841,7 +1860,52 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 // Release: skip entirely when nothing changed.
                 #[cfg(not(feature = "dev"))]
-                if !scene_needs_gpu { return; }
+                if !scene_needs_gpu {
+                    // Defense in depth against a stray/self-rearming timer keeping
+                    // the loop awake on an otherwise-static screen: after enough
+                    // consecutive no-op frames, reclaim Vello's scratch buffer pool
+                    // the same way occlusion/focus-loss already do. Re-fires every
+                    // IDLE_GATE_TRIM_THRESHOLD frames, not just once per streak.
+                    const IDLE_GATE_TRIM_THRESHOLD: u32 = 120;
+                    s.idle_gate_frames = s.idle_gate_frames.saturating_add(1);
+                    let mut should_trim = s.idle_gate_frames % IDLE_GATE_TRIM_THRESHOLD == 0;
+
+                    // Wall-clock check, independent of the frame streak above: a
+                    // screen with a focused blinking text cursor forces a real
+                    // render every ~500ms (blink_changed), which resets
+                    // idle_gate_frames well before it reaches the streak
+                    // threshold — that screen would otherwise never trim. Scaled
+                    // by GPU tier: integrated/none tiers pay real system RAM for
+                    // the pool and get checked often; discrete tiers have their
+                    // own VRAM budget and are checked rarely.
+                    let trim_check_interval = match s.gpu_tier {
+                        glyx_gpu::GpuTier::Integrated | glyx_gpu::GpuTier::None => Duration::from_secs(2),
+                        glyx_gpu::GpuTier::DiscreteIntel | glyx_gpu::GpuTier::Discrete => Duration::from_secs(15),
+                    };
+                    if now.duration_since(s.last_idle_trim_check) >= trim_check_interval {
+                        s.last_idle_trim_check = now;
+                        // Only actually trim if the reserved pool has grown
+                        // meaningfully since the last trim — skips the
+                        // reallocation cost on a pool that's already small and
+                        // stable (memory_counters() is atomic reads, cheap to
+                        // call on every check either way).
+                        const TRIM_GROWTH_MARGIN_BYTES: u64 = 24 * 1024 * 1024;
+                        let (_, _, reserved, _, _) = s.gpu.memory_counters();
+                        if reserved >= s.last_trim_reserved_bytes.saturating_add(TRIM_GROWTH_MARGIN_BYTES) {
+                            should_trim = true;
+                        }
+                    }
+
+                    if should_trim {
+                        s.renderer.trim_resources();
+                        if let Present::Gpu(gpu) = &s.gpu { gpu.poll(); }
+                        let (_, _, reserved_after, _, _) = s.gpu.memory_counters();
+                        s.last_trim_reserved_bytes = reserved_after;
+                    }
+                    return;
+                }
+                #[cfg(not(feature = "dev"))]
+                { s.idle_gate_frames = 0; }
 
                 // Dev: compute whether a full render is actually required.
                 #[cfg(feature = "dev")]

@@ -45,6 +45,11 @@ const rootContainer = GlyxReconciler.createContainer(
 // between tick() and drain_scene_commands().
 
 globalThis.__glyx_frameCallback = function glyxFrameCallback() {
+  // A real frame arrived — any native wakeup that was pending is now
+  // consumed. Clear before draining timers so a timer/interval that still
+  // has work due can request the next wakeup (see polyfills.js).
+  globalThis._glyxFramePending = false;
+  globalThis._glyxFramePendingDeadline = Infinity;
   // flushSync forces React to commit all state updates triggered by events
   // synchronously, so scene commands are in the queue before Rust drains them.
   GlyxReconciler.flushSync(() => {

@@ -98,6 +98,8 @@ mod scene;
 mod layout;
 mod render;
 mod soft_present;
+#[cfg(target_os = "windows")]
+mod d2d_present;
 #[cfg(feature = "a11y")]
 mod a11y;
 
@@ -944,6 +946,10 @@ pub fn run(mut config: AppConfig) -> bool {
                             BackendKind::TinySkia                 => "skia",
                             BackendKind::Vello { use_cpu: false } => "vello",
                             BackendKind::Vello { use_cpu: true  } => "vello/cpu",
+                            // Auto never resolves to Direct2D (see resolve_backend
+                            // and auto_never_selects_direct2d test) — unreachable
+                            // in practice, kept for match exhaustiveness.
+                            BackendKind::Direct2D                 => "direct2d",
                         },
                         probe_name,
                     );
@@ -971,6 +977,32 @@ pub fn run(mut config: AppConfig) -> bool {
                                 (Present::Gpu(gpu_ctx), r)
                             }
                         }
+                    } else if cfg!(target_os = "windows") && matches!(backend_kind, BackendKind::Direct2D) {
+                        // Direct2D bypasses AnyRenderer::new entirely (same
+                        // shape as the TinySkia soft-present branch above) —
+                        // its device context comes from D2DPresent, which
+                        // needs the window's raw HWND, not a wgpu GpuContext.
+                        #[cfg(target_os = "windows")]
+                        {
+                            match d2d_present::D2DPresent::new(Arc::clone(&window)) {
+                                Ok(dp) => {
+                                    let r = AnyRenderer::Direct2D(
+                                        glyx_renderer::Direct2DRenderer::new(
+                                            dp.device_context().clone()));
+                                    (Present::Direct2D(dp), r)
+                                }
+                                Err(e) => {
+                                    log::warn!("Direct2D present unavailable ({e}); falling back to wgpu/TinySkia");
+                                    let gpu_ctx = pollster::block_on(GpuContext::new(window.clone()))
+                                        .expect("Failed to initialise GPU");
+                                    let r = AnyRenderer::new(&gpu_ctx, BackendKind::TinySkia)
+                                        .expect("Failed to initialise renderer");
+                                    (Present::Gpu(gpu_ctx), r)
+                                }
+                            }
+                        }
+                        #[cfg(not(target_os = "windows"))]
+                        unreachable!("cfg!(target_os = \"windows\") guard above")
                     } else {
                         let gpu_ctx = pollster::block_on(GpuContext::new(window.clone()))
                             .expect("Failed to initialise GPU");
@@ -1929,6 +1961,8 @@ pub fn run(mut config: AppConfig) -> bool {
                         None    => { surface_lost = true; None }
                     },
                     Present::Soft(_) => None,
+                    #[cfg(target_os = "windows")]
+                    Present::Direct2D(_) => None,
                 };
                 if surface_lost {
                     log::warn!("Surface lost or outdated; reconfiguring.");
@@ -1969,8 +2003,17 @@ pub fn run(mut config: AppConfig) -> bool {
                 // Without this fix, TinySkia (supports_caching=false) never
                 // populates scene_cache, so the old guard was always false and
                 // TinySkia ran a full 60fps re-rasterize even on static screens.
+                // Direct2D has no cached-frame blit yet (Phase 1) — always
+                // take the full-render path there rather than risk presenting
+                // a stale/nonexistent cached frame.
+                #[cfg(all(feature = "dev", target_os = "windows"))]
+                let direct2d_active = matches!(s.gpu, Present::Direct2D(_));
+                #[cfg(all(feature = "dev", not(target_os = "windows")))]
+                let direct2d_active = false;
+
                 #[cfg(feature = "dev")]
-                if !needs_full_render && (s.pipeline_cache_saved || !s.scene_cache.is_empty()) {
+                if !needs_full_render && !direct2d_active
+                    && (s.pipeline_cache_saved || !s.scene_cache.is_empty()) {
                     // Stamp last_frame_at so FPS reflects the visual refresh rate
                     // (~20fps from the overlay timer), not the full-render rate (~4fps).
                     s.perf.lock().last_frame_at = Some(frame_start);
@@ -1985,6 +2028,8 @@ pub fn run(mut config: AppConfig) -> bool {
                             }
                         }
                         Present::Soft(sp) => sp.re_present(),
+                        #[cfg(target_os = "windows")]
+                        Present::Direct2D(_) => unreachable!("excluded via direct2d_active guard above"),
                     }
                     return;
                 }
@@ -2478,6 +2523,32 @@ pub fn run(mut config: AppConfig) -> bool {
                             }
                         }
                     }
+                    #[cfg(target_os = "windows")]
+                    Present::Direct2D(dp) => {
+                        // D2D draws directly into its own device context during
+                        // frame-build (no CPU pixel buffer, no wgpu texture) —
+                        // `finish()` is just EndDraw(); presenting the swap
+                        // chain is D2DPresent's own job, called right after.
+                        #[cfg(feature = "canvas3d")]
+                        if !canvas3d_overlays.is_empty() {
+                            // Canvas3D-on-Direct2D lazy GPU sharing is Phase 6
+                            // (deferred) — not yet supported.
+                            log::debug!("Canvas3D overlays skipped: not yet supported on the Direct2D backend.");
+                        }
+                        match frame {
+                            glyx_renderer::AnyFrame::Direct2D(f) => {
+                                if let Err(e) = f.finish() {
+                                    log::error!("Direct2D render error: {e}");
+                                    return;
+                                }
+                                dp.present();
+                            }
+                            _ => {
+                                log::error!("Direct2D present requires the Direct2D renderer");
+                                return;
+                            }
+                        }
+                    }
                 }
 
                 // Release staging buffers and D3D12 command allocators from
@@ -2726,6 +2797,27 @@ mod tests {
         assert_eq!(resolve_backend(RenderMode::TinySkia, GpuTier::None, true), BackendKind::TinySkia);
     }
 
+    #[test]
+    fn auto_never_selects_direct2d() {
+        // Direct2D is experimental/opt-in — Auto must only ever choose between
+        // Vello and TinySkia, regardless of tier, even on Windows.
+        for tier in [GpuTier::None, GpuTier::Integrated, GpuTier::DiscreteIntel, GpuTier::Discrete] {
+            let backend = resolve_backend(RenderMode::Auto, tier, false);
+            assert_ne!(backend, BackendKind::Direct2D);
+        }
+    }
+
+    #[test]
+    fn explicit_direct2d_pin_resolves_per_platform() {
+        let backend = resolve_backend(RenderMode::Direct2D, GpuTier::Integrated, false);
+        #[cfg(target_os = "windows")]
+        assert_eq!(backend, BackendKind::Direct2D);
+        // Non-Windows: falls back to TinySkia (with a logged warning) rather
+        // than erroring, since Direct2D isn't a real option on that platform.
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(backend, BackendKind::TinySkia);
+    }
+
     // ── renderMode string parsing ──────────────────────────────────────────────
 
     #[test]
@@ -2734,6 +2826,7 @@ mod tests {
         assert_eq!(parse_render_mode("skia"), RenderMode::TinySkia);
         assert_eq!(parse_render_mode("cpu"), RenderMode::Cpu);
         assert_eq!(parse_render_mode("gpu"), RenderMode::Gpu);
+        assert_eq!(parse_render_mode("direct2d"), RenderMode::Direct2D);
         // Unknown values fall back to Gpu rather than erroring.
         assert_eq!(parse_render_mode("not-a-mode"), RenderMode::Gpu);
     }

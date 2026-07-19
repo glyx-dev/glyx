@@ -17,3 +17,19 @@ tiny-skia  = { workspace = true }
 swash      = { workspace = true }
 image      = { workspace = true }
 lru        = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Direct2D backend (experimental `renderMode: 'direct2d'`, see direct2d.rs) —
+# same crate/version/feature set as glyx-core's d2d_present.rs; see that
+# Cargo.toml entry for why `windows` (COM wrapper methods) is used here
+# instead of the workspace's usual windows-sys.
+windows = { version = "0.58", features = [
+    "Foundation_Numerics",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }

@@ -35,9 +35,13 @@ export interface WindowConfig {
    *               up-front for Canvas3D-heavy apps, though Canvas3D also
    *               upgrades automatically from 'skia'/'auto').
    * - 'cpu'     — Vello's built-in CPU path.
+   * - 'direct2d' — Windows-only, experimental. OS/driver-managed Direct2D —
+   *               measured to stay near 'skia'-like flat memory instead of
+   *               Vello's persistent scene-buffer pool. Never auto-selected;
+   *               falls back to 'skia' with a warning on non-Windows.
    * TinySkia can also be forced at runtime via GLYX_CPU_RENDER=1.
    */
-  renderMode?:  'auto' | 'skia' | 'gpu' | 'cpu';
+  renderMode?:  'auto' | 'skia' | 'gpu' | 'cpu' | 'direct2d';
   /** V8 heap cap in MB (16–512). Default: auto from bundle size. */
   maxJsHeapMb?: number;
   /**

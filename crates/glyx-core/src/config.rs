@@ -253,14 +253,20 @@ fn app_has_cap(caps: &glyx_security::Capabilities, cap: &str) -> bool {
 /// Map the `renderMode` config string to a `RenderMode`.
 pub(super) fn parse_render_mode(s: &str) -> RenderMode {
     match s {
-        "cpu"     => RenderMode::Cpu,
-        "skia"    => RenderMode::TinySkia,
-        "auto"    => RenderMode::Auto,
-        _         => RenderMode::Gpu,
+        "cpu"      => RenderMode::Cpu,
+        "skia"     => RenderMode::TinySkia,
+        "direct2d" => RenderMode::Direct2D,
+        "auto"     => RenderMode::Auto,
+        _          => RenderMode::Gpu,
     }
 }
 
 /// Resolve the configured render mode + detected GPU tier to a concrete backend.
+///
+/// `RenderMode::Direct2D` is never selected by `Auto` — it's Windows-only and
+/// experimental, so it must be requested explicitly via `renderMode: 'direct2d'`.
+/// On non-Windows targets that explicit request falls back to TinySkia with a
+/// warning rather than failing, since Direct2D isn't a real option there.
 pub(super) fn resolve_backend(mode: RenderMode, tier: GpuTier, force_cpu: bool) -> BackendKind {
     match mode {
         RenderMode::Auto => {
@@ -273,6 +279,18 @@ pub(super) fn resolve_backend(mode: RenderMode, tier: GpuTier, force_cpu: bool) 
         RenderMode::Cpu      => BackendKind::Vello { use_cpu: true },
         RenderMode::Gpu      => BackendKind::Vello { use_cpu: force_cpu },
         RenderMode::TinySkia => BackendKind::TinySkia,
+        RenderMode::Direct2D => {
+            #[cfg(target_os = "windows")]
+            { BackendKind::Direct2D }
+            #[cfg(not(target_os = "windows"))]
+            {
+                log::warn!(
+                    "[glyx] renderMode='direct2d' requested but Direct2D is Windows-only \
+                     — falling back to TinySkia."
+                );
+                BackendKind::TinySkia
+            }
+        }
     }
 }
 

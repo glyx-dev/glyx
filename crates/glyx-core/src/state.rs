@@ -13,6 +13,8 @@ use glyx_text::TextSystem;
 
 use crate::{LabelKey, CachedLabel};
 use crate::soft_present::SoftPresent;
+#[cfg(target_os = "windows")]
+use crate::d2d_present::D2DPresent;
 
 // ── Present target ───────────────────────────────────────────────────────────
 
@@ -24,17 +26,38 @@ use crate::soft_present::SoftPresent;
 pub(super) enum Present {
     Gpu(GpuContext),
     Soft(SoftPresent),
+    /// Direct2D (Windows only, experimental — see `d2d_present.rs`). Owns its
+    /// own D3D11 device + DXGI swap chain, entirely separate from `Gpu`'s
+    /// wgpu device — the two never coexist for the same window in Phase 1-5
+    /// (Canvas3D-on-Direct2D compatibility is Phase 6, deferred).
+    #[cfg(target_os = "windows")]
+    Direct2D(D2DPresent),
 }
 
 impl Present {
     pub(super) fn width(&self) -> u32 {
-        match self { Present::Gpu(g) => g.width(),  Present::Soft(s) => s.width() }
+        match self {
+            Present::Gpu(g)  => g.width(),
+            Present::Soft(s) => s.width(),
+            #[cfg(target_os = "windows")]
+            Present::Direct2D(d) => d.width(),
+        }
     }
     pub(super) fn height(&self) -> u32 {
-        match self { Present::Gpu(g) => g.height(), Present::Soft(s) => s.height() }
+        match self {
+            Present::Gpu(g)  => g.height(),
+            Present::Soft(s) => s.height(),
+            #[cfg(target_os = "windows")]
+            Present::Direct2D(d) => d.height(),
+        }
     }
     pub(super) fn resize(&mut self, w: u32, h: u32) {
-        match self { Present::Gpu(g) => g.resize(w, h), Present::Soft(s) => s.resize(w, h) }
+        match self {
+            Present::Gpu(g)  => g.resize(w, h),
+            Present::Soft(s) => s.resize(w, h),
+            #[cfg(target_os = "windows")]
+            Present::Direct2D(d) => d.resize(w, h),
+        }
     }
     pub(super) fn poll(&self) {
         if let Present::Gpu(g) = self { g.poll(); }
@@ -43,6 +66,8 @@ impl Present {
         match self {
             Present::Gpu(g)  => g.memory_counters(),
             Present::Soft(_) => (0, 0, 0, 0, 0),
+            #[cfg(target_os = "windows")]
+            Present::Direct2D(_) => (0, 0, 0, 0, 0),
         }
     }
 }

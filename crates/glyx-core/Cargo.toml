@@ -27,7 +27,7 @@ fetch    = ["glyx-runtime/fetch"]
 websocket = ["glyx-runtime/websocket"]
 updater  = ["glyx-runtime/updater"]
 shell    = ["glyx-runtime/shell"]
-webview  = ["glyx-runtime/webview", "dep:glyx-cap-abi", "dep:raw-window-handle"]
+webview  = ["glyx-runtime/webview", "dep:glyx-cap-abi"]
 a11y     = ["glyx-shell/a11y", "glyx-runtime/a11y", "dep:accesskit"]
 
 [dependencies]
@@ -61,7 +61,7 @@ smallvec       = { workspace = true }
 glyx-3d        = { path = "../glyx-3d", optional = true }
 glyx-cap-abi   = { path = "../glyx-cap-abi", optional = true }
 accesskit      = { workspace = true, optional = true }
-raw-window-handle = { workspace = true, optional = true }
+raw-window-handle = { workspace = true }
 nokhwa         = { workspace = true, optional = true }
 glyx-media    = { path = "../glyx-media" }
 rodio          = { workspace = true, optional = true }
@@ -78,4 +78,21 @@ windows-sys = { workspace = true, features = [
     "Win32_Security_Authorization",
     "Win32_System_Threading",
     "Win32_System_Memory",
+] }
+# Direct2D present target (experimental `renderMode: 'direct2d'` backend, see
+# d2d_present.rs). Uses the higher-level `windows` crate (COM wrapper methods)
+# rather than windows-sys here specifically: the DXGI-swapchain/ID2D1DeviceContext
+# object graph this backend needs is COM-interface-heavy enough that raw-FFI
+# vtable calls would be significantly more error-prone, and this exact API
+# surface was already proven working in a standalone spike before this
+# dependency was added.
+windows = { version = "0.58", features = [
+    "Foundation_Numerics",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
 ] }

@@ -2,6 +2,10 @@ use super::*;
 
 pub(crate) struct RenderCtx<'a> {
     pub nodes: &'a std::collections::HashMap<u32, JsNode>,
+    /// Current interpolated opacity for nodes with an active `@glyx-dev/motion`
+    /// transition — read instead of `node.props.opacity` when present. See
+    /// `PerWindowState::opacity_transitions`'s docs.
+    pub opacity_overrides: &'a std::collections::HashMap<u32, f32>,
     pub images: &'a std::collections::HashMap<u32, peniko::ImageData>,
     pub resolved: &'a [(NodeId, ResolvedLayout)],
     pub frame: &'a mut AnyFrame,
@@ -176,7 +180,9 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     let rw = rl.width  as f64;
     let rh = rl.height as f64;
 
-    let child_opacity = opacity * node.props.opacity.unwrap_or(1.0);
+    let own_opacity = ctx.opacity_overrides.get(&id).copied()
+        .unwrap_or_else(|| node.props.opacity.unwrap_or(1.0));
+    let child_opacity = opacity * own_opacity;
 
     // ── Viewport culling ──────────────────────────────────────────────────────
     // Skip nodes entirely outside the window — analogous to Chromium's tile

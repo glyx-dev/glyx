@@ -172,6 +172,14 @@ pub(super) struct PerWindowState {
     pub(super) resolved:     Vec<(NodeId, ResolvedLayout)>,
     pub(super) js_nodes:     std::collections::HashMap<u32, JsNode>,
     pub(super) js_root:      Option<u32>,
+    /// Active `opacity` transitions, keyed by node id — see `scene::tick_opacity_transitions`.
+    /// `@glyx-dev/motion` v1: JS declares a `transition` prop once on a style
+    /// change; Rust owns the interpolation entirely from here, evaluated
+    /// fresh every frame with zero JS re-entry (the worklet-style
+    /// architecture from the QuickJS perf plan's §8a, scoped to `opacity`
+    /// for v1 — `transform`/other properties are a natural v1.1 follow-up
+    /// once this proves out).
+    pub(super) opacity_transitions: std::collections::HashMap<u32, OpacityTransition>,
     pub(super) images:       std::collections::HashMap<u32, peniko::ImageData>,
     pub(super) images_by_path: ByteBudgetImageCache,
     pub(super) image_cache_hits: u64,
@@ -277,6 +285,27 @@ pub(super) struct JsNode {
     pub(super) props:     NodeProps,
     pub(super) children:  SmallVec<[u32; 4]>,
     pub(super) layout_id: Option<NodeId>,
+}
+
+/// One in-progress `opacity` interpolation, driven entirely by Rust — see
+/// `PerWindowState::opacity_transitions`'s docs for the architecture.
+pub(super) struct OpacityTransition {
+    pub(super) from:        f32,
+    pub(super) to:          f32,
+    pub(super) start:       Instant,
+    pub(super) duration_ms: u32,
+}
+
+impl OpacityTransition {
+    /// Current eased value and whether the transition has finished.
+    /// Eases with a simple ease-out cubic — the common "settle in" curve
+    /// used by most CSS-transition defaults.
+    pub(super) fn sample(&self, now: Instant) -> (f32, bool) {
+        let elapsed_ms = now.saturating_duration_since(self.start).as_secs_f32() * 1000.0;
+        let t = (elapsed_ms / self.duration_ms.max(1) as f32).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - t).powi(3);
+        (self.from + (self.to - self.from) * eased, t >= 1.0)
+    }
 }
 
 /// State for an active scrollbar thumb drag.

@@ -932,6 +932,11 @@ pub struct NodeProps {
     //  Visual effects €€€
     /// Opacity multiplier (0.0 €“ 1.0).  Applied via Vello compositing layer.
     pub opacity: Option<f32>,
+    /// `@glyx-dev/motion` v1: when set, an `opacity` change on this node
+    /// interpolates over `transition_ms` (ease-out cubic) instead of
+    /// snapping — driven by `glyx-core`'s render loop, not JS. `None` means
+    /// opacity changes always snap immediately (existing behavior).
+    pub transition_ms: Option<u32>,
     /// Box shadow string: `"dx dy blur color"` (e.g. `"2 2 4 #00000044"`).
     pub box_shadow: Option<String>,
     /// Linear background gradient: `"startColor endColor"` (e.g. `"#ff0000 #0000ff"`).
@@ -2192,6 +2197,7 @@ fn parse_props(
 
     //  Visual effects 
     props.opacity             = get_num_prop(scope, obj, "opacity");
+    props.transition_ms       = get_num_prop(scope, obj, "transitionMs").map(|n| n as u32);
     props.box_shadow          = get_str_prop(scope, obj, "boxShadow");
     props.background_gradient = get_str_prop(scope, obj, "backgroundGradient");
 

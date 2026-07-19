@@ -165,6 +165,7 @@ pub(crate) fn parse_props_json(json: &str) -> NodeProps {
     props.pointer_events = get_str(&v, "pointerEvents");
 
     props.opacity             = get_num(&v, "opacity");
+    props.transition_ms       = get_num(&v, "transitionMs").map(|n| n as u32);
     props.box_shadow          = get_str(&v, "boxShadow");
     props.background_gradient = get_str(&v, "backgroundGradient");
 

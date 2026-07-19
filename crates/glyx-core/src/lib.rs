@@ -108,7 +108,7 @@ use self::dev_mode::*;
 #[cfg(feature = "dev")]
 use arboard;
 
-use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, snapshot_resolved};
+use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, snapshot_resolved, tick_opacity_transitions};
 use layout::{recompute_layout, update_scroll_positions};
 
 // ── F1: Windows named-pipe DACL restricted to current user ───────────────────
@@ -1270,6 +1270,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     resolved:               Vec::new(),
                     js_nodes:     std::collections::HashMap::with_capacity(256),
                     js_root:      None,
+                    opacity_transitions: std::collections::HashMap::new(),
                     images:       std::collections::HashMap::with_capacity(32),
                     images_by_path: ByteBudgetImageCache::new(256 * 1024 * 1024),
                     image_cache_hits: 0,
@@ -1723,6 +1724,15 @@ pub fn run(mut config: AppConfig) -> bool {
                 let post_commands = s.runtime.drain_scene_commands();
                 let post_changed  = apply_scene_commands(s, post_commands);
 
+                // 4b. Advance any active opacity transitions (@glyx-dev/motion v1) —
+                // Rust-owned interpolation, no JS re-entry. If any are still
+                // running after this tick, force this frame to render and
+                // schedule the next one (nothing else would wake the loop).
+                let transitions_active = tick_opacity_transitions(s);
+                if transitions_active {
+                    (s.request_redraw)();
+                }
+
                 // 5a. Pull latest camera frames and dirty only the nodes displaying them.
                 #[cfg(feature = "camera")]
                 let mut updated_camera_handles: Vec<u32> = Vec::new();
@@ -1813,7 +1823,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 //     Full Vello render only when scene changed OR overlay text is due
                 //     for its 250ms refresh.  All other overlay-timer ticks blit the
                 //     previous frame — skipping all 35 compute passes.
-                let scene_needs_gpu = pre_changed || post_changed || media_changed || blink_changed;
+                let scene_needs_gpu = pre_changed || post_changed || transitions_active || media_changed || blink_changed;
 
                 // Release: skip entirely when nothing changed.
                 #[cfg(not(feature = "dev"))]
@@ -1987,9 +1997,17 @@ pub fn run(mut config: AppConfig) -> bool {
                 #[cfg(feature = "webview")]
                 let mut webview_overlays: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
 
+                // Sample each active opacity transition's current value once,
+                // fresh every frame — this is the actual interpolation step.
+                let opacity_overrides: std::collections::HashMap<u32, f32> = s.opacity_transitions
+                    .iter()
+                    .map(|(&id, t)| (id, t.sample(Instant::now()).0))
+                    .collect();
+
                 if let Some(root_id) = s.js_root {
                     let mut render_ctx = RenderCtx {
                         nodes:             &s.js_nodes,
+                        opacity_overrides: &opacity_overrides,
                         images:            &s.images,
                         resolved:          &s.resolved,
                         frame:             &mut frame,

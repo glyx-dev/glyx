@@ -141,6 +141,23 @@ export interface SplashConfig {
   imageScale?: number;
 }
 
+/**
+ * Auto-updater target: where `updater.check()`/`updater.update()` look for
+ * new GitHub Releases. Requires the `updater` capability to also be enabled.
+ * Read at startup from `glyx.config.json` — this is app metadata, not a
+ * capability toggle, so it lives here rather than under `capabilities`.
+ */
+export interface UpdaterConfig {
+  /** GitHub organization or username. */
+  owner:   string;
+  /** Repository name. */
+  repo:    string;
+  /** Release asset filename prefix — matches `{binName}-{platform}`
+   *  (`.exe` appended automatically on Windows), which is exactly what
+   *  `glyx package` produces. */
+  binName: string;
+}
+
 export interface PluginConfig {
   /** Path to the plugin JS entry point (bundled at startup). */
   entry:         string;
@@ -195,6 +212,8 @@ export interface GlyxConfig {
   icon?:         string;
   /** Splash screen shown during JS startup. */
   splash?:       SplashConfig;
+  /** Auto-updater target repo. Requires `capabilities.updater: true` too. */
+  updater?:      UpdaterConfig;
   /** JS plugin extensions. Each plugin's exported async functions are
    *  callable via backend.<name>.<fn>() from JS. */
   plugins?:      PluginConfig[];

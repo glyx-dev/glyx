@@ -842,6 +842,20 @@ mod tests {
         let caps = parse(r#"{ "env": { "allow": ["*"] } }"#);
         assert!(!caps.can_get_env(""), "empty env name must be denied even under '*'");
     }
+
+    // ── Update origin ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn update_origin_round_trips_through_init() {
+        assert!(update_origin().is_none(), "should be unset before init in this test binary");
+        init_update_origin(UpdateOrigin {
+            owner: "acme-inc".into(), repo: "my-app".into(), bin_name: "my-app".into(),
+        });
+        let o = update_origin().expect("should be set after init");
+        assert_eq!(o.owner, "acme-inc");
+        assert_eq!(o.repo, "my-app");
+        assert_eq!(o.bin_name, "my-app");
+    }
 }
 
 // ── Test helpers (used by R6 tests, not exposed publicly) ────────────────────

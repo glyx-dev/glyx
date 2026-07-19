@@ -313,6 +313,29 @@
         }
       }
     },
+    "updater": {
+      "type": "object",
+      "description": "Auto-updater target repo for updater.check()/updater.update(). Requires capabilities.updater: true too.",
+      "additionalProperties": false,
+      "required": ["owner", "repo", "binName"],
+      "properties": {
+        "owner": {
+          "type": "string",
+          "description": "GitHub organization or username.",
+          "examples": ["glyx-dev"]
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repository name.",
+          "examples": ["my-app"]
+        },
+        "binName": {
+          "type": "string",
+          "description": "Release asset filename prefix — matches `{binName}-{platform}`, exactly what `glyx package` produces.",
+          "examples": ["my-app"]
+        }
+      }
+    },
     "dev": {
       "type": "object",
       "description": "Development server settings.",

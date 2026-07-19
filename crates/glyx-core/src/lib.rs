@@ -2092,7 +2092,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 // unconditionally here rather than inside the Present::Gpu-only
                 // 3D-overlay blit block below.
                 #[cfg(feature = "webview")]
-                if let Some(cap) = s.webview_cap {
+                if let Some(cap) = s.webview_cap.filter(|_| glyx_security::get().webview) {
                     use raw_window_handle::HasWindowHandle;
                     let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
                     for (id, x, y, w, h) in &webview_overlays {

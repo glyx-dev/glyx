@@ -405,6 +405,13 @@ pub struct Capabilities {
     pub crash: bool,
     /// Deep-link URL scheme registration.  `None` = no deep-link support.
     pub deeplink: Option<DeeplinkCapability>,
+    /// Native OS-embedded webview (WebView2/WKWebView/WebKitGTK) via the
+    /// `<WebView>` component. Gates whether a `<WebView>` node is allowed to
+    /// load content at all — separate from (and does not affect) the
+    /// GPU-rendered UI everything else uses. Gracefully degrades to
+    /// "not available" if the `webview` Cargo feature/DLL isn't present.
+    #[serde(default)]
+    pub webview: bool,
 }
 
 impl Capabilities {

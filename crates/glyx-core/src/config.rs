@@ -211,7 +211,7 @@ fn is_valid_cap_name(cap: &str) -> bool {
         | "battery" | "usb" | "shell" | "mdns" | "system" | "power" | "storage"
         | "gamepads" | "globalShortcuts" | "credentials" | "audio" | "ai"
         | "camera" | "microphone" | "hid" | "updater" | "video" | "crash" | "deeplink"
-        | "tray"
+        | "tray" | "webview"
     )
 }
 
@@ -245,6 +245,7 @@ fn app_has_cap(caps: &glyx_security::Capabilities, cap: &str) -> bool {
         "crash"            => caps.crash,
         "deeplink"         => caps.deeplink.is_some(),
         "tray"             => caps.tray,
+        "webview"          => caps.webview,
         _                  => false,
     }
 }
@@ -353,7 +354,7 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
                          Valid names: fs, network, env, db, dialog, clipboard, notification, \
                          battery, usb, shell, mdns, system, power, storage, gamepads, \
                          globalShortcuts, credentials, audio, ai, camera, microphone, \
-                         hid, updater, video, crash, deeplink",
+                         hid, updater, video, crash, deeplink, webview",
                         safe, cap
                     );
                     return None;

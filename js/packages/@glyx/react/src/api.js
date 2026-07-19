@@ -1786,7 +1786,7 @@ export const hid = {
  *   "update_type": "js_only",   // "js_only" | "runner" | "full"
  *   "notes":       "Bug fixes",
  *   "js_url":      "https://cdn.example.com/2.1.0/app.js",
- *   "js_sha256":   "abc123..."
+ *   "js_sig":      "a1b2c3..."  // Ed25519 signature, hex-encoded, over the bundle bytes
  * }
  * ```
  *
@@ -1795,7 +1795,7 @@ export const hid = {
  * const manifest = await updater.checkManifest('https://cdn.example.com/latest.json');
  * if (manifest) {
  *   if (manifest.update_type === 'js_only') {
- *     await updater.downloadJs(manifest.js_url, manifest.js_sha256);
+ *     await updater.downloadJs(manifest.js_url, manifest.js_sig);
  *     glyxWindow.restart();   // applies on next launch automatically
  *   } else {
  *     // runner/full: use updater.update() for GitHub releases, or direct download
@@ -1805,10 +1805,16 @@ export const hid = {
  *
  * ## GitHub-release flow (binary updates)
  *
+ * The release owner/repo/binary name are NOT passed from JS — they're baked
+ * in at build time from `updater: { owner, repo, binName }` in glyx.config
+ * (see `bind_updater.rs`'s "Build-time update origin" doc). JS only ever
+ * supplies the version to compare against; it can't redirect the update
+ * source to a different repo.
+ *
  * ```js
- * const info = await updater.check('myorg', 'myapp', '1.0.0');
+ * const info = await updater.check('1.0.0');
  * if (info.hasUpdate) {
- *   const result = await updater.update('myorg', 'myapp', 'myapp', '1.0.0');
+ *   const result = await updater.update('1.0.0');
  *   if (result.updated) { // show "restart required" dialog }
  * }
  * ```
@@ -1858,39 +1864,42 @@ export const updater = {
   },
 
   /**
-   * Download a JS bundle from `url`, verify its SHA-256 digest, and stage it
-   * for the next restart. On next launch the runner loads the staged JS
+   * Download a JS bundle from `url`, verify its Ed25519 signature, and stage
+   * it for the next restart. On next launch the runner loads the staged JS
    * instead of the trailer bundle — completing a JS-only update with zero downtime.
-   * @param {string}  url    Direct download URL of the new `app.js`.
-   * @param {string=} sha256 Expected SHA-256 hex digest. Pass `""` to skip verification.
+   *
+   * There is no "skip verification" option — an unsigned bundle is always
+   * rejected before anything is written to disk.
+   * @param {string} url    Direct download URL of the new `app.js`.
+   * @param {string} sigHex Ed25519 signature, hex-encoded, over the raw bundle
+   *                        bytes (e.g. the manifest's `js_sig` field — NOT a
+   *                        SHA-256 digest).
    * @returns {Promise<void>}
    */
-  async downloadJs(url, sha256 = '') {
-    await __glyx_updater_download_js(url, sha256);
+  async downloadJs(url, sigHex) {
+    await __glyx_updater_download_js(url, sigHex);
   },
 
   /**
-   * Check GitHub releases for a newer version.
-   * @param {string} owner          GitHub owner (user or org).
-   * @param {string} repo           Repository name.
+   * Check the build-time-configured GitHub repo for a newer version. The
+   * owner/repo are NOT passed from JS — see the module doc above.
    * @param {string} currentVersion Current semver string (e.g. "1.0.0").
    * @returns {Promise<{hasUpdate:boolean, latestVersion:string, body:string}>}
    */
-  async check(owner, repo, currentVersion) {
-    return JSON.parse(await __glyx_updater_check(owner, repo, currentVersion));
+  async check(currentVersion) {
+    return JSON.parse(await __glyx_updater_check(currentVersion));
   },
 
   /**
    * Download the latest GitHub release and replace the running binary.
-   * The caller should prompt the user to restart the app after this resolves.
-   * @param {string} owner          GitHub owner.
-   * @param {string} repo           Repository name.
-   * @param {string} binName        Binary asset name (without .exe — added on Windows).
+   * The release source (owner/repo/binName) is build-time-configured, not
+   * caller-supplied — see the module doc above. The caller should prompt the
+   * user to restart the app after this resolves.
    * @param {string} currentVersion Current semver string.
    * @returns {Promise<{updated:boolean, latestVersion:string}>}
    */
-  async update(owner, repo, binName, currentVersion) {
-    return JSON.parse(await __glyx_updater_update(owner, repo, binName, currentVersion));
+  async update(currentVersion) {
+    return JSON.parse(await __glyx_updater_update(currentVersion));
   },
 };
 

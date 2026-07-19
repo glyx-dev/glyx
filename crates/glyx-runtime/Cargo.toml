@@ -97,7 +97,7 @@ webview  = ["dep:glyx-cap-webview"]
 # register __glyx_hasA11y (a JS-facing capability query), the actual
 # accesskit integration lives in glyx-shell/glyx-core.
 a11y     = []
-updater  = ["dep:self_update", "dep:ed25519-dalek"]
+updater  = ["dep:self_update", "dep:ed25519-dalek", "dep:reqwest"]
 # Scoped shell exec (Tier 1: explicit binary allowlist). No new dep — spawns
 # via tokio::process::Command (argv-only, never a shell interpreter).
 shell    = []

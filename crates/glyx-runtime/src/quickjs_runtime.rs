@@ -703,7 +703,7 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let setter = w.set_maximized.clone();
         globals.set("__glyx_setMaximized", Function::new(ctx.clone(), move |v: bool| setter(v))?)?;
         let setter = w.set_minimized.clone();
-        globals.set("__glyx_setMinimized", Function::new(ctx.clone(), move || setter())?)?;
+        globals.set("__glyx_setMinimized", Function::new(ctx.clone(), move |v: Opt<bool>| setter(v.0.unwrap_or(true)))?)?;
         let getter = w.is_fullscreen.clone();
         globals.set("__glyx_isFullscreen", Function::new(ctx.clone(), move || getter())?)?;
         let getter = w.is_maximized.clone();

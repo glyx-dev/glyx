@@ -149,17 +149,24 @@ pub fn set_maximized_callback(
     }
 }
 
+/// `__glyx_setMinimized(minimized?)` — defaults to `true` when omitted, so
+/// existing no-arg call sites keep minimizing; pass `false` to un-minimize.
 pub fn set_minimized_callback(
-    _scope: &mut v8::PinScope<'_, '_, v8::Context>,
-    args:   v8::FunctionCallbackArguments,
-    _rv:    v8::ReturnValue,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
 ) {
     let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
+    let minimized = if args.length() > 0 {
+        args.get(0).boolean_value(scope)
+    } else {
+        true
+    };
     if let Some(ctrl) = &state.window {
-        (ctrl.set_minimized)();
+        (ctrl.set_minimized)(minimized);
     }
 }
 

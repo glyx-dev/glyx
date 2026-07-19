@@ -1156,7 +1156,7 @@ export const ipc = {
 export const glyxWindow = {
   setFullscreen:   (full)  => typeof __glyx_setFullscreen   !== 'undefined' && __glyx_setFullscreen(full),
   setMaximized:    (max)   => typeof __glyx_setMaximized    !== 'undefined' && __glyx_setMaximized(max),
-  setMinimized:    ()      => typeof __glyx_setMinimized    !== 'undefined' && __glyx_setMinimized(),
+  setMinimized:    (minimized = true) => typeof __glyx_setMinimized !== 'undefined' && __glyx_setMinimized(minimized),
   isFullscreen:    ()      => typeof __glyx_isFullscreen    !== 'undefined' ? __glyx_isFullscreen()    : false,
   isMaximized:     ()      => typeof __glyx_isMaximized     !== 'undefined' ? __glyx_isMaximized()     : false,
   getWindowSize:   ()      => typeof __glyx_getWindowSize   !== 'undefined' ? __glyx_getWindowSize()   : { width: 0, height: 0 },

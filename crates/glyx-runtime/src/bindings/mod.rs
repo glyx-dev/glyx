@@ -318,7 +318,7 @@ pub struct WindowController {
     pub request_redraw:    RedrawRequest,
     pub set_fullscreen:    Arc<dyn Fn(bool) + Send + Sync>,
     pub set_maximized:     Arc<dyn Fn(bool) + Send + Sync>,
-    pub set_minimized:     Arc<dyn Fn() + Send + Sync>,
+    pub set_minimized:     Arc<dyn Fn(bool) + Send + Sync>,
     pub is_fullscreen:     Arc<dyn Fn() -> bool + Send + Sync>,
     pub is_maximized:      Arc<dyn Fn() -> bool + Send + Sync>,
     pub set_always_on_top: Arc<dyn Fn(bool) + Send + Sync>,

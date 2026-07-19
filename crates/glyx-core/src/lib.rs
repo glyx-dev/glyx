@@ -633,8 +633,8 @@ fn build_window_controller(
         set_maximized: Arc::new(move |maximized| {
             w4.set_maximized(maximized);
         }),
-        set_minimized: Arc::new(move || {
-            w5.set_minimized(true);
+        set_minimized: Arc::new(move |minimized| {
+            w5.set_minimized(minimized);
         }),
         is_fullscreen: Arc::new(move || {
             w6.fullscreen().is_some()

@@ -13,11 +13,13 @@ static TRAY_MAP: LazyLock<Mutex<HashMap<u32, TrayIconId>>> =
 static MENU_ITEM_TO_TRAY: LazyLock<Mutex<HashMap<String, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+fn default_true() -> bool { true }
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct TrayMenuItem {
     pub id: String,
     pub label: String,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
     pub checked: bool,

@@ -26,6 +26,7 @@ ai       = ["glyx-runtime/ai"]
 fetch    = ["glyx-runtime/fetch"]
 websocket = ["glyx-runtime/websocket"]
 updater  = ["glyx-runtime/updater"]
+shell    = ["glyx-runtime/shell"]
 webview  = ["glyx-runtime/webview", "dep:glyx-cap-abi", "dep:raw-window-handle"]
 a11y     = ["glyx-shell/a11y", "glyx-runtime/a11y", "dep:accesskit"]
 

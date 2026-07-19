@@ -2475,6 +2475,7 @@ mod tests {
         assert_eq!(r.trim(), "null");
     }
 
+    #[cfg(feature = "audio")]
     #[test]
     fn audio_control_bindings_accept_string_handle_ids_without_panicking() {
         // Same regression coverage for audio's own id-as-string bug.

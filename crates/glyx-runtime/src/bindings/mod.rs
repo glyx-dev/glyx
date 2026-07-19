@@ -440,7 +440,17 @@ pub(crate) fn validate_external_url(url: &str) -> Result<(), &'static str> {
     if url.bytes().any(|b| b < 0x20 || b == 0x7F) {
         return Err("URL contains control characters");
     }
-    const SHELL_META: &[char] = &['|', '&', ';', '$', '(', ')', '>', '<', '`', '{', '}'];
+    // `&` and `(`/`)` are legal, extremely common URL characters (RFC 3986
+    // sub-delims — `&`/`=` join query params on essentially every real URL
+    // with 2+ params; `(`/`)` appear in ordinary paths, e.g. Wikipedia
+    // disambiguation links). Blocking them as bare characters broke a huge
+    // fraction of real-world URLs. The actual dangerous *patterns* are
+    // `&&` (shell AND-chaining) and `$(` (command substitution) — checked
+    // explicitly below — not the individual characters they're built from.
+    if url.contains("&&") || url.contains("$(") {
+        return Err("URL contains shell metacharacters");
+    }
+    const SHELL_META: &[char] = &['|', ';', '`', '<', '>', '{', '}'];
     if url.chars().any(|c| SHELL_META.contains(&c)) {
         return Err("URL contains shell metacharacters");
     }

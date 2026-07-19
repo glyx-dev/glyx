@@ -12,7 +12,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, ScrollView, Pressable, Video,
-  render, audio, dialog, db, useWindowSize,
+  render, audio, dialog, db, tray, useWindowSize,
 } from '@glyx-dev/react';
 import { ThemeProvider, ToastProvider, useToast, WindowControls } from '@glyx-dev/design';
 
@@ -262,6 +262,23 @@ const pressBtn = (hovered) => ({
 const iconSt = { color: P.muted, fontSize: 14 };
 const timeSt = { fontSize: 11, color: P.faint, width: 38, textAlign: 'right' };
 
+// ── Tray icon helper ──────────────────────────────────────────────────────────
+function createTrayIcon() {
+  const S = 16;
+  const buf = new ArrayBuffer(S * S * 4);
+  const px = new Uint8Array(buf);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const i = (y * S + x) * 4;
+      // Simple play triangle pointing right
+      const inTriangle = x >= y && x + y >= S - 1;
+      if (inTriangle) { px[i]=0x7C; px[i+1]=0x5C; px[i+2]=0xFF; px[i+3]=255; } // purple
+      else            { px[i+3]=0; }                                           // transparent
+    }
+  }
+  return buf;
+}
+
 // ── Main screen ────────────────────────────────────────────────────────────────
 function PlayerScreen() {
   const { width: winW } = useWindowSize();
@@ -279,8 +296,59 @@ function PlayerScreen() {
 
   const audioRef  = useRef(null);
   const videoRef  = useRef(null);
+  const trayRef   = useRef(0);
   const _lastVid  = useRef(0);
   const _prevVol  = useRef(0.8);
+
+  // ── System tray ──────────────────────────────────────────────────────
+  useEffect(() => {
+    try {
+      // 16×16 purple play-button icon as raw RGBA
+      const icon = createTrayIcon();
+      const id = tray.create(icon, 16, 16, 'Media Player', [
+        { id: 'play', label: playing ? 'Pause' : 'Play' },
+        { id: 'next', label: 'Next' },
+        { id: 'prev', label: 'Previous' },
+        { id: '', separator: true },
+        { id: 'quit', label: 'Quit' },
+      ]);
+      if (id) trayRef.current = id;
+    } catch (e) { /* tray not available */ }
+
+    // Poll tray events
+    const iv = setInterval(() => {
+      const id = trayRef.current;
+      if (!id) return;
+      const raw = tray.pollEvents();
+      if (!raw) return;
+      try {
+        const events = JSON.parse(raw);
+        for (const ev of events) {
+          if (ev.MenuItemClick) {
+            if (ev.MenuItemClick.item_id === 'play') togglePlay();
+            if (ev.MenuItemClick.item_id === 'next') playNext();
+            if (ev.MenuItemClick.item_id === 'prev') playPrev();
+            if (ev.MenuItemClick.item_id === 'quit') { tray.destroy(id); window.quit(); }
+          }
+          if (ev.DoubleClick) window.show();
+        }
+      } catch {}
+    }, 500);
+
+    return () => { clearInterval(iv); if (trayRef.current) tray.destroy(trayRef.current); };
+  }, []);
+
+  // Update tray play/pause label when playing state changes
+  useEffect(() => {
+    if (!trayRef.current) return;
+    tray.updateMenu(trayRef.current, [
+      { id: 'play', label: playing ? 'Pause' : 'Play' },
+      { id: 'next', label: 'Next' },
+      { id: 'prev', label: 'Previous' },
+      { id: '', separator: true },
+      { id: 'quit', label: 'Quit' },
+    ]);
+  }, [playing]);
 
   const refresh = useCallback(() => {
     db.query('SELECT * FROM media ORDER BY added_at DESC')

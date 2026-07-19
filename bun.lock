@@ -57,6 +57,30 @@
         "@glyx-dev/config": "workspace:*",
       },
     },
+    "examples/log-viewer": {
+      "name": "log-viewer",
+      "version": "0.1.0",
+      "dependencies": {
+        "@glyx-dev/design": "workspace:*",
+        "@glyx-dev/react": "workspace:*",
+        "react": "^18",
+      },
+      "devDependencies": {
+        "@glyx-dev/config": "workspace:*",
+      },
+    },
+    "examples/media-player": {
+      "name": "media-player",
+      "version": "0.1.0",
+      "dependencies": {
+        "@glyx-dev/design": "workspace:*",
+        "@glyx-dev/react": "workspace:*",
+        "react": "^18",
+      },
+      "devDependencies": {
+        "@glyx-dev/config": "workspace:*",
+      },
+    },
     "examples/model-viewer": {
       "name": "model-viewer",
       "version": "0.1.0",
@@ -76,7 +100,6 @@
       "dependencies": {
         "@glyx-dev/design": "workspace:*",
         "@glyx-dev/react": "workspace:*",
-        "@glyx-dev/router": "workspace:*",
         "react": "^18",
       },
       "devDependencies": {
@@ -292,7 +315,11 @@
 
     "js-tokens": ["js-tokens@4.0.0", "", {}, "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ=="],
 
+    "log-viewer": ["log-viewer@workspace:examples/log-viewer"],
+
     "loose-envify": ["loose-envify@1.4.0", "", { "dependencies": { "js-tokens": "^3.0.0 || ^4.0.0" }, "bin": { "loose-envify": "cli.js" } }, "sha512-lyuxPGr/Wfhrlem2CL/UcnUc1zcqKAImBDzukY7Y5F/yQiNdko6+fRLevlw1HgMySw7f611UIY408EtxRSoK3Q=="],
+
+    "media-player": ["media-player@workspace:examples/media-player"],
 
     "model-viewer": ["model-viewer@workspace:examples/model-viewer"],
 

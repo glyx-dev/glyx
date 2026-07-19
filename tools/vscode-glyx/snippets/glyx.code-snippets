@@ -176,6 +176,36 @@
     "description": "Glyx Canvas3D element"
   },
 
+  // ── WebView ───────────────────────────────────────────────────────────────
+  "WebView": {
+    "prefix": "gwebview",
+    "body": [
+      "<WebView",
+      "  src=\"${1:https://example.com}\"",
+      "  style={{ flex: 1 }}",
+      "  onMessage={(msg) => { $0 }}",
+      "/>"
+    ],
+    "description": "Glyx WebView — native OS-embedded webview (requires the webview capability)"
+  },
+  "WebView (with ref + postMessage)": {
+    "prefix": "gwebviewref",
+    "body": [
+      "const ${1:webviewRef} = useRef(null);",
+      "",
+      "<WebView",
+      "  ref={${1:webviewRef}}",
+      "  src=\"${2:https://example.com}\"",
+      "  allowedOrigins={['${2:https://example.com}']}",
+      "  style={{ flex: 1 }}",
+      "  onMessage={(msg) => { $0 }}",
+      "/>",
+      "",
+      "// ${1:webviewRef}.current.postMessage('hello from JS');"
+    ],
+    "description": "Glyx WebView with ref for postMessage"
+  },
+
   // ── @glyx/design components ───────────────────────────────────────────────
   "Button (design)": {
     "prefix": "gbtn",
@@ -355,5 +385,33 @@
       "});"
     ],
     "description": "Scaffold glyx.config.ts"
+  },
+
+  // ── System tray ─────────────────────────────────────────────────────────
+  "Glyx System Tray Icon": {
+    "prefix": "gtray",
+    "body": [
+      "import { tray } from '@glyx/react';",
+      "",
+      "const id = tray.create(rgbaBytes, ${1:32}, ${2:32}, '${3:My App}', [",
+      "  { id: '${4:show}', label: '${5:Show}' },",
+      "  { id: '', separator: true },",
+      "  { id: '${6:quit}', label: '${7:Quit}' },",
+      "]);",
+      "",
+      "// Poll tray events each frame (call in your frame loop)",
+      "function pollTray() {",
+      "  const raw = tray.pollEvents();",
+      "  if (!raw) return;",
+      "  const events = JSON.parse(raw);",
+      "  for (const ev of events) {",
+      "    if (ev.MenuItemClick?.item_id === '${4:show}') window.show();",
+      "    if (ev.MenuItemClick?.item_id === '${6:quit}') { tray.destroy(id); window.quit(); }",
+      "  }",
+      "}",
+      "",
+      "$0"
+    ],
+    "description": "Create a system tray icon with menu"
   }
 }

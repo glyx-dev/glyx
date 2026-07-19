@@ -14,6 +14,12 @@ const registry = [];
 
 export function useCommands(commands) {
   useEffect(() => {
+    // Dedupe by id: a later registration of the same id replaces the
+    // earlier entry instead of appearing twice in the palette.
+    const ids = new Set(commands.map((c) => c.id));
+    for (let i = registry.length - 1; i >= 0; i--) {
+      if (ids.has(registry[i].id)) registry.splice(i, 1);
+    }
     registry.push(...commands);
     return () => {
       for (const c of commands) {

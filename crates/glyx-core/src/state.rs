@@ -7,7 +7,7 @@ use smallvec::SmallVec;
 
 use glyx_layout::{LayoutTree, ResolvedLayout, NodeId};
 use glyx_renderer::{peniko, AnyRenderer, Scene};
-use glyx_runtime::{CanvasCmd, NodeProps, NodeType, GlyxRuntime};
+use glyx_runtime::{CanvasCmd, NodeProps, NodeType, JsRuntime};
 use glyx_gpu::GpuContext;
 use glyx_text::TextSystem;
 
@@ -55,6 +55,11 @@ use std::sync::mpsc::Receiver;
 /// Splash screen overlay state. Active from window open until dismissed.
 pub(super) struct SplashState {
     pub(super) image:        Option<peniko::ImageData>,
+    /// Max fraction (0.0-1.0) of the smaller window dimension the splash
+    /// image may occupy — keeps a full-bleed source image (e.g. an app
+    /// icon with no transparent margin) from filling the whole window and
+    /// swallowing `background`. Default 0.5 (see `load_splash_state`).
+    pub(super) image_scale:  f64,
     pub(super) background:   [u8; 4],
     pub(super) min_until:    Instant,
     pub(super) auto_hide_at: Instant,
@@ -144,6 +149,7 @@ impl ByteBudgetImageCache {
 // ── Per-window state ──────────────────────────────────────────────────────────
 
 /// Per-window rendering + runtime state.
+#[allow(dead_code)]
 pub(super) struct PerWindowState {
     pub(super) gpu:          Present,
     /// Window handle — needed to lazily create a wgpu context when a
@@ -165,12 +171,20 @@ pub(super) struct PerWindowState {
     pub(super) renderer:     AnyRenderer,
     pub(super) text_sys:     TextSystem,
     pub(super) layout:       LayoutTree,
-    pub(super) runtime:      GlyxRuntime,
+    pub(super) runtime:      Box<dyn JsRuntime>,
     pub(super) layout_dirty: bool,
     pub(super) layout_structure_dirty: bool,
     pub(super) resolved:     Vec<(NodeId, ResolvedLayout)>,
     pub(super) js_nodes:     std::collections::HashMap<u32, JsNode>,
     pub(super) js_root:      Option<u32>,
+    /// Active `opacity` transitions, keyed by node id — see `scene::tick_opacity_transitions`.
+    /// `@glyx-dev/motion` v1: JS declares a `transition` prop once on a style
+    /// change; Rust owns the interpolation entirely from here, evaluated
+    /// fresh every frame with zero JS re-entry (the worklet-style
+    /// architecture from the QuickJS perf plan's §8a, scoped to `opacity`
+    /// for v1 — `transform`/other properties are a natural v1.1 follow-up
+    /// once this proves out).
+    pub(super) opacity_transitions: std::collections::HashMap<u32, OpacityTransition>,
     pub(super) images:       std::collections::HashMap<u32, peniko::ImageData>,
     pub(super) images_by_path: ByteBudgetImageCache,
     pub(super) image_cache_hits: u64,
@@ -182,12 +196,34 @@ pub(super) struct PerWindowState {
     pub(super) drag_start_x: f32,
     pub(super) drag_start_y: f32,
     pub(super) request_redraw: Arc<dyn Fn() + Send + Sync>,
+    /// Quits the app. Used by the native fallback close control drawn when
+    /// `!decorations && js_root.is_none()` — a custom-titlebar app whose JS
+    /// crashed/failed to eval has no OS chrome and no JS-drawn chrome, so
+    /// without this there is no discoverable way to close the window.
+    pub(super) quit_fn: Arc<dyn Fn() + Send + Sync>,
     pub(super) cursor_blink_on:       bool,
     pub(super) cursor_blink_deadline: Instant,
     pub(super) cursor_was_active: bool,
     /// Screen rect of the focused TextInput (captured during render) — the
     /// damage region for blink-only frames under software present.
     pub(super) cursor_node_rect: Option<(f64, f64, f64, f64)>,
+    /// Global keyboard-focus registry — the node id JS last reported as
+    /// focused via `__glyx_setFocus`, or `None`. Foundation for IME
+    /// composition routing (attach to this node's rect) and, later,
+    /// accessibility (expose focus to the AT). Not yet consumed by anything;
+    /// this is step 1 of that work — see [[accessibility-and-ime-plan]].
+    pub(super) focused_node: Option<u32>,
+    /// Push an accessibility tree update to this window's `accesskit_winit`
+    /// adapter. `None` when built without the `a11y` feature. Cheap to call
+    /// every frame — no-ops internally when no AT is actually running.
+    #[cfg(feature = "a11y")]
+    pub(super) a11y_update: glyx_shell::A11yUpdateFn,
+    /// Set whenever a scene command actually changes something (see
+    /// `scene::apply_scene_commands`); cleared after the tree is rebuilt and
+    /// pushed. Avoids rebuilding the accessibility tree on frames where
+    /// nothing changed (e.g. a blink-only caret redraw).
+    #[cfg(feature = "a11y")]
+    pub(super) a11y_dirty: bool,
     /// Sender to the persistent blink-timer thread (spawned lazily on first
     /// focused TextInput). Sending a deadline schedules one redraw at that
     /// instant; newer deadlines received while waiting replace the pending one.
@@ -205,6 +241,33 @@ pub(super) struct PerWindowState {
     #[cfg(feature = "camera")]
     pub(super) camera_streams: std::collections::HashMap<u32, CameraStream>,
     pub(super) video_streams: std::collections::HashMap<u32, VideoStream>,
+    /// Resolved once at window-creation time (mirrors `renderer_3d`'s lazy-init
+    /// style, except the webview cap vtable itself is stateless to resolve —
+    /// only the native webview instances it creates carry per-window state).
+    #[cfg(feature = "webview")]
+    pub(super) webview_cap: Option<&'static glyx_cap_abi::WebviewCap>,
+    /// node id -> cap-returned webview handle.
+    #[cfg(feature = "webview")]
+    pub(super) webview_instances: std::collections::HashMap<u32, u32>,
+    /// node id -> last URL/HTML content sent to that instance, so the
+    /// per-frame reconcile loop only calls `load_url` when it actually changes.
+    #[cfg(feature = "webview")]
+    pub(super) webview_last_src: std::collections::HashMap<u32, String>,
+    /// node id -> last (x,y,w,h) sent via `set_bounds`. Calling `set_bounds`
+    /// every frame with an UNCHANGED rect made WebView2 behave as if it were
+    /// under continuous resize and stop repainting until an input event (e.g.
+    /// mouse hover) forced it to catch up — only call it on an actual change.
+    #[cfg(feature = "webview")]
+    pub(super) webview_last_bounds: std::collections::HashMap<u32, (f32, f32, f32, f32)>,
+    /// node ids currently `set_visible(0)`d — tracked so the reconcile loop
+    /// only calls `set_visible` on an actual show/hide transition, not every
+    /// frame (same repeated-call-suppresses-repaint issue as bounds above).
+    #[cfg(feature = "webview")]
+    pub(super) webview_hidden: std::collections::HashSet<u32>,
+    /// (node_id, x, y, w, h) accumulated during `render_subtree` each frame,
+    /// consumed right after to create/reposition/hide native webview children.
+    #[cfg(feature = "webview")]
+    pub(super) webview_overlays: Vec<(u32, f32, f32, f32, f32)>,
     pub(super) splash_state: Option<SplashState>,
     pub(super) decorations: bool,
     pub(super) drag_window_fn: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -227,6 +290,27 @@ pub(super) struct JsNode {
     pub(super) props:     NodeProps,
     pub(super) children:  SmallVec<[u32; 4]>,
     pub(super) layout_id: Option<NodeId>,
+}
+
+/// One in-progress `opacity` interpolation, driven entirely by Rust — see
+/// `PerWindowState::opacity_transitions`'s docs for the architecture.
+pub(super) struct OpacityTransition {
+    pub(super) from:        f32,
+    pub(super) to:          f32,
+    pub(super) start:       Instant,
+    pub(super) duration_ms: u32,
+}
+
+impl OpacityTransition {
+    /// Current eased value and whether the transition has finished.
+    /// Eases with a simple ease-out cubic — the common "settle in" curve
+    /// used by most CSS-transition defaults.
+    pub(super) fn sample(&self, now: Instant) -> (f32, bool) {
+        let elapsed_ms = now.saturating_duration_since(self.start).as_secs_f32() * 1000.0;
+        let t = (elapsed_ms / self.duration_ms.max(1) as f32).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - t).powi(3);
+        (self.from + (self.to - self.from) * eased, t >= 1.0)
+    }
 }
 
 /// State for an active scrollbar thumb drag.
@@ -266,4 +350,27 @@ pub(super) struct DevModeState {
     pub(super) last_js_error: Option<String>,
     pub(super) startup_rss_bytes: u64,
     pub(super) startup_v8_total_bytes: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opacity_transition_samples_start_mid_and_end() {
+        let start = Instant::now();
+        let tr = OpacityTransition { from: 0.0, to: 1.0, start, duration_ms: 1000 };
+
+        let (v0, done0) = tr.sample(start);
+        assert_eq!(v0, 0.0);
+        assert!(!done0);
+
+        let (v_end, done_end) = tr.sample(start + std::time::Duration::from_millis(2000));
+        assert_eq!(v_end, 1.0);
+        assert!(done_end);
+
+        let (v_mid, done_mid) = tr.sample(start + std::time::Duration::from_millis(500));
+        assert!(v_mid > 0.0 && v_mid < 1.0);
+        assert!(!done_mid);
+    }
 }

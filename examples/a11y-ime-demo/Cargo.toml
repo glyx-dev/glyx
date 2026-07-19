@@ -1,0 +1,18 @@
+[package]
+name    = "a11y-ime-demo"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# "dev" gates hot-reload, bun watcher, and dev overlay in glyx-core.
+# Production builds (glyx build) use --no-default-features to exclude them.
+default = ["dev", "v8"]
+dev     = ["glyx-core/dev"]
+v8      = ["glyx-core/v8"]
+quickjs = ["glyx-core/quickjs"]
+
+[dependencies]
+# a11y: this example's whole purpose is exercising IME + the accessibility tree.
+glyx-core  = { path = "../../crates/glyx-core", default-features = false, features = ["a11y"] }
+glyx-shell = { path = "../../crates/glyx-shell" }
+env_logger  = "0.11"

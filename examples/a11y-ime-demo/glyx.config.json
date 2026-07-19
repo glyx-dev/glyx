@@ -1,0 +1,17 @@
+{
+  "window": {
+    "title":       "A11y + IME Demo",
+    "width":       520,
+    "height":      760,
+    "startupMode": "windowed",
+    "background":  "#0f0f14",
+    "renderMode":  "skia"
+  },
+  "capabilities": {},
+  "locales": ["en"],
+  "dev": {
+    "entry":  "js/app.jsx",
+    "output": "js/dist/app.js",
+    "watch":  ["js"]
+  }
+}

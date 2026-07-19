@@ -253,7 +253,7 @@ pub(super) fn append_trailer_snapshot(
         println!("  ~/.glyx/runners/prod/glyx-runner on your build machine.");
     }
 
-    let runner = find_or_build_runner(false)
+    let runner = find_or_build_runner(false, &super::read_engine_from_config())
         .context("Could not find or build prod glyx-runner. Run `glyx runtime build`.")?;
 
     std::fs::create_dir_all("target/release")?;
@@ -315,7 +315,7 @@ pub(super) fn copy_prod_runner_as(target: Option<&str>, project_name: &str) -> R
         println!("  then use `glyx build --mode snapshot` for embedded cross-target binaries.");
     }
 
-    let runner = find_or_build_runner(false)
+    let runner = find_or_build_runner(false, &super::read_engine_from_config())
         .context("Could not find or build prod glyx-runner. Run `glyx runtime build`.")?;
 
     std::fs::create_dir_all("target/release")?;
@@ -336,7 +336,13 @@ pub(super) fn cargo_build_release(
     app_config: Option<&Path>,
 ) -> Result<PathBuf> {
     let rust_target = target.map(platform_to_rust_target).transpose()?;
-    let mut args = vec!["build", "--release", "--no-default-features", "-p", project_name];
+    // --no-default-features drops "dev" (hot-reload) for a lean prod binary,
+    // but it also drops the engine feature — glyx-core::run() needs `v8` or
+    // `quickjs` explicitly re-added, or it fails to compile (its `rt` local
+    // is cfg-gated on one of them, not linked by default once neither is
+    // implied). Read from glyx.config's "engine" field (default "v8").
+    let engine = super::read_engine_from_config();
+    let mut args = vec!["build", "--release", "--no-default-features", "--features", &engine, "-p", project_name];
     let target_str;
     if let Some(ref t) = rust_target {
         target_str = t.to_string();

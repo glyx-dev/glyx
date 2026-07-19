@@ -1,0 +1,19 @@
+{
+  "window": {
+    "title":       "WebView Demo",
+    "width":       900,
+    "height":      650,
+    "startupMode": "windowed",
+    "background":  "#0f0f14",
+    "renderMode":  "skia"
+  },
+  "capabilities": {
+    "webview": true
+  },
+  "locales": ["en"],
+  "dev": {
+    "entry":  "js/app.jsx",
+    "output": "js/dist/app.js",
+    "watch":  ["js"]
+  }
+}

@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 v8 = { workspace = true }
+mimalloc = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }

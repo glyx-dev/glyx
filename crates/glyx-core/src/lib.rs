@@ -61,10 +61,12 @@ use glyx_gpu::GpuContext;
 use glyx_layout::{flex_column, LayoutTree, ResolvedLayout, TextMeasureCtx};
 use glyx_renderer::{colors, peniko, AnyRenderer, AnyFrame, BackendKind, Scene};
 use glyx_runtime::{
-    init_v8, new_ipc_bus,
+    new_ipc_bus,
     CanvasCmd, InputEvent, LengthValue, NodeProps, NodeType, SceneCommand,
-    GlyxRuntime, WindowController,
+    WindowController,
 };
+#[cfg(feature = "v8")]
+use glyx_runtime::{init_v8, GlyxRuntime};
 
 pub use glyx_runtime::GlyxExtension;
 use glyx_security;
@@ -74,6 +76,13 @@ use glyx_text::{TextLayout, TextSystem};
 use glyx_layout::NodeId;
 
 include!(concat!(env!("OUT_DIR"), "/embedded_snapshot.rs"));
+
+/// Size (px) of the native fallback close control drawn top-right when a
+/// `decorations: false` window's JS has never successfully rendered a scene
+/// — see the `js_root.is_none()` branches in the render loop, `MouseInput`
+/// handler, and keyboard handler below. Shared so the drawn hit-box and the
+/// click hit-test always agree.
+const CLOSE_BTN_SIZE: f64 = 32.0;
 
 // ── JS plugin bundling ────────────────────────────────────────────────────────
 
@@ -89,6 +98,8 @@ mod scene;
 mod layout;
 mod render;
 mod soft_present;
+#[cfg(feature = "a11y")]
+mod a11y;
 
 use self::config::*;
 use self::state::*;
@@ -97,7 +108,7 @@ use self::dev_mode::*;
 #[cfg(feature = "dev")]
 use arboard;
 
-use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, snapshot_resolved};
+use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, snapshot_resolved, tick_opacity_transitions};
 use layout::{recompute_layout, update_scroll_positions};
 
 // ── F1: Windows named-pipe DACL restricted to current user ───────────────────
@@ -444,7 +455,8 @@ fn try_start_scrollbar_drag(s: &mut PerWindowState) -> Option<ScrollbarDragState
     let cy = s.cursor_y as f64;
     let mut result: Option<(ScrollbarDragState, Option<f64>, f64)> = None;
     {
-        let cache = s.runtime.layout_cache.lock();
+        let layout_cache = s.runtime.layout_cache();
+        let cache = layout_cache.lock();
         for (&id, node) in &s.js_nodes {
             // Only clip containers (ScrollViews) own scrollbars.
             let overflows = matches!(node.props.overflow.as_deref(), Some("hidden" | "scroll"));
@@ -621,8 +633,8 @@ fn build_window_controller(
         set_maximized: Arc::new(move |maximized| {
             w4.set_maximized(maximized);
         }),
-        set_minimized: Arc::new(move || {
-            w5.set_minimized(true);
+        set_minimized: Arc::new(move |minimized| {
+            w5.set_minimized(minimized);
         }),
         is_fullscreen: Arc::new(move || {
             w6.fullscreen().is_some()
@@ -832,10 +844,13 @@ pub fn run(mut config: AppConfig) -> bool {
         .expect("Failed to build Tokio runtime");
     let tokio_handle = tokio_rt.handle().clone();
 
+    #[cfg(feature = "v8")]
     init_v8();
 
     // Apply the app's default ICU locale (first declared `locales` entry) so
     // `Intl.*` / `.toLocaleString()` format correctly when no locale is passed.
+    // V8-only — QuickJS's own Intl support (if any) isn't wired up yet.
+    #[cfg(feature = "v8")]
     if let Some(locale) = config.locales.first().filter(|l| !l.is_empty()) {
         glyx_runtime::icu::set_default_locale(locale);
     }
@@ -854,6 +869,10 @@ pub fn run(mut config: AppConfig) -> bool {
 
     // Wrap in Arc so secondary-window creation can reuse them.
     let js_src_arc        = Arc::new(js_src);
+    // Only read in the #[cfg(feature = "v8")] snapshot-restore branch below —
+    // QuickJS has no snapshot equivalent, so this is unused (by design) in a
+    // quickjs-only build.
+    #[cfg_attr(not(feature = "v8"), allow(unused_variables))]
     let snapshot_blob_arc = Arc::new(snapshot_blob);
     let extensions_arc    = Arc::new(extensions);
     let js_plugins_arc: glyx_runtime::JsPlugins = Arc::new(js_plugins);
@@ -871,7 +890,10 @@ pub fn run(mut config: AppConfig) -> bool {
     // Canvas2D transport config — applied to each runtime after construction.
     let canvas_protocol  = window.canvas_protocol.clone();
     let canvas_buffer_kb = window.canvas_buffer_kb.unwrap_or(256) as usize;
-    // Compute V8 heap cap: explicit config wins; otherwise auto-calculate from bundle size.
+    // Compute V8 heap cap: explicit config wins; otherwise auto-calculate from
+    // bundle size. V8-only — QuickJS has no isolate-heap-limit equivalent
+    // wired up yet (its `new_with_ipc` takes no heap-cap argument), a known gap.
+    #[cfg(feature = "v8")]
     let heap_cap_mb: usize = match window.max_js_heap_mb {
         Some(mb) => mb as usize,
         None => {
@@ -886,7 +908,7 @@ pub fn run(mut config: AppConfig) -> bool {
     let restart = glyx_shell::run(window, move |event| {
         match event {
             // ── Window ready — initialise per-window subsystems ──────────
-            ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy } => {
+            ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy, #[cfg(feature = "a11y")] a11y_update } => {
                 // Resolve RenderMode → BackendKind.
                 // GLYX_CPU_RENDER=1 forces the cheapest CPU path (TinySkia) for
                 // CI, headless testing, or machines without a supported GPU.
@@ -1013,7 +1035,14 @@ pub fn run(mut config: AppConfig) -> bool {
                     });
                 }
 
-                let mut rt = if let Some(ref blob) = *snapshot_blob_arc {
+                // Construct the selected JsRuntime backend. Compile-time choice
+                // (see memory/backend-droppability-goals.md — picking one drops
+                // the other's dependency entirely, not a runtime toggle).
+                // `Box<dyn JsRuntime>` from here on — everything past this point
+                // (canvas init, register_extensions, eval, deeplink wiring) goes
+                // through trait methods only, uniformly across backends.
+                #[cfg(feature = "v8")]
+                let mut rt: Box<dyn glyx_runtime::JsRuntime> = if let Some(ref blob) = *snapshot_blob_arc {
                     match GlyxRuntime::new_from_snapshot_with_ipc(
                         blob, tokio_handle.clone(), Some(window_ctrl),
                         Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
@@ -1024,7 +1053,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     ) {
                         Ok(rt) => {
                             log::info!("Window {}: restored from snapshot", window_handle);
-                            rt
+                            Box::new(rt)
                         }
                         Err(e) => {
                             log::warn!("Window {}: snapshot restore failed ({}); eval mode", window_handle, e);
@@ -1045,28 +1074,47 @@ pub fn run(mut config: AppConfig) -> bool {
                                     let _ = proxy_rfb.send_event(GlyxUserEvent::Restart);
                                 })),
                             );
-                            GlyxRuntime::new_with_ipc(
+                            Box::new(GlyxRuntime::new_with_ipc(
                                 tokio_handle.clone(), Some(wc),
                                 Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
                                 Arc::clone(&shared_perf),
                                 Arc::clone(&backend_registry),
                                 Arc::clone(&js_plugins_arc),
                                 heap_cap_mb,
-                            )
+                            ))
                         }
                     }
                 } else {
-                    GlyxRuntime::new_with_ipc(
+                    Box::new(GlyxRuntime::new_with_ipc(
                         tokio_handle.clone(), Some(window_ctrl),
                         Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
                         Arc::clone(&shared_perf),
                         Arc::clone(&backend_registry),
                         Arc::clone(&js_plugins_arc),
                         heap_cap_mb,
-                    )
+                    ))
                 };
 
+                // QuickJS has no snapshot equivalent — this uses eval-from-source
+                // every time, no bytecode precompilation path yet. IPC/multi-window,
+                // the async-Rust-command half of backend_call, AND JS plugins
+                // (backend.<name>.<fn>()) are all wired via `new_with_ipc`. Unlike
+                // V8, there's no dev-mode hot-reload for a plugin edit yet — a
+                // full window restart picks up the change instead.
+                #[cfg(feature = "quickjs")]
+                let mut rt: Box<dyn glyx_runtime::JsRuntime> = Box::new(
+                    glyx_runtime::QuickJsRuntime::new_with_ipc(
+                        Arc::clone(&shared_perf), tokio_handle.clone(),
+                        Some(Arc::clone(&window_ctrl.request_redraw)),
+                        Some(window_ctrl.clone()),
+                        Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
+                        Arc::clone(&backend_registry),
+                        Arc::clone(&js_plugins_arc),
+                    ).expect("QuickJsRuntime::new_with_ipc")
+                );
+
                 // Set up the Canvas2D binary command buffer (or mark json mode).
+                // No-op under quickjs (canvas bindings aren't ported yet).
                 rt.init_canvas_buffers(&canvas_protocol, canvas_buffer_kb);
 
                 rt.register_extensions(&*extensions_arc);
@@ -1076,7 +1124,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 // forwarded deep-link URLs into the runtime's url queue.
                 if window_handle == 0 {
                     if let Some(ipc_name) = single_instance_ipc.take() {
-                        let queue_clone = Arc::clone(&rt.deeplink_url_queue);
+                        let queue_clone = rt.deeplink_url_queue();
 
                         // F1: Build SD before spawning to avoid holding *mut c_void across await.
                         // Transmit as usize (Send); valid for the lifetime of sd_guard below.
@@ -1172,16 +1220,32 @@ pub fn run(mut config: AppConfig) -> bool {
                     }
                 }
 
+                // Captured so the dev-mode error overlay can show it below —
+                // previously only HMR-reload errors set `last_js_error`, so a
+                // syntax/eval error present from the very first launch left
+                // the window blank with only a log line nobody sees. Only
+                // consumed by the `dev_mode` field below, which is itself
+                // `dev`-only — write-only (and warns) otherwise.
+                #[cfg(feature = "dev")]
+                let mut initial_eval_error: Option<String> = None;
                 if let Some(ref js) = *js_src_arc {
                     match rt.eval(js) {
                         Ok(_)  => log::info!("Window {}: JS eval complete.", window_handle),
-                        Err(e) => log::error!("Window {}: JS eval error: {}", window_handle, e),
+                        Err(e) => {
+                            log::error!("Window {}: JS eval error: {}", window_handle, e);
+                            #[cfg(feature = "dev")]
+                            { initial_eval_error = Some(format!("Eval error: {}", e)); }
+                        }
                     }
                 }
 
                 let win = window.clone();
                 let request_redraw: Arc<dyn Fn() + Send + Sync> =
                     Arc::new(move || win.request_redraw());
+
+                let proxy_quit_fallback = ev_proxy.clone();
+                let quit_fn: Arc<dyn Fn() + Send + Sync> =
+                    Arc::new(move || { let _ = proxy_quit_fallback.send_event(GlyxUserEvent::Quit); });
 
                 // Frameless drag closure — captures the window directly.
                 let drag_window_fn: Option<Arc<dyn Fn() + Send + Sync>> =
@@ -1211,6 +1275,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     resolved:               Vec::new(),
                     js_nodes:     std::collections::HashMap::with_capacity(256),
                     js_root:      None,
+                    opacity_transitions: std::collections::HashMap::new(),
                     images:       std::collections::HashMap::with_capacity(32),
                     images_by_path: ByteBudgetImageCache::new(256 * 1024 * 1024),
                     image_cache_hits: 0,
@@ -1222,10 +1287,16 @@ pub fn run(mut config: AppConfig) -> bool {
                     drag_start_x: 0.0,
                     drag_start_y: 0.0,
                     request_redraw: Arc::clone(&request_redraw),
+                    quit_fn: Arc::clone(&quit_fn),
                     cursor_blink_on:       true,
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
                     cursor_was_active:     false,
                     cursor_node_rect:      None,
+                    focused_node:          None,
+                    #[cfg(feature = "a11y")]
+                    a11y_update,
+                    #[cfg(feature = "a11y")]
+                    a11y_dirty: true, // force the first-ever tree push
                     cursor_blink_tx:       None,
                     perf:          shared_perf,
                     rss_bytes:     {
@@ -1261,6 +1332,22 @@ pub fn run(mut config: AppConfig) -> bool {
                     #[cfg(feature = "camera")]
                     camera_streams:  std::collections::HashMap::new(),
                     video_streams:   std::collections::HashMap::new(),
+                    #[cfg(feature = "webview")]
+                    webview_cap: {
+                        let cap = glyx_runtime::load_caps().webview;
+                        if let Some(c) = cap { unsafe { (c.init)(); } }
+                        cap
+                    },
+                    #[cfg(feature = "webview")]
+                    webview_instances: std::collections::HashMap::new(),
+                    #[cfg(feature = "webview")]
+                    webview_last_src:    std::collections::HashMap::new(),
+                    #[cfg(feature = "webview")]
+                    webview_last_bounds: std::collections::HashMap::new(),
+                    #[cfg(feature = "webview")]
+                    webview_hidden:      std::collections::HashSet::new(),
+                    #[cfg(feature = "webview")]
+                    webview_overlays:    Vec::new(),
                     // Splash only applies to the main window; secondary windows get None.
                     splash_state: if window_handle == 0 { main_splash_state.take() } else { None },
                     decorations:     window_decorations,
@@ -1294,7 +1381,7 @@ pub fn run(mut config: AppConfig) -> bool {
                             overlay_lines:         Vec::new(),
                             overlay_next_refresh:  Instant::now(),
                             overlay_next_redraw:    Instant::now(),
-                            last_js_error:          None,
+                            last_js_error:          initial_eval_error,
                             startup_rss_bytes:      0,
                             startup_v8_total_bytes: 0,
                         })
@@ -1370,6 +1457,19 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Mouse button ──────────────────────────────────────────────
             ShellEvent::MouseInput { window_handle, button, pressed } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    // Native fallback close control (see CLOSE_BTN_SIZE doc)
+                    // — only live when JS has never rendered anything, so it
+                    // can never intercept a real app's own clicks.
+                    if button == 0 && pressed && !s.decorations && s.js_root.is_none() {
+                        let win_w = s.gpu.width() as f32;
+                        let btn = CLOSE_BTN_SIZE as f32;
+                        if s.cursor_x >= win_w - btn && s.cursor_x <= win_w
+                            && s.cursor_y >= 0.0 && s.cursor_y <= btn {
+                            (s.quit_fn)();
+                            return;
+                        }
+                    }
+
                     // When frameless and left button pressed: check for a glyxDraggable
                     // node under the cursor. If found, initiate an OS window drag and
                     // skip the normal DragStart event so JS sliders/etc. aren't affected.
@@ -1378,7 +1478,8 @@ pub fn run(mut config: AppConfig) -> bool {
                             let cx = s.cursor_x;
                             let cy = s.cursor_y;
                             let hit = {
-                                let cache = s.runtime.layout_cache.lock();
+                                let layout_cache = s.runtime.layout_cache();
+                                let cache = layout_cache.lock();
                                 s.js_nodes.iter().any(|(&id, node)| {
                                     node.props.draggable == Some(true)
                                         && cache.get(&id).map_or(false, |&[x, y, w, h]| {
@@ -1441,6 +1542,15 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Keyboard ──────────────────────────────────────────────────
             ShellEvent::KeyInput { window_handle, key, text, pressed } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    // Same native fallback as the close control drawn/hit-tested
+                    // above: Escape closes the app, but only while JS has never
+                    // rendered a scene — never intercepts a real app's own
+                    // Escape handling once it's actually running.
+                    if key.as_str() == "Escape" && pressed && !s.decorations && s.js_root.is_none() {
+                        (s.quit_fn)();
+                        return;
+                    }
+
                     #[cfg(feature = "dev")]
                     if let Some(dev) = s.dev_mode.as_mut() {
                         match key.as_str() {
@@ -1470,6 +1580,75 @@ pub fn run(mut config: AppConfig) -> bool {
                 }
             }
 
+            // ── Accessibility action requests (screen reader, etc.) ──────
+            #[cfg(feature = "a11y")]
+            ShellEvent::AccessibilityAction { window_handle, target, action, numeric_value } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
+                    match action.as_str() {
+                        "focus" => {
+                            if s.js_nodes.contains_key(&target) {
+                                s.focused_node = Some(target);
+                                s.window.set_ime_allowed(true);
+                                s.runtime.push_event(InputEvent::AccessibilityFocus { node_id: target });
+                                // This path bypasses apply_scene_commands (which
+                                // marks a11y_dirty for SceneCommand-driven focus
+                                // changes), so the AT-driven focus move would
+                                // otherwise never get re-announced until an
+                                // unrelated scene command happened to fire.
+                                s.a11y_dirty = true;
+                                (s.request_redraw)();
+                            }
+                        }
+                        "click" => {
+                            if let Some(node) = s.js_nodes.get(&target) {
+                                if let Some(layout_id) = node.layout_id {
+                                    if let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == layout_id) {
+                                        let cx = rl.x + rl.width  / 2.0;
+                                        let cy = rl.y + rl.height / 2.0;
+                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: true });
+                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: false });
+                                        (s.request_redraw)();
+                                    }
+                                }
+                            }
+                        }
+                        // Increment/Decrement/SetValue don't have a generic
+                        // scene-graph meaning (unlike click, which is just a
+                        // synthesized mouse event) — the actual step/range
+                        // logic lives in the JS control (e.g. Slider knows
+                        // its own min/max/step), so these are just forwarded
+                        // for JS's a11yValueRegistry to act on.
+                        "increment" | "decrement" | "setValue" => {
+                            if s.js_nodes.contains_key(&target) {
+                                s.runtime.push_event(InputEvent::AccessibilityValueChange {
+                                    node_id: target,
+                                    action: action.clone(),
+                                    numeric_value,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // ── IME (CJK/etc composition) ────────────────────────────────
+            // Only forwarded to JS when a node currently has keyboard focus —
+            // matches the OS's own behavior of routing IME to the focused
+            // control, and avoids composition events reaching JS with no
+            // target to attach to.
+            ShellEvent::Ime { window_handle, kind, text, cursor } => {
+                if let Some(s) = windows.get_mut(&window_handle) {
+                    if s.focused_node.is_some() {
+                        let (cursor_start, cursor_end) = match cursor {
+                            Some((a, b)) => (Some(a), Some(b)),
+                            None => (None, None),
+                        };
+                        s.runtime.push_event(InputEvent::Ime { kind, text, cursor_start, cursor_end });
+                    }
+                }
+            }
+
             // ── Scroll ────────────────────────────────────────────────────
             ShellEvent::Scroll { window_handle, delta_y } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
@@ -1495,6 +1674,35 @@ pub fn run(mut config: AppConfig) -> bool {
                     }
                 };
 
+                // 0. Drain page→JS webview messages (window.ipc.postMessage from
+                // inside each webview) BEFORE the JS tick below, so a message that
+                // just arrived (and woke this frame via InvalidateRect — see
+                // glyx-cap-webview's wake_parent) is visible to THIS frame's
+                // __glyx_webview_poll() call, not next frame's. Draining this after
+                // frame_tick (where the video-events queue is drained, for example)
+                // is fine for continuous streams but introduces a one-frame lag for
+                // discrete click-triggered messages, which IS perceptible.
+                #[cfg(feature = "webview")]
+                if let Some(cap) = s.webview_cap {
+                    let mut buf = vec![0u8; 64 * 1024];
+                    for (&id, &handle) in s.webview_instances.iter() {
+                        let mut out_len: usize = 0;
+                        unsafe {
+                            (cap.poll_messages)(handle, buf.as_mut_ptr(), &mut out_len, buf.len());
+                        }
+                        if out_len == 0 { continue; }
+                        let Ok(json) = std::str::from_utf8(&buf[..out_len]) else { continue };
+                        let Ok(messages) = serde_json::from_str::<Vec<String>>(json) else { continue };
+                        if messages.is_empty() { continue; }
+                        let webview_events = s.runtime.webview_events();
+                        let mut events = webview_events.lock();
+                        for msg in messages {
+                            let Ok(wrapped) = serde_json::to_string(&serde_json::json!({ "id": id, "message": msg })) else { continue };
+                            events.push_back(wrapped);
+                        }
+                    }
+                }
+
                 // 1. Resolve async JS Promises.
                 s.runtime.tick();
 
@@ -1506,20 +1714,38 @@ pub fn run(mut config: AppConfig) -> bool {
                 let js_start = Instant::now();
                 let frame_tick_err = s.runtime.frame_tick();
                 let js_time_ms = js_start.elapsed().as_secs_f64() * 1000.0;
-                #[cfg(not(feature = "dev"))]
-                let _ = frame_tick_err;
 
-                // In dev mode, surface JS exceptions as a visual overlay.
+                // An uncaught exception here never reaches JS's own
+                // `globalThis.onerror` shim (nothing in either engine fires
+                // that global for engine-caught errors) — so this is the
+                // only place a JS crash gets persisted in a release build.
+                // Runs in every build, not just dev; see record_js_crash's docs.
+                if let Some(err) = &frame_tick_err {
+                    glyx_runtime::bindings::record_js_crash(err, "frame_tick");
+                }
+
+                // In dev mode, also surface JS exceptions as a visual overlay.
                 #[cfg(feature = "dev")]
                 if let Some(err) = frame_tick_err {
                     if let Some(dev) = s.dev_mode.as_mut() {
                         dev.last_js_error = Some(err);
                     }
                 }
+                #[cfg(not(feature = "dev"))]
+                let _ = frame_tick_err;
 
                 // 4. Post-frame commands (React re-renders from step 3 events).
                 let post_commands = s.runtime.drain_scene_commands();
                 let post_changed  = apply_scene_commands(s, post_commands);
+
+                // 4b. Advance any active opacity transitions (@glyx-dev/motion v1) —
+                // Rust-owned interpolation, no JS re-entry. If any are still
+                // running after this tick, force this frame to render and
+                // schedule the next one (nothing else would wake the loop).
+                let transitions_active = tick_opacity_transitions(s);
+                if transitions_active {
+                    (s.request_redraw)();
+                }
 
                 // 5a. Pull latest camera frames and dirty only the nodes displaying them.
                 #[cfg(feature = "camera")]
@@ -1553,7 +1779,8 @@ pub fn run(mut config: AppConfig) -> bool {
                     }
                     let pending: Vec<_> = stream.events.lock().drain(..).collect();
                     if !pending.is_empty() {
-                        let mut ve = s.runtime.video_events.lock();
+                        let video_events = s.runtime.video_events();
+                        let mut ve = video_events.lock();
                         ve.extend(pending);
                     }
                 }
@@ -1610,7 +1837,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 //     Full Vello render only when scene changed OR overlay text is due
                 //     for its 250ms refresh.  All other overlay-timer ticks blit the
                 //     previous frame — skipping all 35 compute passes.
-                let scene_needs_gpu = pre_changed || post_changed || media_changed || blink_changed;
+                let scene_needs_gpu = pre_changed || post_changed || transitions_active || media_changed || blink_changed;
 
                 // Release: skip entirely when nothing changed.
                 #[cfg(not(feature = "dev"))]
@@ -1781,10 +2008,20 @@ pub fn run(mut config: AppConfig) -> bool {
                 let mut any_cursor_active = false;
                 #[cfg(feature = "canvas3d")]
                 let mut canvas3d_overlays: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
+                #[cfg(feature = "webview")]
+                let mut webview_overlays: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
+
+                // Sample each active opacity transition's current value once,
+                // fresh every frame — this is the actual interpolation step.
+                let opacity_overrides: std::collections::HashMap<u32, f32> = s.opacity_transitions
+                    .iter()
+                    .map(|(&id, t)| (id, t.sample(Instant::now()).0))
+                    .collect();
 
                 if let Some(root_id) = s.js_root {
                     let mut render_ctx = RenderCtx {
                         nodes:             &s.js_nodes,
+                        opacity_overrides: &opacity_overrides,
                         images:            &s.images,
                         resolved:          &s.resolved,
                         frame:             &mut frame,
@@ -1793,6 +2030,8 @@ pub fn run(mut config: AppConfig) -> bool {
                         canvas_cmds:       &s.canvas_cmds,
                         #[cfg(feature = "canvas3d")]
                         canvas3d_overlays: &mut canvas3d_overlays,
+                        #[cfg(feature = "webview")]
+                        webview_overlays: &mut webview_overlays,
                         #[cfg(feature = "camera")]
                         camera_streams:    &s.camera_streams,
                         video_streams:     &s.video_streams,
@@ -1808,6 +2047,132 @@ pub fn run(mut config: AppConfig) -> bool {
                         win_h: s.gpu.height() as f64,
                     };
                     render_subtree(root_id, 0.0, 1.0, &mut render_ctx);
+                } else if !s.decorations {
+                    // JS never produced a scene (crashed / failed to eval)
+                    // and there's no OS titlebar to fall back on — the
+                    // window would otherwise be fully blank and
+                    // unclosable via any visible control. Same fixed
+                    // top-right hit-box used by the MouseInput handler
+                    // below and the Escape-key fallback.
+                    let win_w = s.gpu.width()  as f64;
+                    let win_h = s.gpu.height() as f64;
+                    frame.fill_rect(0.0, 0.0, win_w, win_h, peniko::Color::from_rgba8(20, 20, 24, 255));
+                    frame.fill_rect(win_w - CLOSE_BTN_SIZE, 0.0, CLOSE_BTN_SIZE, CLOSE_BTN_SIZE,
+                        peniko::Color::from_rgba8(70, 30, 30, 255));
+                    let x_lbl = s.text_sys.label("✕", 14.0);
+                    frame.draw_text(&x_lbl, win_w - CLOSE_BTN_SIZE + 11.0, 9.0,
+                        peniko::Color::from_rgba8(255, 190, 190, 255));
+                }
+
+                // Position the OS IME candidate window at the focused text
+                // field's caret. Only meaningful while a node is focused —
+                // `cursor_node_rect` is written by render.rs's Text case
+                // whenever a focused, cursor-showing TextInput is drawn.
+                if s.focused_node.is_some() {
+                    if let Some((cx, cy, cw, ch)) = s.cursor_node_rect {
+                        s.window.set_ime_cursor_area(
+                            winit::dpi::PhysicalPosition::new(cx, cy),
+                            winit::dpi::PhysicalSize::new(cw.max(1.0), ch.max(1.0)),
+                        );
+                    }
+                }
+
+                // Push the accessibility tree — only when something actually
+                // changed since the last push (`a11y_dirty`, set by
+                // `apply_scene_commands`). `update_if_active` is cheap when no
+                // AT is running, but rebuilding the whole tree from `js_nodes`
+                // every frame is real work once one IS running, so this is
+                // gated rather than unconditional.
+                #[cfg(feature = "a11y")]
+                if s.a11y_dirty {
+                    if let Some(update) = a11y::build_tree(s) {
+                        (s.a11y_update.0)(update);
+                    }
+                    s.a11y_dirty = false;
+                }
+
+                // Native webview children: create/reposition/hide to match this
+                // frame's `webview_overlays`. A webview is a real OS child window
+                // the OS composites itself — not Vello content — so this runs
+                // unconditionally here rather than inside the Present::Gpu-only
+                // 3D-overlay blit block below.
+                #[cfg(feature = "webview")]
+                if let Some(cap) = s.webview_cap.filter(|_| glyx_security::get().webview) {
+                    use raw_window_handle::HasWindowHandle;
+                    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                    for (id, x, y, w, h) in &webview_overlays {
+                        seen.insert(*id);
+                        if let Some(&handle) = s.webview_instances.get(id) {
+                            // Only call set_bounds on an actual change — calling it every
+                            // frame with an unchanged rect made WebView2 behave as if
+                            // continuously resizing and stop repainting until an input
+                            // event (e.g. mouse hover) forced it to catch up.
+                            let bounds_changed = s.webview_last_bounds.get(id) != Some(&(*x, *y, *w, *h));
+                            if bounds_changed {
+                                unsafe { (cap.set_bounds)(handle, *x, *y, *w, *h); }
+                                s.webview_last_bounds.insert(*id, (*x, *y, *w, *h));
+                            }
+                            if s.webview_hidden.remove(id) {
+                                unsafe { (cap.set_visible)(handle, 1); }
+                            }
+                            // Reconcile URL/HTML changes without recreating the instance.
+                            if let Some(node) = s.js_nodes.get(id) {
+                                let src = node.props.webview_html.as_deref()
+                                    .or(node.props.webview_src.as_deref());
+                                if let Some(src) = src {
+                                    let changed = s.webview_last_src.get(id).map(|s| s.as_str()) != Some(src);
+                                    if changed {
+                                        unsafe { (cap.load_url)(handle, src.as_ptr(), src.len()); }
+                                        s.webview_last_src.insert(*id, src.to_string());
+                                    }
+                                }
+                            }
+                        } else if let Some(node) = s.js_nodes.get(id) {
+                            let (content, is_html) = match (&node.props.webview_html, &node.props.webview_src) {
+                                (Some(html), _) => (html.as_str(), 1u8),
+                                (None, Some(src)) => (src.as_str(), 0u8),
+                                (None, None) => continue,
+                            };
+                            let opts = node.props.webview_opts.as_deref().unwrap_or("{}");
+                            let Ok(raw) = s.window.window_handle() else { continue };
+                            let parent_ptr = match raw.as_raw() {
+                                #[cfg(target_os = "windows")]
+                                raw_window_handle::RawWindowHandle::Win32(h) => {
+                                    h.hwnd.get() as *mut std::ffi::c_void
+                                }
+                                #[cfg(target_os = "macos")]
+                                raw_window_handle::RawWindowHandle::AppKit(h) => {
+                                    h.ns_view.as_ptr()
+                                }
+                                #[cfg(all(unix, not(target_os = "macos")))]
+                                raw_window_handle::RawWindowHandle::Xlib(h) => {
+                                    h.window as *mut std::ffi::c_void
+                                }
+                                _ => continue,
+                            };
+                            let handle = unsafe {
+                                (cap.create)(
+                                    parent_ptr,
+                                    content.as_ptr(), content.len(), is_html,
+                                    *x, *y, *w, *h,
+                                    opts.as_ptr(), opts.len(),
+                                )
+                            };
+                            if handle != 0 {
+                                s.webview_instances.insert(*id, handle);
+                                s.webview_last_src.insert(*id, content.to_string());
+                                s.webview_last_bounds.insert(*id, (*x, *y, *w, *h));
+                            }
+                        }
+                    }
+                    // Anything tracked but not seen this frame (display:none,
+                    // scrolled out, node about to be removed next tick) — hide
+                    // rather than destroy, so quick re-shows don't pay init cost.
+                    for (&id, &handle) in s.webview_instances.iter() {
+                        if !seen.contains(&id) && s.webview_hidden.insert(id) {
+                            unsafe { (cap.set_visible)(handle, 0); }
+                        }
+                    }
                 }
 
                 // Splash screen overlay — drawn on top of JS scene.
@@ -1820,7 +2185,16 @@ pub fn run(mut config: AppConfig) -> bool {
                         if let Some(img) = &sp.image {
                             let iw = img.width  as f64;
                             let ih = img.height as f64;
-                            let scale  = (sw / iw).min(sh / ih).min(1.0);
+                            // Two caps, take the smaller: (1) fit within the
+                            // window at all, (2) never exceed `image_scale`
+                            // of the smaller window dimension — this is what
+                            // keeps a full-bleed source image (an app icon
+                            // with no transparent margin, say) from filling
+                            // the whole window and swallowing `background`.
+                            let fit_scale = (sw / iw).min(sh / ih).min(1.0);
+                            let max_dim   = sw.min(sh) * sp.image_scale;
+                            let cap_scale = (max_dim / iw).min(max_dim / ih);
+                            let scale = fit_scale.min(cap_scale);
                             let dw = iw * scale;
                             let dh = ih * scale;
                             let dx = (sw - dw) * 0.5;
@@ -1963,7 +2337,7 @@ pub fn run(mut config: AppConfig) -> bool {
                                     if let Some(scene) = s.canvas3d_scenes.get(id) {
                                         let gltf_paths: Vec<&str> = scene.meshes.iter()
                                             .filter_map(|m| match &m.geometry {
-                                                glyx_3d::Geometry3D::Gltf { path } => Some(path.as_str()),
+                                                glyx_3d::Geometry3D::Gltf { path, .. } => Some(path.as_str()),
                                                 _ => None,
                                             })
                                             .collect();
@@ -1985,6 +2359,34 @@ pub fn run(mut config: AppConfig) -> bool {
                                                   *id, *x, *y, *w, *h,
                                                   &surface_view, sw, sh);
                                 }
+                            }
+                        }
+
+                        // Drain pending __glyx_canvas3d_raycast requests — needs the
+                        // live Renderer3D + Scene3D, which only glyx-core has, so
+                        // this can't be answered synchronously from the binding
+                        // call site. Answered as JSON, polled by JS each frame via
+                        // __glyx_canvas3d_raycast_poll (same shape as video/webview
+                        // events) rather than resolving a promise directly, since
+                        // promise-resolution machinery is kept engine-internal.
+                        #[cfg(feature = "canvas3d")]
+                        {
+                            let pending: Vec<_> = s.runtime.raycast_requests().lock().drain(..).collect();
+                            if !pending.is_empty() {
+                                let mut out = Vec::with_capacity(pending.len());
+                                for req in pending {
+                                    let hit = s.renderer_3d.as_ref()
+                                        .zip(s.canvas3d_scenes.get(&req.canvas_id))
+                                        .and_then(|(r3d, scene)| r3d.raycast(req.canvas_id, scene, req.ndc_x, req.ndc_y));
+                                    out.push(match hit {
+                                        Some(h) => format!(
+                                            r#"{{"reqId":{},"meshIndex":{},"point":[{},{},{}],"distance":{}}}"#,
+                                            req.req_id, h.mesh_index, h.point[0], h.point[1], h.point[2], h.distance,
+                                        ),
+                                        None => format!(r#"{{"reqId":{},"hit":null}}"#, req.req_id),
+                                    });
+                                }
+                                s.runtime.raycast_results().lock().extend(out);
                             }
                         }
 
@@ -2211,6 +2613,8 @@ pub fn run(mut config: AppConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glyx_gpu::GpuTier;
+    use glyx_security::Capabilities;
 
     // ── Backend selection (renderMode + GPU tier → concrete backend) ──────────
 
@@ -2340,6 +2744,17 @@ mod tests {
         assert!(caps.db);
         assert!(caps.can_network("api.example.com"));
         assert!(!caps.can_network("other.example.com"));
+    }
+
+    #[test]
+    fn config_webview_capability_defaults_false_and_parses_true() {
+        // webview used to be entirely unenforced (no field on Capabilities at
+        // all) — declaring it a real, parsed capability so a <WebView> node
+        // fails closed without it, matching every other capability.
+        let (_, caps_off) = apply(r#"{ "capabilities": { "db": true } }"#);
+        assert!(!caps_off.webview);
+        let (_, caps_on) = apply(r#"{ "capabilities": { "webview": true } }"#);
+        assert!(caps_on.webview);
     }
 
     #[test]

@@ -105,6 +105,58 @@ pub fn canvas3d_update_callback(
     state.scene.lock().push_back(SceneCommand::Canvas3DUpdate { id, scene });
 }
 
+/// `__glyx_webview_post_message(id, msg)` — sync.
+/// Pushes a message INTO the webview page at node `id` (JS→page half of the
+/// postMessage bridge). Delivered as a `message` event on `window`.
+#[cfg(feature = "webview")]
+pub fn webview_post_message_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let id  = args.get(0).number_value(scope).unwrap_or_default() as u32;
+    let msg = args.get(1).to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
+        .unwrap_or_default();
+
+    state.scene.lock().push_back(SceneCommand::WebviewPostMessage { id, msg });
+}
+
+/// `__glyx_webview_poll() → JSON`
+///
+/// Returns a JSON array of `{"id":N,"message":"..."}` objects — messages the
+/// page(s) have posted OUT via `window.ipc.postMessage(str)` since the last
+/// poll (page→JS half of the bridge). Called each frame from JS.
+#[cfg(feature = "webview")]
+pub fn webview_poll_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let _ = args; // no arguments
+
+    let mut events = state.webview_events.lock();
+    let json = if events.is_empty() {
+        "[]".to_string()
+    } else {
+        let items: Vec<_> = events.drain(..).collect();
+        format!("[{}]", items.join(","))
+    };
+    let s = v8::String::new(scope, &json).unwrap();
+    rv.set(s.into());
+}
+
 /// `__glyx_canvas3d_load_gltf(id, path)` â€” sync.
 /// Signals that a GLTF file should be loaded for this canvas on the render side.
 /// (Actual loading happens in glyx-core on next frame via renderer_3d.)
@@ -138,7 +190,7 @@ pub fn canvas3d_load_gltf_callback(
         camera:     glyx_3d::Camera3D { position: [0.,1.,3.], target: [0.;3], up: [0.,1.,0.], fov_deg: 60., near: 0.1, far: 1000. },
         lights:     vec![],
         meshes:     vec![glyx_3d::Mesh3DInstance {
-            geometry:  glyx_3d::Geometry3D::Gltf { path: path.clone() },
+            geometry:  glyx_3d::Geometry3D::Gltf { path: path.clone(), animation: None },
             transform: [1.,0.,0.,0., 0.,1.,0.,0., 0.,0.,1.,0., 0.,0.,0.,1.],
             color:     [1.;4],
         }],
@@ -168,4 +220,55 @@ pub fn canvas3d_unload_gltf_callback(
         .unwrap_or_default();
 
     state.scene.lock().push_back(SceneCommand::Canvas3DUnloadGltf { path });
+}
+
+/// `__glyx_canvas3d_raycast(id, ndcX, ndcY) -> reqId` — sync, returns
+/// immediately with a request id (NOT a promise — raycasting needs the live
+/// `Renderer3D`, which only glyx-core has; it's answered on the next frame,
+/// polled via `__glyx_canvas3d_raycast_poll` like video/webview events).
+#[cfg(feature = "canvas3d")]
+pub fn canvas3d_raycast_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let id     = args.get(0).number_value(scope).unwrap_or_default() as u32;
+    let ndc_x  = args.get(1).number_value(scope).unwrap_or_default() as f32;
+    let ndc_y  = args.get(2).number_value(scope).unwrap_or_default() as f32;
+
+    let req_id = state.next_raycast_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state.raycast_requests.lock().push_back(RaycastRequest { req_id, canvas_id: id, ndc_x, ndc_y });
+    rv.set_uint32(req_id);
+}
+
+/// `__glyx_canvas3d_raycast_poll() -> string` — JSON array of pending
+/// raycast results (`{"reqId":N,"meshIndex":..,"point":[...],"distance":..}`
+/// or `{"reqId":N,"hit":null}`), drained each frame from JS.
+#[cfg(feature = "canvas3d")]
+pub fn canvas3d_raycast_poll_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    let _ = args;
+
+    let mut results = state.raycast_results.lock();
+    let json = if results.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", results.drain(..).collect::<Vec<_>>().join(","))
+    };
+    let s = v8::String::new(scope, &json).unwrap_or_else(|| v8::String::empty(scope));
+    rv.set(s.into());
 }

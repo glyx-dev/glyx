@@ -31,11 +31,17 @@ export function ContextMenu({ children, items = [], width = 200 }) {
     return () => removeGlobalClickListener(onClick);
   }, [open]);
 
-  // Estimate menu height to flip it back on-screen near edges.
+  // itemH is derived from this component's own fixed row styling
+  // (paddingVertical: 6 + one line of fontSize:13 text) — there's no
+  // custom item-render prop, so every row really is this height; not an
+  // estimate that can drift out from under us.
   const itemH = 30;
   const menuH = items.reduce((h, it) => h + (it.separator ? 9 : itemH), 8);
-  const x = Math.min(pos.x, Math.max(0, winW - width - 4));
-  const y = Math.min(pos.y, Math.max(0, winH - menuH - 4));
+  // Clamp on both axes — min() alone only guards the right/bottom edge;
+  // max(0, ...) floors the left/top edge too (defensive: covers callers
+  // that pass an out-of-window pos programmatically, not just real clicks).
+  const x = Math.max(0, Math.min(pos.x, winW - width - 4));
+  const y = Math.max(0, Math.min(pos.y, winH - menuH - 4));
 
   return React.createElement(
     View, null,

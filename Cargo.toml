@@ -21,6 +21,9 @@ members = [
     "examples/calculator",
     "examples/files",
     "examples/model-viewer",
+    "examples/webview-demo",
+    "examples/a11y-ime-demo",
+    "examples/bench-app",
     "crates/glyx-snapshot",
     "crates/glyx-media",
     "crates/glyx-cap-abi",
@@ -29,8 +32,11 @@ members = [
     "crates/glyx-cap-gamepad",
     "crates/glyx-cap-hid",
     "crates/glyx-cap-camera",
+    "crates/glyx-cap-webview",
     "crates/glyx-macros",
     "crates/glyx-verify",
+    "crates/glyx-tray",
+    # "crates/glyx-webview",  # TODO: not yet scaffolded
 ]
 
 [workspace.dependencies]
@@ -53,7 +59,7 @@ taffy     = "0.10"
 v8        = "150"
 
 # Async
-tokio     = { version = "1", features = ["rt-multi-thread", "fs", "sync", "time"] }
+tokio     = { version = "1", features = ["rt-multi-thread", "fs", "sync", "time", "process", "io-util"] }
 
 # Serialisation
 serde      = { version = "1", features = ["derive"] }
@@ -119,6 +125,22 @@ cpal                = "0.15"
 hound               = "3"
 hex                 = "0.4"
 windows-sys         = { version = "0.59", features = [] }
+
+# System tray
+tray-icon           = "0.24"
+muda                = "0.19"
+
+# WebView (wry wraps the OS web engine: WebView2 / WKWebView / WebKitGTK)
+wry                 = "0.50"
+
+# Accessibility (accesskit surfaces to NSAccessibility / UIAutomation / AT-SPI)
+accesskit           = "0.19"
+accesskit_winit     = "0.27"
+
+# QuickJS (mobile-required, desktop-optional lightweight engine — see
+# glyx_rough_docs/QUICKJS_PERFORMANCE_PLAN.md). Mutually exclusive with `v8`
+# at the glyx-runtime feature level — never both linked into one binary.
+rquickjs            = { version = "0.12", features = ["full-async", "parallel"] }
 
 # AI / ML — Candle (Hugging Face minimalist ML framework, CPU-only by default)
 candle-core         = { version = "0.8", default-features = false }

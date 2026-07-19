@@ -37,6 +37,8 @@ export function Button({ label, onPress, variant = 'primary', disabled = false, 
   return (
     <Pressable
       onPress={disabled ? undefined : onPress}
+      role="button"
+      ariaLabel={label}
       style={{
         backgroundColor: bg,
         paddingHorizontal: space[4],

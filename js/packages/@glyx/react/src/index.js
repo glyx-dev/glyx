@@ -5,12 +5,13 @@ import './polyfills.js';
 import React from 'react';
 import Reconciler from 'react-reconciler';
 import HostConfig from './hostConfig.js';
-import { dispatchEvents, addGlobalClickListener, removeGlobalClickListener, addKeyListener } from './events.js';
+import { dispatchEvents, addGlobalClickListener, removeGlobalClickListener, addKeyListener, removeKeyListener } from './events.js';
 import {
   _pollWebSockets, _pollIpc, _pollDeeplinks, _pollGamepads,
   _pollGlobalShortcuts, _pollPerfViolations, _pollLeakWarnings,
-  _pollAudio, _pollVideo, _pollFsWatch,
+  _pollAudio, _pollVideo, _pollFsWatch, _pollWebview,
 } from './api.js';
+import { _pollCanvas3DRaycasts } from './canvas.js';
 import { View } from './core.js';
 import { PopoverHost } from './popover.js';
 
@@ -21,9 +22,10 @@ export * from './popover.js';
 export * from './controls.js';
 export * from './canvas.js';
 export * from './media.js';
+export * from './webview.js';
 
 // Event-registry helpers used by companion packages (@glyx-dev/context-menu, …).
-export { addGlobalClickListener, removeGlobalClickListener, addKeyListener };
+export { addGlobalClickListener, removeGlobalClickListener, addKeyListener, removeKeyListener };
 
 // ── Reconciler ────────────────────────────────────────────────────────────────
 
@@ -58,6 +60,8 @@ globalThis.__glyx_frameCallback = function glyxFrameCallback() {
     _pollAudio();
     _pollVideo();
     _pollFsWatch();
+    _pollWebview();
+    _pollCanvas3DRaycasts();
     dispatchEvents();
   });
 };

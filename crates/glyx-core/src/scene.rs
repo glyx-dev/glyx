@@ -244,10 +244,36 @@ fn rgba_premul_srgb_to_peniko(mut bytes: Vec<u8>, w: u32, h: u32) -> Option<peni
     })
 }
 
+/// Advance every active opacity transition one frame, marking transitioning
+/// nodes dirty so they actually re-render (opacity is changing with no new
+/// `SceneCommand` behind it). Returns `true` if any transition is still
+/// running after this tick — the caller uses that to force a GPU render and
+/// schedule the next frame, since nothing else would otherwise wake the
+/// render loop mid-transition.
+pub(crate) fn tick_opacity_transitions(state: &mut PerWindowState) -> bool {
+    if state.opacity_transitions.is_empty() { return false; }
+    let now = Instant::now();
+    let dirty_nodes = &mut state.dirty_nodes;
+    state.opacity_transitions.retain(|&id, t| {
+        let (_, finished) = t.sample(now);
+        dirty_nodes.insert(id);
+        !finished
+    });
+    !state.opacity_transitions.is_empty()
+}
+
 pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<SceneCommand>) -> bool {
     if commands.is_empty() {
         return false;
     }
+    // Mark the a11y tree dirty whenever any scene command actually ran, rather
+    // than rebuilding it every rendered frame regardless of activity — the
+    // tree only needs to change when the scene graph does. Slightly
+    // conservative (canvas/media commands don't affect the tree but still
+    // set this), which is fine: idle frames where NOTHING changed are the
+    // case this actually needs to avoid.
+    #[cfg(feature = "a11y")]
+    { state.a11y_dirty = true; }
     let mut layout_changed   = false;
     // Tracks whether the Taffy tree structure itself changed (nodes added / removed /
     // reparented).  When only style props changed we skip the full rebuild and rely
@@ -357,6 +383,29 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 if needs_cascade {
                     state.descendant_cascade_nodes.insert(id);
                 }
+                // `@glyx-dev/motion` v1: an opacity change with `transitionMs` set
+                // starts (or retargets) a Rust-owned interpolation instead of
+                // snapping. Must read the OLD effective opacity (mid-transition
+                // value if one was already running) before it's overwritten below.
+                if let (Some(old), Some(ms)) = (
+                    state.js_nodes.get(&id),
+                    props.transition_ms,
+                ) {
+                    let new_opacity = props.opacity.unwrap_or(1.0);
+                    let from = state.opacity_transitions.get(&id)
+                        .map(|t| t.sample(Instant::now()).0)
+                        .unwrap_or_else(|| old.props.opacity.unwrap_or(1.0));
+                    if (new_opacity - from).abs() > f32::EPSILON {
+                        state.opacity_transitions.insert(id, OpacityTransition {
+                            from, to: new_opacity, start: Instant::now(), duration_ms: ms,
+                        });
+                    }
+                } else {
+                    // No transition declared (or first-ever props for this node) —
+                    // any previously-running transition for this id is stale.
+                    state.opacity_transitions.remove(&id);
+                }
+
                 if let Some(node) = state.js_nodes.get_mut(&id) {
                     node.props = props.clone();
                 }
@@ -396,7 +445,21 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         }
                     }
                 }
+                #[cfg(feature = "webview")]
+                {
+                    if let Some(handle) = state.webview_instances.remove(&id) {
+                        if let Some(cap) = state.webview_cap {
+                            unsafe { (cap.destroy)(handle); }
+                        }
+                    }
+                    state.webview_last_src.remove(&id);
+                    state.webview_last_bounds.remove(&id);
+                    state.webview_hidden.remove(&id);
+                }
                 state.js_nodes.remove(&id);
+                if state.focused_node == Some(id) {
+                    state.focused_node = None;
+                }
                 // Clean up all per-node state for the removed node.
                 state.dirty_nodes.remove(&id);
                 state.dirty_subtrees.remove(&id);
@@ -431,6 +494,13 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 layout_changed   = true;
                 structure_changed = true;
             }
+            SceneCommand::SetFocus { id } => {
+                state.focused_node = id;
+                // Only allow IME composition while a text field is actually
+                // focused — otherwise the OS may show a candidate window with
+                // nowhere for composed text to go.
+                state.window.set_ime_allowed(id.is_some());
+            }
             SceneCommand::CanvasUpdate { id, cmds, append } => {
                 if append {
                     // Overflow continuation: extend the existing command list.
@@ -451,6 +521,14 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
             SceneCommand::Canvas3DUnloadGltf { path } => {
                 if let Some(r3d) = state.renderer_3d.as_mut() {
                     r3d.unload_gltf(&path);
+                }
+            }
+            #[cfg(feature = "webview")]
+            SceneCommand::WebviewPostMessage { id, msg } => {
+                if let Some(&handle) = state.webview_instances.get(&id) {
+                    if let Some(cap) = state.webview_cap {
+                        unsafe { (cap.post_message)(handle, msg.as_ptr(), msg.len()); }
+                    }
                 }
             }
             #[cfg(feature = "camera")]

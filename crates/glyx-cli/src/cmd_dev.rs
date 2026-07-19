@@ -4,7 +4,8 @@ use std::process::Command;
 
 use super::{
     read_project_name, read_dev_config, read_dev_inspect_port,
-    is_native_project, find_or_build_runner, resolve_config_json, pm,
+    is_native_project, find_or_build_runner, resolve_config_json,
+    read_engine_from_config, pm,
 };
 
 pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm, icupkg: Option<PathBuf>) -> Result<()> {
@@ -43,6 +44,8 @@ pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm, icupkg: Option<PathBuf>) 
         println!("Starting dev server for '{project_name}' (hot reload active)...");
     }
 
+    let engine = read_engine_from_config();
+
     if is_native_project() {
         // Native project: custom Rust extensions compiled in — use cargo run
         // Place a trimmed icudtl.dat next to the debug binary so the app
@@ -52,9 +55,12 @@ pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm, icupkg: Option<PathBuf>) 
             log::warn!("ICU trim skipped: {e}");
         }
 
-        // Native project: custom Rust extensions compiled in — use cargo run
+        // Native project: custom Rust extensions compiled in — use cargo run.
+        // Explicit --features (not the project's own Cargo.toml default) so
+        // glyx.config's "engine" is honored even though the example crates'
+        // own defaults are all v8.
         let mut cmd = Command::new("cargo");
-        cmd.args(["run", "-p", &project_name])
+        cmd.args(["run", "-p", &project_name, "--no-default-features", "--features", &format!("dev,{engine}")])
             .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
             .env("GLYX_CONFIG_JSON", &config_json)
             .env("GLYX_MEDIA_SKIP_VERIFY", "1");
@@ -65,7 +71,7 @@ pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm, icupkg: Option<PathBuf>) 
         std::process::exit(status.code().unwrap_or(1));
     } else {
         // JS-only project: spawn the prebuilt glyx-runner (dev build with hot-reload)
-        let runner = find_or_build_runner(true)
+        let runner = find_or_build_runner(true, &engine)
             .context("Could not find or build glyx-runner. Run `glyx runtime build`.")?;
         log::info!("Using runner: {}", runner.display());
 

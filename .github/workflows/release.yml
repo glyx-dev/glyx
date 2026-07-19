@@ -11,13 +11,19 @@ env:
 
 jobs:
   # ── Lean glyx-runner binary ────────────────────────────────────────────────
+  # One runner artifact pair (lean prod + dev) per (platform, engine) —
+  # engine selection lives in glyx.config's "engine" field (default "v8");
+  # glyx-cli's find_or_build_runner/download_runner pick the matching
+  # artifact by name (v8 keeps the original unprefixed names; quickjs gets
+  # a "quickjs-" segment — see crates/glyx-cli/src/main.rs).
   runner:
-    name: Runner (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
+    name: Runner (${{ matrix.platform.target }}, ${{ matrix.engine }})
+    runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
+        engine: [v8, quickjs]
+        platform:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             bin_suffix: .exe
@@ -33,38 +39,58 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.platform.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}-runner
+          key: ${{ matrix.platform.target }}-runner-${{ matrix.engine }}
+
+      - name: Install system deps (Linux)
+        if: matrix.platform.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libv4l-dev libusb-1.0-0-dev
+
+      - name: Compute artifact names
+        id: names
+        shell: bash
+        run: |
+          if [ "${{ matrix.engine }}" = "quickjs" ]; then
+            echo "lean=glyx-runner-quickjs-${{ matrix.platform.target }}${{ matrix.platform.bin_suffix }}" >> "$GITHUB_OUTPUT"
+            echo "dev=glyx-runner-quickjs-dev-${{ matrix.platform.target }}${{ matrix.platform.bin_suffix }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "lean=glyx-runner-${{ matrix.platform.target }}${{ matrix.platform.bin_suffix }}" >> "$GITHUB_OUTPUT"
+            echo "dev=glyx-runner-dev-${{ matrix.platform.target }}${{ matrix.platform.bin_suffix }}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build lean runner
-        run: cargo build --release --no-default-features -p glyx-runner --target ${{ matrix.target }}
+        # --no-default-features drops "dev"; the engine feature must be
+        # re-added explicitly or glyx-core::run() fails to compile (its `rt`
+        # local is cfg-gated on the v8/quickjs engine feature, not linked by
+        # default once neither is implied).
+        run: cargo build --release --no-default-features --features ${{ matrix.engine }} -p glyx-runner --target ${{ matrix.platform.target }}
 
       - name: Stage lean artifact
         shell: bash
         run: |
-          cp "target/${{ matrix.target }}/release/glyx-runner${{ matrix.bin_suffix }}" \
-             "glyx-runner-${{ matrix.target }}${{ matrix.bin_suffix }}"
+          cp "target/${{ matrix.platform.target }}/release/glyx-runner${{ matrix.platform.bin_suffix }}" \
+             "${{ steps.names.outputs.lean }}"
 
       # The dev-flavored runner (hot-reload + overlay) — downloaded by the CLI
       # for `glyx dev` on machines without the source workspace.
       - name: Build dev runner
-        run: cargo build --release -p glyx-runner --target ${{ matrix.target }}
+        run: cargo build --release --no-default-features --features dev,${{ matrix.engine }} -p glyx-runner --target ${{ matrix.platform.target }}
 
       - name: Stage dev artifact
         shell: bash
         run: |
-          cp "target/${{ matrix.target }}/release/glyx-runner${{ matrix.bin_suffix }}" \
-             "glyx-runner-dev-${{ matrix.target }}${{ matrix.bin_suffix }}"
+          cp "target/${{ matrix.platform.target }}/release/glyx-runner${{ matrix.platform.bin_suffix }}" \
+             "${{ steps.names.outputs.dev }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: runner-${{ matrix.target }}
+          name: runner-${{ matrix.platform.target }}-${{ matrix.engine }}
           path: |
-            glyx-runner-${{ matrix.target }}${{ matrix.bin_suffix }}
-            glyx-runner-dev-${{ matrix.target }}${{ matrix.bin_suffix }}
+            ${{ steps.names.outputs.lean }}
+            ${{ steps.names.outputs.dev }}
 
   # ── glyx CLI binary ────────────────────────────────────────────────────────
   cli:

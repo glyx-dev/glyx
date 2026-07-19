@@ -18,9 +18,12 @@ function createInstance(type, props) {
   // backgroundColor, borderRadius, etc. directly (not nested under style).
   // Strip `_glyxOnMount` — a callback that components use to learn their
   // native node ID synchronously, without relying on ref forwarding.
-  const { children, style, ref: _ref, _glyxOnMount, glyxDraggable, ...rest } = props;
+  const { children, style, ref: _ref, _glyxOnMount, glyxDraggable, transition, ...rest } = props;
   const nodeProps = { ...rest, ...style };
   if (glyxDraggable) nodeProps.draggable = true;
+  // @glyx-dev/motion v1: `transition={{ duration: 200 }}` → flat `transitionMs`
+  // (Rust reads a plain number, not a nested object — see NodeProps::transition_ms).
+  if (transition && typeof transition.duration === 'number') nodeProps.transitionMs = transition.duration;
   const id = __glyx_createNode(type, nodeProps);
   // Every 'view' node is solid (click-opaque) by default.  Nodes with
   // pointerEvents:'none' are still registered but excluded at lookup time.
@@ -131,9 +134,10 @@ function prepareUpdate(_instance, _type, oldProps, newProps) {
 }
 
 function commitUpdate(instance, updatePayload) {
-  const { children, style, ref: _ref, _glyxOnMount, glyxDraggable, ...rest } = updatePayload;
+  const { children, style, ref: _ref, _glyxOnMount, glyxDraggable, transition, ...rest } = updatePayload;
   const nodeProps = { ...rest, ...style };
   if (glyxDraggable) nodeProps.draggable = true;
+  if (transition && typeof transition.duration === 'number') nodeProps.transitionMs = transition.duration;
   __glyx_updateNode(instance.id, nodeProps);
   setNodeZIndex(instance.id, nodeProps.zIndex ?? 0);
 }
@@ -259,3 +263,4 @@ const HostConfig = {
 };
 
 export default HostConfig;
+export { prepareUpdate };

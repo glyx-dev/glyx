@@ -20,6 +20,19 @@ pub(super) struct SplashCfgJson {
     pub(super) background:  Option<String>,
     #[serde(rename = "minimumMs", default)]
     pub(super) minimum_ms:  u64,
+    /// Max fraction (0.0-1.0) of the smaller window dimension `image` may
+    /// occupy. Default 0.5 when unset — see `SplashState::image_scale`.
+    #[serde(rename = "imageScale")]
+    pub(super) image_scale: Option<f64>,
+}
+
+/// Auto-updater origin from `glyx.config.json`'s `updater` block.
+#[derive(serde::Deserialize)]
+pub(super) struct UpdaterCfgJson {
+    pub(super) owner:    String,
+    pub(super) repo:     String,
+    #[serde(rename = "binName")]
+    pub(super) bin_name: String,
 }
 
 /// A single JS plugin entry from `glyx.config.json`.
@@ -45,6 +58,7 @@ pub(super) struct GlyxConfigFile {
     /// when omitted or empty.
     #[serde(default)]
     pub(super) locales:      Option<Vec<String>>,
+    pub(super) updater:      Option<UpdaterCfgJson>,
 }
 
 /// Canvas2D transport settings from `glyx.config.json`.
@@ -197,6 +211,7 @@ fn is_valid_cap_name(cap: &str) -> bool {
         | "battery" | "usb" | "shell" | "mdns" | "system" | "power" | "storage"
         | "gamepads" | "globalShortcuts" | "credentials" | "audio" | "ai"
         | "camera" | "microphone" | "hid" | "updater" | "video" | "crash" | "deeplink"
+        | "tray" | "webview"
     )
 }
 
@@ -229,6 +244,8 @@ fn app_has_cap(caps: &glyx_security::Capabilities, cap: &str) -> bool {
         "video"            => caps.video,
         "crash"            => caps.crash,
         "deeplink"         => caps.deeplink.is_some(),
+        "tray"             => caps.tray,
+        "webview"          => caps.webview,
         _                  => false,
     }
 }
@@ -337,7 +354,7 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
                          Valid names: fs, network, env, db, dialog, clipboard, notification, \
                          battery, usb, shell, mdns, system, power, storage, gamepads, \
                          globalShortcuts, credentials, audio, ai, camera, microphone, \
-                         hid, updater, video, crash, deeplink",
+                         hid, updater, video, crash, deeplink, webview",
                         safe, cap
                     );
                     return None;
@@ -386,6 +403,14 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
         .cloned()
         .unwrap_or_else(|| "0.0.0".to_string());
     glyx_security::init_version(version);
+
+    if let Some(u) = file.as_ref().and_then(|f| f.updater.as_ref()) {
+        glyx_security::init_update_origin(glyx_security::UpdateOrigin {
+            owner:    u.owner.clone(),
+            repo:     u.repo.clone(),
+            bin_name: u.bin_name.clone(),
+        });
+    }
 
     let caps = file.and_then(|f| f.capabilities).unwrap_or_default();
     (caps, plugins)
@@ -506,7 +531,8 @@ pub(super) fn load_splash_state() -> Option<SplashState> {
         }
     });
 
-    Some(SplashState { image: img, background, min_until, auto_hide_at, hidden: false })
+    let image_scale = cfg.image_scale.unwrap_or(0.5).clamp(0.05, 1.0);
+    Some(SplashState { image: img, image_scale, background, min_until, auto_hide_at, hidden: false })
 }
 
 /// Calculate a sensible V8 max-heap cap from the JS bundle size.
@@ -514,6 +540,9 @@ pub(super) fn load_splash_state() -> Option<SplashState> {
 /// Dev mode gets a higher floor (32 MB) to absorb HMR double-eval churn.
 /// Prod floor is 24 MB — enough headroom for the React + framework baseline
 /// without squeezing small bundles into OOM territory.
+///
+/// V8-only — QuickJS has no isolate-heap-limit equivalent wired up yet.
+#[cfg(feature = "v8")]
 pub(super) fn calc_heap_mb(bundle_bytes: usize, is_dev: bool) -> usize {
     const MB: usize = 1024 * 1024;
     let base = ((bundle_bytes * 12) / MB).max(24).min(256);

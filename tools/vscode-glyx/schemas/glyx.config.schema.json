@@ -16,6 +16,12 @@
       "description": "Semver version string. Exposed via updater.getVersion() and embedded in installer metadata.",
       "examples": ["1.0.0"]
     },
+    "engine": {
+      "type": "string",
+      "enum": ["v8", "quickjs"],
+      "description": "JsRuntime backend. Mutually exclusive — a build links exactly one. 'v8' (default): full-featured, larger binary (~58 MB floor). 'quickjs': no JIT, ~3x smaller binary, better suited to size-constrained/mobile targets, slower for JS-heavy workloads. Read by `glyx build`/`glyx dev`/`glyx runtime` to select the matching --features build.",
+      "default": "v8"
+    },
     "app": {
       "type": "object",
       "description": "Installer and store metadata used by glyx package when generating NSIS, DMG, and AppImage installers.",
@@ -158,9 +164,35 @@
           "type": "boolean",
           "description": "Send native OS notifications."
         },
+        "tray": {
+          "type": "boolean",
+          "description": "Create system tray icons with menus."
+        },
         "crash": {
           "type": "boolean",
           "description": "Crash reporting — collect JS and Rust panics to ~/.glyx/crashes/."
+        },
+        "shell": {
+          "type": "boolean",
+          "description": "Opens a URL/file via the OS (rundll32/open/xdg-open) — openExternal(). Not the same capability as shellExec/shellAgent below, which spawn arbitrary declared binaries."
+        },
+        "shellExec": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allow"],
+          "properties": {
+            "allow": { "type": "array", "items": { "type": "string" }, "description": "Exact binary names (or absolute paths) the app may spawn, e.g. ['git', 'ffmpeg']." }
+          },
+          "description": "Scoped shell exec (Tier 1) — explicit binary allowlist. Args are always passed as a real argv array, never through a shell interpreter."
+        },
+        "shellAgent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scopeDir"],
+          "properties": {
+            "scopeDir": { "type": "string", "description": "The only filesystem root spawned processes' cwd may resolve within." }
+          },
+          "description": "Agent-style shell exec (Tier 2) — no binary allowlist; every command runs, but cwd is hard-scoped to scopeDir. A much higher trust level than shellExec, meant for apps (e.g. an AI coding assistant) that can't enumerate binaries ahead of time. Note: the native activity-overlay requirement and streaming spawn/poll API are designed but not yet implemented."
         },
         "credentials": {
           "type": "boolean",
@@ -181,6 +213,10 @@
         "camera": {
           "type": "boolean",
           "description": "Camera capture."
+        },
+        "webview": {
+          "type": "boolean",
+          "description": "Native OS-embedded webview (WebView2/WKWebView/WebKitGTK) via the <WebView> component — a real child window for content that needs a browser engine, separate from the app's own GPU-rendered UI."
         },
         "microphone": {
           "type": "boolean",
@@ -267,6 +303,36 @@
           "minimum": 0,
           "description": "Minimum duration to show the splash in milliseconds (useful to prevent flash on fast loads).",
           "default": 0
+        },
+        "imageScale": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 1,
+          "description": "Max fraction of the smaller window dimension `image` may occupy. Keeps a full-bleed source image (e.g. an app icon with no transparent margin) from filling the whole window. Set closer to 1 for an image intentionally designed as a full splash background.",
+          "default": 0.5
+        }
+      }
+    },
+    "updater": {
+      "type": "object",
+      "description": "Auto-updater target repo for updater.check()/updater.update(). Requires capabilities.updater: true too.",
+      "additionalProperties": false,
+      "required": ["owner", "repo", "binName"],
+      "properties": {
+        "owner": {
+          "type": "string",
+          "description": "GitHub organization or username.",
+          "examples": ["glyx-dev"]
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repository name.",
+          "examples": ["my-app"]
+        },
+        "binName": {
+          "type": "string",
+          "description": "Release asset filename prefix — matches `{binName}-{platform}`, exactly what `glyx package` produces.",
+          "examples": ["my-app"]
         }
       }
     },

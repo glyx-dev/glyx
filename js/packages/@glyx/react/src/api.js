@@ -1,6 +1,16 @@
 // @glyx-dev/react — native API bindings and frame poll state.
 import { addKeyListener, registerSystemWatch, unregisterSystemWatch } from './events.js';
 
+/**
+ * Whether the Rust host was built with the `a11y` Cargo feature enabled.
+ * Setting `role`/`ariaLabel`/etc props is harmless either way, but this lets
+ * an app branch on it (e.g. skip building an accessibility-tree-heavy UI
+ * variant, or show a settings toggle) instead of guessing.
+ */
+export function hasAccessibility() {
+  return typeof __glyx_hasA11y !== 'undefined' && __glyx_hasA11y();
+}
+
 // ── WebSocket inbox polling ───────────────────────────────────────────────────
 //
 // Open sockets: id (number) → { onmessage, onclose, onerror }
@@ -750,6 +760,67 @@ export const clipboard = {
   },
 };
 
+// ── System tray ─────────────────────────────────────────────────────────────
+//
+// Requires `tray: true` capability in glyx.config.json.
+
+export const tray = {
+  /**
+   * Create a system tray icon from raw RGBA pixel data.
+   * @param {ArrayBuffer} rgba           RGBA pixel buffer (width×height×4 bytes).
+   * @param {number}      width          Icon width in pixels.
+   * @param {number}      height         Icon height in pixels.
+   * @param {string}      tooltip        Tooltip text.
+   * @param {Array<{id:string,label:string,enabled?:boolean,checked?:boolean,separator?:boolean,accelerator?:string,children?:Array}>} [menu]
+   * @returns {number} Tray handle ID, or 0 on failure.
+   */
+  create(rgba, width, height, tooltip, menu = []) {
+    if (typeof __glyx_tray_create === 'undefined') return 0;
+    return __glyx_tray_create(rgba, width, height, tooltip, JSON.stringify(menu));
+  },
+
+  /**
+   * Destroy a tray icon.
+   * @param {number} trayId
+   * @returns {boolean}
+   */
+  destroy(trayId) {
+    if (typeof __glyx_tray_destroy === 'undefined') return false;
+    return __glyx_tray_destroy(trayId);
+  },
+
+  /**
+   * Update the tray context menu.
+   * @param {number} trayId
+   * @param {Array}  menu
+   * @returns {boolean}
+   */
+  updateMenu(trayId, menu) {
+    if (typeof __glyx_tray_update_menu === 'undefined') return false;
+    return __glyx_tray_update_menu(trayId, JSON.stringify(menu));
+  },
+
+  /**
+   * Update the tooltip text.
+   * @param {number} trayId
+   * @param {string} tooltip
+   */
+  setTooltip(trayId, tooltip) {
+    if (typeof __glyx_tray_set_tooltip !== 'undefined') {
+      __glyx_tray_set_tooltip(trayId, tooltip);
+    }
+  },
+
+  /**
+   * Poll for pending tray events. Returns JSON array string or empty string.
+   * @returns {string}
+   */
+  pollEvents() {
+    if (typeof __glyx_tray_poll_events === 'undefined') return '';
+    return __glyx_tray_poll_events();
+  },
+};
+
 // ── Notifications ─────────────────────────────────────────────────────────────
 //
 // Requires `notification: true` capability in glyx.config.json.
@@ -890,6 +961,28 @@ export async function fetch(url, options = {}) {
   const raw = await __glyx_fetch(url, JSON.stringify(init));
   return _makeResponse(JSON.parse(raw), url);
 }
+
+// ── Shell (Tier 1: scoped exec) ─────────────────────────────────────────────
+//
+// Requires `shellExec: { allow: [...] }` capability in glyx.config.json —
+// `bin` must exact-match an allowlist entry. Args are always passed as a
+// real argv array (never through a shell interpreter), which is what
+// actually prevents injection — not a string filter on top of it.
+export const shell = {
+  /**
+   * Run `bin` with `args`, wait for completion, and return the buffered
+   * output. For long-running commands where you need progress as it
+   * happens rather than a single result at the end, a streaming
+   * `shell.spawn()`/`shell.poll()` pair is planned but not yet implemented.
+   * @param {string} bin - exact binary name, must be in `shellExec.allow`.
+   * @param {string[]} [args]
+   * @returns {Promise<{stdout: string, stderr: string, exitCode: number}>}
+   */
+  run(bin, args = []) {
+    if (typeof __glyx_shell_run === 'undefined') return _noBinding('shell.run');
+    return __glyx_shell_run(bin, JSON.stringify(args)).then(JSON.parse);
+  },
+};
 
 // Expose `fetch` + `Headers` as globals (the embedded V8 runtime has no platform
 // equivalents, so this is purely additive — nothing standard is shadowed). Lets
@@ -1063,7 +1156,7 @@ export const ipc = {
 export const glyxWindow = {
   setFullscreen:   (full)  => typeof __glyx_setFullscreen   !== 'undefined' && __glyx_setFullscreen(full),
   setMaximized:    (max)   => typeof __glyx_setMaximized    !== 'undefined' && __glyx_setMaximized(max),
-  setMinimized:    ()      => typeof __glyx_setMinimized    !== 'undefined' && __glyx_setMinimized(),
+  setMinimized:    (minimized = true) => typeof __glyx_setMinimized !== 'undefined' && __glyx_setMinimized(minimized),
   isFullscreen:    ()      => typeof __glyx_isFullscreen    !== 'undefined' ? __glyx_isFullscreen()    : false,
   isMaximized:     ()      => typeof __glyx_isMaximized     !== 'undefined' ? __glyx_isMaximized()     : false,
   getWindowSize:   ()      => typeof __glyx_getWindowSize   !== 'undefined' ? __glyx_getWindowSize()   : { width: 0, height: 0 },
@@ -1693,7 +1786,7 @@ export const hid = {
  *   "update_type": "js_only",   // "js_only" | "runner" | "full"
  *   "notes":       "Bug fixes",
  *   "js_url":      "https://cdn.example.com/2.1.0/app.js",
- *   "js_sha256":   "abc123..."
+ *   "js_sig":      "a1b2c3..."  // Ed25519 signature, hex-encoded, over the bundle bytes
  * }
  * ```
  *
@@ -1702,7 +1795,7 @@ export const hid = {
  * const manifest = await updater.checkManifest('https://cdn.example.com/latest.json');
  * if (manifest) {
  *   if (manifest.update_type === 'js_only') {
- *     await updater.downloadJs(manifest.js_url, manifest.js_sha256);
+ *     await updater.downloadJs(manifest.js_url, manifest.js_sig);
  *     glyxWindow.restart();   // applies on next launch automatically
  *   } else {
  *     // runner/full: use updater.update() for GitHub releases, or direct download
@@ -1712,10 +1805,16 @@ export const hid = {
  *
  * ## GitHub-release flow (binary updates)
  *
+ * The release owner/repo/binary name are NOT passed from JS — they're baked
+ * in at build time from `updater: { owner, repo, binName }` in glyx.config
+ * (see `bind_updater.rs`'s "Build-time update origin" doc). JS only ever
+ * supplies the version to compare against; it can't redirect the update
+ * source to a different repo.
+ *
  * ```js
- * const info = await updater.check('myorg', 'myapp', '1.0.0');
+ * const info = await updater.check('1.0.0');
  * if (info.hasUpdate) {
- *   const result = await updater.update('myorg', 'myapp', 'myapp', '1.0.0');
+ *   const result = await updater.update('1.0.0');
  *   if (result.updated) { // show "restart required" dialog }
  * }
  * ```
@@ -1765,39 +1864,42 @@ export const updater = {
   },
 
   /**
-   * Download a JS bundle from `url`, verify its SHA-256 digest, and stage it
-   * for the next restart. On next launch the runner loads the staged JS
+   * Download a JS bundle from `url`, verify its Ed25519 signature, and stage
+   * it for the next restart. On next launch the runner loads the staged JS
    * instead of the trailer bundle — completing a JS-only update with zero downtime.
-   * @param {string}  url    Direct download URL of the new `app.js`.
-   * @param {string=} sha256 Expected SHA-256 hex digest. Pass `""` to skip verification.
+   *
+   * There is no "skip verification" option — an unsigned bundle is always
+   * rejected before anything is written to disk.
+   * @param {string} url    Direct download URL of the new `app.js`.
+   * @param {string} sigHex Ed25519 signature, hex-encoded, over the raw bundle
+   *                        bytes (e.g. the manifest's `js_sig` field — NOT a
+   *                        SHA-256 digest).
    * @returns {Promise<void>}
    */
-  async downloadJs(url, sha256 = '') {
-    await __glyx_updater_download_js(url, sha256);
+  async downloadJs(url, sigHex) {
+    await __glyx_updater_download_js(url, sigHex);
   },
 
   /**
-   * Check GitHub releases for a newer version.
-   * @param {string} owner          GitHub owner (user or org).
-   * @param {string} repo           Repository name.
+   * Check the build-time-configured GitHub repo for a newer version. The
+   * owner/repo are NOT passed from JS — see the module doc above.
    * @param {string} currentVersion Current semver string (e.g. "1.0.0").
    * @returns {Promise<{hasUpdate:boolean, latestVersion:string, body:string}>}
    */
-  async check(owner, repo, currentVersion) {
-    return JSON.parse(await __glyx_updater_check(owner, repo, currentVersion));
+  async check(currentVersion) {
+    return JSON.parse(await __glyx_updater_check(currentVersion));
   },
 
   /**
    * Download the latest GitHub release and replace the running binary.
-   * The caller should prompt the user to restart the app after this resolves.
-   * @param {string} owner          GitHub owner.
-   * @param {string} repo           Repository name.
-   * @param {string} binName        Binary asset name (without .exe — added on Windows).
+   * The release source (owner/repo/binName) is build-time-configured, not
+   * caller-supplied — see the module doc above. The caller should prompt the
+   * user to restart the app after this resolves.
    * @param {string} currentVersion Current semver string.
    * @returns {Promise<{updated:boolean, latestVersion:string}>}
    */
-  async update(owner, repo, binName, currentVersion) {
-    return JSON.parse(await __glyx_updater_update(owner, repo, binName, currentVersion));
+  async update(currentVersion) {
+    return JSON.parse(await __glyx_updater_update(currentVersion));
   },
 };
 
@@ -1861,6 +1963,32 @@ export const video = {
   close(handleId) {
     __glyx_video_close(String(handleId));
     _videoCallbacks.delete(handleId);
+  },
+};
+
+// ── WebView (native OS-embedded webview) ────────────────────────────────────
+//
+// Declarative — `<WebView>` (see webview.js) sets `webviewSrc`/`webviewHtml`/
+// `webviewOpts` node props; glyx-core creates/positions/destroys the native
+// child webview automatically based on layout. This module is just the
+// postMessage bridge: page→JS (poll) and JS→page (post).
+
+// nodeId → { onMessage }
+export const _webviewCallbacks = new Map();
+export function _pollWebview() {
+  if (typeof __glyx_webview_poll === 'undefined') return;
+  const events = JSON.parse(__glyx_webview_poll());
+  for (const ev of events) {
+    const cbs = _webviewCallbacks.get(ev.id);
+    if (cbs && cbs.onMessage) cbs.onMessage(ev.message);
+  }
+}
+
+export const webview = {
+  /** Post a message INTO the page at `nodeId` (delivered as a `message` event on `window`). */
+  postMessage(nodeId, message) {
+    if (typeof __glyx_webview_post_message === 'undefined') return;
+    __glyx_webview_post_message(nodeId, typeof message === 'string' ? message : JSON.stringify(message));
   },
 };
 

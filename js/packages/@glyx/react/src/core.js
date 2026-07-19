@@ -89,7 +89,21 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
 
   // Always keep handlersRef up to date with the latest prop values.
   handlersRef.current = {
-    onPress:      (e) => onPress?.(e),
+    onPress: (e) => {
+      // Move the Rust-side focus registry here — events.js's mouseButton
+      // dispatch calls `onPress` DIRECTLY for a plain click (onPressIn/Out
+      // are never invoked for a simple click, only onPress — confirmed by
+      // reading the dispatch code after this fix's first attempt, in
+      // onPressIn, silently did nothing). Without this, clicking a
+      // Checkbox/Switch/Radio/Select/Slider never updates `focused_node`,
+      // so the accessibility tree's `focus` field falls back to the root —
+      // which is why Narrator's highlight rect covered the whole window
+      // instead of the actual control.
+      if (typeof __glyx_setFocus !== 'undefined' && nodeIdRef.current != null) {
+        __glyx_setFocus(nodeIdRef.current);
+      }
+      onPress?.(e);
+    },
     onRightPress: (e) => onRightPress?.(e),
     onPressIn:  () => { setPressed(true);  onPressIn?.(); },
     onPressOut: () => { setPressed(false); onPressOut?.(); },

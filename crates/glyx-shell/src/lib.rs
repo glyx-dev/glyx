@@ -38,7 +38,10 @@ pub use winit::event_loop::EventLoopProxy;
 // ── User events (sent from Rust side to the event loop) ───────────────────────
 
 /// Events that non-event-loop threads can send to the event loop.
-#[derive(Debug, Clone)]
+///
+/// NOTE: not `Clone` — the `Accesskit` variant wraps `accesskit_winit::Event`,
+/// which isn't `Clone`. Nothing in the codebase clones `GlyxUserEvent`.
+#[derive(Debug)]
 pub enum GlyxUserEvent {
     /// Request creation of a secondary window with a pre-assigned handle.
     CreateWindow { id: u32, title: String, width: u32, height: u32 },
@@ -46,6 +49,30 @@ pub enum GlyxUserEvent {
     Quit,
     /// Quit then re-launch the same executable (for OTA apply / settings reload).
     Restart,
+    /// Routed from `accesskit_winit::Adapter` (created with `with_event_loop_proxy`)
+    /// — initial-tree requests, AT action requests, and deactivation.
+    #[cfg(feature = "a11y")]
+    Accesskit(accesskit_winit::Event),
+}
+
+#[cfg(feature = "a11y")]
+impl From<accesskit_winit::Event> for GlyxUserEvent {
+    fn from(e: accesskit_winit::Event) -> Self { GlyxUserEvent::Accesskit(e) }
+}
+
+/// Wraps the accessibility tree-update callback so `ShellEvent` can keep
+/// deriving `Debug`/`Clone` (an `Arc<dyn Fn>` doesn't derive `Debug` itself).
+/// Call this whenever the scene graph changes; it's cheap when no assistive
+/// technology is actually running (`accesskit_winit::Adapter::update_if_active`
+/// no-ops in that case) so callers don't need to gate calls on AT presence.
+#[cfg(feature = "a11y")]
+#[derive(Clone)]
+pub struct A11yUpdateFn(pub Arc<dyn Fn(accesskit::TreeUpdate) + Send + Sync>);
+#[cfg(feature = "a11y")]
+impl std::fmt::Debug for A11yUpdateFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "A11yUpdateFn(..)")
+    }
 }
 
 // ── Public event type ────────────────────────────────────────────────────────
@@ -66,6 +93,10 @@ pub enum ShellEvent {
         window_handle: u32,
         window: Arc<Window>,
         proxy:  EventLoopProxy<GlyxUserEvent>,
+        /// Push an accessibility tree update for this window. `None` when
+        /// built without the `a11y` feature.
+        #[cfg(feature = "a11y")]
+        a11y_update: A11yUpdateFn,
     },
     /// Window was resized to these physical pixel dimensions.
     Resized { window_handle: u32, width: u32, height: u32 },
@@ -87,6 +118,34 @@ pub enum ShellEvent {
     /// Window gained or lost OS focus.
     /// `focused = false` is a good time to release allocator memory.
     FocusChanged { window_handle: u32, focused: bool },
+    /// IME (Input Method Editor) composition event — CJK/etc text input.
+    /// `kind` is one of "enabled" / "preedit" / "commit" / "disabled".
+    /// `text` carries the in-progress composition string for "preedit" or
+    /// the final composed string for "commit"; `None` for enabled/disabled.
+    /// `cursor` is a (start, end) BYTE offset range within `text`, selecting
+    /// the portion of the preedit string currently being edited by the IME
+    /// (e.g. the actively-converted clause) — only meaningful for "preedit".
+    Ime {
+        window_handle: u32,
+        kind: String,
+        text: Option<String>,
+        cursor: Option<(u32, u32)>,
+    },
+    /// An assistive technology (screen reader, etc.) requested an action on
+    /// a node — e.g. VoiceOver/Narrator's user pressing Enter on a focused
+    /// button, or Tab-focusing into a field. `target` is the glyx node id
+    /// (accesskit's `NodeId` is just our u32 id widened to u64).
+    /// `action` is one of "focus" / "click" / "increment" / "decrement" /
+    /// "setValue". `numeric_value` is only set for "setValue" (from
+    /// `ActionData::NumericValue` — string `ActionData::Value` isn't wired,
+    /// only sliders/numeric controls are operable this way for now).
+    #[cfg(feature = "a11y")]
+    AccessibilityAction {
+        window_handle: u32,
+        target: u32,
+        action: String,
+        numeric_value: Option<f64>,
+    },
 }
 
 // ── Shell config ─────────────────────────────────────────────────────────────
@@ -110,13 +169,13 @@ pub enum StartupMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
     /// Vello GPU compute via wgpu. Best AA quality, highest RAM on iGPU.
-    #[default]
     Gpu,
     /// Vello CPU path (Cranelift JIT). No discrete GPU required.
     Cpu,
     /// tiny-skia CPU rasterizer. Minimal RAM, pure Rust, no GPU pool.
     TinySkia,
     /// Auto-detect: discrete GPU → Gpu, no GPU → TinySkia.
+    #[default]
     Auto,
 }
 
@@ -201,6 +260,8 @@ where
     log::debug!("glyx-shell: ControlFlow = {:?}", control_flow);
 
     let proxy = event_loop.create_proxy();
+    #[cfg(feature = "a11y")]
+    let (a11y_tx, a11y_rx) = std::sync::mpsc::channel();
 
     let mut app = ShellApp {
         config,
@@ -212,6 +273,12 @@ where
         restart_requested: false,
         cursor_pos:        HashMap::new(),
         frameless:         HashMap::new(),
+        #[cfg(feature = "a11y")]
+        a11y_adapters:     HashMap::new(),
+        #[cfg(feature = "a11y")]
+        a11y_rx,
+        #[cfg(feature = "a11y")]
+        a11y_tx,
     };
 
     event_loop.run_app(&mut app).expect("Event loop error");
@@ -274,19 +341,60 @@ struct ShellApp {
     cursor_pos:        HashMap<u32, (f64, f64)>,
     /// Per-window: true when the window is frameless (decorations=false).
     frameless:         HashMap<u32, bool>,
+    /// glyx handle → accesskit adapter. One per window, created before the
+    /// window is first shown (accesskit_winit's requirement).
+    #[cfg(feature = "a11y")]
+    a11y_adapters:     HashMap<u32, accesskit_winit::Adapter>,
+    /// Tree updates pushed by glyx-core (via the `A11yUpdateFn` closure
+    /// handed out in `ShellEvent::WindowReady`), drained each `about_to_wait`.
+    #[cfg(feature = "a11y")]
+    a11y_rx:           std::sync::mpsc::Receiver<(u32, accesskit::TreeUpdate)>,
+    /// Kept alive so cloning it into new `WindowReady` closures is cheap;
+    /// the receiver end lives on `a11y_rx` above.
+    #[cfg(feature = "a11y")]
+    a11y_tx:           std::sync::mpsc::Sender<(u32, accesskit::TreeUpdate)>,
 }
 
 impl ShellApp {
     fn open_window(&mut self, event_loop: &ActiveEventLoop, handle: u32, attrs: WindowAttributes) {
+        // accesskit_winit requires the adapter to be created BEFORE the window
+        // is ever shown, so under the `a11y` feature we force the window
+        // invisible at creation, wire up the adapter, then reveal it —
+        // otherwise `Adapter::with_event_loop_proxy` panics.
+        #[cfg(feature = "a11y")]
+        let requested_visible = attrs.visible;
+        #[cfg(feature = "a11y")]
+        let attrs = attrs.with_visible(false);
+
         match event_loop.create_window(attrs) {
             Ok(w) => {
                 let window = Arc::new(w);
                 self.windows.insert(window.id(), handle);
                 self.window_arcs.insert(handle, Arc::clone(&window));
+
+                #[cfg(feature = "a11y")]
+                {
+                    let adapter = accesskit_winit::Adapter::with_event_loop_proxy(
+                        event_loop, &window, self.proxy.clone(),
+                    );
+                    self.a11y_adapters.insert(handle, adapter);
+                    if requested_visible {
+                        window.set_visible(true);
+                    }
+                }
+
+                #[cfg(feature = "a11y")]
+                let a11y_update = {
+                    let tx = self.a11y_tx.clone();
+                    A11yUpdateFn(Arc::new(move |update| { let _ = tx.send((handle, update)); }))
+                };
+
                 (self.handler)(ShellEvent::WindowReady {
                     window_handle: handle,
                     window,
                     proxy: self.proxy.clone(),
+                    #[cfg(feature = "a11y")]
+                    a11y_update,
                 });
             }
             Err(e) => log::error!("glyx-shell: failed to create window (handle {}): {}", handle, e),
@@ -348,6 +456,55 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
                 self.restart_requested = true;
                 event_loop.exit();
             }
+            #[cfg(feature = "a11y")]
+            GlyxUserEvent::Accesskit(accesskit_winit::Event { window_id, window_event }) => {
+                let Some(&handle) = self.windows.get(&window_id) else { return };
+                match window_event {
+                    accesskit_winit::WindowEvent::InitialTreeRequested => {
+                        // WinitActivationHandler::request_initial_tree always
+                        // returns None (see accesskit_winit source) — the
+                        // platform adapter shows a placeholder until glyx-core's
+                        // next per-frame tree push arrives via `a11y_rx`. No
+                        // action needed here beyond letting that happen.
+                    }
+                    accesskit_winit::WindowEvent::ActionRequested(req) => {
+                        // Focus/Click/Increment/Decrement/SetValue(numeric) are
+                        // wired — Expand/Collapse/ScrollIntoView/text-selection
+                        // actions are not (see glyx-core/src/a11y.rs's module
+                        // doc comment for the full scope-limit list).
+                        let action = match req.action {
+                            accesskit::Action::Focus => Some("focus"),
+                            accesskit::Action::Click => Some("click"),
+                            accesskit::Action::Increment => Some("increment"),
+                            accesskit::Action::Decrement => Some("decrement"),
+                            accesskit::Action::SetValue => Some("setValue"),
+                            _ => None,
+                        };
+                        if let Some(action) = action {
+                            let numeric_value = match req.data {
+                                Some(accesskit::ActionData::NumericValue(v)) => Some(v),
+                                _ => None,
+                            };
+                            (self.handler)(ShellEvent::AccessibilityAction {
+                                window_handle: handle,
+                                target: req.target.0 as u32,
+                                action: action.to_string(),
+                                numeric_value,
+                            });
+                        }
+                    }
+                    accesskit_winit::WindowEvent::AccessibilityDeactivated => {}
+                }
+            }
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(feature = "a11y")]
+        while let Ok((handle, update)) = self.a11y_rx.try_recv() {
+            if let Some(adapter) = self.a11y_adapters.get_mut(&handle) {
+                adapter.update_if_active(move || update);
+            }
         }
     }
 
@@ -361,6 +518,15 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
             Some(&h) => h,
             None => return, // unknown window — ignore
         };
+
+        // AccessKit must see every window event before (or regardless of)
+        // our own handling, so its platform adapter can track window state.
+        #[cfg(feature = "a11y")]
+        if let Some(adapter) = self.a11y_adapters.get_mut(&handle) {
+            if let Some(window) = self.window_arcs.get(&handle) {
+                adapter.process_event(window, &event);
+            }
+        }
 
         match event {
             WindowEvent::CloseRequested => {
@@ -495,6 +661,28 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
 
             WindowEvent::Focused(focused) => {
                 (self.handler)(ShellEvent::FocusChanged { window_handle: handle, focused });
+            }
+
+            WindowEvent::Ime(ime) => {
+                let (kind, text, cursor) = match ime {
+                    winit::event::Ime::Enabled => ("enabled", None, None),
+                    winit::event::Ime::Preedit(s, cursor) => (
+                        "preedit",
+                        Some(s),
+                        cursor.map(|(a, b)| (a as u32, b as u32)),
+                    ),
+                    winit::event::Ime::Commit(s) => ("commit", Some(s), None),
+                    winit::event::Ime::Disabled => ("disabled", None, None),
+                };
+                (self.handler)(ShellEvent::Ime {
+                    window_handle: handle,
+                    kind: kind.to_string(),
+                    text,
+                    cursor,
+                });
+                if let Some(w) = self.window_arcs.get(&handle) {
+                    w.request_redraw();
+                }
             }
 
             _ => {}

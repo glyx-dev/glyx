@@ -1,34 +1,27 @@
 use super::*;
 
-// ── Build-time update origin (H2) ─────────────────────────────────────────────
+// ── Update origin ──────────────────────────────────────────────────────────────
 //
-// Owner, repo and binary name are compiled in from env vars set by the CLI
-// during `glyx build`.  JS cannot override them - callers only trigger
-// check / apply; the trust chain is:
+// Owner, repo and binary name come from `glyx.config.json`'s `updater` block,
+// read once at startup into glyx-security's UpdateOrigin (see
+// glyx_security::init_update_origin — same OnceLock pattern as app_version).
+// JS cannot override them - callers only trigger check / apply; the trust
+// chain is:
 //
 //   CI signs release binary with UPDATE_SIGNING_KEY (private, never committed)
 //   → .sig sidecar uploaded alongside each GitHub Release asset
 //   → glyx-verify::UPDATE_PUBKEY (embedded) verifies before applying
 //
 // Set in glyx.config: updater: { owner, repo, binName }
-// The CLI sets GLYX_UPDATE_OWNER / GLYX_UPDATE_REPO / GLYX_UPDATE_BIN_NAME.
 
+/// Fail fast at runtime if `glyx.config.json` has no `updater` block.
 #[allow(dead_code)]
-const UPDATE_OWNER:    Option<&str> = option_env!("GLYX_UPDATE_OWNER");
-#[allow(dead_code)]
-const UPDATE_REPO:     Option<&str> = option_env!("GLYX_UPDATE_REPO");
-#[allow(dead_code)]
-const UPDATE_BIN_NAME: Option<&str> = option_env!("GLYX_UPDATE_BIN_NAME");
-
-/// Fail fast at runtime if the origin constants were not baked in at build
-/// time and return a user-visible error string.
-#[allow(dead_code)]
-fn update_origin() -> Result<(&'static str, &'static str, &'static str), String> {
-    match (UPDATE_OWNER, UPDATE_REPO, UPDATE_BIN_NAME) {
-        (Some(o), Some(r), Some(b)) => Ok((o, r, b)),
-        _ => Err(
+fn update_origin() -> Result<(String, String, String), String> {
+    match glyx_security::update_origin() {
+        Some(o) => Ok((o.owner.clone(), o.repo.clone(), o.bin_name.clone())),
+        None => Err(
             "Update origin not configured. Set updater.owner, updater.repo, \
-             and updater.binName in glyx.config and rebuild.".to_string()
+             and updater.binName in glyx.config.json.".to_string()
         ),
     }
 }
@@ -87,8 +80,8 @@ pub fn updater_check_callback(
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             let (owner, repo, _bin) = update_origin()?;
             let releases = self_update::backends::github::ReleaseList::configure()
-                .repo_owner(owner)
-                .repo_name(repo)
+                .repo_owner(&owner)
+                .repo_name(&repo)
                 .build().map_err(|e| e.to_string())?
                 .fetch().map_err(|e| e.to_string())?;
 
@@ -147,8 +140,8 @@ pub fn updater_update_callback(
 
             // 1. Fetch release list and find the latest upgrade.
             let releases = self_update::backends::github::ReleaseList::configure()
-                .repo_owner(owner)
-                .repo_name(repo)
+                .repo_owner(&owner)
+                .repo_name(&repo)
                 .build().map_err(|e| e.to_string())?
                 .fetch().map_err(|e| e.to_string())?;
 

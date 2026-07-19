@@ -59,6 +59,11 @@ pub fn system_watch_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
+    if !glyx_security::get().system {
+        throw_cap_error(scope, "system");
+        return;
+    }
+
     let kind = v8_arg_to_string(scope, &args, 0);
     let interval_ms = args.get(1).number_value(scope).unwrap_or(0.0);
     // Clamp: darkMode/batterySaver are registry reads (cheap, 2s default);
@@ -144,17 +149,24 @@ pub fn set_maximized_callback(
     }
 }
 
+/// `__glyx_setMinimized(minimized?)` — defaults to `true` when omitted, so
+/// existing no-arg call sites keep minimizing; pass `false` to un-minimize.
 pub fn set_minimized_callback(
-    _scope: &mut v8::PinScope<'_, '_, v8::Context>,
-    args:   v8::FunctionCallbackArguments,
-    _rv:    v8::ReturnValue,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
 ) {
     let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
+    let minimized = if args.length() > 0 {
+        args.get(0).boolean_value(scope)
+    } else {
+        true
+    };
     if let Some(ctrl) = &state.window {
-        (ctrl.set_minimized)();
+        (ctrl.set_minimized)(minimized);
     }
 }
 
@@ -413,12 +425,8 @@ pub fn clipboard_read_text_callback(
         rv.set(reject_cap_promise(scope, "clipboard").into());
         return;
     }
-    // Read synchronously on the V8 thread. clipboard_win calls Win32 OpenClipboard/
-    // GetClipboardData which require a thread with a message pump â€" the main thread
-    // qualifies, but spawn_blocking worker threads do not (causes silent failures when
-    // pasting from external apps). The clipboard read is ~0ms so blocking is fine.
-    let text = clipboard_win::get_clipboard::<String, _>(clipboard_win::formats::Unicode)
-        .unwrap_or_else(|e| { log::warn!("[clipboard] read failed: {e}"); String::new() });
+    // Read synchronously on the V8 thread — the clipboard read is ~0ms.
+    let text = crate::bindings::read_clipboard_text();
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise  = resolver.get_promise(scope);
     let v8_str   = v8::String::new(scope, &text)
@@ -442,10 +450,7 @@ pub fn clipboard_write_text_callback(
     let text     = v8_arg_to_string(scope, &args, 0);
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise  = resolver.get_promise(scope);
-    // Write synchronously â€" same reason as readText (Win32 clipboard needs message pump thread).
-    if let Err(e) = clipboard_win::set_clipboard(clipboard_win::formats::Unicode, &text) {
-        log::warn!("[clipboard] write failed: {e}");
-    }
+    crate::bindings::write_clipboard_text(&text);  // synchronous, same reason as readText
     let undef = v8::undefined(scope);
     resolver.resolve(scope, undef.into());
     rv.set(promise.into());
@@ -971,61 +976,8 @@ pub fn credentials_delete_callback(
 
 // â"€â"€ Audio playback bindings â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-pub fn parse_accelerator(acc: &str) -> Option<global_hotkey::hotkey::HotKey> {
-    use global_hotkey::hotkey::{HotKey, Modifiers};
-    let mut mods     = Modifiers::empty();
-    let mut key_code = None;
-    for part in acc.to_lowercase().split('+') {
-        match part.trim() {
-            "ctrl" | "control" => mods |= Modifiers::CONTROL,
-            "shift"            => mods |= Modifiers::SHIFT,
-            "alt"              => mods |= Modifiers::ALT,
-            "meta" | "cmd" | "super" | "win" => mods |= Modifiers::META,
-            key => key_code = str_to_code(key),
-        }
-    }
-    let code = key_code?;
-    Some(HotKey::new(if mods.is_empty() { None } else { Some(mods) }, code))
-}
-
-pub fn str_to_code(key: &str) -> Option<global_hotkey::hotkey::Code> {
-    use global_hotkey::hotkey::Code;
-    Some(match key {
-        "a" => Code::KeyA,    "b" => Code::KeyB,    "c" => Code::KeyC,
-        "d" => Code::KeyD,    "e" => Code::KeyE,    "f" => Code::KeyF,
-        "g" => Code::KeyG,    "h" => Code::KeyH,    "i" => Code::KeyI,
-        "j" => Code::KeyJ,    "k" => Code::KeyK,    "l" => Code::KeyL,
-        "m" => Code::KeyM,    "n" => Code::KeyN,    "o" => Code::KeyO,
-        "p" => Code::KeyP,    "q" => Code::KeyQ,    "r" => Code::KeyR,
-        "s" => Code::KeyS,    "t" => Code::KeyT,    "u" => Code::KeyU,
-        "v" => Code::KeyV,    "w" => Code::KeyW,    "x" => Code::KeyX,
-        "y" => Code::KeyY,    "z" => Code::KeyZ,
-        "0" => Code::Digit0,  "1" => Code::Digit1,  "2" => Code::Digit2,
-        "3" => Code::Digit3,  "4" => Code::Digit4,  "5" => Code::Digit5,
-        "6" => Code::Digit6,  "7" => Code::Digit7,  "8" => Code::Digit8,
-        "9" => Code::Digit9,
-        "f1"  => Code::F1,  "f2"  => Code::F2,  "f3"  => Code::F3,
-        "f4"  => Code::F4,  "f5"  => Code::F5,  "f6"  => Code::F6,
-        "f7"  => Code::F7,  "f8"  => Code::F8,  "f9"  => Code::F9,
-        "f10" => Code::F10, "f11" => Code::F11, "f12" => Code::F12,
-        "space"                    => Code::Space,
-        "enter" | "return"         => Code::Enter,
-        "escape" | "esc"           => Code::Escape,
-        "tab"                      => Code::Tab,
-        "backspace"                => Code::Backspace,
-        "delete"                   => Code::Delete,
-        "insert"                   => Code::Insert,
-        "home"                     => Code::Home,
-        "end"                      => Code::End,
-        "pageup"                   => Code::PageUp,
-        "pagedown"                 => Code::PageDown,
-        "up"    | "arrowup"        => Code::ArrowUp,
-        "down"  | "arrowdown"      => Code::ArrowDown,
-        "left"  | "arrowleft"      => Code::ArrowLeft,
-        "right" | "arrowright"     => Code::ArrowRight,
-        _ => return None,
-    })
-}
+// parse_accelerator/str_to_code moved to bindings/mod.rs's always-compiled
+// shared section (engine-neutral, needed by quickjs_sys.rs's shortcut_register too).
 
 // â"€â"€ Performance metrics â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
@@ -1156,40 +1108,6 @@ pub fn collect_memory_callback(
 ) {
     extern "C" { fn mi_collect(force: bool); }
     unsafe { mi_collect(true); }
-}
-
-/// Validate a URL before passing it to the OS shell.
-///
-/// Enforces:
-/// - Scheme must be `http`, `https`, or `mailto` (prevents `file://`, `javascript:`, etc.)
-/// - No ASCII control characters (0x00-0x1F, 0x7F)
-/// - No shell metacharacters that could cause re-interpretation if a platform
-///   handler mis-uses them: `|  &  ;  $  (  )  >  <  \`  {  }`
-///
-/// Returns `Err` with a log-safe reason string on denial.
-fn validate_external_url(url: &str) -> Result<(), &'static str> {
-    // Scheme check - must be one of the three safe schemes.
-    let lower = url.to_ascii_lowercase();
-    let valid_scheme = lower.starts_with("https://")
-        || lower.starts_with("http://")
-        || lower.starts_with("mailto:");
-    if !valid_scheme {
-        return Err("scheme not in allowlist (http, https, mailto)");
-    }
-
-    // Control character check.
-    if url.bytes().any(|b| b < 0x20 || b == 0x7F) {
-        return Err("URL contains control characters");
-    }
-
-    // Shell metacharacter check - defense-in-depth against injection if
-    // any downstream platform handler passes the URL through a shell.
-    const SHELL_META: &[char] = &['|', '&', ';', '$', '(', ')', '>', '<', '`', '{', '}'];
-    if url.chars().any(|c| SHELL_META.contains(&c)) {
-        return Err("URL contains shell metacharacters");
-    }
-
-    Ok(())
 }
 
 /// `__glyx_open_external(url)` - sync, opens a URL in the OS default browser.

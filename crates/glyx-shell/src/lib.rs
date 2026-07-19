@@ -169,13 +169,13 @@ pub enum StartupMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
     /// Vello GPU compute via wgpu. Best AA quality, highest RAM on iGPU.
-    #[default]
     Gpu,
     /// Vello CPU path (Cranelift JIT). No discrete GPU required.
     Cpu,
     /// tiny-skia CPU rasterizer. Minimal RAM, pure Rust, no GPU pool.
     TinySkia,
     /// Auto-detect: discrete GPU → Gpu, no GPU → TinySkia.
+    #[default]
     Auto,
 }
 

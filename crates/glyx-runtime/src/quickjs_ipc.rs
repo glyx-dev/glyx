@@ -7,18 +7,90 @@
 //! `ipc_bus`/`my_handle`/`next_window_id`/`backend_commands` state (wired up
 //! in `QuickJsRuntime::new_with_ipc`), not just a binding function.
 //!
-//! `backend_call`'s sync JS-registered-handler path (`js_backend_commands`,
-//! populated by dev-mode plugin hot-reload / `GlyxExtension::register()`,
-//! which is V8-scope-only) is NOT ported — only the async Rust-command path
-//! (`backend_commands` / `GlyxExtension::register_commands`, already
-//! engine-neutral) is. `register_extensions` already documents this split.
+//! `backend_call`'s sync JS-registered-handler path (`js_backend_commands`) IS
+//! now ported — `eval_js_plugins` below mirrors V8's identical pass in
+//! `bindings/mod.rs`'s `register_all`: eval each plugin's bundled IIFE, walk
+//! its exports object's own function properties into a
+//! `cmd_name -> (global_name, export_key)` map. **Static registration
+//! only** — unlike V8's `reload_plugin`, there's no dev-mode hot-reload
+//! port yet, so editing a plugin during `glyx dev` needs a full window
+//! restart on QuickJS today.
+//!
+//! Deliberately NOT storing `Persistent<Function>` handles here: an earlier
+//! version did, and crashed on runtime teardown
+//! (`Assertion failed: list_empty(&rt->gc_obj_list)`) — a `Persistent`
+//! captured inside a Rust closure that itself becomes a QuickJS-native
+//! function value (the registered `__glyx_backend_call` binding) creates a
+//! reference cycle between the Rust heap and the QuickJS heap that neither
+//! GC can see through. Storing plain owned Strings and re-resolving the
+//! function fresh from `globalThis` on every call sidesteps the cycle
+//! entirely, at the cost of a cheap property lookup per call instead of a
+//! pre-resolved handle.
 
-use rquickjs::Ctx;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use rquickjs::{Ctx, Object, Value};
 use tokio::runtime::Handle;
 
 use crate::bindings::{CompletionQueue, IpcBus, RedrawRequest, WindowController};
 use crate::quickjs_runtime::QuickJsRuntime;
 use crate::BackendRegistry;
+
+/// `cmd_name -> (global_name, export_key)` for every exported function across
+/// all loaded JS plugins, prefixed per `JsPlugin::prefix` (e.g. `"db.getAll"`
+/// -> `("__glyx_plugin_db", "getAll")`). No JS values held in Rust — see the
+/// module doc for why.
+pub(crate) type JsBackendCommands = Rc<HashMap<String, (String, String)>>;
+
+/// Eval every JS plugin's bundled IIFE and collect its exported function
+/// locations. Mirrors `bindings::mod::register_all`'s V8 pass (same
+/// combined-eval + walk-own-properties approach), just via rquickjs.
+pub(crate) fn eval_js_plugins<'js>(ctx: &Ctx<'js>, plugins: &crate::JsPlugins) -> JsBackendCommands {
+    let mut out: HashMap<String, (String, String)> = HashMap::new();
+    if plugins.is_empty() {
+        return Rc::new(out);
+    }
+
+    let combined: String = plugins.iter()
+        .map(|p| p.bundled_js.as_str())
+        .collect::<Vec<_>>()
+        .join(";\n");
+    if let Err(e) = ctx.eval::<(), _>(combined) {
+        log::error!("[plugins] eval error: {e}");
+    }
+
+    let globals = ctx.globals();
+    for plugin in plugins.iter() {
+        let exports_val: Value = match globals.get(plugin.global_name.as_str()) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let Some(exports) = exports_val.into_object() else {
+            log::warn!("[plugins] plugin {:?} did not set global '{}'", plugin.prefix, plugin.global_name);
+            continue;
+        };
+        for result in exports.props::<String, Value>() {
+            let Ok((key, val)) = result else { continue };
+            if key.is_empty() || !val.is_function() { continue; }
+            let cmd_name = match &plugin.prefix {
+                Some(ns) => format!("{ns}.{key}"),
+                None     => key.clone(),
+            };
+            out.insert(cmd_name, (plugin.global_name.clone(), key.clone()));
+            log::info!("[plugins] registered JS command '{}' from plugin {:?}", key, plugin.prefix);
+        }
+    }
+    Rc::new(out)
+}
+
+/// Look up a registered JS command's function fresh from `globalThis` — see
+/// the module doc for why this isn't a pre-resolved `Persistent<Function>`.
+fn resolve_js_command<'js>(ctx: &Ctx<'js>, global_name: &str, key: &str) -> rquickjs::Result<rquickjs::Function<'js>> {
+    let globals = ctx.globals();
+    let exports: Object<'js> = globals.get(global_name)?;
+    exports.get(key)
+}
 
 /// `__glyx_window_create(optsJson) -> Promise<string>` — handle as string.
 pub(crate) fn window_create<'js>(
@@ -85,13 +157,21 @@ pub(crate) fn ipc_poll(ipc_bus: &IpcBus, my_handle: u32) -> String {
     format!("[{}]", items.join(","))
 }
 
-/// `__glyx_backend_call(name, argsJson) -> Promise<string>` — async Rust
-/// command path only (see module doc for the sync-JS-handler path that's
-/// NOT ported).
+/// `__glyx_backend_call(name, argsJson) -> Promise<string>` — checks the
+/// JS-plugin command map first (sync call, the plugin's own `async fn`
+/// returns the Promise directly), then falls back to the async Rust-command
+/// registry, matching V8's `backend_call_callback` precedence exactly.
 pub(crate) fn backend_call<'js>(
     ctx: Ctx<'js>, name: String, args_json: String, commands: BackendRegistry,
+    js_commands: crate::quickjs_ipc::JsBackendCommands,
     queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>,
 ) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    if let Some((global_name, key)) = js_commands.get(&name) {
+        let f = resolve_js_command(&ctx, global_name, key)?;
+        let parsed_args: Value<'js> = ctx.json_parse(args_json)?;
+        return f.call((parsed_args,));
+    }
+
     let Some(handler) = commands.get(&name).cloned() else {
         return QuickJsRuntime::reject_now(&ctx, format!("backend.{name}: no such command registered"));
     };

@@ -869,6 +869,10 @@ pub fn run(mut config: AppConfig) -> bool {
 
     // Wrap in Arc so secondary-window creation can reuse them.
     let js_src_arc        = Arc::new(js_src);
+    // Only read in the #[cfg(feature = "v8")] snapshot-restore branch below —
+    // QuickJS has no snapshot equivalent, so this is unused (by design) in a
+    // quickjs-only build.
+    #[cfg_attr(not(feature = "v8"), allow(unused_variables))]
     let snapshot_blob_arc = Arc::new(snapshot_blob);
     let extensions_arc    = Arc::new(extensions);
     let js_plugins_arc: glyx_runtime::JsPlugins = Arc::new(js_plugins);
@@ -1092,11 +1096,11 @@ pub fn run(mut config: AppConfig) -> bool {
                 };
 
                 // QuickJS has no snapshot equivalent — this uses eval-from-source
-                // every time, no bytecode precompilation path yet. IPC/multi-window
-                // and the async-Rust-command half of backend_call are wired via
-                // `new_with_ipc`; the sync-JS-registered-handler half of backend_call
-                // (dev-mode plugin hot-reload) is still V8-only — see
-                // memory/quickjs-milestone0-progress.md.
+                // every time, no bytecode precompilation path yet. IPC/multi-window,
+                // the async-Rust-command half of backend_call, AND JS plugins
+                // (backend.<name>.<fn>()) are all wired via `new_with_ipc`. Unlike
+                // V8, there's no dev-mode hot-reload for a plugin edit yet — a
+                // full window restart picks up the change instead.
                 #[cfg(feature = "quickjs")]
                 let mut rt: Box<dyn glyx_runtime::JsRuntime> = Box::new(
                     glyx_runtime::QuickJsRuntime::new_with_ipc(
@@ -1105,6 +1109,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         Some(window_ctrl.clone()),
                         Arc::clone(&ipc_clone), window_handle, Arc::clone(&nwid),
                         Arc::clone(&backend_registry),
+                        Arc::clone(&js_plugins_arc),
                     ).expect("QuickJsRuntime::new_with_ipc")
                 );
 

@@ -540,6 +540,9 @@ pub(super) fn load_splash_state() -> Option<SplashState> {
 /// Dev mode gets a higher floor (32 MB) to absorb HMR double-eval churn.
 /// Prod floor is 24 MB — enough headroom for the React + framework baseline
 /// without squeezing small bundles into OOM territory.
+///
+/// V8-only — QuickJS has no isolate-heap-limit equivalent wired up yet.
+#[cfg(feature = "v8")]
 pub(super) fn calc_heap_mb(bundle_bytes: usize, is_dev: bool) -> usize {
     const MB: usize = 1024 * 1024;
     let base = ((bundle_bytes * 12) / MB).max(24).min(256);

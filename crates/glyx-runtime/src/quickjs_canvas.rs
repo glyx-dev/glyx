@@ -11,8 +11,10 @@
 
 use rquickjs::{ArrayBuffer, Ctx, Function, TypedArray, Value};
 
-use crate::bindings::{decode_canvas_binary, CanvasCmd, RaycastRequest, RaycastRequestQueue, RaycastResults, SceneCommand, SceneQueue};
+use crate::bindings::{decode_canvas_binary, CanvasCmd, SceneCommand, SceneQueue};
 
+// Only used by canvas3d_raycast below, which is `#[cfg(feature = "canvas3d")]`.
+#[cfg(feature = "canvas3d")]
 static NEXT_RAYCAST_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 pub(crate) fn canvas_update(id: u32, json: String, scene: &SceneQueue) {

@@ -1,33 +1,19 @@
 //! `QuickJsRuntime` — the QuickJS-based implementation of `JsRuntime`, built
 //! on the synchronous `rquickjs::{Runtime, Context}` API (not
 //! `AsyncRuntime`/`AsyncContext`, which require an async executor around
-//! every call — `glyx-core`'s frame loop is synchronous, driven by winit,
-//! and picking the async story is explicitly deferred to Opt-4 in
-//! QUICKJS_PERFORMANCE_PLAN.md's addendum until there's profiling data to
-//! decide it with, not guessed here).
+//! every call — `glyx-core`'s frame loop is synchronous, driven by winit).
 //!
-//! ## Scope of this first slice (see memory/quickjs-milestone0-progress.md)
-//!
-//! This proves the `JsRuntime` trait is genuinely satisfiable by a second
-//! engine and wires up the Rust-side plumbing (event queue, layout cache,
-//! scene-command queue, frame-callback dispatch) using the SAME
+//! Binding coverage mirrors `bind_*.rs`'s V8 registration (fs, db, network,
+//! ai, media, tray, updater, video, JS plugins, ...) via the same
 //! engine-neutral types `V8Runtime` uses (`EventQueue`, `LayoutCache`,
 //! `SceneQueue`, `DbPools`, `WebviewEvents`, `VideoEvents`, ...) from
-//! `bindings::mod` — those types have zero V8 dependencies, confirmed while
-//! gating the V8-specific half of that module behind `feature = "v8"`.
-//!
-//! **Not yet ported**: the bulk of the ~90 async `__glyx_*` host bindings
-//! (fs, db, network, ai, media, ...) that `bind_*.rs` registers for V8.
-//! Three bindings are registered here: two trivial sync ones (`__glyx_log`,
-//! `__glyx_getTime`) proving plain registration works, and one genuinely
-//! async, capability-gated one (`__glyx_battery_getStatus`, mirroring
-//! `bind_sys.rs`'s V8 implementation) proving the harder cross-thread
-//! completion path (Opt-4) and capability-rejection reuse (Opt-3) both
-//! work end-to-end. A real QuickJS app bundle will not run correctly
-//! against this yet — porting the rest is the large, separate "Phase 2:
-//! core host APIs" effort the plan itself estimates at 1-2 weeks.
+//! `bindings::mod`. Known gaps vs. V8: no snapshot/precompilation path (eval
+//! from source every launch), and JS-plugin hot-reload during `glyx dev`
+//! (static registration at startup works; a plugin edit needs a window
+//! restart to pick up, unlike V8's `reload_plugin`).
 
 use std::sync::Arc;
+use std::rc::Rc;
 use std::collections::VecDeque;
 
 use rquickjs::{Context, Runtime as QjsRuntime, Function, Promise, Persistent, Ctx, Value};
@@ -113,6 +99,7 @@ pub struct QuickJsRuntime {
     my_handle:          u32,
     next_window_id:     Arc<std::sync::atomic::AtomicU32>,
     backend_commands:   crate::BackendRegistry,
+    js_plugins:         crate::JsPlugins,
 }
 
 impl QuickJsRuntime {
@@ -132,7 +119,8 @@ impl QuickJsRuntime {
         let ipc_bus = crate::bindings::new_ipc_bus();
         let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
         let backend_commands: crate::BackendRegistry = Arc::new(std::collections::HashMap::new());
-        Self::new_with_ipc(perf_state, tokio, redraw, window, ipc_bus, 0, next_window_id, backend_commands)
+        let js_plugins: crate::JsPlugins = Arc::new(vec![]);
+        Self::new_with_ipc(perf_state, tokio, redraw, window, ipc_bus, 0, next_window_id, backend_commands, js_plugins)
     }
 
     /// Create a new QuickJS runtime and join it to the shared IPC bus —
@@ -149,6 +137,7 @@ impl QuickJsRuntime {
         my_handle: u32,
         next_window_id: Arc<std::sync::atomic::AtomicU32>,
         backend_commands: crate::BackendRegistry,
+        js_plugins: crate::JsPlugins,
     ) -> Result<Self, RuntimeError> {
         ipc_bus.lock().entry(my_handle).or_insert_with(|| Arc::new(parking_lot::Mutex::new(VecDeque::new())));
 
@@ -239,7 +228,7 @@ impl QuickJsRuntime {
             events, layout_cache, scene, perf_state, deeplink_url_queue,
             db_pools, video_events, next_video_id, webview_events,
             raycast_requests, raycast_results,
-            ipc_bus, my_handle, next_window_id, backend_commands,
+            ipc_bus, my_handle, next_window_id, backend_commands, js_plugins,
         };
         this.register_core_bindings()?;
         this.install_polyfills()?;
@@ -423,6 +412,7 @@ impl QuickJsRuntime {
             my_handle:        self.my_handle,
             next_window_id:   Arc::clone(&self.next_window_id),
             backend_commands: Arc::clone(&self.backend_commands),
+            js_plugins:       Arc::clone(&self.js_plugins),
         };
         self.ctx.with(|ctx| do_register(ctx, reg))
             .map_err(|e| RuntimeError::CompileError(format!("quickjs binding registration: {e}")))
@@ -519,12 +509,17 @@ struct RegisterState {
     webview_events: WebviewEvents,
     video_events:   VideoEvents,
     next_video_id:  Arc<std::sync::atomic::AtomicU32>,
+    // Only read inside the `#[cfg(feature = "canvas3d")]` raycast-binding
+    // block below — unused (by design) in a canvas3d-less build.
+    #[allow(dead_code)]
     raycast_requests: crate::bindings::RaycastRequestQueue,
+    #[allow(dead_code)]
     raycast_results:  crate::bindings::RaycastResults,
     ipc_bus:          crate::bindings::IpcBus,
     my_handle:        u32,
     next_window_id:   Arc<std::sync::atomic::AtomicU32>,
     backend_commands: crate::BackendRegistry,
+    js_plugins:       crate::JsPlugins,
 }
 
 /// Registers every `__glyx_*` binding for this backend. A plain fn item
@@ -1269,11 +1264,21 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let f = Function::new(ctx.clone(), move || crate::quickjs_ipc::ipc_poll(&ipc_bus, my_handle))?;
         globals.set("__glyx_ipc_poll", f)?;
 
+        // Eval each JS plugin's bundled IIFE (sets globalThis.<global_name> to
+        // its exports object), then walk each exports object's own function
+        // properties into `js_backend_commands`, mirroring V8's identical
+        // pass in bindings/mod.rs's register_all. Static registration only —
+        // no dev-mode hot-reload port yet (V8's reload_plugin equivalent),
+        // so a plugin edit during `glyx dev` needs a full window restart on
+        // QuickJS today, unlike V8.
+        let js_backend_commands = crate::quickjs_ipc::eval_js_plugins(&ctx, &reg.js_plugins);
+
         let commands = reg.backend_commands.clone();
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
         let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, name: String, args_json: Opt<String>| {
             crate::quickjs_ipc::backend_call(
                 ctx, name, args_json.0.unwrap_or_else(|| "{}".to_string()), commands.clone(),
+                Rc::clone(&js_backend_commands),
                 Arc::clone(&queue), tokio.clone(), redraw.clone(),
             )
         })?;
@@ -1745,6 +1750,77 @@ mod tests {
         let rt = QuickJsRuntime::new(perf, tokio_rt.handle().clone(), None, None)
             .expect("QuickJsRuntime::new should succeed");
         (tokio_rt, rt)
+    }
+
+    /// Same as `new_runtime`, but with one JS plugin loaded — for exercising
+    /// `eval_js_plugins`/`backend_call`'s JS-command path end to end.
+    fn new_runtime_with_plugin(prefix: Option<&str>, bundled_js: &str, global_name: &str) -> (tokio::runtime::Runtime, QuickJsRuntime) {
+        let tokio_rt = tokio::runtime::Runtime::new().expect("tokio runtime should build");
+        let perf = Arc::new(parking_lot::Mutex::new(glyx_perf::PerfState::new()));
+        let ipc_bus = crate::bindings::new_ipc_bus();
+        let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let backend_commands: crate::BackendRegistry = Arc::new(std::collections::HashMap::new());
+        let js_plugins: crate::JsPlugins = Arc::new(vec![crate::JsPlugin {
+            prefix: prefix.map(String::from),
+            bundled_js: bundled_js.to_string(),
+            global_name: global_name.to_string(),
+            capabilities: vec![],
+            entry: None,
+        }]);
+        let rt = QuickJsRuntime::new_with_ipc(
+            perf, tokio_rt.handle().clone(), None, None,
+            ipc_bus, 0, next_window_id, backend_commands, js_plugins,
+        ).expect("QuickJsRuntime::new_with_ipc should succeed");
+        (tokio_rt, rt)
+    }
+
+    #[test]
+    fn js_plugin_export_is_registered_and_callable_via_backend_call() {
+        let (_tokio_rt, mut rt) = new_runtime_with_plugin(
+            Some("notes"),
+            "globalThis.__glyx_plugin_notes = { getAll: async function(args) { return { echoed: args.title }; } };",
+            "__glyx_plugin_notes",
+        );
+        rt.eval(
+            "globalThis.__out = null; \
+             __glyx_backend_call('notes.getAll', JSON.stringify({ title: 'hi' })) \
+                .then(r => { globalThis.__out = JSON.stringify(r); });"
+        ).expect("eval should succeed");
+        rt.tick(); // drain the resolved microtask into globalThis.__out
+        let out = rt.eval("globalThis.__out").expect("eval should succeed");
+        assert!(out.contains("\"echoed\":\"hi\""), "got: {out}");
+    }
+
+    #[test]
+    fn js_plugin_without_prefix_registers_under_the_bare_function_name() {
+        let (_tokio_rt, mut rt) = new_runtime_with_plugin(
+            None,
+            "globalThis.__glyx_plugin_util = { ping: async function() { return 'pong'; } };",
+            "__glyx_plugin_util",
+        );
+        rt.eval(
+            "globalThis.__out = null; \
+             __glyx_backend_call('ping', '{}').then(r => { globalThis.__out = r; });"
+        ).expect("eval should succeed");
+        rt.tick();
+        let out = rt.eval("globalThis.__out").expect("eval should succeed");
+        assert!(out.contains("pong"), "got: {out}");
+    }
+
+    #[test]
+    fn unknown_backend_command_still_rejects_with_a_plugin_loaded() {
+        let (_tokio_rt, mut rt) = new_runtime_with_plugin(
+            Some("notes"),
+            "globalThis.__glyx_plugin_notes = { getAll: async function() { return []; } };",
+            "__glyx_plugin_notes",
+        );
+        rt.eval(
+            "globalThis.__err = null; \
+             __glyx_backend_call('notes.missing', '{}').catch(e => { globalThis.__err = String(e); });"
+        ).expect("eval should succeed");
+        rt.tick();
+        let out = rt.eval("globalThis.__err").expect("eval should succeed");
+        assert!(out.contains("no such command"), "got: {out}");
     }
 
     #[test]

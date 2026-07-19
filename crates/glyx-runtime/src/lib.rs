@@ -53,6 +53,7 @@ extern "C" {}
 
 pub use glyx_macros::{glyx_plugin, glyx_command};
 
+#[cfg(feature = "v8")]
 use std::sync::Once;
 use thiserror::Error;
 

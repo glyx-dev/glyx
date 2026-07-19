@@ -3,12 +3,16 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(feature = "v8")]
+use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 
+#[cfg(feature = "v8")]
 use base64::Engine as _;
+#[cfg(feature = "v8")]
 use tokio::runtime::Handle;
+#[cfg(feature = "v8")]
 use notify::RecommendedWatcher;
 
 #[cfg(feature = "v8")]

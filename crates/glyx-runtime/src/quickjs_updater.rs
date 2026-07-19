@@ -17,22 +17,16 @@ fn cap_denied<'js>(ctx: &Ctx<'js>, cap: &str) -> rquickjs::Result<rquickjs::Prom
     QuickJsRuntime::reject_now(ctx, format!("Capability required: {cap} — add it to glyx.config.json under \"capabilities\""))
 }
 
+// Owner/repo/binName come from glyx.config.json's `updater` block, read once
+// at startup into glyx-security's UpdateOrigin — see bind_updater.rs's V8
+// equivalent for the full rationale (this used to be an `option_env!`
+// compile-time constant that nothing in glyx-cli ever actually set).
 #[cfg(feature = "updater")]
-#[allow(dead_code)]
-const UPDATE_OWNER:    Option<&str> = option_env!("GLYX_UPDATE_OWNER");
-#[cfg(feature = "updater")]
-#[allow(dead_code)]
-const UPDATE_REPO:     Option<&str> = option_env!("GLYX_UPDATE_REPO");
-#[cfg(feature = "updater")]
-#[allow(dead_code)]
-const UPDATE_BIN_NAME: Option<&str> = option_env!("GLYX_UPDATE_BIN_NAME");
-
-#[cfg(feature = "updater")]
-fn update_origin() -> Result<(&'static str, &'static str, &'static str), String> {
-    match (UPDATE_OWNER, UPDATE_REPO, UPDATE_BIN_NAME) {
-        (Some(o), Some(r), Some(b)) => Ok((o, r, b)),
-        _ => Err("Update origin not configured. Set updater.owner, updater.repo, \
-             and updater.binName in glyx.config and rebuild.".to_string()),
+fn update_origin() -> Result<(String, String, String), String> {
+    match glyx_security::update_origin() {
+        Some(o) => Ok((o.owner.clone(), o.repo.clone(), o.bin_name.clone())),
+        None => Err("Update origin not configured. Set updater.owner, updater.repo, \
+             and updater.binName in glyx.config.json.".to_string()),
     }
 }
 
@@ -58,7 +52,7 @@ pub(crate) fn updater_check<'js>(
         tokio::task::spawn_blocking(move || -> Result<String, String> {
             let (owner, repo, _bin) = update_origin()?;
             let releases = self_update::backends::github::ReleaseList::configure()
-                .repo_owner(owner).repo_name(repo)
+                .repo_owner(&owner).repo_name(&repo)
                 .build().map_err(|e| e.to_string())?
                 .fetch().map_err(|e| e.to_string())?;
             let latest = releases.first();
@@ -80,7 +74,7 @@ pub(crate) fn updater_update<'js>(
         tokio::task::spawn_blocking(move || -> Result<String, String> {
             let (owner, repo, bin_name) = update_origin()?;
             let releases = self_update::backends::github::ReleaseList::configure()
-                .repo_owner(owner).repo_name(repo)
+                .repo_owner(&owner).repo_name(&repo)
                 .build().map_err(|e| e.to_string())?
                 .fetch().map_err(|e| e.to_string())?;
             let latest = releases.first().ok_or_else(|| "no releases found".to_string())?;

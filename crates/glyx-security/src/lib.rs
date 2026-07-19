@@ -498,6 +498,39 @@ pub fn app_version() -> &'static str {
     APP_VERSION.get().map(|s| s.as_str()).unwrap_or("0.0.0")
 }
 
+// ── Update origin store ───────────────────────────────────────────────────────
+//
+// The GitHub owner/repo/binName the auto-updater checks against. Read from
+// `glyx.config.json`'s `updater` block at startup — NOT from a build-time
+// `option_env!`, since the real build pipeline (`glyx build`) mostly ships a
+// shared, cached `glyx-runner` binary plus embedded/runtime-supplied config
+// (see `glyx-core::config::read_config_json`'s three sources: embedded
+// payload, `GLYX_CONFIG_JSON` env var, or the config file itself) rather than
+// a full per-app `cargo build` with unique compile-time constants baked in.
+// This mirrors `init_version`/`app_version` above exactly.
+
+/// GitHub owner/repo + release asset binary-name prefix for the auto-updater.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateOrigin {
+    pub owner:    String,
+    pub repo:     String,
+    pub bin_name: String,
+}
+
+static UPDATE_ORIGIN: OnceLock<UpdateOrigin> = OnceLock::new();
+
+/// Store the update origin declared in `glyx.config.json`'s `updater` block.
+/// Must be called once during startup. Subsequent calls are silently ignored.
+pub fn init_update_origin(origin: UpdateOrigin) {
+    let _ = UPDATE_ORIGIN.set(origin);
+}
+
+/// Returns the configured update origin, or `None` if `glyx.config.json` has
+/// no `updater` block (or `init_update_origin` was never called).
+pub fn update_origin() -> Option<&'static UpdateOrigin> {
+    UPDATE_ORIGIN.get()
+}
+
 /// Lock in the capability set from the parsed config.
 ///
 /// Must be called once during startup before any JS bindings execute.

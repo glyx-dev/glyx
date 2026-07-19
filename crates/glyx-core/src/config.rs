@@ -26,6 +26,15 @@ pub(super) struct SplashCfgJson {
     pub(super) image_scale: Option<f64>,
 }
 
+/// Auto-updater origin from `glyx.config.json`'s `updater` block.
+#[derive(serde::Deserialize)]
+pub(super) struct UpdaterCfgJson {
+    pub(super) owner:    String,
+    pub(super) repo:     String,
+    #[serde(rename = "binName")]
+    pub(super) bin_name: String,
+}
+
 /// A single JS plugin entry from `glyx.config.json`.
 #[derive(serde::Deserialize, Default)]
 pub(super) struct PluginConfigJson {
@@ -49,6 +58,7 @@ pub(super) struct GlyxConfigFile {
     /// when omitted or empty.
     #[serde(default)]
     pub(super) locales:      Option<Vec<String>>,
+    pub(super) updater:      Option<UpdaterCfgJson>,
 }
 
 /// Canvas2D transport settings from `glyx.config.json`.
@@ -392,6 +402,14 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
         .cloned()
         .unwrap_or_else(|| "0.0.0".to_string());
     glyx_security::init_version(version);
+
+    if let Some(u) = file.as_ref().and_then(|f| f.updater.as_ref()) {
+        glyx_security::init_update_origin(glyx_security::UpdateOrigin {
+            owner:    u.owner.clone(),
+            repo:     u.repo.clone(),
+            bin_name: u.bin_name.clone(),
+        });
+    }
 
     let caps = file.and_then(|f| f.capabilities).unwrap_or_default();
     (caps, plugins)

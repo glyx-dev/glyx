@@ -59,6 +59,11 @@ pub fn system_watch_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
+    if !glyx_security::get().system {
+        throw_cap_error(scope, "system");
+        return;
+    }
+
     let kind = v8_arg_to_string(scope, &args, 0);
     let interval_ms = args.get(1).number_value(scope).unwrap_or(0.0);
     // Clamp: darkMode/batterySaver are registry reads (cheap, 2s default);
@@ -413,12 +418,8 @@ pub fn clipboard_read_text_callback(
         rv.set(reject_cap_promise(scope, "clipboard").into());
         return;
     }
-    // Read synchronously on the V8 thread. clipboard_win calls Win32 OpenClipboard/
-    // GetClipboardData which require a thread with a message pump â€" the main thread
-    // qualifies, but spawn_blocking worker threads do not (causes silent failures when
-    // pasting from external apps). The clipboard read is ~0ms so blocking is fine.
-    let text = clipboard_win::get_clipboard::<String, _>(clipboard_win::formats::Unicode)
-        .unwrap_or_else(|e| { log::warn!("[clipboard] read failed: {e}"); String::new() });
+    // Read synchronously on the V8 thread — the clipboard read is ~0ms.
+    let text = crate::bindings::read_clipboard_text();
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise  = resolver.get_promise(scope);
     let v8_str   = v8::String::new(scope, &text)
@@ -442,10 +443,7 @@ pub fn clipboard_write_text_callback(
     let text     = v8_arg_to_string(scope, &args, 0);
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise  = resolver.get_promise(scope);
-    // Write synchronously â€" same reason as readText (Win32 clipboard needs message pump thread).
-    if let Err(e) = clipboard_win::set_clipboard(clipboard_win::formats::Unicode, &text) {
-        log::warn!("[clipboard] write failed: {e}");
-    }
+    crate::bindings::write_clipboard_text(&text);  // synchronous, same reason as readText
     let undef = v8::undefined(scope);
     resolver.resolve(scope, undef.into());
     rv.set(promise.into());

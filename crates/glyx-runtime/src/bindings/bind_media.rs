@@ -717,8 +717,8 @@ pub fn camera_close_callback(
     state.scene.lock().push_back(SceneCommand::CloseCamera { handle_id });
 }
 
-/// `__glyx_camera_capture(handleId) â†’ Promise<string>` â€” saves current frame as PNG.
-/// Resolves with the absolute path to the saved PNG file.
+/// `__glyx_camera_capture(handleId) â†’ Promise<string>` â€” saves current frame as JPEG.
+/// Resolves with the absolute path to the saved `.jpg` file.
 #[cfg(feature = "camera")]
 pub fn camera_capture_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,

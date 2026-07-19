@@ -20,7 +20,6 @@ glyx-tray     = { path = "../glyx-tray" }
 serde_json     = { workspace = true }
 rfd                 = { workspace = true }
 arboard             = { workspace = true }
-clipboard-win       = { workspace = true }
 notify-rust         = { workspace = true }
 raw-window-handle   = { workspace = true }
 reqwest             = { workspace = true, optional = true }
@@ -60,6 +59,11 @@ hex                = { workspace = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader"] }
 notify             = { workspace = true }
+# Windows-only clipboard backend — clipboard-win wraps Win32 OpenClipboard/
+# GetClipboardData and doesn't build on other targets. macOS/Linux use the
+# cross-platform `arboard` dep above instead (see bindings/mod.rs's
+# read_clipboard_text/write_clipboard_text).
+clipboard-win       = { workspace = true }
 
 [features]
 default = ["v8", "embed-icu"]

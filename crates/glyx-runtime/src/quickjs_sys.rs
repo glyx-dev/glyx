@@ -96,8 +96,7 @@ pub(crate) fn dialog_open_folder<'js>(
 pub(crate) fn clipboard_read_text<'js>(ctx: Ctx<'js>) -> rquickjs::Result<rquickjs::Promise<'js>> {
     if !glyx_security::get().clipboard { return cap_denied(&ctx, "clipboard"); }
     let (handle, promise) = QuickJsRuntime::make_promise(&ctx)?;
-    let text = clipboard_win::get_clipboard::<String, _>(clipboard_win::formats::Unicode)
-        .unwrap_or_else(|e| { log::warn!("[clipboard] read failed: {e}"); String::new() });
+    let text = crate::bindings::read_clipboard_text();
     QuickJsRuntime::settle(&ctx, handle, Ok(text));
     Ok(promise)
 }
@@ -105,9 +104,7 @@ pub(crate) fn clipboard_read_text<'js>(ctx: Ctx<'js>) -> rquickjs::Result<rquick
 pub(crate) fn clipboard_write_text<'js>(ctx: Ctx<'js>, text: String) -> rquickjs::Result<rquickjs::Promise<'js>> {
     if !glyx_security::get().clipboard { return cap_denied(&ctx, "clipboard"); }
     let (handle, promise) = QuickJsRuntime::make_promise(&ctx)?;
-    if let Err(e) = clipboard_win::set_clipboard(clipboard_win::formats::Unicode, &text) {
-        log::warn!("[clipboard] write failed: {e}");
-    }
+    crate::bindings::write_clipboard_text(&text);
     QuickJsRuntime::settle(&ctx, handle, Ok(String::new()));
     Ok(promise)
 }
@@ -331,10 +328,13 @@ fn watch_payload(kind: &str, mem_sys: &mut Option<sysinfo::System>) -> String {
     }
 }
 
-pub(crate) fn system_watch(
-    kind: String, interval_ms: f64,
+pub(crate) fn system_watch<'js>(
+    ctx: Ctx<'js>, kind: String, interval_ms: f64,
     events: crate::bindings::EventQueue, tokio: Handle, redraw: Option<RedrawRequest>,
-) -> u32 {
+) -> rquickjs::Result<u32> {
+    if !glyx_security::get().system {
+        return Err(rquickjs::Exception::throw_message(&ctx, "Capability required: system"));
+    }
     let default_ms = match kind.as_str() { "darkMode" | "batterySaver" => 2_000.0, _ => 10_000.0 };
     let interval = std::time::Duration::from_millis(if interval_ms >= 1000.0 { interval_ms } else { default_ms } as u64);
     let id = NEXT_WATCH_ID.fetch_add(1, Ordering::Relaxed);

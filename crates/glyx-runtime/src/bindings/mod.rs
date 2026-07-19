@@ -59,6 +59,46 @@ pub fn record_js_crash(message: &str, source: &str) {
     let _    = std::fs::write(path, json.as_bytes());
 }
 
+// ── Clipboard — shared, engine-neutral ─────────────────────────────────────────
+//
+// Windows uses `clipboard-win` directly (Win32 OpenClipboard/GetClipboardData
+// need a thread with a message pump — the main thread qualifies, worker
+// threads don't). macOS/Linux use the cross-platform `arboard` crate instead,
+// since `clipboard-win` is a Windows-only wrapper. Both V8's bind_sys.rs and
+// QuickJS's quickjs_sys.rs call these rather than duplicating the platform
+// split — it used to be duplicated with the Windows-only path unconditional
+// in both places, which doesn't build on macOS/Linux.
+
+pub fn read_clipboard_text() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        clipboard_win::get_clipboard::<String, _>(clipboard_win::formats::Unicode)
+            .unwrap_or_else(|e| { log::warn!("[clipboard] read failed: {e}"); String::new() })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        arboard::Clipboard::new()
+            .and_then(|mut cb| cb.get_text())
+            .unwrap_or_else(|e| { log::warn!("[clipboard] read failed: {e}"); String::new() })
+    }
+}
+
+pub fn write_clipboard_text(text: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Err(e) = clipboard_win::set_clipboard(clipboard_win::formats::Unicode, text) {
+            log::warn!("[clipboard] write failed: {e}");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+            Ok(())  => {}
+            Err(e)  => log::warn!("[clipboard] write failed: {e}"),
+        }
+    }
+}
+
 // All of these bind_*.rs submodules are V8 FunctionCallback-based glue —
 // 100% V8-specific, unlike the shared data model below (InputEvent,
 // SceneCommand, NodeProps, etc.). A QuickJS backend needs its own parallel

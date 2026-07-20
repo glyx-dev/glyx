@@ -83,7 +83,7 @@ image     = { version = "0.25", default-features = false, features = ["png", "jp
 notify    = "6.1"
 sqlx            = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 libsqlite3-sys  = { version = "0.30", features = ["bundled"] }
-rfd                 = { version = "0.14", features = ["tokio"] }
+rfd                 = { version = "0.14", default-features = false, features = ["xdg-portal", "tokio"] }
 arboard             = "3"
 keyring             = "3"
 clipboard-win       = "5"

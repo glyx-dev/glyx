@@ -84,11 +84,40 @@ function _ChartCanvas({ width, height, draw, deps }) {
 // Draws the two solid axis lines (Y at PAD.left, X at PAD.top+H) — distinct
 // from the light `showGrid` reference lines. This is what makes a chart read
 // as "plotted against axes" rather than just floating shapes on a canvas.
-function _drawAxes(ctx, { PAD, W, H }) {
+const TICK_LEN = 5;
+
+// `yTicks`/`xTicks` are pixel positions (not data values) — the same
+// positions the label loop already computed, so every tick lines up exactly
+// under/beside its label rather than being a separately-computed guess.
+function _drawAxes(ctx, { PAD, W, H, yTicks = [], xTicks = [] }) {
   ctx.strokeStyle = AXIS;
   ctx.lineWidth = 1.5;
   ctx.strokeLine(PAD.left, PAD.top, PAD.left, PAD.top + H);       // Y axis
   ctx.strokeLine(PAD.left, PAD.top + H, PAD.left + W, PAD.top + H); // X axis
+
+  ctx.lineWidth = 1;
+  for (const y of yTicks) {
+    ctx.strokeLine(PAD.left - TICK_LEN, y, PAD.left, y);
+  }
+  for (const x of xTicks) {
+    ctx.strokeLine(x, PAD.top + H, x, PAD.top + H + TICK_LEN);
+  }
+}
+
+// How many X-axis labels actually fit without overlapping, given the real
+// plot width — not a flat "show at most 8" rule. There's no text-measurement
+// API exposed to canvas draw code, so this estimates label width from
+// character count at the fixed 11px tick-label font size rather than
+// measuring exactly; canvas fillText also has no rotate/transform primitive
+// (checked — none exists), so skipping labels is the only decluttering
+// lever available today, not rotating them.
+function _xLabelStep(items, availableWidth, avgCharPx = 6.2, minGapPx = 14) {
+  const n = items.length;
+  if (n <= 1 || availableWidth <= 0) return 1;
+  const maxLabelChars = Math.max(...items.map((s) => String(s).length), 1);
+  const labelWidth = maxLabelChars * avgCharPx + minGapPx;
+  const maxVisible = Math.max(1, Math.floor(availableWidth / labelWidth));
+  return Math.max(1, Math.ceil(n / maxVisible));
 }
 
 // ── Tooltips + click ─────────────────────────────────────────────────────────
@@ -215,8 +244,15 @@ export function Legend({ items, onToggle, disabled = [], style }) {
 // Computes the pixel-space layout (padding, scales, toX/toY) once, shared by
 // the draw pass, the axis-label pass, and the tooltip hit-point pass — so
 // everything drawn always agrees exactly with what's hit-tested.
+// Padding depends only on `showLabels`, not on data — shared by the full
+// layout pass and by `_useZoomPan`, which needs the real plot-area width
+// (not the raw chart `width`) to map drag pixels to data-index shifts 1:1.
+function _linePad(showLabels) {
+  return { top: 16, right: 16, bottom: showLabels ? 34 : 12, left: showLabels ? 46 : 12 };
+}
+
 function _lineLayout({ data, width, height, showLabels }) {
-  const PAD = { top: 16, right: 16, bottom: showLabels ? 34 : 12, left: showLabels ? 46 : 12 };
+  const PAD = _linePad(showLabels);
   const W = width - PAD.left - PAD.right;
   const H = height - PAD.top - PAD.bottom;
   const ys = data.map((d) => d.y);
@@ -234,7 +270,7 @@ function _lineLikePoints(data, layout) {
   return data.map((d, i) => ({ cx: toX(i), cy: toY(d.y), label: String(d.x), value: d.y, raw: d }));
 }
 
-function _lineLike({ data, width, height, color, lineWidth, area, showGrid, showDots, showLabels, showAxes, hoverIdx }) {
+function _lineLike({ data, width, height, color, lineWidth, area, showGrid, showDots, showLabels, showAxes, showXTicks, showYTicks, hoverIdx }) {
   return (ctx) => {
     if (!data || data.length === 0) return;
     const { PAD, W, H, maxY, range, toX, toY } = _lineLayout({ data, width, height, showLabels });
@@ -284,8 +320,31 @@ function _lineLike({ data, width, height, color, lineWidth, area, showGrid, show
       ctx.strokeCircle(hx, hy, lineWidth + 3);
     }
 
-    // Axis lines drawn last so they sit crisply on top of grid/fill/line.
-    if (showAxes) _drawAxes(ctx, { PAD, W, H });
+    // Axis tick labels — drawn after the fill/line/dots (not before) so the
+    // semi-transparent area fill never paints over them, but before the
+    // axis lines so those stay crisp on top of everything. Tick pixel
+    // positions are collected here (same loop as the labels) so ticks
+    // always line up exactly under/beside their label.
+    const yTicks = [], xTicks = [];
+    if (showLabels) {
+      ctx.fillStyle = LABEL;
+      for (let i = 0; i <= 4; i++) {
+        const value = maxY - (range / 4) * i;
+        const y = PAD.top + (H / 4) * i;
+        ctx.fillText(_fmt(value), 6, y - 6, 11);
+        yTicks.push(y);
+      }
+      const step = _xLabelStep(data.map((d) => String(d.x)), W);
+      data.forEach((d, i) => {
+        if (i % step !== 0) return;
+        ctx.fillText(String(d.x), toX(i) - 10, height - 16, 11);
+        xTicks.push(toX(i));
+      });
+    }
+
+    // Axis lines (+ tick marks, if enabled) drawn last so they sit crisply
+    // on top of grid/fill/line.
+    if (showAxes) _drawAxes(ctx, { PAD, W, H, yTicks: showYTicks ? yTicks : [], xTicks: showXTicks ? xTicks : [] });
   };
 }
 
@@ -295,7 +354,7 @@ function _lineLike({ data, width, height, color, lineWidth, area, showGrid, show
 // adjusting the visible window size, and pan is `useDraggable` adjusting the
 // window's start index — both real, working interactions rather than a
 // synthesized approximation of wheel/pinch.
-function _useZoomPan(dataLength, { minVisible = 4 } = {}) {
+function _useZoomPan(dataLength, { minVisible = 4, trackWidth } = {}) {
   const [start, setStart] = useState(0);
   const [count, setCount] = useState(dataLength);
   const dragAnchor = useRef(0);
@@ -311,17 +370,21 @@ function _useZoomPan(dataLength, { minVisible = 4 } = {}) {
   const reset   = useCallback(() => { setCount(dataLength); setStart(0); }, [dataLength]);
 
   // useDraggable itself must be called unconditionally at the top level
-  // (Rules of Hooks) — the drag handlers close over `start`/`count` via refs
-  // instead of needing to be recreated as those values change.
-  const stateRef = useRef({ start, count, dataLength });
-  stateRef.current = { start, count, dataLength };
+  // (Rules of Hooks) — the drag handlers close over `start`/`count`/
+  // `trackWidth` via refs instead of needing to be recreated as those
+  // values change.
+  const stateRef = useRef({ start, count, dataLength, trackWidth });
+  stateRef.current = { start, count, dataLength, trackWidth };
   const onMount = useDraggable({
     onDragStart: () => { dragAnchor.current = stateRef.current.start; },
     onDragMove: ({ dx }) => {
-      const { count: c, dataLength: n } = stateRef.current;
-      // Drag distance in pixels → index shift, scaled by how many points
-      // are currently visible per pixel — feels the same at any zoom level.
-      const perPixel = c / 480; // approximate track width; good enough for pan feel
+      const { count: c, dataLength: n, trackWidth: tw } = stateRef.current;
+      // Drag distance in pixels → index shift, scaled by how many points are
+      // currently visible per pixel of the *actual* plot area (not the raw
+      // chart width, which includes label padding that data never occupies)
+      // — so a full-width drag always pans exactly across the visible
+      // window, at any chart size or zoom level.
+      const perPixel = c / Math.max(1, tw);
       const shift = Math.round(-dx * perPixel);
       const maxStart = Math.max(0, n - c);
       setStart(Math.min(maxStart, Math.max(0, dragAnchor.current + shift)));
@@ -350,19 +413,20 @@ function _ZoomControls({ onZoomIn, onZoomOut, onReset }) {
 export function LineChart({
   data, width = 480, height = 260, color = DEFAULT_PALETTE[0],
   lineWidth = 2, showGrid = true, showDots = true, showLabels = true,
-  showAxes = true, showTooltip = true, onPointPress, zoomPan = false,
+  showAxes = true, showXTicks = true, showYTicks = true, showTooltip = true, onPointPress, zoomPan = false,
 }) {
   const full = data || [];
-  const zp = _useZoomPan(full.length);
+  const pad = _linePad(showLabels);
+  const zp = _useZoomPan(full.length, { trackWidth: width - pad.left - pad.right });
   const visible = zoomPan ? full.slice(zp.start, zp.start + zp.count) : full;
   const [hoverIdx, setHoverIdx] = useState(null);
 
-  const draw = _lineLike({ data: visible, width, height, color, lineWidth, area: false, showGrid, showDots, showLabels, showAxes, hoverIdx });
+  const draw = _lineLike({ data: visible, width, height, color, lineWidth, area: false, showGrid, showDots, showLabels, showAxes, showXTicks, showYTicks, hoverIdx });
   const points = visible.length ? _lineLikePoints(visible, _lineLayout({ data: visible, width, height, showLabels })) : null;
 
   const canvas = React.createElement(_ChartWithTooltip, {
     width, height, draw, points, showTooltip, onPointPress, hoverIdx, setHoverIdx,
-    deps: [visible, width, height, color, lineWidth, showGrid, showDots, showLabels, showAxes, hoverIdx],
+    deps: [visible, width, height, color, lineWidth, showGrid, showDots, showLabels, showAxes, showXTicks, showYTicks, hoverIdx],
   });
   if (!zoomPan) return canvas;
   return React.createElement(
@@ -378,20 +442,21 @@ export function LineChart({
 
 export function AreaChart({
   data, width = 480, height = 260, color = DEFAULT_PALETTE[0],
-  lineWidth = 2, showGrid = true, showLabels = true,
-  showAxes = true, showTooltip = true, onPointPress, zoomPan = false,
+  lineWidth = 2, showGrid = true, showLabels = true, showDots = true,
+  showAxes = true, showXTicks = true, showYTicks = true, showTooltip = true, onPointPress, zoomPan = false,
 }) {
   const full = data || [];
-  const zp = _useZoomPan(full.length);
+  const pad = _linePad(showLabels);
+  const zp = _useZoomPan(full.length, { trackWidth: width - pad.left - pad.right });
   const visible = zoomPan ? full.slice(zp.start, zp.start + zp.count) : full;
   const [hoverIdx, setHoverIdx] = useState(null);
 
-  const draw = _lineLike({ data: visible, width, height, color, lineWidth, area: true, showGrid, showDots: false, showLabels, showAxes, hoverIdx });
+  const draw = _lineLike({ data: visible, width, height, color, lineWidth, area: true, showGrid, showDots, showLabels, showAxes, showXTicks, showYTicks, hoverIdx });
   const points = visible.length ? _lineLikePoints(visible, _lineLayout({ data: visible, width, height, showLabels })) : null;
 
   const canvas = React.createElement(_ChartWithTooltip, {
     width, height, draw, points, showTooltip, onPointPress, hoverIdx, setHoverIdx,
-    deps: [visible, width, height, color, lineWidth, showGrid, showLabels, showAxes, hoverIdx],
+    deps: [visible, width, height, color, lineWidth, showGrid, showDots, showLabels, showAxes, showXTicks, showYTicks, hoverIdx],
   });
   if (!zoomPan) return canvas;
   return React.createElement(
@@ -407,7 +472,7 @@ export function AreaChart({
 export function BarChart({
   data, width = 480, height = 260, color = DEFAULT_PALETTE[1],
   showGrid = true, showLabels = true, showAxes = true,
-  showTooltip = true, onPointPress,
+  showXTicks = true, showYTicks = true, showTooltip = true, onPointPress,
 }) {
   const [hoverIdx, setHoverIdx] = useState(null);
 
@@ -433,12 +498,20 @@ export function BarChart({
         ctx.strokeLine(PAD.left, y, PAD.left + W, y);
       }
     }
+    const yTicks = [], xTicks = [];
     if (showLabels) {
       ctx.fillStyle = LABEL;
       for (let i = 0; i <= 4; i++) {
-        ctx.fillText(_fmt(maxY - (maxY / 4) * i), 6, PAD.top + (H / 4) * i - 6, 11);
+        const y = PAD.top + (H / 4) * i;
+        ctx.fillText(_fmt(maxY - (maxY / 4) * i), 6, y - 6, 11);
+        yTicks.push(y);
       }
     }
+    // Same width-aware skip as line/area charts — BarChart previously drew
+    // every single bar's label unconditionally, which overlaps into an
+    // unreadable smear once there are more than a handful of bars.
+    const xLabelStep = showLabels ? _xLabelStep(data.map((d) => String(d.x)), W) : 1;
+
     data.forEach((d, i) => {
       const h = (d.y / maxY) * H;
       const x = PAD.left + slot * i + (slot - bw) / 2;
@@ -459,13 +532,14 @@ export function BarChart({
       }
       ctx.fillRect(x, y, bw, h);
 
-      if (showLabels) {
+      if (showLabels && i % xLabelStep === 0) {
         ctx.fillStyle = LABEL;
         ctx.fillText(String(d.x), x, height - 16, 11);
+        xTicks.push(x + bw / 2);
       }
     });
 
-    if (showAxes) _drawAxes(ctx, { PAD, W, H });
+    if (showAxes) _drawAxes(ctx, { PAD, W, H, yTicks: showYTicks ? yTicks : [], xTicks: showXTicks ? xTicks : [] });
   };
 
   const points = layout ? data.map((d, i) => {
@@ -478,7 +552,7 @@ export function BarChart({
 
   return React.createElement(_ChartWithTooltip, {
     width, height, draw, points, showTooltip, onPointPress, hoverIdx, setHoverIdx,
-    deps: [data, width, height, color, showGrid, showLabels, showAxes, hoverIdx],
+    deps: [data, width, height, color, showGrid, showLabels, showAxes, showXTicks, showYTicks, hoverIdx],
   });
 }
 

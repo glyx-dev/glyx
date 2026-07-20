@@ -136,3 +136,68 @@ if (typeof MessageChannel === 'undefined') {
     }
   };
 }
+
+// TextEncoder is a Web Platform API, not a V8 built-in — bare V8 isolates
+// don't have it unless the embedder provides it, and this one doesn't.
+// `canvas.js`'s `fillText` calls `encodeInto()` with no fallback (unlike
+// `api.js`'s `toBytes()`, which degrades to a manual byte loop when
+// TextEncoder is missing) — silently writing zero bytes every time, so
+// every Canvas `fillText()` call across the whole framework renders no
+// glyphs at all, with no error. Real UTF-8 encode/encodeInto, not a
+// Latin1-only shortcut, so non-ASCII text (labels, user content) works too.
+if (typeof TextEncoder === 'undefined') {
+  function _glyxUtf8Bytes(codePoint) {
+    if (codePoint < 0x80) return [codePoint];
+    if (codePoint < 0x800) {
+      return [0xc0 | (codePoint >> 6), 0x80 | (codePoint & 0x3f)];
+    }
+    if (codePoint < 0x10000) {
+      return [
+        0xe0 | (codePoint >> 12),
+        0x80 | ((codePoint >> 6) & 0x3f),
+        0x80 | (codePoint & 0x3f),
+      ];
+    }
+    return [
+      0xf0 | (codePoint >> 18),
+      0x80 | ((codePoint >> 12) & 0x3f),
+      0x80 | ((codePoint >> 6) & 0x3f),
+      0x80 | (codePoint & 0x3f),
+    ];
+  }
+
+  globalThis.TextEncoder = class TextEncoder {
+    get encoding() { return 'utf-8'; }
+
+    encode(input) {
+      const str = String(input ?? '');
+      const out = [];
+      for (let i = 0; i < str.length; i++) {
+        const code = str.codePointAt(i);
+        if (code > 0xffff) i++; // consumed a surrogate pair
+        out.push(..._glyxUtf8Bytes(code));
+      }
+      return new Uint8Array(out);
+    }
+
+    // Matches the spec shape canvas.js relies on: writes as many whole
+    // code points as fit in `dest`, returns { read, written } in JS
+    // string-unit / byte counts respectively — never writes a partial
+    // multi-byte sequence.
+    encodeInto(input, dest) {
+      const str = String(input ?? '');
+      let read = 0, written = 0;
+      for (let i = 0; i < str.length; i++) {
+        const code = str.codePointAt(i);
+        const isPair = code > 0xffff;
+        const bytes = _glyxUtf8Bytes(code);
+        if (written + bytes.length > dest.length) break;
+        for (let k = 0; k < bytes.length; k++) dest[written + k] = bytes[k];
+        written += bytes.length;
+        read += isPair ? 2 : 1;
+        if (isPair) i++;
+      }
+      return { read, written };
+    }
+  };
+}

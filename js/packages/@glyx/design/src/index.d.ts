@@ -1,4 +1,4 @@
-// @glyx/design — TypeScript declarations
+// @glyx-dev/design — TypeScript declarations
 // Auto-generated — do not edit manually.
 
 import type { ReactNode, CSSProperties } from 'react';
@@ -315,4 +315,18 @@ export declare function Breadcrumb(props: {
   items?:     Array<{ label: string; onPress?: () => void }>;
   separator?: string;
   style?:     Style;
+}): JSX.Element;
+
+// ── Window ──────────────────────────────────────────────────────────────────
+
+export declare function WindowControls(props: {
+  glyphColor?:      string;
+  hoverGlyphColor?: string;
+  hoverBg?:         string;
+  closeHoverBg?:    string;
+  minimizeIcon?:    string;
+  maximizeIcon?:    string;
+  restoreIcon?:     string;
+  closeIcon?:       string;
+  style?:           Style;
 }): JSX.Element;

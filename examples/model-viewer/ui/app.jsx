@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, render, useWindowSize, Canvas3D,
-} from '@glyx/react';
+} from '@glyx-dev/react';
 import {
   ThemeProvider, Button, Tabs, SwitchRow, NumberInput, Chip, useTheme,
-} from '@glyx/design';
-import { Icon } from '@glyx/icons';
-import { Scene, PerspectiveCamera, AmbientLight, DirectionalLight, PointLight, Mesh } from '@glyx/three';
+} from '@glyx-dev/design';
+import { Icon } from '@glyx-dev/icons';
+import { Scene, PerspectiveCamera, AmbientLight, DirectionalLight, PointLight, Mesh } from '@glyx-dev/three';
 
 const COLORS = [
   { name: 'Blue', rgba: [0.4, 0.6, 1, 1] },

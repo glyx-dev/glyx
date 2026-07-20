@@ -1,4 +1,4 @@
-// @glyx/three — Declarative React-Three-Fiber-style 3D for Glyx Canvas3D.
+// @glyx-dev/three — Declarative React-Three-Fiber-style 3D for Glyx Canvas3D.
 //
 // Architecture:
 //   • <Scene> owns a React context that child components register into.
@@ -12,12 +12,12 @@
 //     background?: [r, g, b, a],
 //     camera: { position, target, up, fovDeg, near, far },
 //     lights: [ { type:'ambient'|'directional', ... } ],
-//     meshes: [ { geometry:{type:'box'|'sphere'|'plane'|'gltf', path?}, transform:[16f], color:[r,g,b,a] } ],
+//     meshes: [ { geometry:{type:'box'|'sphere'|'plane'|'gltf', path?, animation?:{clip,time}}, transform:[16f], color:[r,g,b,a] } ],
 //   }
 //
 // Usage:
-//   import { Canvas3D } from '@glyx/react';
-//   import { Scene, PerspectiveCamera, AmbientLight, DirectionalLight, Mesh } from '@glyx/three';
+//   import { Canvas3D } from '@glyx-dev/react';
+//   import { Scene, PerspectiveCamera, AmbientLight, DirectionalLight, Mesh } from '@glyx-dev/three';
 //
 //   function My3DScene() {
 //     const c3dRef = React.useRef(null);
@@ -47,10 +47,16 @@ import React, {
 export {
   makeTransform, makeRotationY, makeSimpleTransform, mat4mul, deg,
 } from './math.js';
+import { mat4mul as _mat4mul, IDENTITY as _IDENTITY } from './math.js';
 
 // ── Scene context ──────────────────────────────────────────────────────────────
 
 const SceneCtx = createContext(null);
+
+// Ancestor world transform for whatever <Group> nesting a Mesh/Model sits
+// inside. Defaults to identity for scenes with no <Group> at all — existing
+// flat scenes are unaffected.
+const GroupCtx = createContext(_IDENTITY);
 
 // ── Scene ─────────────────────────────────────────────────────────────────────
 
@@ -129,7 +135,7 @@ export function Scene({ canvasRef, background, children }) {
 
 function useRegister(type, data) {
   const ctx = useContext(SceneCtx);
-  if (!ctx) throw new Error(`@glyx/three: must be a descendant of <Scene>`);
+  if (!ctx) throw new Error(`@glyx-dev/three: must be a descendant of <Scene>`);
   // Stable per-instance key so the registry entry survives prop changes.
   const id = useId();
   useLayoutEffect(() => {
@@ -261,6 +267,29 @@ function buildTransform(position, rotation, scale) {
   ];
 }
 
+// ── Group ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Groups nested `<Mesh>`/`<Model>`/`<Group>` children under a shared parent
+ * transform. Purely a JS-side authoring convenience — the renderer never
+ * sees groups, only the final composed world matrix per mesh (same as an
+ * ungrouped scene), so this adds zero runtime cost on the Rust side.
+ *
+ * @param {{
+ *   position?:  [x, y, z],
+ *   rotation?:  [rx, ry, rz],           radians Euler XYZ
+ *   scale?:     [sx, sy, sz] | number,
+ *   transform?: number[],               raw 16-float column-major (overrides pos/rot/scale)
+ *   children:   React.ReactNode,
+ * }} props
+ */
+export function Group({ position, rotation, scale, transform, children }) {
+  const parentTransform = useContext(GroupCtx);
+  const localTransform = transform ?? buildTransform(position, rotation, scale);
+  const worldTransform = _mat4mul(parentTransform, localTransform);
+  return React.createElement(GroupCtx.Provider, { value: worldTransform }, children);
+}
+
 // ── Mesh ──────────────────────────────────────────────────────────────────────
 
 /**
@@ -284,7 +313,9 @@ export function Mesh({
   scale,
   transform,
 }) {
-  const finalTransform = transform ?? buildTransform(position, rotation, scale);
+  const parentTransform = useContext(GroupCtx);
+  const localTransform = transform ?? buildTransform(position, rotation, scale);
+  const finalTransform = _mat4mul(parentTransform, localTransform);
   useRegister('mesh', {
     geometry:  { type: geometry.toLowerCase() },
     transform: finalTransform,
@@ -315,9 +346,15 @@ export function Model({
   rotation,
   scale,
   transform,
+  // GLTF animation playback — JS owns the clock (same "JS drives state,
+  // Rust is a dumb renderer" model as everything else), so `animationClip`/
+  // `animationTime` are just the current sample point sent to the renderer
+  // each render. Omit both to render the model's static bind pose.
+  animationClip,
+  animationTime,
 }) {
   const ctx = useContext(SceneCtx);
-  if (!ctx) throw new Error('@glyx/three: <Model> must be a descendant of <Scene>');
+  if (!ctx) throw new Error('@glyx-dev/three: <Model> must be a descendant of <Scene>');
 
   // Preload GLTF once per src change.
   useEffect(() => {
@@ -325,9 +362,16 @@ export function Model({
     if (ctx3d && src) ctx3d.loadGltf(src);
   }, [src, ctx]);
 
-  const finalTransform = transform ?? buildTransform(position, rotation, scale);
+  const parentTransform = useContext(GroupCtx);
+  const localTransform = transform ?? buildTransform(position, rotation, scale);
+  const finalTransform = _mat4mul(parentTransform, localTransform);
+  const hasAnimation = animationClip != null && animationTime != null;
   useRegister('mesh', {
-    geometry:  { type: 'gltf', path: src },
+    geometry: {
+      type: 'gltf',
+      path: src,
+      ...(hasAnimation ? { animation: { clip: String(animationClip), time: animationTime } } : {}),
+    },
     transform: finalTransform,
     color,
   });

@@ -1,0 +1,23 @@
+{
+  "name": "glyx-cli",
+  "version": "0.1.0",
+  "description": "Glyx CLI — build native desktop apps with React. Installs the platform glyx binary.",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/glyx-dev/glyx.git",
+    "directory": "js/packages/glyx-cli"
+  },
+  "homepage": "https://glyx.dev",
+  "keywords": ["glyx", "desktop", "react", "native", "cli"],
+  "bin": {
+    "glyx": "bin/glyx.js"
+  },
+  "files": ["bin", "install.js", "README.md"],
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

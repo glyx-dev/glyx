@@ -31,21 +31,17 @@ use tokio::sync::mpsc;
 // ── Channel — forwards CDP responses from V8 to the WebSocket ─────────────────
 
 pub struct GlyxChannel {
-    base:   v8::inspector::ChannelBase,
     outbox: mpsc::UnboundedSender<String>,
 }
 
 impl GlyxChannel {
     fn new(outbox: mpsc::UnboundedSender<String>) -> Self {
-        Self { base: v8::inspector::ChannelBase::new::<Self>(), outbox }
+        Self { outbox }
     }
 }
 
 impl v8::inspector::ChannelImpl for GlyxChannel {
-    fn base(&self)     -> &v8::inspector::ChannelBase     { &self.base }
-    fn base_mut(&mut self) -> &mut v8::inspector::ChannelBase { &mut self.base }
-
-    fn send_response(&mut self, _call_id: i32, message: v8::UniquePtr<v8::inspector::StringBuffer>) {
+    fn send_response(&self, _call_id: i32, message: v8::UniquePtr<v8::inspector::StringBuffer>) {
         if let Some(buf) = message.as_ref() {
             if let Some(chars) = buf.string().characters16() {
                 let _ = self.outbox.send(String::from_utf16_lossy(chars));
@@ -53,7 +49,7 @@ impl v8::inspector::ChannelImpl for GlyxChannel {
         }
     }
 
-    fn send_notification(&mut self, message: v8::UniquePtr<v8::inspector::StringBuffer>) {
+    fn send_notification(&self, message: v8::UniquePtr<v8::inspector::StringBuffer>) {
         if let Some(buf) = message.as_ref() {
             if let Some(chars) = buf.string().characters16() {
                 let _ = self.outbox.send(String::from_utf16_lossy(chars));
@@ -61,46 +57,43 @@ impl v8::inspector::ChannelImpl for GlyxChannel {
         }
     }
 
-    fn flush_protocol_notifications(&mut self) {}
+    fn flush_protocol_notifications(&self) {}
 }
 
 // ── Client — handles V8 inspector client callbacks ────────────────────────────
 
 pub struct GlyxInspectorClient {
-    base:   v8::inspector::V8InspectorClientBase,
     /// Shared handle to the DevTools message queue; kept so the pause
     /// busy-wait loop can pump it (reads go through the Arc clone).
     #[allow(dead_code)]
     inbox:  Arc<Mutex<VecDeque<String>>>,
-    paused: bool,
+    paused: std::sync::atomic::AtomicBool,
 }
 
 impl GlyxInspectorClient {
     fn new(inbox: Arc<Mutex<VecDeque<String>>>) -> Self {
         Self {
-            base:   v8::inspector::V8InspectorClientBase::new::<Self>(),
             inbox,
-            paused: false,
+            paused: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
 
 impl v8::inspector::V8InspectorClientImpl for GlyxInspectorClient {
-    fn base(&self)     -> &v8::inspector::V8InspectorClientBase     { &self.base }
-    fn base_mut(&mut self) -> &mut v8::inspector::V8InspectorClientBase { &mut self.base }
-
     /// Called by V8 when execution pauses (breakpoint / debugger statement).
     /// We spin-wait, draining the inbox, until `quit_message_loop_on_pause` is called.
     /// This blocks the render thread — the window freezes but the debugger is live.
-    fn run_message_loop_on_pause(&mut self, _context_group_id: i32) {
-        self.paused = true;
-        while self.paused {
+    fn run_message_loop_on_pause(&self, _context_group_id: i32) {
+        use std::sync::atomic::Ordering;
+        self.paused.store(true, Ordering::SeqCst);
+        while self.paused.load(Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 
-    fn quit_message_loop_on_pause(&mut self) {
-        self.paused = false;
+    fn quit_message_loop_on_pause(&self) {
+        use std::sync::atomic::Ordering;
+        self.paused.store(false, Ordering::SeqCst);
     }
 }
 
@@ -112,16 +105,15 @@ impl v8::inspector::V8InspectorClientImpl for GlyxInspectorClient {
 /// Fields are declared in drop order: session is dropped before inspector,
 /// and both are dropped before _channel / _client (which they reference).
 pub struct GlyxInspector {
-    /// Active inspector session — dropped first (depends on inspector).
-    session:   v8::UniqueRef<v8::inspector::V8InspectorSession>,
+    /// Active inspector session — dropped first.  It owns the `Channel` that
+    /// routes V8 CDP responses out to the WebSocket, and borrows from `inspector`.
+    session:   v8::inspector::V8InspectorSession,
     /// V8Inspector — never read, but MUST be held: `session` borrows from it,
-    /// and field order guarantees session drops first.
+    /// and field order guarantees session drops first.  It also owns the
+    /// `V8InspectorClient` (V8 keeps a raw pointer into it for the lifetime of
+    /// the inspector).
     #[allow(dead_code)]
-    inspector: v8::UniqueRef<v8::inspector::V8Inspector>,
-    /// Channel that routes V8 CDP responses out to the WebSocket.
-    _channel:  Box<GlyxChannel>,
-    /// Inspector client (callbacks from V8).
-    _client:   Box<GlyxInspectorClient>,
+    inspector: v8::inspector::V8Inspector,
     /// Messages arriving from Chrome DevTools, waiting to be dispatched to V8.
     inbox:     Arc<Mutex<VecDeque<String>>>,
     /// Port the WS server is listening on.
@@ -153,22 +145,33 @@ impl GlyxInspector {
         let inbox_clone = Arc::clone(&inbox);
         tokio_handle.spawn(run_ws_server(port, inbox_clone, outbox_rx));
 
-        // Create the channel and client (both pinned on the heap).
-        let mut channel = Box::new(GlyxChannel::new(outbox_tx));
-        let mut client  = Box::new(GlyxInspectorClient::new(Arc::clone(&inbox)));
+        // Build the channel and client wrappers.  In v8 150 these own the
+        // `ChannelImpl` / `V8InspectorClientImpl` boxes; the inspector and
+        // session take ownership of them (the client lives inside `inspector`,
+        // the channel inside `session`).
+        let channel = v8::inspector::Channel::new(Box::new(GlyxChannel::new(outbox_tx)));
+        let client  = v8::inspector::V8InspectorClient::new(Box::new(
+            GlyxInspectorClient::new(Arc::clone(&inbox)),
+        ));
 
         // Build V8Inspector + session inside a HandleScope.
         let (inspector, session) = {
-            let scope = &mut v8::HandleScope::new(isolate);
+            v8::scope!(let scope, isolate);
             let ctx   = v8::Local::new(scope, context);
 
-            let mut inspector = v8::inspector::V8Inspector::create(scope, &mut *client);
+            let inspector = v8::inspector::V8Inspector::create(scope, client);
 
             let name = v8::inspector::StringView::from("glyx".as_bytes());
-            inspector.context_created(ctx, 1, name);
+            let aux  = v8::inspector::StringView::empty();
+            inspector.context_created(ctx, 1, name, aux);
 
             let state = v8::inspector::StringView::from("{}".as_bytes());
-            let session = inspector.connect(1, &mut *channel, state);
+            let session = inspector.connect(
+                1,
+                channel,
+                state,
+                v8::inspector::V8InspectorClientTrustLevel::FullyTrusted,
+            );
 
             (inspector, session)
         };
@@ -176,7 +179,7 @@ impl GlyxInspector {
         log::info!("[glyx] CDP inspector listening on ws://127.0.0.1:{port}");
         log::info!("[glyx] Open chrome://inspect in Chrome and click 'Configure...' to add 127.0.0.1:{port}");
 
-        Self { session, inspector, _channel: channel, _client: client, inbox, port }
+        Self { session, inspector, inbox, port }
     }
 
     /// Drain the inbox and dispatch all pending CDP messages to V8.
@@ -188,9 +191,7 @@ impl GlyxInspector {
         };
         if msgs.is_empty() { return; }
 
-        let scope = &mut v8::HandleScope::new(isolate);
-        let ctx   = v8::Local::new(scope, context);
-        let _scope = &mut v8::ContextScope::new(scope, ctx);
+        v8::scope_with_context!(let _scope, isolate, context);
 
         for msg in msgs {
             let view = v8::inspector::StringView::from(msg.as_bytes());

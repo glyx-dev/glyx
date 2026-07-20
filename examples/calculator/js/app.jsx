@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, Pressable, ScrollView, render, useWindowSize,
-} from '@glyx/react';
+} from '@glyx-dev/react';
 
 // ── Theme ─────────────────────────────────────────────────────────────────────
 

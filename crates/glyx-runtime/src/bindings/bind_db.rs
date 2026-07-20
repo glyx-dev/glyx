@@ -1,120 +1,23 @@
-﻿use super::*;
+use super::*;
 
-// ── H4: DB path safety ────────────────────────────────────────────────────────
-
-/// Compute the app-local DB data directory:
-///   Windows:  %APPDATA%\{exe}\data\
-///   macOS:    ~/Library/Application Support/{exe}/data/
-///   Linux:    $XDG_DATA_HOME/{exe}/data/  (falls back to ~/.local/share)
-fn app_db_dir() -> std::path::PathBuf {
-    let exe_stem = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "glyx".to_string());
-
-    #[cfg(target_os = "windows")]
-    let base = std::env::var("APPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::var("USERPROFILE")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from(".")));
-
-    #[cfg(target_os = "macos")]
-    let base = std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        .join("Library").join("Application Support");
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let base = std::env::var("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::var("HOME")
-            .map(|h| std::path::PathBuf::from(h).join(".local").join("share"))
-            .unwrap_or_else(|_| std::path::PathBuf::from(".")));
-
-    base.join(&exe_stem).join("data")
-}
-
-/// Resolve and security-check a DB path supplied by JS.
-///
-/// Rules (H4):
-/// - `:memory:` requires `capabilities.db.path: true` (explicit grant).
-/// - Absolute paths require `capabilities.db.path: true`.
-/// - Relative paths are rooted at the app data dir and verified via
-///   `glyx_security::resolve_and_check_write` -- symlinks are resolved and
-///   the result must fall within a declared `fs.write` glob OR the app data
-///   dir is added to the allowlist implicitly (see note below).
-///
-/// Returns `Ok(resolved_string)` for use in `glyx_db::open`, or `Err` with
-/// a user-visible message on denial.
-///
-/// Note on implicit data-dir grant: apps using `db: true` but no `fs.write`
-/// are the common case. We allow the resolved path if it is a descendant of
-/// `app_db_dir()` -- that directory is the intended default scope for db files.
-pub fn resolve_db_path_checked(path: &str) -> Result<String, String> {
-    let caps = glyx_security::get();
-
-    // ── :memory: -- requires explicit db.path grant ───────────────────────────
-    if path == ":memory:" {
-        if caps.db_path {
-            return Ok(":memory:".to_string());
-        }
-        return Err("db.open(\":memory:\") requires capabilities.db.path: true".to_string());
-    }
-
-    let p = std::path::Path::new(path);
-
-    // ── Absolute paths -- require explicit db.path grant ──────────────────────
-    if p.is_absolute() {
-        if !caps.db_path {
-            return Err(format!(
-                "db.open with absolute path requires capabilities.db.path: true (got {path:?})"
-            ));
-        }
-        // Still canonicalize + check via fs.write if declared.
-        return glyx_security::resolve_and_check_write(p)
-            .map(|c| c.to_string_lossy().into_owned())
-            .map_err(|e| format!("db path denied: {e}"));
-    }
-
-    // ── Relative path -- root under app data dir ───────────────────────────────
-    let data_dir = app_db_dir();
-    let _ = std::fs::create_dir_all(&data_dir);
-    let joined = data_dir.join(path);
-
-    // Resolve symlinks. For a new file the parent must exist (created above).
-    let canonical = if joined.exists() {
-        joined.canonicalize()
-    } else {
-        joined.parent()
-            .unwrap_or(&data_dir)
-            .canonicalize()
-            .map(|p| p.join(joined.file_name().unwrap_or_default()))
-    }.map_err(|e| format!("db path resolve error: {e}"))?;
-
-    // Accept if canonical path is within the app data dir (implicit grant).
-    let canon_data = data_dir.canonicalize().unwrap_or(data_dir.clone());
-    if canonical.starts_with(&canon_data) {
-        return Ok(canonical.to_string_lossy().into_owned());
-    }
-
-    // Fall back: check fs.write allowlist.
-    glyx_security::resolve_and_check_write(&canonical)
-        .map(|c| c.to_string_lossy().into_owned())
-        .map_err(|e| format!("db path outside app data dir and not in fs.write grant: {e}"))
-}
+// `app_db_dir`/`resolve_db_path_checked` moved to `bindings/mod.rs`'s
+// always-compiled shared section (pure path logic, zero V8 dependency) so
+// the QuickJS backend's `quickjs_db.rs` can reuse it too instead of
+// duplicating the H4 path-safety rules. Re-imported via `use super::*;` above.
 
 /// `__glyx_db_open(path) -> Promise<string>` â€" handle number.
 pub fn db_open_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().db {
         rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -140,15 +43,17 @@ pub fn db_open_callback(
 
 /// `__glyx_db_query(handle, sql, paramsJson) -> Promise<string>` â€" JSON rows.
 pub fn db_query_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().db {
         rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -183,15 +88,17 @@ pub fn db_query_callback(
 
 /// `__glyx_db_run(handle, sql, paramsJson) -> Promise<string>` â€" JSON `{ rowsAffected, lastInsertId }`.
 pub fn db_run_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().db {
         rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -232,15 +139,17 @@ pub fn db_run_callback(
 /// Removes the pool from the handle map and drains all connections gracefully.
 /// Idempotent: closing an unknown handle resolves immediately without error.
 pub fn db_close_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().db {
         rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -268,15 +177,17 @@ pub fn db_close_callback(
 /// `statementsJson` is a JSON array of `{ sql: string, params: any[] }` objects.
 /// All statements execute in a single SQLite transaction; any failure rolls back.
 pub fn db_transaction_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().db {
         rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -318,15 +229,17 @@ pub fn db_transaction_callback(
 /// The destination file is created if it does not exist; any existing file
 /// is overwritten atomically (VACUUM INTO writes a temp file then renames).
 pub fn db_backup_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().db {
         rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -373,15 +286,17 @@ pub fn db_backup_callback(
 
 /// `__glyx_setAlwaysOnTop(on: boolean) -> void`
 pub fn vectordb_open_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().db {
         rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
-    let data   = args.data().unwrap();
+    let data   = args.data();
     let ext    = v8::Local::<v8::External>::try_from(data).unwrap();
     let state  = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -410,15 +325,17 @@ pub fn vectordb_open_callback(
 /// `vectorJson`   â€" JSON array of f32 numbers (the embedding).
 /// `metadataJson` â€" JSON string for the metadata payload, or `""` for none.
 pub fn vectordb_upsert_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().db {
         rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -459,15 +376,17 @@ pub fn vectordb_upsert_callback(
 /// `queryJson` â€" JSON array of f32 numbers (the query embedding).
 /// Resolves with a JSON array of `{id, score, metadata}` objects.
 pub fn vectordb_search_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().db {
         rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
@@ -513,15 +432,17 @@ pub fn vectordb_search_callback(
 /// Removes the store from the handle map and closes the underlying pool.
 /// Idempotent: closing an unknown handle resolves immediately without error.
 pub fn vectordb_close_callback(
-    scope:  &mut v8::HandleScope,
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
     if !glyx_security::get().db {
         rv.set(reject_cap_promise(scope, "db").into());
         return;
     }
-    let data  = args.data().unwrap();
+    let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 

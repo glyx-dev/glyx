@@ -7,11 +7,13 @@ use crate::{
     bindings::{
         new_completion_queue, new_event_queue, new_layout_cache, new_scene_queue,
         new_ipc_bus, new_db_pools, new_video_events, register_all, reload_plugin_in_scope,
+        new_webview_events, new_raycast_request_queue, new_raycast_results,
         CompletionQueue, DbPools, EventQueue, InputEvent, IpcBus, LayoutCache, SceneCommand,
         SceneQueue, VideoEvents, WindowController, StatePtrUsize,
     },
-    runtime_trait::JsRuntime,
-    BackendRegistry, RuntimeError, GlyxExtension,
+    bindings::{WebviewEvents, RaycastRequestQueue, RaycastResults},
+    runtime_trait::{JsRuntime, HeapStats},
+    BackendRegistry, RuntimeError, GlyxExtension, Scope,
 };
 
 #[cfg(feature = "dev")]
@@ -26,20 +28,21 @@ use std::collections::VecDeque;
 /// Installed in release builds only.  Debug builds leave the callback unset so
 /// hot-reload and snapshot tooling can still use `import()` during development.
 ///
-/// The callback is called whenever JS evaluates `import(specifier)`.  We
-/// immediately reject the resulting promise with a descriptive Error so the
-/// app sees a normal rejected-promise rather than a silent no-op.
-// rusty_v8 0.32 uses a raw extern "C" callback with no HandleScope.
-// Returning null_mut() signals to V8 that the import could not be resolved,
-// which causes it to reject the dynamic import with an error.
+/// The callback is called whenever JS evaluates `import(specifier)`.  Returning
+/// `None` (a null MaybeLocal) signals to V8 that the import could not be
+/// resolved, which causes it to reject the dynamic import with an error.
+// v8 150: the host-import callback is now a `FnOnce(&mut PinScope, Data, Value,
+// String, FixedArray) -> Option<Local<Promise>>`.  The second parameter is the
+// host-defined options (a `Data`) rather than the `Context`.
 #[cfg(not(debug_assertions))]
-extern "C" fn deny_dynamic_import(
-    _ctx:                v8::Local<v8::Context>,
-    _referrer:           v8::Local<v8::ScriptOrModule>,
-    _specifier:          v8::Local<v8::String>,
-    _import_assertions:  v8::Local<v8::FixedArray>,
-) -> *mut v8::Promise {
-    std::ptr::null_mut()
+fn deny_dynamic_import<'s, 'i>(
+    _scope:             &mut v8::PinScope<'s, 'i>,
+    _host_defined_opts: v8::Local<'s, v8::Data>,
+    _resource_name:     v8::Local<'s, v8::Value>,
+    _specifier:         v8::Local<'s, v8::String>,
+    _import_attributes: v8::Local<'s, v8::FixedArray>,
+) -> Option<v8::Local<'s, v8::Promise>> {
+    None
 }
 
 /// Install the dynamic-import denial callback on a freshly created isolate.
@@ -53,7 +56,7 @@ fn install_import_guard(isolate: &mut v8::OwnedIsolate) {
 
 // eval / new Function denial is handled solely by the V8 flag
 // `--disallow-code-generation-from-strings` set in lib.rs.
-// rusty_v8 0.32 does not expose a per-context set_allow_code_generation_from_strings API.
+// v8 150 does not expose a per-context set_allow_code_generation_from_strings API.
 
 /// V8 isolate params shared by fresh and snapshot-restore paths.
 ///
@@ -68,7 +71,7 @@ fn glyx_create_params(snapshot: Option<Vec<u8>>, max_heap_mb: usize) -> v8::Crea
     let params = v8::CreateParams::default()
         .heap_limits(2 * MB, max_heap_mb * MB);
     if let Some(blob) = snapshot {
-        params.snapshot_blob(blob)
+        params.snapshot_blob(blob.into())
     } else {
         params
     }
@@ -95,14 +98,15 @@ pub struct V8Runtime {
     pub db_pools: DbPools,
     /// Video events pushed by decode threads and forwarded to JS via `__glyx_video_poll`.
     pub video_events: VideoEvents,
+    /// Webview page messages drained by glyx-core each frame, forwarded to JS via `__glyx_webview_poll`.
+    pub webview_events: WebviewEvents,
+    /// Pending `__glyx_canvas3d_raycast` requests, drained by glyx-core once per frame.
+    pub raycast_requests: RaycastRequestQueue,
+    /// JSON raycast results, forwarded to JS via `__glyx_canvas3d_raycast_poll`.
+    pub raycast_results: RaycastResults,
     /// Opaque pointer to the heap-allocated `AsyncState` created in `register_all`.
     /// Used by `reload_plugin` to update `js_backend_commands` after a dev-mode rebundle.
     state_ptr: StatePtrUsize,
-}
-
-pub struct HeapStats {
-    pub used_heap_size: usize,
-    pub total_heap_size: usize,
 }
 
 impl V8Runtime {
@@ -150,6 +154,9 @@ impl V8Runtime {
         let deeplink_url_queue = Arc::new(parking_lot::Mutex::new(VecDeque::new()));
         let db_pools           = new_db_pools();
         let video_events       = new_video_events();
+        let webview_events     = new_webview_events();
+        let raycast_requests   = new_raycast_request_queue();
+        let raycast_results    = new_raycast_results();
         let cdp_log_tx         = Arc::new(parking_lot::Mutex::new(None::<tokio::sync::mpsc::UnboundedSender<String>>));
 
         // Clone handle before moving into register_all; keep one for inspector.
@@ -157,12 +164,14 @@ impl V8Runtime {
         let inspect_handle = tokio_handle.clone();
 
         let (context, queue, scene, state_ptr) = {
-            let scope  = &mut v8::HandleScope::new(&mut isolate);
+            v8::scope!(let scope, &mut isolate);
             let queue  = new_completion_queue();
             let scene  = new_scene_queue();
-            let ctx    = v8::Context::new(scope);
-            let scope  = &mut v8::ContextScope::new(scope, ctx);
-            let global = ctx.global(scope);
+            let ctx    = v8::Context::new(&scope, Default::default());
+            let ctx_global = v8::Global::new(&scope, ctx);
+            let global = ctx.global(&scope);
+            let context_local = v8::Local::new(&scope, &ctx_global);
+            let scope = &mut v8::ContextScope::new(scope, context_local);
 
             let state_ptr = register_all(
                 scope, global,
@@ -179,12 +188,15 @@ impl V8Runtime {
                 Arc::clone(&deeplink_url_queue),
                 Arc::clone(&db_pools),
                 Arc::clone(&video_events),
+                Arc::clone(&webview_events),
+                Arc::clone(&raycast_requests),
+                Arc::clone(&raycast_results),
                 Arc::clone(&cdp_log_tx),
                 backend_commands,
                 js_plugins,
             );
 
-            (v8::Global::new(scope, ctx), queue, scene, state_ptr)
+            (ctx_global, queue, scene, state_ptr)
         };
 
         // Attach CDP inspector if GLYX_INSPECT_PORT is set (dev feature only).
@@ -198,7 +210,8 @@ impl V8Runtime {
             #[cfg(feature = "dev")]
             inspector,
             isolate, context, queue, scene, events, layout_cache,
-            perf_state, deeplink_url_queue, db_pools, video_events, state_ptr,
+            perf_state, deeplink_url_queue, db_pools, video_events, webview_events,
+            raycast_requests, raycast_results, state_ptr,
         }
     }
 
@@ -246,6 +259,9 @@ impl V8Runtime {
         let deeplink_url_queue = Arc::new(parking_lot::Mutex::new(VecDeque::new()));
         let db_pools           = new_db_pools();
         let video_events       = new_video_events();
+        let webview_events     = new_webview_events();
+        let raycast_requests   = new_raycast_request_queue();
+        let raycast_results    = new_raycast_results();
         let cdp_log_tx         = Arc::new(parking_lot::Mutex::new(None::<tokio::sync::mpsc::UnboundedSender<String>>));
 
         // Clone handle before moving into register_all; keep one for inspector.
@@ -253,14 +269,16 @@ impl V8Runtime {
         let inspect_handle = tokio_handle.clone();
 
         let (context, queue, scene, state_ptr) = {
-            let scope  = &mut v8::HandleScope::new(&mut isolate);
+            v8::scope!(let scope, &mut isolate);
             let queue  = new_completion_queue();
             let scene  = new_scene_queue();
 
             // Snapshot contains a default context; use it
-            let ctx    = v8::Context::new(scope);
-            let scope  = &mut v8::ContextScope::new(scope, ctx);
-            let global = ctx.global(scope);
+            let ctx    = v8::Context::new(&scope, Default::default());
+            let ctx_global = v8::Global::new(&scope, ctx);
+            let global = ctx.global(&scope);
+            let context_local = v8::Local::new(&scope, &ctx_global);
+            let scope = &mut v8::ContextScope::new(scope, context_local);
 
             // Re-register all binding implementations (stubs are already in snapshot)
             let state_ptr = register_all(
@@ -278,12 +296,15 @@ impl V8Runtime {
                 Arc::clone(&deeplink_url_queue),
                 Arc::clone(&db_pools),
                 Arc::clone(&video_events),
+                Arc::clone(&webview_events),
+                Arc::clone(&raycast_requests),
+                Arc::clone(&raycast_results),
                 Arc::clone(&cdp_log_tx),
                 backend_commands,
                 js_plugins,
             );
 
-            (v8::Global::new(scope, ctx), queue, scene, state_ptr)
+            (ctx_global, queue, scene, state_ptr)
         };
 
         #[cfg(feature = "dev")]
@@ -296,7 +317,8 @@ impl V8Runtime {
             #[cfg(feature = "dev")]
             inspector,
             isolate, context, queue, scene, events, layout_cache,
-            perf_state, deeplink_url_queue, db_pools, video_events, state_ptr,
+            perf_state, deeplink_url_queue, db_pools, video_events, webview_events,
+            raycast_requests, raycast_results, state_ptr,
         })
     }
 
@@ -305,9 +327,7 @@ impl V8Runtime {
     /// Re-eval a plugin IIFE and refresh its exported commands in `js_backend_commands`.
     /// Called by glyx-core's dev-mode event handler on file-change rebuild.
     pub fn reload_plugin(&mut self, global_name: &str, prefix: Option<&str>, bundled_js: &str) {
-        let scope = &mut v8::HandleScope::new(&mut self.isolate);
-        let ctx   = v8::Local::new(scope, &self.context);
-        let scope = &mut v8::ContextScope::new(scope, ctx);
+        v8::scope_with_context!(let scope, &mut self.isolate, &self.context);
         reload_plugin_in_scope(scope, self.state_ptr, global_name, prefix, bundled_js);
     }
 
@@ -316,10 +336,9 @@ impl V8Runtime {
     /// Call each extension's `register()` so it can add its own __myapp_* bindings.
     pub fn register_extensions(&mut self, extensions: &[Box<dyn crate::GlyxExtension>]) {
         if extensions.is_empty() { return; }
-        let scope = &mut v8::HandleScope::new(&mut self.isolate);
-        let ctx   = v8::Local::new(scope, &self.context);
-        let scope = &mut v8::ContextScope::new(scope, ctx);
-        let global = ctx.global(scope);
+        v8::scope_with_context!(let scope, &mut self.isolate, &self.context);
+        let ctx    = v8::Local::new(&scope, &self.context);
+        let global = ctx.global(&scope);
         for ext in extensions {
             log::debug!("Registering extension: {}", ext.name());
             ext.register(scope, global);
@@ -332,47 +351,46 @@ impl V8Runtime {
         // All V8 handle-scope work is in a nested block so every borrow of
         // `self.isolate` is released before `low_memory_notification()` runs.
         let result = {
-            let scope = &mut v8::HandleScope::new(&mut self.isolate);
-            let ctx   = v8::Local::new(scope, &self.context);
-            let scope = &mut v8::ContextScope::new(scope, ctx);
+            v8::scope_with_context!(let scope, &mut self.isolate, &self.context);
 
-            let code = v8::String::new(scope, source)
+            let code = v8::String::new(&scope, source)
                 .ok_or_else(|| RuntimeError::JsException("Failed to create source string".into()))?;
 
-            let mut try_catch = v8::TryCatch::new(scope);
+            v8::tc_scope!(let try_catch, scope);
 
             // Set a script origin so V8 labels stack frames as "app.js" instead
             // of "vm".  With --source-map=inline in bun and --enable_source_maps
             // in V8 (dev builds), positions are automatically translated back to
             // the original .jsx/.tsx source file and line.
             let resource_name: v8::Local<v8::Value> =
-                v8::String::new(&mut try_catch, "app.js").unwrap().into();
+                v8::String::new(try_catch, "app.js").unwrap().into();
             let source_map_url: v8::Local<v8::Value> =
-                v8::String::new(&mut try_catch, "").unwrap().into();
+                v8::String::new(try_catch, "").unwrap().into();
             let origin = v8::ScriptOrigin::new(
-                &mut *try_catch,
+                try_catch,
                 resource_name,
                 0, 0,
                 false, -1,
-                source_map_url,
+                Some(source_map_url),
                 false, false, false,
+                None,
             );
 
-            let script = v8::Script::compile(&mut try_catch, code, Some(&origin))
+            let script = v8::Script::compile(try_catch, code, Some(&origin))
                 .ok_or_else(|| {
                     let exc = try_catch.exception().unwrap();
                     let msg = exc
-                        .to_string(&mut try_catch)
-                        .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                        .to_string(try_catch)
+                        .map(|s| s.to_rust_string_lossy(try_catch.as_ref()))
                         .unwrap_or_else(|| "Compile error".into());
                     RuntimeError::CompileError(msg)
                 })?;
 
-            match script.run(&mut try_catch) {
+            match script.run(try_catch) {
                 Some(val) => {
                     let s = val
-                        .to_string(&mut try_catch)
-                        .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                        .to_string(try_catch)
+                        .map(|s| s.to_rust_string_lossy(try_catch.as_ref()))
                         .unwrap_or_default();
                     Ok(s)
                 }
@@ -381,15 +399,15 @@ impl V8Runtime {
                     // Prefer Error.stack -- it includes message + all frames.
                     // Fall back to exc.to_string() for non-Error throws.
                     let msg = {
-                        let key = v8::String::new(&mut try_catch, "stack").unwrap();
-                        exc.to_object(&mut try_catch)
-                            .and_then(|o| o.get(&mut try_catch, key.into()))
-                            .and_then(|v| v.to_string(&mut try_catch))
-                            .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                        let key = v8::String::new(try_catch, "stack").unwrap();
+                        exc.to_object(try_catch)
+                            .and_then(|o| o.get(try_catch, key.into()))
+                            .and_then(|v| v.to_string(try_catch))
+                            .map(|s| s.to_rust_string_lossy(try_catch.as_ref()))
                             .filter(|s| !s.is_empty())
                             .unwrap_or_else(|| {
-                                exc.to_string(&mut try_catch)
-                                    .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                                exc.to_string(try_catch)
+                                    .map(|s| s.to_rust_string_lossy(try_catch.as_ref()))
                                     .unwrap_or_else(|| "Unknown JS exception".into())
                             })
                     };
@@ -419,19 +437,18 @@ impl V8Runtime {
     /// setup fails, only `__glyx_canvas_protocol = "json"` is set and JS uses
     /// the JSON `__glyx_canvas_update` path.
     pub fn init_canvas_buffers(&mut self, protocol: &str, buffer_kb: usize) {
-        let scope  = &mut v8::HandleScope::new(&mut self.isolate);
-        let ctx    = v8::Local::new(scope, &self.context);
-        let scope  = &mut v8::ContextScope::new(scope, ctx);
-        let global = ctx.global(scope);
+        v8::scope_with_context!(let scope, &mut self.isolate, &self.context);
+        let ctx    = v8::Local::new(&scope, &self.context);
+        let global = ctx.global(&scope);
 
         // Helper: set globalThis[key] = "value" (string).
-        fn set_str(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>, key: &str, val: &str) {
+        fn set_str(scope: &mut Scope, global: v8::Local<v8::Object>, key: &str, val: &str) {
             if let (Some(k), Some(v)) = (v8::String::new(scope, key), v8::String::new(scope, val)) {
                 global.set(scope, k.into(), v.into());
             }
         }
         // Helper: set globalThis[key] = value (any V8 value).
-        fn set_val(scope: &mut v8::HandleScope, global: v8::Local<v8::Object>, key: &str, val: v8::Local<v8::Value>) {
+        fn set_val(scope: &mut Scope, global: v8::Local<v8::Object>, key: &str, val: v8::Local<v8::Value>) {
             if let Some(k) = v8::String::new(scope, key) {
                 global.set(scope, k.into(), val);
             }
@@ -451,12 +468,12 @@ impl V8Runtime {
 
         let store = vec![0u8; total].into_boxed_slice();
         let bs    = v8::ArrayBuffer::new_backing_store_from_boxed_slice(store).make_shared();
-        let ab    = v8::ArrayBuffer::with_backing_store(scope, &bs);
+        let ab    = v8::ArrayBuffer::with_backing_store(&scope, &bs);
 
         let (Some(f32v), Some(u32v), Some(u8v)) = (
-            v8::Float32Array::new(scope, ab, 0, f32_len),
-            v8::Uint32Array::new(scope, ab, 0, f32_len),
-            v8::Uint8Array::new(scope, ab, cmd_bytes, str_bytes),
+            v8::Float32Array::new(&scope, ab, 0, f32_len),
+            v8::Uint32Array::new(&scope, ab, 0, f32_len),
+            v8::Uint8Array::new(&scope, ab, cmd_bytes, str_bytes),
         ) else {
             set_str(scope, global, "__glyx_canvas_protocol", "json");
             log::warn!("canvas: typed-array setup failed → JSON fallback");
@@ -478,34 +495,35 @@ impl V8Runtime {
     pub fn tick(&mut self) {
         let completions: Vec<(usize, Result<String, String>)> = {
             let mut q = self.queue.lock();
-            q.drain(..).map(|c| (c.resolver_ptr, c.result)).collect()
+            q.drain(..).map(|c| (c.resolver_ptr.into_raw(), c.result)).collect()
         };
 
         if completions.is_empty() {
             return;
         }
 
-        let scope = &mut v8::HandleScope::new(&mut self.isolate);
-        let ctx   = v8::Local::new(scope, &self.context);
-        let scope = &mut v8::ContextScope::new(scope, ctx);
+        v8::scope_with_context!(let scope, &mut self.isolate, &self.context);
 
         for (resolver_ptr, result) in completions {
+            // `into_raw()` above is only safe to call from the backend that
+            // minted the handle (V8Runtime, via `make_promise`) — see
+            // `PromiseHandle`'s doc comment in bindings/mod.rs.
             let resolver_global = unsafe {
                 *Box::from_raw(resolver_ptr as *mut v8::Global<v8::PromiseResolver>)
             };
-            let resolver = v8::Local::new(scope, &resolver_global);
+            let resolver = v8::Local::new(&scope, &resolver_global);
 
             match result {
                 Ok(content) => {
-                    let s = v8::String::new(scope, &content)
-                        .unwrap_or_else(|| v8::String::empty(scope));
-                    resolver.resolve(scope, s.into());
+                    let s = v8::String::new(&scope, &content)
+                        .unwrap_or_else(|| v8::String::empty(&scope));
+                    resolver.resolve(&scope, s.into());
                 }
                 Err(err) => {
-                    let msg = v8::String::new(scope, &err)
-                        .unwrap_or_else(|| v8::String::empty(scope));
-                    let exc = v8::Exception::error(scope, msg);
-                    resolver.reject(scope, exc);
+                    let msg = v8::String::new(&scope, &err)
+                        .unwrap_or_else(|| v8::String::empty(&scope));
+                    let exc = v8::Exception::error(&scope, msg);
+                    resolver.reject(&scope, exc);
                 }
             }
 
@@ -530,13 +548,12 @@ impl V8Runtime {
             self.inspector = Some(insp);
         }
 
-        let scope = &mut v8::HandleScope::new(&mut self.isolate);
-        let ctx   = v8::Local::new(scope, &self.context);
-        let scope = &mut v8::ContextScope::new(scope, ctx);
-        let global = ctx.global(scope);
+        v8::scope_with_context!(let scope, &mut self.isolate, &self.context);
+        let ctx    = v8::Local::new(&scope, &self.context);
+        let global = ctx.global(&scope);
 
-        let key = v8::String::new(scope, "__glyx_frameCallback").unwrap();
-        let val = match global.get(scope, key.into()) {
+        let key = v8::String::new(&scope, "__glyx_frameCallback").unwrap();
+        let val = match global.get(&scope, key.into()) {
             Some(v) => v,
             None    => return None,
         };
@@ -545,19 +562,19 @@ impl V8Runtime {
         }
         let func = v8::Local::<v8::Function>::try_from(val).unwrap();
         let recv = global.into();
-        let mut try_catch = v8::TryCatch::new(scope);
-        if func.call(&mut try_catch, recv, &[]).is_some() {
+        v8::tc_scope!(let try_catch, scope);
+        if func.call(try_catch, recv, &[]).is_some() {
             try_catch.perform_microtask_checkpoint();
             None
         } else if let Some(exc) = try_catch.exception() {
             // Extract both the exception message and the stack trace if available.
             let msg = exc
-                .to_string(&mut try_catch)
-                .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                .to_string(try_catch)
+                .map(|s| s.to_rust_string_lossy(try_catch.as_ref()))
                 .unwrap_or_else(|| "Unknown JS exception".into());
             let stack = try_catch.stack_trace()
-                .and_then(|st| st.to_string(&mut try_catch))
-                .map(|s| s.to_rust_string_lossy(&mut try_catch))
+                .and_then(|st| st.to_string(try_catch))
+                .map(|s| s.to_rust_string_lossy(try_catch.as_ref()))
                 .unwrap_or_default();
             let full = if stack.is_empty() { msg } else { format!("{}\n{}", msg, stack) };
             log::error!("[JS] frameCallback error: {}", full);
@@ -594,9 +611,7 @@ impl V8Runtime {
     /// (e.g. initial render deferred via Promise.resolve().then()) is committed
     /// and its scene commands are in the queue before `drain_scene_commands()`.
     pub fn flush_microtasks(&mut self) {
-        let scope = &mut v8::HandleScope::new(&mut self.isolate);
-        let ctx   = v8::Local::new(scope, &self.context);
-        let scope = &mut v8::ContextScope::new(scope, ctx);
+        v8::scope_with_context!(let scope, &mut self.isolate, &self.context);
         scope.perform_microtask_checkpoint();
     }
 
@@ -621,8 +636,7 @@ impl V8Runtime {
     }
 
     pub fn heap_stats(&mut self) -> HeapStats {
-        let mut stats = v8::HeapStatistics::default();
-        self.isolate.get_heap_statistics(&mut stats);
+        let stats = self.isolate.get_heap_statistics();
         HeapStats {
             used_heap_size: stats.used_heap_size(),
             total_heap_size: stats.total_heap_size(),
@@ -639,6 +653,10 @@ impl JsRuntime for V8Runtime {
 
     fn eval(&mut self, source: &str) -> Result<String, RuntimeError> {
         self.eval(source)
+    }
+
+    fn init_canvas_buffers(&mut self, protocol: &str, buffer_kb: usize) {
+        self.init_canvas_buffers(protocol, buffer_kb);
     }
 
     fn tick(&mut self) {
@@ -691,5 +709,29 @@ impl JsRuntime for V8Runtime {
 
     fn db_pools(&self) -> DbPools {
         Arc::clone(&self.db_pools)
+    }
+
+    fn webview_events(&self) -> WebviewEvents {
+        Arc::clone(&self.webview_events)
+    }
+
+    fn video_events(&self) -> VideoEvents {
+        Arc::clone(&self.video_events)
+    }
+
+    fn raycast_requests(&self) -> RaycastRequestQueue {
+        Arc::clone(&self.raycast_requests)
+    }
+
+    fn raycast_results(&self) -> RaycastResults {
+        Arc::clone(&self.raycast_results)
+    }
+
+    fn reload_plugin(&mut self, global_name: &str, prefix: Option<&str>, bundled_js: &str) {
+        self.reload_plugin(global_name, prefix, bundled_js);
+    }
+
+    fn gc_hint(&mut self) {
+        self.gc_hint();
     }
 }

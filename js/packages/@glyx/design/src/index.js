@@ -1,4 +1,4 @@
-// @glyx/design — Design system for Glyx apps
+// @glyx-dev/design — Design system for Glyx apps
 //
 // Exports:
 //   tokens, darkTokens — raw design token objects (colors, space, radius, fontSize, …)
@@ -25,7 +25,7 @@
 //   Tabs, Accordion, Stepper, Breadcrumb
 //
 // Quick-start:
-//   import { ThemeProvider, Button, Card, TextField, Alert } from '@glyx/design';
+//   import { ThemeProvider, Button, Card, TextField, Alert } from '@glyx-dev/design';
 //
 //   render(
 //     <ThemeProvider colorScheme="system">
@@ -41,3 +41,4 @@ export { Alert, ProgressBar, Spinner, Skeleton, ToastProvider, useToast } from '
 export { Modal, ModalFooter, Tooltip, Sheet } from './overlay.js';
 export { Avatar, AvatarGroup, Chip, Empty, Stat, KVRow } from './display.js';
 export { Tabs, Accordion, Stepper, Breadcrumb } from './navigation.js';
+export { WindowControls } from './window.js';

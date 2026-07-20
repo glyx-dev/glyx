@@ -1,4 +1,4 @@
-// @glyx/design — Overlay components
+// @glyx-dev/design — Overlay components
 //
 // Exports:
 //   Modal    — backdrop + centered panel with optional title and close button
@@ -6,7 +6,7 @@
 //   Sheet    — bottom sheet panel that slides up over content
 
 import React, { useState, useCallback } from 'react';
-import { View, Text, Pressable } from '@glyx/react';
+import { View, Text, Pressable } from '@glyx-dev/react';
 import { useTheme } from './theme.js';
 import { Heading } from './components.js';
 

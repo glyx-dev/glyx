@@ -7,7 +7,7 @@
 //   • Clipboard integration (clipboard.writeText)
 //   • Desktop notifications (notification.send)
 //   • Dynamic window title (glyxWindow.setTitle)
-//   • Multi-screen navigation (@glyx/router)
+//   • Multi-screen navigation (@glyx-dev/router)
 //   • Responsive layout (useWindowSize)
 //
 // Screens:
@@ -25,12 +25,12 @@ import {
   Canvas, Canvas3D,
   ai, camera, microphone, Camera,
   Video, Image,
-} from '@glyx/react';
-import { Router, Route, useNavigate, useRoute } from '@glyx/router';
-import { createKeychain, createTypedKeychain } from '@glyx/keychain';
-import { initStore, createStore } from '@glyx/store';
-import { Scene, PerspectiveCamera, AmbientLight, DirectionalLight, PointLight, SpotLight, Mesh, Model } from '@glyx/three';
-import { createDrizzle } from '@glyx/drizzle';
+} from '@glyx-dev/react';
+import { Router, Route, useNavigate, useRoute } from '@glyx-dev/router';
+import { createKeychain, createTypedKeychain } from '@glyx-dev/keychain';
+import { initStore, createStore } from '@glyx-dev/store';
+import { Scene, PerspectiveCamera, AmbientLight, DirectionalLight, PointLight, SpotLight, Mesh, Model } from '@glyx-dev/three';
+import { createDrizzle } from '@glyx-dev/drizzle';
 import { sqliteTable, integer, text, real } from 'drizzle-orm/sqlite-core';
 import { desc, eq, gt } from 'drizzle-orm';
 
@@ -2062,7 +2062,7 @@ function CanvasDemoScreen() {
       {/* 3D Canvas — isolated component so its 30 fps state updates don't
           re-render the 2D canvas, header, or Text nodes above. */}
       <Text fontSize={13} width={inner} height={18} style={{ color: C.dim }}>
-        3D Canvas — declarative @glyx/three (R3F-style)
+        3D Canvas — declarative @glyx-dev/three (R3F-style)
       </Text>
       <Canvas3DDemo />
     </ScrollView>
@@ -2803,7 +2803,7 @@ function MediaDemoScreen() {
   );
 }
 
-// ── Screen: Packages Demo (@glyx/keychain + @glyx/store) ────────────────────
+// ── Screen: Packages Demo (@glyx-dev/keychain + @glyx-dev/store) ────────────────────
 
 // Module-level singletons — created once, shared across all renders.
 const appChain   = createTypedKeychain('demo', { apiKey: null, sessionToken: null });
@@ -2814,7 +2814,7 @@ function PackagesDemoScreen() {
   const inner = winW - PAD * 2;
   const C = useThemeColors();
 
-  // ── @glyx/keychain demo ───────────────────────────────────────────────────
+  // ── @glyx-dev/keychain demo ───────────────────────────────────────────────────
   const [kcInput,  setKcInput]  = useState('');
   const [kcStored, setKcStored] = useState(null);
   const [kcStatus, setKcStatus] = useState('');
@@ -2845,7 +2845,7 @@ function PackagesDemoScreen() {
     } catch (e) { setKcStatus('Clear error: ' + String(e)); }
   }
 
-  // ── @glyx/store demo ──────────────────────────────────────────────────────
+  // ── @glyx-dev/store demo ──────────────────────────────────────────────────────
   const { state: ctr, set: setCtr, reset: resetCtr, hydrated } = useCounter();
 
   return (
@@ -2855,8 +2855,8 @@ function PackagesDemoScreen() {
         <Text fontSize={18} height={24} style={{ color: C.text }}>Packages</Text>
       </View>
 
-      {/* @glyx/keychain ────────────────────────────────────────────────── */}
-      <Text fontSize={15} width={inner} height={20} style={{ color: C.accent }}>@glyx/keychain</Text>
+      {/* @glyx-dev/keychain ────────────────────────────────────────────────── */}
+      <Text fontSize={15} width={inner} height={20} style={{ color: C.accent }}>@glyx-dev/keychain</Text>
       <Text fontSize={12} width={inner} height={16} style={{ color: C.dim }}>
         Typed namespace-scoped wrapper over the OS credential store (DPAPI / Keychain / Secret Service).
       </Text>
@@ -2895,8 +2895,8 @@ function PackagesDemoScreen() {
         </Text>
       ) : null}
 
-      {/* @glyx/store ───────────────────────────────────────────────────── */}
-      <Text fontSize={15} width={inner} height={20} style={{ color: C.accent }}>@glyx/store</Text>
+      {/* @glyx-dev/store ───────────────────────────────────────────────────── */}
+      <Text fontSize={15} width={inner} height={20} style={{ color: C.accent }}>@glyx-dev/store</Text>
       <Text fontSize={12} width={inner} height={16} style={{ color: C.dim }}>
         Persistent reactive store backed by SQLite. State survives app restarts.
         {hydrated ? '' : '  (hydrating…)'}
@@ -3077,7 +3077,7 @@ function DrizzleScreen() {
 
       <Text fontSize={10} style={{ color: C.dim, marginTop: 12, lineHeight: 16 }}>
         {'Typed insert / select / delete / where / orderBy — zero raw SQL in the screen. ' +
-         'Drizzle generates the SQL; @glyx/drizzle routes it through __glyx_db_* bindings.'}
+         'Drizzle generates the SQL; @glyx-dev/drizzle routes it through __glyx_db_* bindings.'}
       </Text>
     </ScrollView>
   );

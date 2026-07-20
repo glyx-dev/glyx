@@ -16,6 +16,7 @@ pub(super) fn cmd_build(
     perf_budget: f64,
     perf_duration: u64,
     p: pm::Pm,
+    icupkg: Option<PathBuf>,
 ) -> Result<()> {
     let project_name = read_project_name()
         .context("Run `glyx build` from the project root (where glyx.config.ts or package.json lives)")?;
@@ -26,6 +27,15 @@ pub(super) fn cmd_build(
         "portable" => build_portable_mode(target, &project_name, p)?,
         other => bail!("Unknown build mode '{other}'. Use: snapshot, bundle, portable"),
     };
+
+    // Ship a trimmed icudtl.dat next to the binary so packaged apps stay light.
+    if let Some(ref bin) = bin_path {
+        if let Some(dir) = bin.parent() {
+            if let Err(e) = super::icu_trim::trim_icu_for_app(&project_name, dir, icupkg) {
+                log::warn!("ICU trim skipped: {e}");
+            }
+        }
+    }
 
     if check_performance {
         if let Some(bin) = &bin_path {
@@ -243,7 +253,7 @@ pub(super) fn append_trailer_snapshot(
         println!("  ~/.glyx/runners/prod/glyx-runner on your build machine.");
     }
 
-    let runner = find_or_build_runner(false)
+    let runner = find_or_build_runner(false, &super::read_engine_from_config())
         .context("Could not find or build prod glyx-runner. Run `glyx runtime build`.")?;
 
     std::fs::create_dir_all("target/release")?;
@@ -305,7 +315,7 @@ pub(super) fn copy_prod_runner_as(target: Option<&str>, project_name: &str) -> R
         println!("  then use `glyx build --mode snapshot` for embedded cross-target binaries.");
     }
 
-    let runner = find_or_build_runner(false)
+    let runner = find_or_build_runner(false, &super::read_engine_from_config())
         .context("Could not find or build prod glyx-runner. Run `glyx runtime build`.")?;
 
     std::fs::create_dir_all("target/release")?;
@@ -326,7 +336,13 @@ pub(super) fn cargo_build_release(
     app_config: Option<&Path>,
 ) -> Result<PathBuf> {
     let rust_target = target.map(platform_to_rust_target).transpose()?;
-    let mut args = vec!["build", "--release", "--no-default-features", "-p", project_name];
+    // --no-default-features drops "dev" (hot-reload) for a lean prod binary,
+    // but it also drops the engine feature — glyx-core::run() needs `v8` or
+    // `quickjs` explicitly re-added, or it fails to compile (its `rt` local
+    // is cfg-gated on one of them, not linked by default once neither is
+    // implied). Read from glyx.config's "engine" field (default "v8").
+    let engine = super::read_engine_from_config();
+    let mut args = vec!["build", "--release", "--no-default-features", "--features", &engine, "-p", project_name];
     let target_str;
     if let Some(ref t) = rust_target {
         target_str = t.to_string();
@@ -379,6 +395,17 @@ pub fn build_cap_dlls(caps: &[String], target: Option<&str>, dest: &Path) -> Res
         ("lib", "so")
     };
 
+    // When run from an app subdir (e.g. `examples/media-player`), `cargo` walks
+    // up to the glyx workspace root and emits the cdylib into the workspace
+    // `target/` dir. Resolve that root explicitly so our source path matches
+    // where the artifact actually lands.
+    let home = super::glyx_home().ok();
+    let profile_dir = if let Some(ref t) = rust_target {
+        format!("target/{t}/release")
+    } else {
+        "target/release".to_string()
+    };
+
     for cap in caps {
         let pkg = format!("glyx-cap-{cap}");
         // cdylib stem: glyx_cap_<name>  (hyphens → underscores)
@@ -393,18 +420,19 @@ pub fn build_cap_dlls(caps: &[String], target: Option<&str>, dest: &Path) -> Res
         }
 
         println!("Building cap DLL: {pkg}...");
-        let status = Command::new("cargo")
-            .args(&args)
-            .env("RUST_LOG", "warn")
+        let mut cargo = Command::new("cargo");
+        cargo.args(&args).env("RUST_LOG", "warn");
+        if let Some(ref h) = home { cargo.current_dir(h); }
+        let status = cargo
             .status()
             .with_context(|| format!("Failed to run cargo build for {pkg}"))?;
         if !status.success() { bail!("cargo build for {pkg} failed"); }
 
         let lib_name = format!("{dll_prefix}{stem}.{dll_ext}");
-        let src = if let Some(ref t) = rust_target {
-            PathBuf::from(format!("target/{t}/release/{lib_name}"))
+        let src = if let Some(ref h) = home {
+            h.join(&profile_dir).join(&lib_name)
         } else {
-            PathBuf::from(format!("target/release/{lib_name}"))
+            PathBuf::from(&profile_dir).join(&lib_name)
         };
 
         if !src.exists() {

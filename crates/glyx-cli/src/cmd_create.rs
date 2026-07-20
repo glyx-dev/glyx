@@ -18,16 +18,18 @@ pub(super) fn cmd_create(name: &str, native: bool, template: &str, p: pm::Pm) ->
         );
     }
 
-    let glyx_home = glyx_home()?;
+    // Workspace checkout → wire local path/file deps (contributor fast-iteration).
+    // Standalone CLI → npm versions + git deps pinned to this CLI's release tag.
+    let glyx_home = glyx_home().ok();
 
     if native {
         println!("Creating Glyx project (native): {name}/");
         println!("  Template: {template}  |  Includes Cargo.toml + src/main.rs");
-        cmd_create_native(name, &dest, &glyx_home, template)?;
+        cmd_create_native(name, &dest, glyx_home.as_deref(), template)?;
     } else {
         println!("Creating Glyx project: {name}/");
         println!("  Template: {template}  |  JS-only mode — no Rust toolchain required.");
-        cmd_create_js(name, &dest, &glyx_home, template)?;
+        cmd_create_js(name, &dest, glyx_home.as_deref(), template)?;
     }
 
     println!();
@@ -44,16 +46,31 @@ pub(super) fn cmd_create(name: &str, native: bool, template: &str, p: pm::Pm) ->
     Ok(())
 }
 
-pub(super) fn cmd_create_js(name: &str, dest: &Path, glyx_home: &Path, template: &str) -> Result<()> {
+/// npm/file dep specifiers for the four @glyx JS packages.
+/// Workspace checkout → `file:` links; standalone CLI → npm versions matching
+/// this CLI's release.
+fn js_dep_specs(dest: &Path, glyx_home: Option<&Path>) -> (String, String, String, String) {
+    match glyx_home {
+        Some(h) => (
+            format!("file:{}", relpath(dest, &h.join("js/packages/@glyx/react"))),
+            format!("file:{}", relpath(dest, &h.join("js/packages/@glyx/router"))),
+            format!("file:{}", relpath(dest, &h.join("js/packages/@glyx/design"))),
+            format!("file:{}", relpath(dest, &h.join("js/packages/@glyx/config"))),
+        ),
+        None => {
+            let v = format!("^{}", env!("CARGO_PKG_VERSION"));
+            (v.clone(), v.clone(), v.clone(), v)
+        }
+    }
+}
+
+pub(super) fn cmd_create_js(name: &str, dest: &Path, glyx_home: Option<&Path>, template: &str) -> Result<()> {
     std::fs::create_dir_all(dest.join("src"))?;
     std::fs::create_dir_all(dest.join("src/components"))?;
     std::fs::create_dir_all(dest.join("public"))?;
     copy_glyx_mark_to(glyx_home, dest, "public");
 
-    let react_path   = relpath(dest, &glyx_home.join("js/packages/@glyx/react"));
-    let router_path  = relpath(dest, &glyx_home.join("js/packages/@glyx/router"));
-    let design_path  = relpath(dest, &glyx_home.join("js/packages/@glyx/design"));
-    let config_path  = relpath(dest, &glyx_home.join("js/packages/@glyx/config"));
+    let (react_dep, router_dep, design_dep, config_dep) = js_dep_specs(dest, glyx_home);
 
     write_file(dest.join("src/app.jsx"), &app_jsx_for_template(name, template))?;
     write_file(dest.join("glyx.config.ts"), &glyx_config_ts_js_template(name))?;
@@ -64,12 +81,12 @@ pub(super) fn cmd_create_js(name: &str, dest: &Path, glyx_home: &Path, template:
   "private": true,
   "dependencies": {{
     "react":          "^18",
-    "@glyx/react":   "file:{react_path}",
-    "@glyx/router":  "file:{router_path}",
-    "@glyx/design":  "file:{design_path}"
+    "@glyx-dev/react":   "{react_dep}",
+    "@glyx-dev/router":  "{router_dep}",
+    "@glyx-dev/design":  "{design_dep}"
   }},
   "devDependencies": {{
-    "@glyx/config": "file:{config_path}"
+    "@glyx-dev/config": "{config_dep}"
   }}
 }}
 "#))?;
@@ -78,19 +95,47 @@ pub(super) fn cmd_create_js(name: &str, dest: &Path, glyx_home: &Path, template:
     Ok(())
 }
 
-pub(super) fn cmd_create_native(name: &str, dest: &Path, glyx_home: &Path, template: &str) -> Result<()> {
+pub(super) fn cmd_create_native(name: &str, dest: &Path, glyx_home: Option<&Path>, template: &str) -> Result<()> {
     std::fs::create_dir_all(dest.join("src"))?;
     std::fs::create_dir_all(dest.join("ui"))?;
     std::fs::create_dir_all(dest.join("ui/components"))?;
     std::fs::create_dir_all(dest.join("public"))?;
     copy_glyx_mark_to(glyx_home, dest, "public");
 
-    let core_path   = relpath(dest, &glyx_home.join("crates/glyx-core"));
-    let shell_path  = relpath(dest, &glyx_home.join("crates/glyx-shell"));
-    let react_path  = relpath(dest, &glyx_home.join("js/packages/@glyx/react"));
-    let router_path = relpath(dest, &glyx_home.join("js/packages/@glyx/router"));
-    let design_path = relpath(dest, &glyx_home.join("js/packages/@glyx/design"));
-    let config_path = relpath(dest, &glyx_home.join("js/packages/@glyx/config"));
+    // Rust dependency block:
+    //   Workspace checkout → path deps (contributors iterate on the framework).
+    //   Standalone CLI     → git deps pinned to this CLI's release tag, PLUS the
+    //   [patch.crates-io] entries so the vendored forks (vello pool cap,
+    //   mimalloc static-CRT) apply to the user's
+    //   build graph — patch tables do NOT propagate through dependencies.
+    let rust_deps = match glyx_home {
+        Some(h) => {
+            let core_path  = relpath(dest, &h.join("crates/glyx-core"));
+            let shell_path = relpath(dest, &h.join("crates/glyx-shell"));
+            format!(
+                r#"glyx-core  = {{ path = "{core_path}", default-features = false }}
+glyx-shell = {{ path = "{shell_path}" }}
+env_logger  = "0.11"
+"#)
+        }
+        None => {
+            let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+            format!(
+                r#"glyx-core  = {{ git = "https://github.com/glyx-dev/glyx", tag = "{tag}", default-features = false }}
+glyx-shell = {{ git = "https://github.com/glyx-dev/glyx", tag = "{tag}" }}
+env_logger  = "0.11"
+
+# Glyx's memory fixes live in vendored forks inside the glyx repo.  These
+# patches make YOUR build use them too — do not remove, or you get upstream
+# vello/mimalloc behavior back (large GPU-buffer pools, CRT link errors).
+[patch.crates-io]
+vello           = {{ git = "https://github.com/glyx-dev/glyx", tag = "{tag}" }}
+libmimalloc-sys = {{ git = "https://github.com/glyx-dev/glyx", tag = "{tag}" }}
+"#)
+        }
+    };
+
+    let (react_dep, router_dep, design_dep, config_dep) = js_dep_specs(dest, glyx_home);
 
     write_file(dest.join("Cargo.toml"), &format!(
         r#"[package]
@@ -105,10 +150,7 @@ default = ["dev"]
 dev     = ["glyx-core/dev"]
 
 [dependencies]
-glyx-core  = {{ path = "{core_path}", default-features = false }}
-glyx-shell = {{ path = "{shell_path}" }}
-env_logger  = "0.11"
-"#))?;
+{rust_deps}"#))?;
     write_file(dest.join("src/main.rs"), "#![cfg_attr(all(target_os = \"windows\", not(debug_assertions)), windows_subsystem = \"windows\")]\n\nfn main() {\n    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(\"info\"))\n        .format_timestamp(None)\n        .format_module_path(false)\n        .init();\n    glyx_core::run(glyx_core::AppConfig::from_config());\n}\n")?;
     write_file(dest.join("ui/app.jsx"), &app_jsx_for_template(name, template))?;
     write_file(dest.join("glyx.config.ts"), &glyx_config_ts_native_template(name))?;
@@ -119,12 +161,12 @@ env_logger  = "0.11"
   "private": true,
   "dependencies": {{
     "react":          "^18",
-    "@glyx/react":   "file:{react_path}",
-    "@glyx/router":  "file:{router_path}",
-    "@glyx/design":  "file:{design_path}"
+    "@glyx-dev/react":   "{react_dep}",
+    "@glyx-dev/router":  "{router_dep}",
+    "@glyx-dev/design":  "{design_dep}"
   }},
   "devDependencies": {{
-    "@glyx/config": "file:{config_path}"
+    "@glyx-dev/config": "{config_dep}"
   }}
 }}
 "#))?;
@@ -144,7 +186,7 @@ pub(super) fn app_jsx_for_template(name: &str, template: &str) -> String {
 
 pub(super) fn app_jsx_blank(name: &str) -> String {
     format!(r#"import React, {{ useState }} from 'react';
-import {{ View, Text, Image, Pressable, render, useWindowSize }} from '@glyx/react';
+import {{ View, Text, Image, Pressable, render, useWindowSize }} from '@glyx-dev/react';
 
 function App() {{
   const {{ width, height }} = useWindowSize();
@@ -179,12 +221,12 @@ render(<App />);
 
 pub(super) fn app_jsx_notes(name: &str) -> String {
     format!(r#"import React, {{ useState }} from 'react';
-import {{ View, Text, Pressable, ScrollView, render, useWindowSize }} from '@glyx/react';
-import {{ ThemeProvider, useTheme, Button, Card, Label, Heading }} from '@glyx/design';
+import {{ View, Text, Pressable, ScrollView, render, useWindowSize }} from '@glyx-dev/react';
+import {{ ThemeProvider, useTheme, Button, Card, Label, Heading }} from '@glyx-dev/design';
 
 const NOTES = [
   {{ id: 1, title: 'Welcome', body: 'This is your first note in {name}. Click any note to read it, or press New Note to create one.' }},
-  {{ id: 2, title: 'Getting started', body: 'Edit src/app.jsx to customise this template. Import more components from @glyx/react and @glyx/design.' }},
+  {{ id: 2, title: 'Getting started', body: 'Edit src/app.jsx to customise this template. Import more components from @glyx-dev/react and @glyx-dev/design.' }},
 ];
 
 function Sidebar({{ notes, selectedId, onSelect, onNew }}) {{
@@ -266,8 +308,8 @@ render(
 
 pub(super) fn app_jsx_dashboard(name: &str) -> String {
     format!(r#"import React, {{ useState }} from 'react';
-import {{ View, Text, Pressable, render, useWindowSize }} from '@glyx/react';
-import {{ ThemeProvider, useTheme, Card, Label, Heading, Divider, Badge }} from '@glyx/design';
+import {{ View, Text, Pressable, render, useWindowSize }} from '@glyx-dev/react';
+import {{ ThemeProvider, useTheme, Card, Label, Heading, Divider, Badge }} from '@glyx-dev/design';
 
 const NAV_ITEMS = ['Overview', 'Analytics', 'Users', 'Settings'];
 
@@ -352,8 +394,8 @@ render(
 
 pub(super) fn app_jsx_settings(name: &str) -> String {
     format!(r#"import React, {{ useState }} from 'react';
-import {{ View, Text, Pressable, Switch, render, useWindowSize }} from '@glyx/react';
-import {{ ThemeProvider, useTheme, Card, Label, Heading, Divider, Button }} from '@glyx/design';
+import {{ View, Text, Pressable, Switch, render, useWindowSize }} from '@glyx-dev/react';
+import {{ ThemeProvider, useTheme, Card, Label, Heading, Divider, Button }} from '@glyx-dev/design';
 
 function SettingRow({{ label, description, children }}) {{
   const {{ colors, space }} = useTheme();
@@ -433,7 +475,7 @@ render(
 }
 
 pub(super) fn glyx_config_ts_js_template(name: &str) -> String {
-    format!(r#"import {{ defineConfig }} from '@glyx/config';
+    format!(r#"import {{ defineConfig }} from '@glyx-dev/config';
 
 export default defineConfig({{
   name:    '{name}',
@@ -476,7 +518,7 @@ Add a new capability to this app.
 
 1. Open `glyx.config.ts` and add the capability key to the `capabilities` block
 2. For `fs`, add glob patterns to `read`, `write`, or `delete` arrays
-3. Import the API in your component: `import { fs, db, clipboard, ... } from '@glyx/react'`
+3. Import the API in your component: `import { fs, db, clipboard, ... } from '@glyx-dev/react'`
 4. Glyx will enforce the capability at runtime — calls outside declared globs throw `CapabilityDenied`
 
 Common capabilities: `fs`, `db`, `dialog`, `clipboard`, `notification`, `audio`, `network`, `credentials`, `storage`, `updater`
@@ -486,8 +528,8 @@ Common capabilities: `fs`, `db`, `dialog`, `clipboard`, `notification`, `audio`,
 Create a new React component for this app.
 
 1. Create the file in `src/components/` (JS-only) or `ui/components/` (native project)
-2. Use `@glyx/react` primitives — `View`, `Text`, `Pressable`, `ScrollView`, `TextInput`, `Image`
-3. Use `@glyx/design` for themed UI — `Button`, `Card`, `TextField`, `Modal`, `Alert`, `Tabs`
+2. Use `@glyx-dev/react` primitives — `View`, `Text`, `Pressable`, `ScrollView`, `TextInput`, `Image`
+3. Use `@glyx-dev/design` for themed UI — `Button`, `Card`, `TextField`, `Modal`, `Alert`, `Tabs`
 4. Style with object props (React Native-style, not CSS strings)
 
 ## /scaffold-plugin
@@ -501,7 +543,7 @@ Add a JS plugin to extend this app with custom backend commands.
 
 ```js
 // src/plugins/example.plugin.js
-import { db } from '@glyx/react'
+import { db } from '@glyx-dev/react'
 
 export async function getAll() {
   return db.query('SELECT * FROM items ORDER BY created_at DESC')
@@ -527,7 +569,7 @@ Fix: guard with `if (!ctx) return` inside the `useEffect`, or use `_veloxOnMount
 }
 
 pub(super) fn glyx_config_ts_native_template(name: &str) -> String {
-    format!(r#"import {{ defineConfig }} from '@glyx/config';
+    format!(r#"import {{ defineConfig }} from '@glyx-dev/config';
 
 export default defineConfig({{
   name:    '{name}',

@@ -1,4 +1,4 @@
-import { defineConfig } from '@glyx/config';
+import { defineConfig } from '@glyx-dev/config';
 
 export default defineConfig({
   name:    'files',

@@ -10,3 +10,25 @@
 # Mirrors workspace Cargo.toml release profile — defined here so it applies
 # to all crates even when invoked from a sub-crate directory.
 # The canonical settings live in the workspace Cargo.toml [profile.release].
+
+# ===========================================================================
+# Custom V8 (glyx-v8) flip — OFF by default.
+#
+# To use a V8 build from the glyx-v8 repo instead of rusty_v8's prebuilt:
+#   1. Build glyx-v8 (produces dist/librusty_v8_<profile>_<triple>.a.gz +
+#      icudtl.dat) and publish/download the artifacts.
+#   2. Enable the `glyx-v8` feature on glyx-runtime (removes the mimalloc
+#      force-link in lib.rs).
+#   3. Uncomment the [env] block below and point RUSTY_V8_ARCHIVE at the
+#      artifact matching your build profile (release vs dev/debug). The
+#      `src_binding.rs` is still taken from denoland's v150.1.0 release via
+#      RUSTY_V8_MIRROR, so the API stays version-matched.
+#   4. Ship the glyx-v8 icudtl.dat next to the executable (or set GLYX_ICU_DATA).
+# ===========================================================================
+# [env]
+# RUSTY_V8_MIRROR = "https://github.com/denoland/rusty_v8/releases/download/v150.1.0"
+# # release builds:
+# RUSTY_V8_ARCHIVE = "https://github.com/<you>/glyx-v8/releases/download/<tag>/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz"
+# # dev/debug builds use the inspector-enabled lib instead:
+# # RUSTY_V8_ARCHIVE = "https://github.com/<you>/glyx-v8/releases/download/<tag>/librusty_v8_debug_x86_64-unknown-linux-gnu.a.gz"
+

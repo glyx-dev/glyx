@@ -1,149 +1,346 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, Text, ScrollView, render, useWindowSize, system, battery,
-} from '@glyx/react';
+  View, Text, ScrollView, Pressable, render, useWindowSize, fs, dialog,
+} from '@glyx-dev/react';
 import {
-  ThemeProvider, Card, Stat, Tabs, ProgressBar, KVRow, Badge, Spinner, useTheme,
-} from '@glyx/design';
-import { Icon } from '@glyx/icons';
-import { LineChart, AreaChart, BarChart, PieChart, DEFAULT_PALETTE } from '@glyx/charts';
-import { DataTable } from '@glyx/table';
+  ThemeProvider, Card, Badge, IconButton, useTheme,
+} from '@glyx-dev/design';
+import { Icon } from '@glyx-dev/icons';
+import { LineChart, AreaChart, BarChart, PieChart } from '@glyx-dev/charts';
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// ── Palette (matches the glyx-design-kit dashboard template) ──────────────────
 
-function genSeries(n, base, amp, seed) {
+const COLORS = {
+  sky:     '#38bdf8',
+  emerald: '#34d399',
+  indigo:  '#818cf8',
+  amber:   '#fbbf24',
+  rose:    '#fb7185',
+};
+
+function fmtTime(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// Manual thousands separator — avoids toLocaleString() (ICU locale data is trimmed
+// in the JS-only runner, where Number.toLocaleString throws).
+function fmtNum(n) {
+  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+const INITIAL_POINTS = 20;
+
+function genInitial() {
+  const now = Date.now();
   const out = [];
-  let s = seed;
-  for (let i = 0; i < n; i++) {
-    s = (s * 9301 + 49297) % 233280;
-    const r = s / 233280;
-    out.push({ x: MONTHS[i % 12], y: Math.round(base + amp * r) });
+  for (let i = INITIAL_POINTS; i >= 0; i--) {
+    const t = new Date(now - i * 2000);
+    out.push({
+      timestamp: fmtTime(t),
+      revenue: Math.floor(Math.random() * 500) + 1000,
+      users:    Math.floor(Math.random() * 50) + 100,
+      errors:   Math.floor(Math.random() * 5),
+    });
   }
   return out;
 }
 
-function genTable() {
-  const names = ['Spring', 'Summer', 'Referral', 'Retarget', 'Newsletter', 'Search', 'Social', 'Affiliate', 'Video', 'Display'];
-  const channels = ['Email', 'Paid', 'Organic', 'Social'];
-  return Array.from({ length: 40 }, (_, i) => ({
-    id: i + 1,
-    name: names[i % names.length] + ' ' + channels[i % channels.length] + ' ' + (Math.floor(i / names.length) + 1),
-    spend: 200 + ((i * 137) % 900),
-    roas: +(1.5 + ((i * 0.37) % 3)).toFixed(2),
-    conv: 2 + (i % 6),
-  }));
+// ── Real-time data (mirrors the template's useRealtimeData hook) ──────────────
+
+function useRealtimeData() {
+  const [timeseries, setTimeseries] = useState(genInitial);
+  const [deviceData, setDeviceData] = useState([
+    { x: 'Desktop', y: 45 },
+    { x: 'Mobile',  y: 40 },
+    { x: 'Tablet',  y: 15 },
+  ]);
+  const [isPaused, setIsPaused] = useState(false);
+
+  useEffect(() => {
+    if (isPaused) return;
+    const id = setInterval(() => {
+      setTimeseries((prev) => {
+        const last = prev[prev.length - 1];
+        const newUsers    = Math.max(50,  Math.min(300,  last.users    + (Math.random() * 20 - 10)));
+        const newRevenue  = Math.max(500, Math.min(3000, last.revenue  + (Math.random() * 200 - 100)));
+        const newErrors   = Math.max(0,   Math.min(20,   last.errors   + (Math.random() * 4 - 2)));
+        const next = [...prev.slice(1)];
+        next.push({
+          timestamp: fmtTime(new Date()),
+          revenue:   Math.round(newRevenue),
+          users:     Math.round(newUsers),
+          errors:    Math.round(newErrors),
+        });
+        return next;
+      });
+      setDeviceData((prev) => prev.map((d) => ({ ...d, y: Math.max(1, d.y + (Math.random() * 2 - 1)) })));
+    }, 3000);
+    return () => clearInterval(id);
+  }, [isPaused]);
+
+  const togglePause = useCallback(() => setIsPaused((p) => !p), []);
+  return { timeseries, deviceData, isPaused, togglePause };
 }
 
-function LivePanel() {
+const INITIAL_WIDGETS = [
+  { id: 'rev',     title: 'Revenue Overview',    type: 'area', dataKey: 'revenue', visible: true },
+  { id: 'users',   title: 'Active Users',        type: 'line', dataKey: 'users',    visible: true },
+  { id: 'devices', title: 'Device Distribution', type: 'pie',  dataKey: 'value',    visible: true },
+  { id: 'errors',  title: 'Error Rate',          type: 'bar',  dataKey: 'errors',   visible: true },
+];
+
+function buildCSV(data) {
+  if (!data || !data.length) return '';
+  const headers = Object.keys(data[0]);
+  return [
+    headers.join(','),
+    ...data.map((row) => headers.map((h) => JSON.stringify(row[h])).join(',')),
+  ].join('\n');
+}
+
+async function exportToCSV(filename, data) {
+  try {
+    const path = await dialog.saveFile({
+      defaultName: `${filename}.csv`,
+      filters: [{ name: 'CSV', extensions: ['csv'] }],
+    });
+    if (!path) return;
+    await fs.writeFile(path, buildCSV(data));
+  } catch (e) {
+    // export cancelled or capability unavailable — ignore
+  }
+}
+
+// ── Stat card ─────────────────────────────────────────────────────────────────
+
+function StatCard({ title, value, change, color, width }) {
   const C = useTheme().colors;
-  const [info, setInfo] = useState(null);
-  const [bat, setBat] = useState(null);
-  useEffect(() => {
-    let alive = true;
-    const tick = () => {
-      system.getInfo().then((i) => alive && setInfo(i)).catch(() => {});
-      battery.getStatus().then((b) => alive && setBat(b)).catch(() => {});
-    };
-    tick();
-    const id = setInterval(tick, 5000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
+  const positive = change >= 0;
   return (
-    <Card style={{ padding: 16 }}>
-      <Text style={{ fontSize: 16, fontWeight: '700', color: C.text, marginBottom: 10 }}>Live system</Text>
-      {info ? (
-        <View style={{ gap: 6 }}>
-          <KVRow label="CPU" value={info.cpuName || '—'} />
-          <KVRow label="Cores" value={String(info.cpuCores)} />
-          <KVRow label="Memory" value={`${info.memoryUsedMb} / ${info.memoryTotalMb} MB`} />
-          <KVRow label="OS" value={`${info.osName} ${info.osVersion}`} />
-        </View>
-      ) : <Text style={{ color: C.textMuted }}>Reading system info…</Text>}
-      <View style={{ marginTop: 12 }}>
-        {bat ? (
-          <View style={{ gap: 6 }}>
-            <KVRow label="Battery" value={`${Math.round(bat.level * 100)}%`} />
-            <ProgressBar value={Math.round(bat.level * 100)} max={100} color={bat.charging ? C.success : C.primary} />
-            <Badge label={bat.charging ? 'Charging' : 'On battery'} variant={bat.charging ? 'success' : 'default'} />
-          </View>
-        ) : <Text style={{ color: C.textMuted }}>Battery info unavailable</Text>}
+    <Card style={{ padding: 16, width }}>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <Text fontSize={13} style={{ color: C.textMuted }}>{title}</Text>
+        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color }} />
+      </View>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' }}>
+        <Text fontSize={22} style={{ color: C.text, fontWeight: '700' }}>{value}</Text>
+        <Text fontSize={12} style={{ color: positive ? C.success : C.error, fontWeight: '700' }}>
+          {positive ? '+' : ''}{change}%
+        </Text>
       </View>
     </Card>
   );
 }
 
-function Dashboard() {
+// Header text button with a stable width + centered label, so "Pause" and "Resume"
+// stay visually consistent (the design Button's label can drift off-center).
+function ActionButton({ label, onPress, variant = 'secondary', minWidth = 96 }) {
+  const C = useTheme().colors;
+  const bg = variant === 'primary' ? C.primary : C.surfaceRaised;
+  const fg = variant === 'primary' ? C.primaryText : C.text;
+  return (
+    <Pressable
+      onPress={onPress}
+      style={{
+        backgroundColor: bg,
+        paddingHorizontal: 16,
+        paddingVertical: 8,
+        borderRadius: 8,
+        minWidth,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      <Text fontSize={14} style={{ color: fg, fontWeight: '600', textAlign: 'center', width: '100%' }}>{label}</Text>
+    </Pressable>
+  );
+}
+
+// ── Chart widget ───────────────────────────────────────────────────────────────
+
+function ChartWidget({ config, timeseries, deviceData, width }) {
+  const C = useTheme().colors;
+  const h = 260;
+  // Card already applies 16px padding on each side; leave a little extra right
+  // breathing room so the last axis labels aren't clipped.
+  const cw = Math.max(80, width - 36);
+  const [selected, setSelected] = useState(null);
+  let chart = null;
+
+  // Real click-to-select: every chart type reports the raw data point it was
+  // built from (not just x/y pixel coords), so apps can drive selection,
+  // drill-down, etc. straight off onPointPress.
+  const onPointPress = (point) => setSelected(point);
+
+  if (config.type === 'area') {
+    chart = (
+      <AreaChart
+        data={timeseries.map((d) => ({ x: d.timestamp, y: d[config.dataKey] }))}
+        width={cw} height={h} color={COLORS.sky}
+        onPointPress={onPointPress} zoomPan
+      />
+    );
+  } else if (config.type === 'line') {
+    chart = (
+      <LineChart
+        data={timeseries.map((d) => ({ x: d.timestamp, y: d[config.dataKey] }))}
+        width={cw} height={h} color={COLORS.emerald} showDots={false}
+        onPointPress={onPointPress}
+      />
+    );
+  } else if (config.type === 'bar') {
+    chart = (
+      <BarChart
+        data={timeseries.map((d) => ({ x: d.timestamp, y: d[config.dataKey] }))}
+        width={cw} height={h} color={COLORS.indigo}
+        onPointPress={onPointPress}
+      />
+    );
+  } else if (config.type === 'pie') {
+    // Legend adds its own row below the donut — give it real room within the
+    // widget's fixed height budget instead of letting it overflow the card.
+    chart = (
+      <PieChart
+        data={deviceData} width={cw} height={h - 36} innerRadius={0.5}
+        onPointPress={onPointPress} showLegend
+      />
+    );
+  }
+
+  return (
+    <Card style={{ padding: 16, width }}>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <Text fontSize={14} style={{ color: C.text, fontWeight: '600' }}>{config.title}</Text>
+        {selected ? (
+          <Text fontSize={12} style={{ color: C.textMuted }}>
+            {String(selected.x)}: {fmtNum(selected[config.dataKey] ?? selected.y)}
+          </Text>
+        ) : null}
+      </View>
+      <View style={{ height: h }}>{chart}</View>
+      {config.type === 'area' ? (
+        <Text fontSize={11} style={{ color: C.textMuted, marginTop: 6 }}>
+          Drag to pan, use +/−/⟲ to zoom · click a point to select it
+        </Text>
+      ) : null}
+    </Card>
+  );
+}
+
+// ── Dashboard ───────────────────────────────────────────────────────────────────
+
+function Dashboard({ scheme, onToggleTheme }) {
   const C = useTheme().colors;
   const { width } = useWindowSize();
-  const [tab, setTab] = useState('overview');
-  const cols = width >= 1000 ? 2 : 1;
-  const cardW = Math.floor((width - 48 - (cols - 1) * 16) / cols);
-  const chartW = cardW - 32;
-  // Stat cards go 4-across on wide windows, 2-across otherwise.
+  const { timeseries, deviceData, isPaused, togglePause } = useRealtimeData();
+  const [widgets, setWidgets] = useState(INITIAL_WIDGETS);
+  const [showSettings, setShowSettings] = useState(false);
+
+  const toggleWidget = (id) =>
+    setWidgets((ws) => ws.map((w) => (w.id === id ? { ...w, visible: !w.visible } : w)));
+
+  const latest = timeseries[timeseries.length - 1] || { revenue: 0, users: 0, errors: 0 };
+  const prev   = timeseries[timeseries.length - 2] || { revenue: 0, users: 0, errors: 0 };
+  const pct = (cur, p) => (p ? Math.round(((cur - p) / p) * 100) : 0);
+
+  const handleExport = () => exportToCSV('analytics-report', timeseries);
+
+  const pad = 16;
   const statCols = width >= 1000 ? 4 : 2;
-  const statW = Math.floor((width - 48 - (statCols - 1) * 16) / statCols);
+  const statGap = 12;
+  const statW = Math.floor((width - pad * 2 - (statCols - 1) * statGap) / statCols);
 
-  const revenue = useMemo(() => genSeries(12, 1800, 1400, 7), []);
-  const signups = useMemo(() => genSeries(12, 400, 300, 19), []);
-  const channels = useMemo(() => ([
-    { x: 'Email', y: 4200 }, { x: 'Paid', y: 3100 }, { x: 'Organic', y: 2700 }, { x: 'Social', y: 1900 },
-  ]), []);
-  const devices = useMemo(() => ([
-    { x: 'Desktop', y: 58 }, { x: 'Mobile', y: 33 }, { x: 'Tablet', y: 9 },
-  ]), []);
-  const rows = useMemo(() => genTable(), []);
+  const chartCols = width >= 1000 ? 2 : 1;
+  const chartGap = 12;
+  const chartW = Math.floor((width - pad * 2 - (chartCols - 1) * chartGap) / chartCols);
 
-  const columns = [
-    { key: 'name', label: 'Campaign', sortable: true },
-    { key: 'spend', label: 'Spend', align: 'right', sortable: true },
-    { key: 'roas', label: 'ROAS', align: 'right', sortable: true, render: (v) => <Text style={{ color: v >= 3 ? C.success : C.text }}>{Number(v).toFixed(2)}x</Text> },
-    { key: 'conv', label: 'Conv %', align: 'right', sortable: true },
-  ];
+  const visible = widgets.filter((w) => w.visible);
 
   return (
     <View style={{ flex: 1, width: width || undefined, backgroundColor: C.bg }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16, borderBottomWidth: 1, borderBottomColor: C.border, backgroundColor: C.surface }}>
-        <Text style={{ fontSize: 22, fontWeight: '700', color: C.text }}>Analytics</Text>
-        <Tabs items={[{ key: 'overview', label: 'Overview' }, { key: 'table', label: 'Campaigns' }]} value={tab} onChange={setTab} />
+      {/* Header */}
+      <View style={{
+        flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+        paddingHorizontal: pad, paddingVertical: 12,
+        borderBottomWidth: 1, borderBottomColor: C.border, backgroundColor: C.surface,
+      }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          <View style={{ width: 32, height: 32, borderRadius: 8, backgroundColor: COLORS.sky, alignItems: 'center', justifyContent: 'center' }}>
+            <Text fontSize={15} style={{ color: '#fff', fontWeight: '700' }}>N</Text>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Text fontSize={18} style={{ color: C.text, fontWeight: '700' }}>Nexus Analytics</Text>
+            <Badge label="Real-Time" variant="success" />
+          </View>
+        </View>
+
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <ActionButton label={isPaused ? 'Resume' : 'Pause'} onPress={togglePause} />
+          <IconButton icon="settings" variant="ghost" label="Customize widgets" onPress={() => setShowSettings((s) => !s)} />
+          <ActionButton label="Export CSV" onPress={handleExport} variant="primary" minWidth={112} />
+          <IconButton
+            icon={scheme === 'dark' ? 'sun' : 'moon'}
+            variant="ghost"
+            label="Toggle theme"
+            onPress={onToggleTheme}
+          />
+        </View>
       </View>
 
-      <ScrollView style={{ flex: 1, padding: 16 }} width={width}>
-        {tab === 'overview' ? (
-          <View>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 16 }}>
-              <Stat style={{ width: statW }} value="$4.2k" label="Revenue" change="+12%" />
-              <Stat style={{ width: statW }} value="1,284" label="Users" change="+5%" />
-              <Stat style={{ width: statW }} value="3.4%" label="Conversion" change="-0.4%" positive={false} />
-              <Stat style={{ width: statW }} value="87" label="Sessions" change="+9%" />
-            </View>
+      {/* Widget settings popover */}
+      {showSettings && (
+        <Card style={{ position: 'absolute', top: 64, right: pad, width: 240, zIndex: 50, padding: 12 }}>
+          <Text fontSize={13} style={{ color: C.text, fontWeight: '600', marginBottom: 8 }}>Customize Layout</Text>
+          {widgets.map((w) => (
+            <Pressable
+              key={w.id}
+              onPress={() => toggleWidget(w.id)}
+              style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 6 }}
+            >
+              <Text fontSize={13} style={{ color: C.textMuted }}>{w.title}</Text>
+              <View style={{
+                width: 18, height: 18, borderRadius: 4,
+                backgroundColor: w.visible ? C.primary : C.surfaceRaised,
+                borderWidth: 1, borderColor: C.border,
+                alignItems: 'center', justifyContent: 'center',
+              }}>
+                {w.visible ? <Icon name="check" size={12} color={C.primaryText} /> : null}
+              </View>
+            </Pressable>
+          ))}
+        </Card>
+      )}
 
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 16, marginTop: 16 }}>
-              <Card style={{ width: cardW, padding: 16 }}>
-                <Text style={{ color: C.textMuted, marginBottom: 8 }}>Revenue trend</Text>
-                <LineChart data={revenue} width={chartW} height={240} color="#4090F0" showDots={false} />
-              </Card>
-              <Card style={{ width: cardW, padding: 16 }}>
-                <Text style={{ color: C.textMuted, marginBottom: 8 }}>Traffic by channel</Text>
-                <BarChart data={channels} width={chartW} height={240} />
-              </Card>
-              <Card style={{ width: cardW, padding: 16 }}>
-                <Text style={{ color: C.textMuted, marginBottom: 8 }}>Device split</Text>
-                <PieChart data={devices} width={Math.min(chartW, 260)} height={260} innerRadius={0.5} />
-              </Card>
-              <Card style={{ width: cardW, padding: 16 }}>
-                <Text style={{ color: C.textMuted, marginBottom: 8 }}>Signups</Text>
-                <AreaChart data={signups} width={chartW} height={240} color="#00A878" />
-              </Card>
-            </View>
+      <ScrollView style={{ flex: 1, padding: pad }} width={width}>
+        {/* Stat cards */}
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: statGap, marginBottom: statGap }}>
+          <StatCard title="Total Revenue"  value={`$${fmtNum(latest.revenue)}`} change={pct(latest.revenue, prev.revenue)} color={COLORS.sky}  width={statW} />
+          <StatCard title="Active Users"   value={fmtNum(latest.users)}               change={pct(latest.users, prev.users)}       color={COLORS.emerald} width={statW} />
+          <StatCard title="System Errors"  value={latest.errors}                                 change={-pct(latest.errors, prev.errors)}    color={COLORS.rose} width={statW} />
+          <StatCard title="Avg Session"    value="4m 12s"                                        change={2.4}                                 color={COLORS.amber} width={statW} />
+        </View>
 
-            <View style={{ marginTop: 16 }}>
-              <LivePanel />
-            </View>
-          </View>
-        ) : (
-          <Card style={{ padding: 16 }}>
-            <Text style={{ color: C.textMuted, marginBottom: 8 }}>Campaigns</Text>
-            <DataTable columns={columns} rows={rows} width={width - 64} height={520} rowHeight={40} onRowPress={() => {}} />
+        {/* Widget grid */}
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: chartGap }}>
+          {visible.map((w) => {
+            const span2 = w.type === 'area';
+            const ww = span2 ? chartW * 2 + chartGap : chartW;
+            return (
+              <View key={w.id} style={{ width: ww }}>
+                <ChartWidget config={w} timeseries={timeseries} deviceData={deviceData} width={ww} />
+              </View>
+            );
+          })}
+        </View>
+
+        {/* Empty state */}
+        {visible.length === 0 && (
+          <Card style={{ padding: 32, alignItems: 'center', marginTop: statGap }}>
+            <Icon name="settings" size={32} color={C.textMuted} />
+            <Text fontSize={16} style={{ color: C.text, marginTop: 8 }}>No widgets visible</Text>
+            <Text fontSize={13} style={{ color: C.textMuted, marginTop: 4 }}>Use the settings menu to add widgets to your dashboard.</Text>
           </Card>
         )}
       </ScrollView>
@@ -151,10 +348,13 @@ function Dashboard() {
   );
 }
 
+// ── Root (lifts color scheme so the theme toggle is runtime-switchable) ─────────
+
 function Root() {
+  const [scheme, setScheme] = useState('dark');
   return (
-    <ThemeProvider colorScheme="system">
-      <Dashboard />
+    <ThemeProvider colorScheme={scheme}>
+      <Dashboard scheme={scheme} onToggleTheme={() => setScheme((s) => (s === 'dark' ? 'light' : 'dark'))} />
     </ThemeProvider>
   );
 }

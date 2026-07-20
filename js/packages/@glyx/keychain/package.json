@@ -1,11 +1,11 @@
 {
-  "name": "@glyx/keychain",
+  "name": "@glyx-dev/keychain",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",
   "description": "Typed namespace-scoped OS keychain for Glyx apps — wraps the credentials API.",
   "peerDependencies": {
-    "@glyx/react": "0.1.0"
+    "@glyx-dev/react": "0.1.0"
   },
   "scripts": {
     "test": "bun test"

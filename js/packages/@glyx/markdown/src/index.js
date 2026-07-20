@@ -1,20 +1,23 @@
-// @glyx/markdown — render Markdown as Glyx component trees.
+// @glyx-dev/markdown — render Markdown as Glyx component trees.
 //
 // Self-contained block parser (no external deps). Handles headings, paragraphs,
 // ordered/unordered lists, fenced code blocks, blockquotes, and horizontal
 // rules. Inline emphasis markers (**bold**, *italic*, `code`) are stripped to
 // plain text — the renderer's Text node doesn't yet support mixed inline spans.
 //
-//   import { Markdown } from '@glyx/markdown';
+//   import { Markdown } from '@glyx-dev/markdown';
 //   <Markdown source={md} width={600} />
 
 import React from 'react';
-import { View, Text } from '@glyx/react';
+import { View, Text } from '@glyx-dev/react';
 
 const DEFAULT = {
   h1: { fontSize: 26, color: '#E0E0F0', bold: true,  mb: 12 },
   h2: { fontSize: 21, color: '#E0E0F0', bold: true,  mb: 10 },
   h3: { fontSize: 17, color: '#E0E0F0', bold: true,  mb: 8  },
+  h4: { fontSize: 15, color: '#E0E0F0', bold: true,  mb: 8  },
+  h5: { fontSize: 14, color: '#E0E0F0', bold: true,  mb: 6  },
+  h6: { fontSize: 13, color: '#A0A0B2', bold: true,  mb: 6  },
   p:  { fontSize: 14, color: '#A0A0B2', mb: 12 },
   code: { fontSize: 13, color: '#C8F0E0' },
   quote: { fontSize: 14, color: '#A0A0B2' },
@@ -46,7 +49,7 @@ export function lex(src) {
       continue;
     }
     if (/^\s*$/.test(line)) { i++; continue; }                 // blank
-    if (/^#{1,3}\s/.test(line)) {                              // heading
+    if (/^#{1,6}\s/.test(line)) {                              // heading
       const depth = line.match(/^#+/)[0].length;
       toks.push({ type: 'heading', depth, text: inline(line.replace(/^#+\s/, '')) });
       i++; continue;

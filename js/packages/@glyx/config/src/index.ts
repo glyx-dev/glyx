@@ -1,8 +1,8 @@
-// @glyx/config — type-safe configuration helper for Glyx apps.
+// @glyx-dev/config — type-safe configuration helper for Glyx apps.
 //
 // Usage in glyx.config.ts:
 //
-//   import { defineConfig } from '@glyx/config';
+//   import { defineConfig } from '@glyx-dev/config';
 //   export default defineConfig({
 //     window:       { title: 'My App', width: 1280, height: 800 },
 //     capabilities: { fs: { read: ['**'] }, db: true },
@@ -31,14 +31,17 @@ export interface WindowConfig {
    * - 'auto'    — pick per machine (default): tiny-skia on integrated/no GPU
    *               (software present, no wgpu), Vello on discrete GPUs.
    * - 'skia'    — tiny-skia CPU rasterizer + OS software present (~35 MB RSS).
-   * - 'femtovg' — OpenGL tessellation renderer.
    * - 'gpu'     — Vello GPU compute via wgpu (best visual quality; required
    *               up-front for Canvas3D-heavy apps, though Canvas3D also
    *               upgrades automatically from 'skia'/'auto').
    * - 'cpu'     — Vello's built-in CPU path.
+   * - 'direct2d' — Windows-only, experimental. OS/driver-managed Direct2D —
+   *               measured to stay near 'skia'-like flat memory instead of
+   *               Vello's persistent scene-buffer pool. Never auto-selected;
+   *               falls back to 'skia' with a warning on non-Windows.
    * TinySkia can also be forced at runtime via GLYX_CPU_RENDER=1.
    */
-  renderMode?:  'auto' | 'skia' | 'femtovg' | 'gpu' | 'cpu';
+  renderMode?:  'auto' | 'skia' | 'gpu' | 'cpu' | 'direct2d';
   /** V8 heap cap in MB (16–512). Default: auto from bundle size. */
   maxJsHeapMb?: number;
   /**
@@ -69,6 +72,27 @@ export interface DeeplinkCapability {
   singleInstance?: boolean;
 }
 
+/** Scoped shell access (Tier 1) — explicit binary allowlist. Distinct from
+ *  the `shell` capability below, which only permits `openExternal()`. */
+export interface ShellExecCapability {
+  /** Exact binary names (or absolute paths) the app may spawn, e.g. `['git', 'ffmpeg']`. */
+  allow: string[];
+}
+
+/** Agent-style shell access (Tier 2) — no binary allowlist, but every
+ *  spawned process is hard-scoped to `scopeDir` and every invocation must
+ *  be shown via the native activity overlay. A much higher trust level than
+ *  `shellExec` — meant for apps like an AI coding assistant that can't
+ *  enumerate which binaries they'll need ahead of time.
+ *
+ *  Status: capability + security enforcement exist; the native activity
+ *  overlay and streaming `shell.spawn()`/`shell.poll()` API are designed
+ *  but not yet implemented. */
+export interface ShellAgentCapability {
+  /** The only filesystem root spawned processes' cwd may resolve within. */
+  scopeDir: string;
+}
+
 export interface Capabilities {
   fs?:              FsCapability;
   network?:         NetworkCapability;
@@ -80,7 +104,11 @@ export interface Capabilities {
   notification?:    boolean;
   battery?:         boolean;
   usb?:             boolean;
+  /** Opens a URL/file via the OS (rundll32/open/xdg-open) — `openExternal()`.
+   *  NOT the same capability as `shellExec`/`shellAgent` below. */
   shell?:           boolean;
+  shellExec?:       ShellExecCapability;
+  shellAgent?:      ShellAgentCapability;
   mdns?:            boolean;
   system?:          boolean;
   power?:           boolean;
@@ -92,6 +120,8 @@ export interface Capabilities {
   video?:           boolean;
   camera?:          boolean;
   microphone?:      boolean;
+  /** Native OS-embedded webview (WebView2/WKWebView/WebKitGTK) via the <WebView> component. */
+  webview?:         boolean;
   ai?:              boolean;
   hid?:             boolean;
   updater?:         boolean;
@@ -105,6 +135,31 @@ export interface SplashConfig {
   background?: string;
   /** Minimum display time in ms before hideSplash() takes effect. */
   minimumMs?:  number;
+  /**
+   * Max fraction (0.0-1.0) of the smaller window dimension `image` may
+   * occupy. Default 0.5 — keeps a full-bleed source image (e.g. an app
+   * icon with no transparent margin) from filling the whole window and
+   * swallowing `background`. Set closer to 1.0 for an image intentionally
+   * designed as a full splash background.
+   */
+  imageScale?: number;
+}
+
+/**
+ * Auto-updater target: where `updater.check()`/`updater.update()` look for
+ * new GitHub Releases. Requires the `updater` capability to also be enabled.
+ * Read at startup from `glyx.config.json` — this is app metadata, not a
+ * capability toggle, so it lives here rather than under `capabilities`.
+ */
+export interface UpdaterConfig {
+  /** GitHub organization or username. */
+  owner:   string;
+  /** Repository name. */
+  repo:    string;
+  /** Release asset filename prefix — matches `{binName}-{platform}`
+   *  (`.exe` appended automatically on Windows), which is exactly what
+   *  `glyx package` produces. */
+  binName: string;
 }
 
 export interface PluginConfig {
@@ -142,6 +197,14 @@ export interface GlyxConfig {
   /** Machine-readable app identifier. Used as the binary filename, installer slug,
    *  and bundle ID. No spaces — use hyphens, e.g. 'my-notes'. */
   name?:         string;
+  /**
+   * JsRuntime backend. Mutually exclusive — a build links exactly one.
+   * - 'v8'      — default. Full-featured, larger binary (~58 MB floor).
+   * - 'quickjs' — smaller binary (~3x), no JIT (suits mobile / size-constrained
+   *               targets). See glyx_rough_docs/QUICKJS_PERFORMANCE_PLAN.md
+   *               for the current perf/feature-parity tradeoffs.
+   */
+  engine?:       'v8' | 'quickjs';
   /** App version string, e.g. '1.2.0'. Exposed via updater.getVersion(). */
   version?:      string;
   /** Installer and store metadata (publisher, description, website, license). */
@@ -153,11 +216,18 @@ export interface GlyxConfig {
   icon?:         string;
   /** Splash screen shown during JS startup. */
   splash?:       SplashConfig;
+  /** Auto-updater target repo. Requires `capabilities.updater: true` too. */
+  updater?:      UpdaterConfig;
   /** JS plugin extensions. Each plugin's exported async functions are
    *  callable via backend.<name>.<fn>() from JS. */
   plugins?:      PluginConfig[];
   /** Preferred package manager. Auto-detected from lockfile when omitted. */
   packageManager?: 'npm' | 'pnpm' | 'yarn' | 'bun';
+  /** ICU locales to bundle. Controls which locales `Intl.*` /
+   *  `toLocaleString()` format correctly (numbers, dates, currency, plurals).
+   *  Defaults to `['en']`. Glyx trims the bundled ICU data to just these
+   *  locales at build time, keeping packaged apps light. */
+  locales?: string[];
 }
 
 /**

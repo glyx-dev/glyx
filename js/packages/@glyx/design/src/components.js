@@ -1,15 +1,15 @@
-// @glyx/design — Pre-themed base components
+// @glyx-dev/design — Pre-themed base components
 //
-// These are thin wrappers around @glyx/react primitives that read from the
+// These are thin wrappers around @glyx-dev/react primitives that read from the
 // current ThemeProvider context.  Use them as a starting point; they're not
 // opinionated UI components — just styled primitives that respect your theme.
 //
 // Usage:
-//   import { Button, Card, Divider, Label, Badge } from '@glyx/design';
+//   import { Button, Card, Divider, Label, Badge } from '@glyx-dev/design';
 
 import React from 'react';
-import { View, Text, Pressable } from '@glyx/react';
-import { Icon } from '@glyx/icons';
+import { View, Text, Pressable } from '@glyx-dev/react';
+import { Icon } from '@glyx-dev/icons';
 import { useTheme } from './theme.js';
 
 // ── Button ────────────────────────────────────────────────────────────────────
@@ -37,6 +37,8 @@ export function Button({ label, onPress, variant = 'primary', disabled = false, 
   return (
     <Pressable
       onPress={disabled ? undefined : onPress}
+      role="button"
+      ariaLabel={label}
       style={{
         backgroundColor: bg,
         paddingHorizontal: space[4],

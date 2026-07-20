@@ -1,4 +1,4 @@
-// @glyx/router — Named-route history-stack router for Glyx desktop apps.
+// @glyx-dev/router — Named-route history-stack router for Glyx desktop apps.
 //
 // Desktop apps have no URL bar. This router uses a simple in-memory history
 // stack of { name, params } entries — the same model as React Navigation for

@@ -1,5 +1,5 @@
 {
-  "name": "@glyx/react",
+  "name": "@glyx-dev/react",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",

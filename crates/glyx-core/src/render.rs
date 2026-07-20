@@ -2,6 +2,10 @@ use super::*;
 
 pub(crate) struct RenderCtx<'a> {
     pub nodes: &'a std::collections::HashMap<u32, JsNode>,
+    /// Current interpolated opacity for nodes with an active `@glyx-dev/motion`
+    /// transition — read instead of `node.props.opacity` when present. See
+    /// `PerWindowState::opacity_transitions`'s docs.
+    pub opacity_overrides: &'a std::collections::HashMap<u32, f32>,
     pub images: &'a std::collections::HashMap<u32, peniko::ImageData>,
     pub resolved: &'a [(NodeId, ResolvedLayout)],
     pub frame: &'a mut AnyFrame,
@@ -11,6 +15,10 @@ pub(crate) struct RenderCtx<'a> {
     /// Accumulated (canvas3d_id, x, y, w, h) for post-Vello 3D overlay rendering.
     #[cfg(feature = "canvas3d")]
     pub canvas3d_overlays: &'a mut Vec<(u32, f32, f32, f32, f32)>,
+    /// Accumulated (webview_id, x, y, w, h) for post-render native child-window
+    /// positioning — a webview is a real OS child window, not Vello content.
+    #[cfg(feature = "webview")]
+    pub webview_overlays: &'a mut Vec<(u32, f32, f32, f32, f32)>,
     /// Window dimensions in physical pixels — used for viewport culling.
     pub win_w: f64,
     pub win_h: f64,
@@ -138,7 +146,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
         if let Some(node_peek) = ctx.nodes.get(&id) {
             let is_leaf      = node_peek.children.is_empty();
             let never_cache  = matches!(node_peek.node_type,
-                NodeType::Canvas3D | NodeType::Camera | NodeType::Video);
+                NodeType::Canvas3D | NodeType::Camera | NodeType::Video | NodeType::WebView);
             if is_leaf && !never_cache && ctx.frame.supports_caching() {
                 if let Some(cached) = ctx.scene_cache.remove(&id) {
                     if opacity >= 1.0 {
@@ -172,7 +180,9 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     let rw = rl.width  as f64;
     let rh = rl.height as f64;
 
-    let child_opacity = opacity * node.props.opacity.unwrap_or(1.0);
+    let own_opacity = ctx.opacity_overrides.get(&id).copied()
+        .unwrap_or_else(|| node.props.opacity.unwrap_or(1.0));
+    let child_opacity = opacity * own_opacity;
 
     // ── Viewport culling ──────────────────────────────────────────────────────
     // Skip nodes entirely outside the window — analogous to Chromium's tile
@@ -217,7 +227,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     let is_cacheable = ctx.frame.supports_caching()
         && node.children.is_empty()
         && !matches!(node.node_type,
-            NodeType::Canvas3D | NodeType::Camera | NodeType::Video)
+            NodeType::Canvas3D | NodeType::Camera | NodeType::Video | NodeType::WebView)
         && opacity >= 1.0;
     let capture_parent: Option<Scene> = if is_cacheable {
         Some(ctx.frame.replace_scene(Scene::new()))
@@ -434,6 +444,8 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             let cursor_position = node.props.cursor_position.map(|p| p as usize);
             let selection_start = node.props.selection_start.map(|p| p as usize);
             let selection_end   = node.props.selection_end.map(|p| p as usize);
+            let ime_preedit_start = node.props.ime_preedit_start.map(|p| p as usize);
+            let ime_preedit_end   = node.props.ime_preedit_end.map(|p| p as usize);
 
             // LabelKey::new() is allocation-free (hashes text, packs fields).
             // Derive it twice instead of cloning — cheaper than a String clone.
@@ -526,6 +538,39 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                 );
             }
 
+            // 2b. IME composition underline — same per-line byte-range → x-extent
+            // approach as the selection highlight above, but drawn as a thin
+            // underline (matching the platform convention for in-progress IME
+            // text) instead of a filled background.
+            if let (Some(ps), Some(pe)) = (ime_preedit_start, ime_preedit_end) {
+                if ps < pe {
+                    let ime_color = apply_opacity(rgba_to_vello(color), child_opacity);
+                    let pb = text.char_indices().nth(ps).map(|(b, _)| b).unwrap_or(text.len());
+                    let eb = text.char_indices().nth(pe).map(|(b, _)| b).unwrap_or(text.len());
+                    for (ls, le, _l_top, l_bot, l_right) in label.layout.line_ranges() {
+                        if le <= pb || ls >= eb { continue; }
+                        let a = pb.max(ls);
+                        let b = eb.min(le);
+                        let cp_a = text[ls..a].chars().count();
+                        let x0 = ctx.text_sys.measure_to_cursor(
+                            &text[ls..], font_size, max_width, cp_a) as f64;
+                        let to_line_end = b >= le || text[b..le].starts_with('\n');
+                        let x1 = if to_line_end {
+                            l_right as f64
+                        } else {
+                            let cp_b = text[ls..b].chars().count();
+                            ctx.text_sys.measure_to_cursor(
+                                &text[ls..], font_size, max_width, cp_b) as f64
+                        };
+                        let w = x1 - x0;
+                        if w > 0.0 {
+                            let ul_y = ty + l_bot as f64 - 2.0;
+                            ctx.frame.fill_rounded_rect(tx + x0, ul_y, w, 1.0, 0.0, ime_color);
+                        }
+                    }
+                }
+            }
+
             // 3. Blinking cursor line — uses same metrics as selection highlight.
             if show_cursor {
                 *ctx.any_cursor_active = true;
@@ -596,6 +641,12 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                     ctx.frame.fill_rect(rx, ry, rw, rh, bg);
                 }
                 ctx.canvas3d_overlays.push((id, rx as f32, ry as f32, rw as f32, rh as f32));
+            }
+        }
+        NodeType::WebView => {
+            #[cfg(feature = "webview")]
+            {
+                ctx.webview_overlays.push((id, rx as f32, ry as f32, rw as f32, rh as f32));
             }
         }
         NodeType::Camera => {

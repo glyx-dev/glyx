@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-v8             = { workspace = true }
+# Optional so a `quickjs`-only build genuinely drops the V8 static lib —
+# see the `v8`/`quickjs` feature definitions below.
+v8             = { workspace = true, optional = true }
+rquickjs       = { workspace = true, optional = true }
+mimalloc       = { workspace = true }
 tokio          = { workspace = true }
 log            = { workspace = true }
 parking_lot    = { workspace = true }
@@ -12,10 +16,10 @@ thiserror      = { workspace = true }
 anyhow         = { workspace = true }
 glyx-security = { path = "../glyx-security" }
 glyx-db       = { path = "../glyx-db" }
+glyx-tray     = { path = "../glyx-tray" }
 serde_json     = { workspace = true }
 rfd                 = { workspace = true }
 arboard             = { workspace = true }
-clipboard-win       = { workspace = true }
 notify-rust         = { workspace = true }
 raw-window-handle   = { workspace = true }
 reqwest             = { workspace = true, optional = true }
@@ -32,6 +36,7 @@ keepawake           = { workspace = true }
 gilrs               = { workspace = true, optional = true }
 global-hotkey       = { workspace = true }
 rodio               = { workspace = true, optional = true }
+symphonia           = { version = "0.5", features = ["mp3", "aac", "isomp4", "flac", "vorbis", "wav"], optional = true }
 hidapi              = { workspace = true, optional = true }
 self_update         = { workspace = true, optional = true }
 ed25519-dalek       = { workspace = true, optional = true }
@@ -45,28 +50,63 @@ glyx-cap-ai        = { path = "../glyx-cap-ai", optional = true }
 glyx-cap-gamepad   = { path = "../glyx-cap-gamepad", optional = true }
 glyx-cap-hid       = { path = "../glyx-cap-hid", optional = true }
 glyx-cap-camera    = { path = "../glyx-cap-camera", optional = true }
+glyx-cap-webview   = { path = "../glyx-cap-webview", optional = true }
 glyx-macros        = { path = "../glyx-macros" }
 glyx-verify        = { path = "../glyx-verify" }
 libloading         = { workspace = true }
 hex                = { workspace = true }
+# fs.watch (bind_fs.rs) is cross-platform (inotify/FSEvents/ReadDirectoryChangesW) —
+# must not live in the Windows-only [target] block below (it did, by accident,
+# alongside windows-sys/clipboard-win, which genuinely are Windows-only).
+notify             = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader"] }
-notify             = { workspace = true }
+# Windows-only clipboard backend — clipboard-win wraps Win32 OpenClipboard/
+# GetClipboardData and doesn't build on other targets. macOS/Linux use the
+# cross-platform `arboard` dep above instead (see bindings/mod.rs's
+# read_clipboard_text/write_clipboard_text).
+clipboard-win       = { workspace = true }
 
 [features]
-default = ["v8"]
-v8 = []       # V8 backend (current only backend; rusty_v8 dep is always required for now)
+default = ["v8", "embed-icu"]
+# V8 and quickjs are mutually exclusive JsRuntime backends — see the
+# compile_error! in lib.rs. V8 stays the desktop default (set above); an app
+# opts into QuickJS explicitly (mobile builds, or a dev choosing the
+# lightweight desktop profile) via `default-features = false, features =
+# ["quickjs", ...]`. Picking one is meant to drop the other's dependency
+# entirely, not just leave it unused — see memory/backend-droppability-goals.md.
+v8 = ["dep:v8"]       # V8 backend — rusty_v8 dep required when enabled
+quickjs = ["dep:rquickjs"]  # QuickJS backend — required for mobile, optional lightweight desktop profile
+# Use a custom V8 build from the glyx-v8 repo instead of rusty_v8's prebuilt.
+# When enabled, mimalloc is already merged into the V8 archive, so the
+# force-link hack in lib.rs is disabled. You must also point the `v8` crate at
+# the glyx-v8 artifact (see .cargo/config.toml `[env]` example / CI). Flip off to
+# return to the default prebuilt + force-link behaviour.
+glyx-v8 = []
+# Embed the full icudtl.dat (ICU 77) into the binary. ON for tests/dev and any
+# build that wants a zero-external-file binary. App builds go through glyx-core
+# with `default-features = false`, so this is OFF there — packaged apps instead
+# ship a trimmed icudtl.dat next to the executable (see glyx-icu-integration.md).
+embed-icu = []
 dev = ["websocket"]      # dev overlay, hot-reload, CDP inspector (needs WS transport)
-full     = ["audio", "gamepad", "canvas3d", "ai", "hid", "updater", "fetch", "websocket"]
+full     = ["audio", "gamepad", "canvas3d", "ai", "hid", "updater", "fetch", "websocket", "shell"]
 fetch     = ["dep:reqwest"]
 websocket = ["dep:tokio-tungstenite", "dep:futures-util"]
-audio    = ["dep:rodio", "dep:glyx-cap-audio"]
+audio    = ["dep:rodio", "dep:glyx-cap-audio", "dep:symphonia"]
 gamepad  = ["dep:gilrs", "dep:glyx-cap-gamepad"]
 canvas3d = ["dep:glyx-3d"]
 ai       = ["dep:glyx-ai", "dep:glyx-cap-ai"]
 hid      = ["dep:hidapi", "dep:glyx-cap-hid"]
 camera   = ["dep:glyx-cap-camera"]
-updater  = ["dep:self_update", "dep:ed25519-dalek"]
+webview  = ["dep:glyx-cap-webview"]
+# No accesskit dependency here — glyx-runtime only needs to know whether to
+# register __glyx_hasA11y (a JS-facing capability query), the actual
+# accesskit integration lives in glyx-shell/glyx-core.
+a11y     = []
+updater  = ["dep:self_update", "dep:ed25519-dalek", "dep:reqwest"]
+# Scoped shell exec (Tier 1: explicit binary allowlist). No new dep — spawns
+# via tokio::process::Command (argv-only, never a shell interpreter).
+shell    = []
 # jsc = []    # future: JavaScriptCore (iOS/macOS)
 # quickjs = [] # future: QuickJS (embedded/WASM)

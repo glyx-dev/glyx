@@ -89,7 +89,21 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
 
   // Always keep handlersRef up to date with the latest prop values.
   handlersRef.current = {
-    onPress:      (e) => onPress?.(e),
+    onPress: (e) => {
+      // Move the Rust-side focus registry here — events.js's mouseButton
+      // dispatch calls `onPress` DIRECTLY for a plain click (onPressIn/Out
+      // are never invoked for a simple click, only onPress — confirmed by
+      // reading the dispatch code after this fix's first attempt, in
+      // onPressIn, silently did nothing). Without this, clicking a
+      // Checkbox/Switch/Radio/Select/Slider never updates `focused_node`,
+      // so the accessibility tree's `focus` field falls back to the root —
+      // which is why Narrator's highlight rect covered the whole window
+      // instead of the actual control.
+      if (typeof __glyx_setFocus !== 'undefined' && nodeIdRef.current != null) {
+        __glyx_setFocus(nodeIdRef.current);
+      }
+      onPress?.(e);
+    },
     onRightPress: (e) => onRightPress?.(e),
     onPressIn:  () => { setPressed(true);  onPressIn?.(); },
     onPressOut: () => { setPressed(false); onPressOut?.(); },
@@ -630,7 +644,7 @@ export function SelectableText({
 // title bars (`window.decorations: false` in glyx.config.json).
 //
 // Usage:
-//   import { WindowControls } from '@glyx/react';
+//   import { WindowControls } from '@glyx-dev/react';
 //   <View glyxDraggable style={styles.titleBar}>
 //     <Text style={styles.title}>My App</Text>
 //     <WindowControls />
@@ -640,7 +654,8 @@ export function SelectableText({
 //   macOS   → traffic-light order on the LEFT side  (close · minimize · maximize)
 //   Windows / Linux → standard order on the RIGHT side (minimize · maximize · close)
 
-const _wc_btn = (label, onPress, bg) =>
+// macOS traffic-light: colored circle + tiny glyph
+const _wc_mac = (label, onPress, bg) =>
   React.createElement(Pressable, {
     onPress,
     style: {
@@ -649,6 +664,24 @@ const _wc_btn = (label, onPress, bg) =>
       justifyContent: 'center', alignItems: 'center',
     },
   }, React.createElement(Text, { style: { fontSize: 8, color: '#00000088' } }, label));
+
+// Windows/Linux: no background, icon-only, highlight on hover
+function _WcWin({ label, onPress, isClose }) {
+  const [hov, setHov] = React.useState(false);
+  return React.createElement(Pressable, {
+    onPress,
+    feedback: false,
+    onHoverIn:  () => setHov(true),
+    onHoverOut: () => setHov(false),
+    style: {
+      width: 46, height: 40,
+      justifyContent: 'center', alignItems: 'center',
+      backgroundColor: hov ? (isClose ? '#c42b1c' : 'rgba(0,0,0,0.08)') : 'transparent',
+    },
+  }, React.createElement(Text, {
+    style: { fontSize: 11, color: (hov && isClose) ? '#ffffff' : '#000000' },
+  }, label));
+}
 
 export function WindowControls({ style } = {}) {
   const [maximized, setMaximized] = React.useState(() => glyxWindow.isMaximized());
@@ -665,22 +698,25 @@ export function WindowControls({ style } = {}) {
   };
   const close = () => glyxWindow.close();
 
-  const isMac    = glyxWindow.platform() === 'macos';
-  const btnClose = _wc_btn('✕', close,     '#ff5f57');
-  const btnMin   = _wc_btn('−', minimize,  '#febc2e');
-  const btnMax   = _wc_btn(maximized ? '⊡' : '⊞', toggleMax, '#28c840');
+  const isMac = glyxWindow.platform() === 'macos';
 
-  const buttons = isMac
-    ? [btnClose, btnMin, btnMax]   // traffic-light order: close · min · max
-    : [btnMin,   btnMax, btnClose]; // Windows/Linux: min · max · close
+  if (isMac) {
+    const buttons = [
+      _wc_mac('✕', close,      '#ff5f57'),
+      _wc_mac('−', minimize,   '#febc2e'),
+      _wc_mac(maximized ? '⊡' : '⊞', toggleMax, '#28c840'),
+    ];
+    return React.createElement(View, {
+      style: { flexDirection: 'row', gap: 6, alignItems: 'center', marginLeft: 8, ...style },
+    }, ...buttons);
+  }
 
+  // Windows / Linux: icon-only buttons, no gap (touch), close on far right
   return React.createElement(View, {
-    style: {
-      flexDirection: 'row',
-      gap: 6,
-      alignItems: 'center',
-      ...(isMac ? { marginLeft: 8 } : { marginRight: 8 }),
-      ...style,
-    },
-  }, ...buttons);
+    style: { flexDirection: 'row', alignItems: 'center', ...style },
+  },
+    React.createElement(_WcWin, { label: '─', onPress: minimize }),
+    React.createElement(_WcWin, { label: maximized ? '❐' : '☐', onPress: toggleMax }),
+    React.createElement(_WcWin, { label: '✕', onPress: close, isClose: true }),
+  );
 }

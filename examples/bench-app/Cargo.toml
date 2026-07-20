@@ -1,0 +1,16 @@
+[package]
+name    = "bench-app"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["dev", "v8"]
+dev     = ["glyx-core/dev"]
+v8      = ["glyx-core/v8"]
+quickjs = ["glyx-core/quickjs"]
+
+[dependencies]
+glyx-core  = { path = "../../crates/glyx-core", default-features = false }
+glyx-shell = { path = "../../crates/glyx-shell" }
+env_logger = "0.11"
+log        = "0.4"

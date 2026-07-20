@@ -201,7 +201,7 @@ fn raw_cmd_with_args(bin: &str, args: &[&str]) -> Command {
 
 /// Bundle JS via esbuild (invoked through the PM's dlx/npx mechanism).
 ///
-/// esbuild is a peer dep of @glyx/react so it is always in node_modules after
+/// esbuild is a peer dep of @glyx-dev/react so it is always in node_modules after
 /// install; dlx resolves the local version first, no network needed.
 ///
 /// `minify`     — set to true for production bundles

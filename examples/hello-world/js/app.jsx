@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, render } from '@glyx/react';
+import { View, Text, render } from '@glyx-dev/react';
 
 function App() {
   return (

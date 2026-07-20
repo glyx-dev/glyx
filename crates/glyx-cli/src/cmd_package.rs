@@ -2,9 +2,228 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Ensure `icupkg` (ICU 77 data trimmer) is available, downloading/caching it
+/// on first use for Windows/Linux, or locating a system install on macOS.
+///
+/// `glyx build` / `glyx package` use icupkg to trim `icudtl.dat` down to an
+/// app's declared locales so packaged apps stay light. Mirrors `ensure_nsis` /
+/// `ensure_rcedit`: download once, verify SHA-256, cache under `~/.glyx/tools`.
+///
+/// macOS ships no prebuilt `icupkg` from unicode.org, so there we use a
+/// Homebrew/system `icupkg` (or `$GLYX_ICUPKG`) instead of downloading.
+///
+/// `custom` (from the `--icupkg` global CLI flag or `$GLYX_ICUPKG`) short-circuits
+/// all of the above: if it points at an existing binary, that one is used as-is
+/// and nothing is downloaded. This is the primary override path for users behind
+/// a firewall or who want a specific ICU 77 build.
+pub(crate) fn ensure_icupkg(custom: Option<PathBuf>) -> Result<PathBuf> {
+    // 1. Explicit override — CLI flag takes priority, env var as fallback.
+    let custom = custom.or_else(|| std::env::var("GLYX_ICUPKG").ok().map(PathBuf::from));
+    if let Some(p) = custom {
+        if p.exists() {
+            println!("Using icupkg from {} (override)", p.display());
+            return Ok(p);
+        } else {
+            log::warn!("icupkg override {} not found — falling back to auto-resolve", p.display());
+        }
+    }
+
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .context("cannot resolve home directory")?;
+    let tools = home.join(".glyx").join("tools");
+    std::fs::create_dir_all(&tools)?;
+
+    match std::env::consts::OS {
+        "windows" => ensure_icupkg_windows(&tools),
+        "linux"   => ensure_icupkg_linux(&tools),
+        "macos"   => ensure_icupkg_macos(),
+        other     => bail!(
+            "icupkg trimming is not supported on {other}. Install icupkg (ICU 77) and set the \
+             GLYX_ICUPKG environment variable (or --icupkg) to its path."
+        ),
+    }
+}
+
+/// Recursively find a file named `name` under `dir` (used to locate `icupkg`
+/// inside the extracted ICU archive, whose layout varies per platform).
+fn find_icupkg_in(dir: &Path, name: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Some(found) = find_icupkg_in(&p, name) {
+                return Some(found);
+            }
+        } else if p.file_name().map(|n| n == name).unwrap_or(false) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Windows: download the matching ICU 77.1 MSVC zip and extract `icupkg.exe`.
+fn ensure_icupkg_windows(tools: &Path) -> Result<PathBuf> {
+    // (default download url, sha256). The ICU zip has no single top-level
+    // folder, so we extract fully and locate icupkg.exe by name. The mirror
+    // path is used when $GLYX_TOOLS_BASE is set.
+    const X64: (&str, &str) = (
+        "https://github.com/unicode-org/icu/releases/download/release-77-1/icu4c-77_1-Win64-MSVC2022.zip",
+        "9E10B27877FF4E036985B0ED15B35563B018E7ACF995A4119AB08080A553317B",
+    );
+    const ARM64: (&str, &str) = (
+        "https://github.com/unicode-org/icu/releases/download/release-77-1/icu4c-77_1-WinARM64-MSVC2022.zip",
+        "A8617EF9DF2AEDD62630011EA730E7EFC112704CF9B3BFE193EA9468EB7F7030",
+    );
+    let (default_url, sha) = if std::env::consts::ARCH == "aarch64" { ARM64 } else { X64 };
+    let mirror_path = if std::env::consts::ARCH == "aarch64" {
+        super::tools::paths::ICUPKG_WIN_ARM64
+    } else {
+        super::tools::paths::ICUPKG_WIN_X64
+    };
+    let url = super::tools::resolve_tool_url(default_url, mirror_path);
+    let dest = tools.join("icupkg.exe");
+
+    if dest.exists() && verify_sha256(&dest, sha).is_ok() {
+        return Ok(dest);
+    }
+    let _ = std::fs::remove_file(&dest);
+
+    println!("Downloading icupkg (ICU 77 data trimmer)...");
+    let zip_tmp = tools.join("icu4c-77_1-win.zip");
+    if !Command::new("curl")
+        .args(["-fsSL", "-o", zip_tmp.to_str().unwrap(), &url])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        bail!("Failed to download icupkg from {url}");
+    }
+
+    println!("Extracting icupkg...");
+    let extract_dir = tools.join("icu_win_extract");
+    let _ = std::fs::remove_dir_all(&extract_dir);
+    std::fs::create_dir_all(&extract_dir)?;
+    extract_zip_full(&zip_tmp, &extract_dir).context("failed to extract icupkg zip")?;
+    let _ = std::fs::remove_file(&zip_tmp);
+
+    let found = find_icupkg_in(&extract_dir, "icupkg.exe")
+        .context("icupkg.exe not found in extracted ICU zip")?;
+    std::fs::copy(&found, &dest).context("copy icupkg into tools dir")?;
+    let _ = std::fs::remove_dir_all(&extract_dir);
+
+    verify_sha256(&dest, sha).context("icupkg download integrity check failed")?;
+    println!("✓ icupkg cached: {}", dest.display());
+    Ok(dest)
+}
+
+/// Extract a zip fully (preserving its internal directory layout) into `dest`.
+fn extract_zip_full(archive: &Path, dest: &Path) -> Result<()> {
+    let file = std::fs::File::open(archive)
+        .with_context(|| format!("open {}", archive.display()))?;
+    let mut arc = zip::ZipArchive::new(file)?;
+    arc.extract(dest).context("extracting zip archive")?;
+    Ok(())
+}
+
+/// Linux: download the ICU 77.1 Ubuntu x64 tarball — the only prebuilt Linux
+/// binary unicode.org ships — extract `icupkg`, and cache it.
+fn ensure_icupkg_linux(tools: &Path) -> Result<PathBuf> {
+    if std::env::consts::ARCH != "x86_64" {
+        bail!(
+            "icupkg trimming supports x86_64 Linux only (unicode.org ships no ARM64 Linux binary). \
+             Install ICU 77's icupkg and set GLYX_ICUPKG to its path."
+        );
+    }
+    const DEFAULT_URL: &str =
+        "https://github.com/unicode-org/icu/releases/download/release-77-1/icu4c-77_1-Ubuntu22.04-x64.tgz";
+    const SHA: &str = "3AD6448BBEAEF1D0AB9A9813EC030DF3BEEE0124243074C31BB2A344EE34E014";
+    let url = super::tools::resolve_tool_url(DEFAULT_URL, super::tools::paths::ICUPKG_LINUX_X64);
+    let dest = tools.join("icupkg");
+
+    if dest.exists() && verify_sha256(&dest, SHA).is_ok() {
+        return Ok(dest);
+    }
+    let _ = std::fs::remove_file(&dest);
+
+    println!("Downloading icupkg (ICU 77 data trimmer)...");
+    let tgz_tmp = tools.join("icu4c-77_1-linux.tgz");
+    if !Command::new("curl")
+        .args(["-fsSL", "-o", tgz_tmp.to_str().unwrap(), &url])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        bail!("Failed to download icupkg from {url}");
+    }
+
+    println!("Extracting icupkg...");
+    let extract_dir = tools.join("icu_linux_extract");
+    let _ = std::fs::remove_dir_all(&extract_dir);
+    std::fs::create_dir_all(&extract_dir)?;
+    let ok = Command::new("tar")
+        .args(["-xzf", tgz_tmp.to_str().unwrap()])
+        .current_dir(&extract_dir)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let _ = std::fs::remove_file(&tgz_tmp);
+    if !ok {
+        bail!("Failed to extract icupkg tarball (is `tar` available?)");
+    }
+
+    let found = find_icupkg_in(&extract_dir, "icupkg")
+        .context("icupkg not found in extracted ICU tarball")?;
+    std::fs::copy(&found, &dest).context("copy icupkg into tools dir")?;
+    let _ = std::fs::remove_dir_all(&extract_dir);
+
+    verify_sha256(&dest, SHA).context("icupkg download integrity check failed")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+    }
+    println!("✓ icupkg cached: {}", dest.display());
+    Ok(dest)
+}
+
+/// macOS: unicode.org ships no prebuilt `icupkg`, so use a system install
+/// (Homebrew's `icu4c`, or `$GLYX_ICUPKG`) rather than downloading.
+fn ensure_icupkg_macos() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("GLYX_ICUPKG") {
+        let p = PathBuf::from(p);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    for candidate in [
+        "/opt/homebrew/bin/icupkg", // Apple Silicon Homebrew
+        "/usr/local/bin/icupkg",     // Intel Homebrew
+        "/usr/bin/icupkg",
+    ] {
+        if Path::new(candidate).exists() {
+            return Ok(PathBuf::from(candidate));
+        }
+    }
+    // Last resort: PATH lookup.
+    if let Ok(out) = Command::new("which").arg("icupkg").output() {
+        if out.status.success() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !p.is_empty() {
+                return Ok(PathBuf::from(p));
+            }
+        }
+    }
+    bail!(
+        "icupkg not found on macOS. Install ICU tools with `brew install icu4c` \
+         (adds /opt/homebrew/bin/icupkg), or set GLYX_ICUPKG to the icupkg binary path."
+    );
+}
+
 /// Verify the SHA-256 hex digest of `path` matches `expected`.
 /// Deletes the file on mismatch so a retry will re-download cleanly.
-fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
+pub(crate) fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     use std::io::Read;
     use sha2::Digest as _;
     let mut file = std::fs::File::open(path)
@@ -17,7 +236,7 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
         hasher.update(&buf[..n]);
     }
     let actual = format!("{:x}", hasher.finalize());
-    if actual != expected {
+    if !actual.eq_ignore_ascii_case(expected) {
         let _ = std::fs::remove_file(path);
         bail!("SHA-256 mismatch for {}:\n  expected: {}\n  actual:   {}\nFile deleted -- retry will re-download.", path.display(), expected, actual);
     }
@@ -325,23 +544,25 @@ pub(super) fn ensure_nsis() -> Result<PathBuf> {
         return Ok(nsis_dir);
     }
 
-    const URL: &str = "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10.zip";
+    const DEFAULT_URL: &str = "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10.zip";
     // SHA-256 of the canonical nsis-3.10.zip from SourceForge.
     const SHA256: &str = "2735f04e5d1686b8aeecb8a9a56a80ae08c5e37f0dfa78ba9a7bf7f90a397c81";
     let zip_tmp = home.join(".glyx").join("tools").join("nsis-download.zip");
     std::fs::create_dir_all(zip_tmp.parent().unwrap())?;
 
+    // Use the self-hosted mirror when $GLYX_TOOLS_BASE is set, else upstream.
+    let url = super::tools::resolve_tool_url(DEFAULT_URL, super::tools::paths::NSIS);
     println!("Downloading NSIS (one-time, ~5 MB)...");
     // curl is built into Windows 10+, macOS, and every Linux distro.
     let ok = Command::new("curl")
-        .args(["-fsSL", "-o", zip_tmp.to_str().unwrap(), URL])
+        .args(["-fsSL", "-o", zip_tmp.to_str().unwrap(), &url])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     if !ok {
         bail!(
             "Failed to download NSIS.\n\
-             Check your internet connection or download manually:\n  {URL}\n\
+              Check your internet connection or download manually:\n  {url}\n\
              Extract to: {}", nsis_dir.display()
         );
     }
@@ -377,19 +598,21 @@ pub(super) fn ensure_rcedit() -> Result<PathBuf> {
     let rcedit = tools_dir.join("rcedit-x64.exe");
     if rcedit.exists() { return Ok(rcedit); }
 
-    const URL: &str = "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe";
+    const DEFAULT_URL: &str = "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe";
     // SHA-256 of rcedit-x64.exe v2.0.0 from the official GitHub release.
     const SHA256: &str = "4088d04409b4db9c35acdb01b0e1a9a27f64b3e62562c7dc6e37b8a6b7be75f7";
+    // Use the self-hosted mirror when $GLYX_TOOLS_BASE is set, else upstream.
+    let url = super::tools::resolve_tool_url(DEFAULT_URL, super::tools::paths::RCEdit);
     println!("Downloading rcedit (icon patcher, ~200 KB)...");
     let ok = Command::new("curl")
-        .args(["-fsSL", "-o", rcedit.to_str().unwrap(), URL])
+        .args(["-fsSL", "-o", rcedit.to_str().unwrap(), &url])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     if !ok {
         bail!(
             "Failed to download rcedit.\n\
-             Download manually from: {URL}\n\
+             Download manually from: {url}\n\
              Save to: {}", rcedit.display()
         );
     }
@@ -401,7 +624,7 @@ pub(super) fn ensure_rcedit() -> Result<PathBuf> {
 }
 
 /// Extract a zip, stripping the single top-level directory (e.g. `nsis-3.10/`).
-pub(super) fn extract_zip_strip_top(zip_path: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn extract_zip_strip_top(zip_path: &Path, dest: &Path) -> Result<()> {
     let file    = std::fs::File::open(zip_path)?;
     let mut arc = zip::ZipArchive::new(file)?;
     std::fs::create_dir_all(dest)?;

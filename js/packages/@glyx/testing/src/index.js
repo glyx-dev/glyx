@@ -1,10 +1,10 @@
-// @glyx/testing — Unit testing utilities for Glyx apps.
+// @glyx-dev/testing — Unit testing utilities for Glyx apps.
 //
 // Works with Bun's built-in test runner (`bun test`).
 //
 // Usage:
 //   // In your test file:
-//   import { render, screen, act, fireEvent } from '@glyx/testing';
+//   import { render, screen, act, fireEvent } from '@glyx-dev/testing';
 //
 //   test('Counter increments', async () => {
 //     const { getByText } = await render(<Counter />);
@@ -15,7 +15,7 @@
 // Setup:
 //   // bunfig.toml
 //   [test]
-//   preload = ["@glyx/testing/setup"]
+//   preload = ["@glyx-dev/testing/setup"]
 //
 // Architecture:
 //   • All __glyx_* native bindings are mocked so React components that call
@@ -121,7 +121,7 @@ function _nodeContainsText(node, text) {
 
 // ── Install default stubs ─────────────────────────────────────────────────────
 //
-// Call installStubs() in your test setup or import '@glyx/testing/setup'.
+// Call installStubs() in your test setup or import '@glyx-dev/testing/setup'.
 // Stubs are no-ops / sensible defaults so tests don't throw on missing bindings.
 
 export function installStubs() {

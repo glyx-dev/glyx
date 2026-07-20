@@ -1,4 +1,4 @@
-// @glyx/design — Form components
+// @glyx-dev/design — Form components
 //
 // All form components follow a consistent anatomy:
 //   label (optional) + control + helper text / error (optional)
@@ -6,7 +6,7 @@
 // Exports: TextField, SwitchRow, CheckboxRow, NumberInput, SearchInput
 
 import React, { useState, useCallback } from 'react';
-import { View, Text, Pressable, TextInput } from '@glyx/react';
+import { View, Text, Pressable, TextInput } from '@glyx-dev/react';
 import { useTheme } from './theme.js';
 
 // ── TextField ─────────────────────────────────────────────────────────────────

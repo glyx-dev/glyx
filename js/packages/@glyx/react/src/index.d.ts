@@ -132,6 +132,42 @@ export declare const DateTimePicker: React.FC<{
   style?: GlyxStyle;
 }>;
 
+// ── WebView (native OS-embedded webview; requires the `webview` capability) ──
+
+export interface WebViewRef {
+  /** Native scene-graph node id once mounted, else null. */
+  readonly nodeId: number | null;
+  /** Send a message INTO the page — delivered as a `message` DOM event (`e.data`). */
+  postMessage: (message: string) => void;
+}
+
+export interface WebViewProps {
+  /** URL to load. Ignored if `html` is set. */
+  src?:    string;
+  /** Raw HTML to load in place of navigating to a URL. */
+  html?:   string;
+  /** Default true — disables devtools on the embedded webview. */
+  sandbox?: boolean;
+  /** Navigation allowlist (exact origins). Defaults to `src`'s own origin if unset. */
+  allowedOrigins?: string[];
+  /** Enables `glyx-asset://<path>` serving files under this directory (not raw `file://`). */
+  assetsRoot?: string;
+  /** Called when the page posts a message via `window.ipc.postMessage(str)`. */
+  onMessage?: (message: string) => void;
+  style?:  GlyxStyle;
+  [key: string]: unknown;
+}
+
+/** Native OS-embedded webview (WebView2 / WKWebView / WebKitGTK), position-tracked like any other node. */
+export declare const WebView: React.ForwardRefExoticComponent<
+  WebViewProps & React.RefAttributes<WebViewRef>
+>;
+
+/** JS → page half of the postMessage bridge; prefer `WebViewRef.postMessage` when you have a ref. */
+export declare const webview: {
+  postMessage: (nodeId: number, message: string | object) => void;
+};
+
 export declare function render(element: React.ReactElement): void;
 
 // ── Responsive hooks ──────────────────────────────────────────────────────────
@@ -160,6 +196,24 @@ export declare function useMediaQuery(minWidth: number): boolean;
 export declare function getEnv(name: string): string | null;
 
 // ── Window imperative API ─────────────────────────────────────────────────────
+
+export type SystemWatchKind = 'battery' | 'memory' | 'darkMode' | 'batterySaver';
+
+export declare const system: {
+  getInfo(): Promise<{ cpuName: string; cpuCores: number; memoryTotalMb: number; memoryUsedMb: number; osName: string; osVersion: string } | null>;
+  getDarkMode(): 'dark' | 'light' | 'unknown';
+  isBatterySaverActive(): boolean;
+  /**
+   * Subscribe to a system metric. A Rust-side poller reads it on a timer and
+   * fires `cb` ONLY when the value changes — no JS timers, V8 idles between
+   * changes. Returns a watch id for `unwatch`.
+   */
+  watch(kind: 'battery',      cb: (v: { level: number; charging: boolean; timeRemainingSecs: number | null } | null) => void, opts?: { intervalMs?: number }): number;
+  watch(kind: 'memory',       cb: (v: { usedMb: number; totalMb: number }) => void, opts?: { intervalMs?: number }): number;
+  watch(kind: 'darkMode',     cb: (v: 'dark' | 'light' | 'unknown') => void, opts?: { intervalMs?: number }): number;
+  watch(kind: 'batterySaver', cb: (v: boolean) => void, opts?: { intervalMs?: number }): number;
+  unwatch(id: number): void;
+};
 
 export declare const glyxWindow: {
   /** Toggle game-style fullscreen (covers taskbar). */
@@ -206,4 +260,53 @@ export declare const glyxWindow: {
   restart(): void;
   /** Close this window. */
   close(): void;
+};
+
+// ── System tray ─────────────────────────────────────────────────────────────
+
+export interface TrayMenuItem {
+  id: string;
+  label: string;
+  enabled?: boolean;
+  checked?: boolean;
+  separator?: boolean;
+  accelerator?: string;
+  children?: TrayMenuItem[];
+}
+
+export type TrayEvent =
+  | { Click: { tray_id: number } }
+  | { DoubleClick: { tray_id: number } }
+  | { MenuItemClick: { tray_id: number; item_id: string } };
+
+export interface TrayHandle {
+  readonly id: number;
+}
+
+/** System tray icon API (requires `tray: true` capability). */
+export const tray: {
+  /**
+   * Create a system tray icon from raw RGBA pixel data.
+   * @returns A handle (0 on failure).
+   * @example
+   * const icon = ... // RGBA bytes from an <img> canvas
+   * const id = tray.create(iconBytes, 32, 32, 'My App', [
+   *   { id: 'play', label: 'Play/Pause' },
+   *   { id: '', separator: true },
+   *   { id: 'quit', label: 'Quit' },
+   * ]);
+   */
+  create(rgba: ArrayBuffer, width: number, height: number, tooltip: string, menu?: TrayMenuItem[]): number;
+
+  /** Destroy a tray icon. */
+  destroy(trayId: number): boolean;
+
+  /** Update the tray menu. */
+  updateMenu(trayId: number, menu: TrayMenuItem[]): boolean;
+
+  /** Update the tooltip text. */
+  setTooltip(trayId: number, tooltip: string): void;
+
+  /** Poll for pending tray events (menu clicks, double-clicks). Call each frame. Returns JSON array. */
+  pollEvents(): string;
 };

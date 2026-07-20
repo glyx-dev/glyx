@@ -9,5 +9,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 glyx-cap-abi = { path = "../glyx-cap-abi" }
 rodio        = { version = "0.17", features = ["symphonia-all"] }
+symphonia    = { version = "0.5", features = ["mp3", "aac", "isomp4", "flac", "vorbis", "wav"] }
 parking_lot  = "0.12"
 log          = "0.4"

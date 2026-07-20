@@ -43,9 +43,9 @@ changes.
 - `crates/` — the Rust workspace. Start at `glyx-core` (event loop, scene,
   layout, render) and `glyx-runtime` (V8 bindings). See the
   [README](./README.md#project-structure) for the full map.
-- `js/packages/@glyx/` — the JS/TS packages. `@glyx/react` is the
+- `js/packages/@glyx/` — the JS/TS packages. `@glyx-dev/react` is the
   reconciler and component layer; most JS-visible behavior lives there.
-- `vendor/` — patched third-party crates (`vello`, `femtovg`,
+- `vendor/` — patched third-party crates (`vello`,
   `libmimalloc-sys`). Changes here need a comment explaining the deviation
   from upstream.
 - `examples/` — runnable apps, also used for manual regression testing.
@@ -54,15 +54,16 @@ changes.
 
 - **`cargo check --workspace` must produce zero warnings** before any
   change is considered done. This is enforced culture, not a suggestion.
-- Run `bun test` in `js/` for JS-side changes (`@glyx/testing` provides the
+- Run `bun test` in `js/` for JS-side changes (`@glyx-dev/testing` provides the
   headless harness).
 - New native bindings (`__glyx_*`) need: the binding in
   `glyx-runtime/src/bindings.rs`, a snapshot stub so snapshot builds don't
-  break, and a JS wrapper in `@glyx/react`.
-- Renderer changes must be checked against all three backends (TinySkia,
-  FemtoVG, Vello) — behavior that only works on one is a bug. Note that
-  WGSL shaders validate at pipeline creation (runtime), not at
-  `cargo build`, so shader changes need a real render smoke test.
+  break, and a JS wrapper in `@glyx-dev/react`.
+- Renderer changes must be checked against every backend the change applies
+  to (TinySkia, Vello, and Direct2D on Windows) — behavior that only works
+  on one is a bug. Note that WGSL shaders validate at pipeline creation
+  (runtime), not at `cargo build`, so shader changes need a real render
+  smoke test.
 - Match the style of surrounding code. Comments explain *why*, not *what*.
 
 ## Commit messages

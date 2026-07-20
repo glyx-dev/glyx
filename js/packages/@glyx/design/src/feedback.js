@@ -1,4 +1,4 @@
-// @glyx/design — Feedback components
+// @glyx-dev/design — Feedback components
 //
 // Exports:
 //   Alert          — inline status message (info / success / warning / error)
@@ -12,7 +12,7 @@ import React, {
   useState, useEffect, useCallback, useRef,
   createContext, useContext,
 } from 'react';
-import { View, Text, Pressable } from '@glyx/react';
+import { View, Text, Pressable } from '@glyx-dev/react';
 import { useTheme } from './theme.js';
 
 // ── Alert ─────────────────────────────────────────────────────────────────────

@@ -15,8 +15,10 @@ mod blit;
 pub(crate) use blit::CachedBlit;
 mod skia;
 pub use skia::{TinySkiaFrame, TinySkiaRenderer};
-mod femtovg_backend;
-pub use femtovg_backend::{FemtoVgFrame, FemtoVgRenderer};
+#[cfg(target_os = "windows")]
+mod direct2d;
+#[cfg(target_os = "windows")]
+pub use direct2d::{Direct2DFrame, Direct2DRenderer};
 
 use std::path::PathBuf;
 use thiserror::Error;
@@ -504,8 +506,10 @@ pub enum BackendKind {
     Vello { use_cpu: bool },
     /// tiny-skia pure-CPU rasterizer — no GPU compute, ~8 MB RAM.
     TinySkia,
-    /// femtovg GPU tessellation — lighter than Vello, ~120–150 MB RAM.
-    FemtoVg,
+    /// Direct2D (Windows only, experimental — see `glyx_shell::RenderMode::Direct2D`).
+    /// Phase 0: routes to `AnyRenderer::TinySkia` as a placeholder until the real
+    /// backend lands (glyx-renderer/src/direct2d.rs, not yet implemented).
+    Direct2D,
 }
 
 // ── AnyFrame ──────────────────────────────────────────────────────────────────
@@ -514,7 +518,8 @@ pub enum BackendKind {
 pub enum AnyFrame {
     Vello(FrameBuilder),
     TinySkia(TinySkiaFrame),
-    FemtoVg(FemtoVgFrame),
+    #[cfg(target_os = "windows")]
+    Direct2D(Direct2DFrame),
 }
 
 impl AnyFrame {
@@ -532,7 +537,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.fill_rounded_rect(x, y, w, h, radius, color),
             AnyFrame::TinySkia(f) => f.fill_rounded_rect(x, y, w, h, radius, color),
-            AnyFrame::FemtoVg(f)  => f.fill_rounded_rect(x, y, w, h, radius, color),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.fill_rounded_rect(x, y, w, h, radius, color),
         }
     }
 
@@ -541,7 +547,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.fill_rounded_rect_with_brush(x, y, w, h, radius, brush),
             AnyFrame::TinySkia(f) => f.fill_rounded_rect_with_brush(x, y, w, h, radius, brush),
-            AnyFrame::FemtoVg(f)  => f.fill_rounded_rect_with_brush(x, y, w, h, radius, brush),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.fill_rounded_rect_with_brush(x, y, w, h, radius, brush),
         }
     }
 
@@ -549,7 +556,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.fill_rect(x, y, w, h, color),
             AnyFrame::TinySkia(f) => f.fill_rect(x, y, w, h, color),
-            AnyFrame::FemtoVg(f)  => f.fill_rect(x, y, w, h, color),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.fill_rect(x, y, w, h, color),
         }
     }
 
@@ -558,7 +566,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.stroke_rounded_rect(x, y, w, h, radius, stroke_width, color),
             AnyFrame::TinySkia(f) => f.stroke_rounded_rect(x, y, w, h, radius, stroke_width, color),
-            AnyFrame::FemtoVg(f)  => f.stroke_rounded_rect(x, y, w, h, radius, stroke_width, color),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.stroke_rounded_rect(x, y, w, h, radius, stroke_width, color),
         }
     }
 
@@ -566,7 +575,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.draw_text(layout, x, y, color),
             AnyFrame::TinySkia(f) => f.draw_text(layout, x, y, color),
-            AnyFrame::FemtoVg(f)  => f.draw_text(layout, x, y, color),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.draw_text(layout, x, y, color),
         }
     }
 
@@ -574,7 +584,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.draw_image(image, x, y, w, h),
             AnyFrame::TinySkia(f) => f.draw_image(image, x, y, w, h),
-            AnyFrame::FemtoVg(f)  => f.draw_image(image, x, y, w, h),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.draw_image(image, x, y, w, h),
         }
     }
 
@@ -582,7 +593,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.draw_image_with_transform(image, transform),
             AnyFrame::TinySkia(f) => f.draw_image_with_transform(image, transform),
-            AnyFrame::FemtoVg(f)  => f.draw_image_with_transform(image, transform),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.draw_image_with_transform(image, transform),
         }
     }
 
@@ -617,7 +629,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.push_layer(x, y, w, h),
             AnyFrame::TinySkia(f) => f.push_layer(x, y, w, h),
-            AnyFrame::FemtoVg(f)  => f.push_layer(x, y, w, h),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.push_layer(x, y, w, h),
         }
     }
 
@@ -625,7 +638,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.push_rounded_layer(x, y, w, h, radius),
             AnyFrame::TinySkia(f) => f.push_rounded_layer(x, y, w, h, radius),
-            AnyFrame::FemtoVg(f)  => f.push_rounded_layer(x, y, w, h, radius),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.push_rounded_layer(x, y, w, h, radius),
         }
     }
 
@@ -633,7 +647,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.push_layer_with_alpha(x, y, w, h, alpha),
             AnyFrame::TinySkia(f) => f.push_layer_with_alpha(x, y, w, h, alpha),
-            AnyFrame::FemtoVg(f)  => f.push_layer_with_alpha(x, y, w, h, alpha),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.push_layer_with_alpha(x, y, w, h, alpha),
         }
     }
 
@@ -641,7 +656,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.pop_layer(),
             AnyFrame::TinySkia(f) => f.pop_layer(),
-            AnyFrame::FemtoVg(f)  => f.pop_layer(),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.pop_layer(),
         }
     }
 
@@ -649,7 +665,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.fill_circle(cx, cy, r, color),
             AnyFrame::TinySkia(f) => f.fill_circle(cx, cy, r, color),
-            AnyFrame::FemtoVg(f)  => f.fill_circle(cx, cy, r, color),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.fill_circle(cx, cy, r, color),
         }
     }
 
@@ -657,7 +674,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.stroke_circle(cx, cy, r, width, color),
             AnyFrame::TinySkia(f) => f.stroke_circle(cx, cy, r, width, color),
-            AnyFrame::FemtoVg(f)  => f.stroke_circle(cx, cy, r, width, color),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.stroke_circle(cx, cy, r, width, color),
         }
     }
 
@@ -665,7 +683,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.stroke_line(x0, y0, x1, y1, width, color),
             AnyFrame::TinySkia(f) => f.stroke_line(x0, y0, x1, y1, width, color),
-            AnyFrame::FemtoVg(f)  => f.stroke_line(x0, y0, x1, y1, width, color),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.stroke_line(x0, y0, x1, y1, width, color),
         }
     }
 
@@ -674,7 +693,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.fill_path(pts, color),
             AnyFrame::TinySkia(f) => f.fill_path(pts, color),
-            AnyFrame::FemtoVg(f)  => f.fill_path(pts, color),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.fill_path(pts, color),
         }
     }
 
@@ -683,7 +703,8 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f)    => f.stroke_path(pts, width, closed, color),
             AnyFrame::TinySkia(f) => f.stroke_path(pts, width, closed, color),
-            AnyFrame::FemtoVg(f)  => f.stroke_path(pts, width, closed, color),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.stroke_path(pts, width, closed, color),
         }
     }
 }
@@ -694,7 +715,8 @@ impl AnyFrame {
 pub enum AnyRenderer {
     Vello(GlyxRenderer),
     TinySkia(TinySkiaRenderer),
-    FemtoVg(FemtoVgRenderer),
+    #[cfg(target_os = "windows")]
+    Direct2D(Direct2DRenderer),
 }
 
 impl AnyRenderer {
@@ -705,8 +727,15 @@ impl AnyRenderer {
                 GlyxRenderer::new(gpu, use_cpu).map(AnyRenderer::Vello),
             BackendKind::TinySkia =>
                 TinySkiaRenderer::new(gpu).map(AnyRenderer::TinySkia),
-            BackendKind::FemtoVg =>
-                FemtoVgRenderer::new(gpu).map(AnyRenderer::FemtoVg),
+            // Safety fallback only — glyx-core's window-creation code bypasses
+            // this constructor for Direct2D entirely (it needs a device
+            // context from D2DPresent, which requires the window's HWND;
+            // this fn only receives a wgpu GpuContext), mirroring TinySkia's
+            // own soft-present bypass of this same constructor. Should never
+            // actually be hit; falls back to TinySkia rather than panicking
+            // if it somehow is.
+            BackendKind::Direct2D =>
+                TinySkiaRenderer::new(gpu).map(AnyRenderer::TinySkia),
         }
     }
 
@@ -715,21 +744,22 @@ impl AnyRenderer {
         match self {
             AnyRenderer::Vello(r)    => r.background_color = color,
             AnyRenderer::TinySkia(r) => r.background_color = color,
-            AnyRenderer::FemtoVg(r)  => r.background_color = color,
+            #[cfg(target_os = "windows")]
+            AnyRenderer::Direct2D(r) => r.background_color = color,
         }
     }
 
     /// Sync stored dimensions to the current GPU surface size before `begin_frame`.
     ///
     /// Call this immediately before `begin_frame()` whenever the window may have
-    /// been resized since the last frame.  TinySkia and FemtoVG create their
-    /// per-frame buffer/canvas at the stored size — if stale, dimensions diverge
-    /// and wgpu panics (TinySkia) or text clips to old bounds and renders red (FemtoVG).
+    /// been resized since the last frame.  TinySkia creates its per-frame buffer
+    /// at the stored size — if stale, dimensions diverge and wgpu panics.
     pub fn notify_resize(&mut self, w: u32, h: u32) {
         match self {
             AnyRenderer::Vello(r)    => r.notify_resize(w, h),
             AnyRenderer::TinySkia(r) => r.notify_resize(w, h),
-            AnyRenderer::FemtoVg(r)  => r.notify_resize(w, h),
+            #[cfg(target_os = "windows")]
+            AnyRenderer::Direct2D(r) => r.notify_resize(w, h),
         }
     }
 
@@ -737,10 +767,16 @@ impl AnyRenderer {
         match self {
             AnyRenderer::Vello(r)    => AnyFrame::Vello(r.begin_frame()),
             AnyRenderer::TinySkia(r) => AnyFrame::TinySkia(r.begin_frame()),
-            AnyRenderer::FemtoVg(r)  => AnyFrame::FemtoVg(r.begin_frame()),
+            #[cfg(target_os = "windows")]
+            AnyRenderer::Direct2D(r) => AnyFrame::Direct2D(r.begin_frame()),
         }
     }
 
+    /// Not used by the Direct2D backend — it draws directly into its own
+    /// device context (no wgpu surface texture involved) and finishes via
+    /// `AnyFrame::Direct2D`'s dedicated `finish()`, called directly from
+    /// glyx-core's `Present::Direct2D` dispatch arm, mirroring TinySkia's
+    /// `finish_frame_soft` bypass of this same method for its soft-present path.
     pub fn render_frame(
         &mut self,
         gpu:     &GpuContext,
@@ -750,7 +786,6 @@ impl AnyRenderer {
         match (self, frame) {
             (AnyRenderer::Vello(r),    AnyFrame::Vello(f))    => r.render_frame(gpu, texture, f),
             (AnyRenderer::TinySkia(r), AnyFrame::TinySkia(f)) => r.render_frame(gpu, texture, f),
-            (AnyRenderer::FemtoVg(r),  AnyFrame::FemtoVg(f))  => r.render_frame(gpu, texture, f),
             _ => unreachable!("AnyRenderer/AnyFrame variant mismatch"),
         }
     }
@@ -763,7 +798,8 @@ impl AnyRenderer {
         match self {
             AnyRenderer::Vello(r)    => r.blit_cached_frame(gpu, texture),
             AnyRenderer::TinySkia(r) => r.blit_cached_frame(gpu, texture),
-            AnyRenderer::FemtoVg(r)  => r.blit_cached_frame(gpu, texture),
+            #[cfg(target_os = "windows")]
+            AnyRenderer::Direct2D(_) => Ok(()), // no cached-frame fast path yet
         }
     }
 
@@ -771,7 +807,8 @@ impl AnyRenderer {
         match self {
             AnyRenderer::Vello(r)    => r.trim_resources(),
             AnyRenderer::TinySkia(r) => r.trim_resources(),
-            AnyRenderer::FemtoVg(r)  => r.trim_resources(),
+            #[cfg(target_os = "windows")]
+            AnyRenderer::Direct2D(r) => r.trim_resources(),
         }
     }
 
@@ -779,7 +816,8 @@ impl AnyRenderer {
         match self {
             AnyRenderer::Vello(r)    => r.try_save_pipeline_cache(),
             AnyRenderer::TinySkia(r) => r.try_save_pipeline_cache(),
-            AnyRenderer::FemtoVg(r)  => r.try_save_pipeline_cache(),
+            #[cfg(target_os = "windows")]
+            AnyRenderer::Direct2D(r) => r.try_save_pipeline_cache(),
         }
     }
 }

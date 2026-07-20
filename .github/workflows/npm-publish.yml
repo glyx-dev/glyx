@@ -1,0 +1,61 @@
+name: Publish npm packages
+
+# Publishes every @glyx-dev/* workspace package to npm.
+# Trigger with a `js-v*` tag (e.g. js-v0.1.0) or manually from the Actions tab.
+#
+# Requires the repo secret NPM_TOKEN (an npm token for the glyx-dev org).
+
+on:
+  push:
+    tags:
+      - 'js-v*'
+  workflow_dispatch:
+    inputs:
+      dist_tag:
+        description: 'npm dist-tag (latest | next)'
+        default: 'latest'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # npm provenance
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install workspace deps
+        run: bun install
+        env:
+          GLYX_SKIP_DOWNLOAD: '1'   # glyx-cli postinstall: no binary fetch in CI
+
+      - name: Run JS tests
+        run: bun test
+        env:
+          GLYX_SKIP_DOWNLOAD: '1'
+
+      - name: Publish all @glyx packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DIST_TAG: ${{ github.event.inputs.dist_tag || 'latest' }}
+        run: |
+          set -e
+          for dir in js/packages/@glyx/*/ js/packages/glyx-cli/; do
+            name=$(node -p "require('./$dir/package.json').name")
+            version=$(node -p "require('./$dir/package.json').version")
+            # Skip if this exact version is already on the registry.
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "skip  $name@$version (already published)"
+              continue
+            fi
+            echo "publish  $name@$version"
+            (cd "$dir" && npm publish --access public --provenance --tag "$DIST_TAG")
+          done

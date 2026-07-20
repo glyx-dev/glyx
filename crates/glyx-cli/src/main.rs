@@ -16,10 +16,12 @@ mod cmd_create;
 mod cmd_dev;
 mod cmd_build;
 mod cmd_package;
+mod icu_trim;
 mod cmd_check;
 mod cmd_test;
 mod cmd_generate;
 mod cmd_runtime;
+mod tools;
 pub mod pm;
 
 use self::cmd_create::*;
@@ -60,6 +62,12 @@ struct Cli {
     /// Overrides auto-detection (lockfile sniff → which probe).
     #[arg(long, global = true, value_name = "PM")]
     pm: Option<String>,
+
+    /// Path to a local `icupkg` (ICU data trimmer) binary to use instead of the
+    /// one glyx downloads/caches automatically. Useful behind a firewall or when
+    /// you want a specific ICU 77 build. Overrides the `GLYX_ICUPKG` env var.
+    #[arg(long, global = true, value_name = "PATH")]
+    icupkg: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Commands,
@@ -200,7 +208,7 @@ enum Commands {
     },
     /// Run tests
     ///
-    /// For JS projects:   `<pm> test` (uses @glyx/testing stubs)
+    /// For JS projects:   `<pm> test` (uses @glyx-dev/testing stubs)
     /// For native projects: `cargo test` + `<pm> test`
     ///
     /// Pass --js or --rust to run only one side.
@@ -306,10 +314,10 @@ fn run() -> Result<()> {
 
     match cli.command {
         Commands::Create { name, native, template } => cmd_create(&name, native, &template, pm),
-        Commands::Dev { inspect }         => cmd_dev(inspect, pm),
+        Commands::Dev { inspect }         => cmd_dev(inspect, pm, cli.icupkg.clone()),
         Commands::Build { target, snapshot: _, bundle, portable, check_performance, perf_budget, perf_duration } => {
             let mode = if bundle { "bundle" } else if portable { "portable" } else { "snapshot" };
-            cmd_build(target.as_deref(), mode, check_performance, perf_budget, perf_duration, pm)
+            cmd_build(target.as_deref(), mode, check_performance, perf_budget, perf_duration, pm, cli.icupkg.clone())
         }
         Commands::Package { target, installer } => cmd_package(target.as_deref(), installer),
         Commands::Runtime { cmd }         => cmd_runtime(cmd),
@@ -343,31 +351,48 @@ fn run() -> Result<()> {
 ///
 /// Search order:
 ///   1. ~/.glyx/runners/{dev|prod}/glyx-runner[.exe]  (cached)
-///   2. glyx_home/target/{debug|release}/glyx-runner[.exe]  (workspace)
-///   3. Build from source → copy to cache
-fn find_or_build_runner(dev_mode: bool) -> Result<PathBuf> {
+///   2. Download the prebuilt runner from GitHub Releases → cache
+///   3. Build from source (isolated `-p glyx-runner`) → copy to cache
+///
+/// NOTE: deliberately does NOT reuse glyx_home/target/{debug|release}/glyx-runner —
+/// a plain workspace-wide `cargo build --release` (e.g. run while hacking on
+/// glyx-cli or an example) unifies Cargo features across every workspace member
+/// that depends on glyx-core (model-viewer enables `canvas3d`, etc.), so any
+/// glyx-runner binary sitting in the shared target/ dir may have been fattened
+/// by features it never asked for. Always going through the isolated `-p
+/// glyx-runner --no-default-features` build guarantees a lean prod binary;
+/// cargo no-ops when the fingerprint already matches, so repeat calls are fast.
+fn find_or_build_runner(dev_mode: bool, engine: &str) -> Result<PathBuf> {
     let profile = if dev_mode { "dev" } else { "prod" };
     let bin_name = runner_bin_name();
 
-    // 1. Check user cache
-    let cache_dir = glyx_runners_dir().join(profile);
+    // 1. Check user cache — namespaced by engine so switching a project's
+    //    configured engine (glyx.config "engine") doesn't silently reuse a
+    //    stale wrong-engine binary cached under the same path.
+    let cache_dir = glyx_runners_dir().join(engine).join(profile);
     let cached    = cache_dir.join(bin_name);
     if cached.exists() { return Ok(cached); }
 
-    // 2. Check glyx workspace target/ (fastest for developers inside the workspace)
-    if let Ok(home) = glyx_home() {
-        let ws_profile = if dev_mode { "debug" } else { "release" };
-        let ws_bin = home.join("target").join(ws_profile).join(bin_name);
-        if ws_bin.exists() { return Ok(ws_bin); }
+    // 2. Download the prebuilt runner for this CLI version from GitHub
+    //    Releases — the NORMAL path for users who installed the CLI binary
+    //    and don't have the glyx source workspace.  Falls through to a
+    //    source build (workspace devs) if unavailable.
+    if download_runner(profile, engine, &cached).unwrap_or(false) {
+        return Ok(cached);
     }
 
     // 3. Build from source
     let home = glyx_home().context("Cannot locate glyx workspace — needed to build glyx-runner")?;
     let label = if dev_mode { "dev (with hot-reload)" } else { "prod (lean)" };
-    println!("Building glyx-runner [{label}] from source (first-run, one-time cost)...");
+    println!("Building glyx-runner [{label}, {engine}] from source (first-run, one-time cost)...");
 
-    let mut args = vec!["build", "-p", "glyx-runner"];
-    if !dev_mode { args.push("--release"); args.push("--no-default-features"); }
+    // Always pass explicit features (both modes) so `engine` is honored
+    // regardless of glyx-runner/Cargo.toml's own default feature set —
+    // relying on defaults here previously meant a dev-mode build always got
+    // v8 no matter what the project's glyx.config asked for.
+    let feat = if dev_mode { format!("dev,{engine}") } else { engine.to_string() };
+    let mut args = vec!["build", "-p", "glyx-runner", "--no-default-features", "--features", feat.as_str()];
+    if !dev_mode { args.push("--release"); }
 
     let status = Command::new("cargo")
         .args(&args)
@@ -392,8 +417,82 @@ fn find_or_build_runner(dev_mode: bool) -> Result<PathBuf> {
     std::fs::copy(&built, &cached)
         .with_context(|| format!("cache runner to {}", cached.display()))?;
 
-    println!("✓ glyx-runner [{profile}] cached at {}", cached.display());
+    println!("✓ glyx-runner [{profile}, {engine}] cached at {}", cached.display());
     Ok(cached)
+}
+
+/// The release-artifact target triple for the running CLI, or None on
+/// platforms we don't publish binaries for (falls back to source build).
+fn release_target() -> Option<&'static str> {
+    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Some("x86_64-pc-windows-msvc")
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some("aarch64-apple-darwin")
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Some("x86_64-apple-darwin")
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some("x86_64-unknown-linux-gnu")
+    } else {
+        None
+    }
+}
+
+/// Download the prebuilt glyx-runner artifact matching this CLI's version
+/// from GitHub Releases into `dest`.  Returns Ok(true) on success, Ok(false)
+/// when the artifact isn't available (offline, unsupported platform, 404) —
+/// the caller then falls through to building from source.
+fn download_runner(profile: &str, engine: &str, dest: &std::path::Path) -> Result<bool> {
+    let Some(target) = release_target() else { return Ok(false) };
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    // Release ships two runner flavors (lean prod, dev hot-reload) per
+    // engine. v8 keeps the original unprefixed names (existing releases,
+    // unchanged); quickjs gets an explicit "quickjs-" segment.
+    let engine_prefix = if engine == "quickjs" { "quickjs-" } else { "" };
+    let artifact = if profile == "dev" {
+        format!("glyx-runner-{engine_prefix}dev-{target}{suffix}")
+    } else {
+        format!("glyx-runner-{engine_prefix}{target}{suffix}")
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    let upstream = [
+        format!("https://github.com/glyx-dev/glyx/releases/download/v{version}/{artifact}"),
+        format!("https://github.com/glyx-dev/glyx/releases/latest/download/{artifact}"),
+    ];
+    // When self-hosting, every runner comes from the mirror base; otherwise
+    // fall back to the upstream GitHub release URLs.
+    let urls: Vec<String> = match tools::tools_base() {
+        Some(base) => vec![format!("{}/{}", base, tools::runner_mirror_path(&artifact))],
+        None => upstream.to_vec(),
+    };
+
+    for url in &urls {
+        println!("Downloading prebuilt glyx-runner [{profile}, {engine}]…");
+        log::info!("  {url}");
+        let resp = match ureq::get(url).call() {
+            Ok(r) => r,
+            Err(e) => { log::info!("  unavailable: {e}"); continue; }
+        };
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create cache dir {}", parent.display()))?;
+        }
+        // Write to a temp file then rename — never leave a half-written binary.
+        let tmp = dest.with_extension("part");
+        let mut file = std::fs::File::create(&tmp)
+            .with_context(|| format!("create {}", tmp.display()))?;
+        std::io::copy(&mut resp.into_reader(), &mut file)
+            .with_context(|| format!("download {url}"))?;
+        drop(file);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        }
+        std::fs::rename(&tmp, dest)?;
+        println!("✓ glyx-runner [{profile}] cached at {}", dest.display());
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn glyx_runners_dir() -> PathBuf {
@@ -750,16 +849,6 @@ fn read_dev_inspect_port() -> Option<u16> {
     }
 }
 
-/// Quick lockfile-only PM sniff used before full detection is available
-/// (e.g. when resolving glyx.config.ts, which happens before PM detection).
-fn detect_pm_fast() -> pm::Pm {
-    if Path::new("bun.lock").exists() || Path::new("bun.lockb").exists() { return pm::Pm::Bun; }
-    if Path::new("pnpm-lock.yaml").exists()  { return pm::Pm::Pnpm; }
-    if Path::new("package-lock.json").exists() { return pm::Pm::Npm; }
-    if Path::new("yarn.lock").exists()       { return pm::Pm::Yarn; }
-    pm::Pm::Bun  // safe default — most glyx projects use bun
-}
-
 fn platform_to_rust_target(os: &str) -> Result<String> {
     Ok(match os {
         "windows"     => "x86_64-pc-windows-msvc".into(),
@@ -837,10 +926,30 @@ fn copy_runtime_files(dest_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read the `engine` field from glyx.config (`"v8"` | `"quickjs"`). Defaults
+/// to `"v8"` (the desktop default, matching every example's own Cargo.toml)
+/// when absent or unrecognized.
+fn read_engine_from_config() -> String {
+    let src = resolve_config_json().unwrap_or_default();
+    parse_engine_from_json(&src)
+}
+
+fn parse_engine_from_json(src: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(src).unwrap_or_default();
+    match v.get("engine").and_then(|e| e.as_str()) {
+        Some("quickjs") => "quickjs".to_string(),
+        Some("v8") | None => "v8".to_string(),
+        Some(other) => {
+            eprintln!("warning: glyx.config \"engine\": {other:?} not recognized (use \"v8\" or \"quickjs\") — defaulting to v8");
+            "v8".to_string()
+        }
+    }
+}
+
 /// Read the `capabilities` object from glyx.config (e.g. `{ "audio": true, "camera": false }`).
 /// Returns the full known set when the config has no capabilities key.
 fn read_capabilities_from_config() -> Vec<String> {
-    let known = ["audio", "ai", "camera", "gamepad", "hid"];
+    let known = ["audio", "ai", "camera", "gamepad", "hid", "webview"];
     let src = resolve_config_json().unwrap_or_default();
     let v: serde_json::Value = serde_json::from_str(&src).unwrap_or_default();
     match v.get("capabilities").and_then(|c| c.as_object()) {
@@ -977,11 +1086,17 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_glyx_mark_to(glyx_home: &Path, dest: &Path, subfolder: &str) {
-    let src = glyx_home.join("assets/glyx-mark.svg");
+fn copy_glyx_mark_to(glyx_home: Option<&Path>, dest: &Path, subfolder: &str) {
     let dst = dest.join(subfolder).join("glyx-mark.svg");
-    if let Err(e) = std::fs::copy(&src, &dst) {
-        log::warn!("[create] could not copy glyx-mark.svg: {e}");
+    // Workspace checkout: copy the asset.  Standalone CLI: write the
+    // embedded copy (the binary carries it — 404 bytes).
+    if let Some(home) = glyx_home {
+        let src = home.join("assets/glyx-mark.svg");
+        if std::fs::copy(&src, &dst).is_ok() { return; }
+    }
+    const MARK_SVG: &str = include_str!("../../../assets/glyx-mark.svg");
+    if let Err(e) = std::fs::write(&dst, MARK_SVG) {
+        log::warn!("[create] could not write glyx-mark.svg: {e}");
     }
 }
 
@@ -1016,3 +1131,36 @@ if (typeof MessageChannel === 'undefined') {
   };
 }
 "#;
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn parse_engine_from_json_reads_quickjs() {
+        assert_eq!(parse_engine_from_json(r#"{"engine":"quickjs"}"#), "quickjs");
+    }
+
+    #[test]
+    fn parse_engine_from_json_defaults_to_v8_when_absent() {
+        assert_eq!(parse_engine_from_json("{}"), "v8");
+        assert_eq!(parse_engine_from_json(""), "v8");
+    }
+
+    #[test]
+    fn parse_engine_from_json_falls_back_to_v8_on_unknown_value() {
+        assert_eq!(parse_engine_from_json(r#"{"engine":"nashorn"}"#), "v8");
+    }
+
+    #[test]
+    fn platform_to_rust_target_maps_known_platforms() {
+        assert_eq!(platform_to_rust_target("windows").unwrap(), "x86_64-pc-windows-msvc");
+        assert_eq!(platform_to_rust_target("macos").unwrap(), "aarch64-apple-darwin");
+        assert_eq!(platform_to_rust_target("linux-arm").unwrap(), "aarch64-unknown-linux-gnu");
+    }
+
+    #[test]
+    fn platform_to_rust_target_rejects_unknown_platform() {
+        assert!(platform_to_rust_target("plan9").is_err());
+    }
+}

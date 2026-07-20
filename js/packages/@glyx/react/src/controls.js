@@ -4,6 +4,7 @@ import {
   registerDraggable, unregisterDraggable,
   registerPressable, unregisterPressable,
   registerScrollView, unregisterScrollView,
+  registerA11yValue, unregisterA11yValue,
   addGlobalClickListener, removeGlobalClickListener,
   addKeyListener,
 } from './events.js';
@@ -29,6 +30,42 @@ function _sizedRootStyle(style, defaultWidth) {
   return sized
     ? { ...style }
     : { alignSelf: 'flex-start', width: defaultWidth, ...style };
+}
+
+// ── Select color context ──────────────────────────────────────────────────────
+//
+// Provides theme-matched colors to every Select in the subtree.
+// @glyx-dev/design's ThemeProvider sets this automatically.
+// The defaults below match the dark (Mocha) theme so existing apps
+// that don't use ThemeProvider stay unchanged.
+
+export const SELECT_COLORS_DARK = {
+  triggerBg:           '#262b3f',
+  triggerBgDisabled:   '#1a1d2e',
+  triggerBorder:       '#3c4464',
+  triggerBorderFocus:  '#7aa2f7',
+  triggerText:         '#e7ecff',
+  triggerPlaceholder:  '#9aa0b6',
+  // chevron: arrow icons on triggers and calendar nav — subtler than accent
+  chevron:             '#9aa0b6',
+  dropdownBg:          '#1e2235',
+  dropdownBorder:      '#3c4464',
+  optionText:          '#cdd6f4',
+  optionSelectedText:  '#7aa2f7',
+  optionHoverBg:       '#2a3048',
+  optionSelectedBg:    '#2e3555',
+  optionCheck:         '#7aa2f7',
+  // calCellSelectedBg: accent for the selected day cell (keep as primary)
+  calCellSelectedBg:   '#7aa2f7',
+  calCellSelectedText: '#1e1e2e',
+  calDayName:          '#6c7086',
+};
+
+export const SelectColorsContext = React.createContext(SELECT_COLORS_DARK);
+
+/** Wrap a subtree to override Select colors — used internally by ThemeProvider. */
+export function SelectColorsProvider({ colors, children }) {
+  return React.createElement(SelectColorsContext.Provider, { value: colors }, children);
 }
 
 // ── TextInput ─────────────────────────────────────────────────────────────────
@@ -62,6 +99,13 @@ export function TextInput({
   // When anchor === focus_: no selection, cursor blinks at that position.
   const [anchor, setAnchor]   = useState(() => value.length);
   const [focus_,  setFocus_]  = useState(() => value.length);
+  // IME composition in progress (CJK/etc). Spliced into the DISPLAYED text
+  // only — `value`/caret math are untouched until the IME commits, matching
+  // how every other native text field defers the actual edit until commit.
+  // KNOWN LIMITATION: caret positioning during active composition stays at
+  // the pre-composition cursor spot rather than tracking within the preedit
+  // text — acceptable for a first pass, not pixel-perfect IME UX yet.
+  const [preedit, setPreedit] = useState('');
   const [scrollX, setScrollX] = useState(0);
   const scrollXRef = useRef(0);
   // Vertical scroll for multiline mode (wheel, scrollbar drag, caret-follow).
@@ -180,9 +224,32 @@ export function TextInput({
       const end = value.length;
       setAnchor(end);
       setFocus_(end);
+      // Tell the Rust-side focus registry — foundation for IME composition
+      // routing and (later) accessibility focus events.
+      if (typeof __glyx_setFocus !== 'undefined' && nodeIdRef.current != null) {
+        __glyx_setFocus(nodeIdRef.current);
+      }
     },
     onBlur: () => {
       setFocused(false);
+      setPreedit('');
+      if (typeof __glyx_setFocus !== 'undefined') {
+        __glyx_setFocus(null);
+      }
+    },
+    // IME composition (CJK/etc). `text` is the in-progress candidate string
+    // ("preedit") — displayed inline but NOT yet part of `value`.
+    onImePreedit: ({ text }) => {
+      setPreedit(text);
+    },
+    // Final composed string from the IME — inserted exactly like typed text
+    // (replacing any active selection), then composition state clears.
+    onImeCommit: (text) => {
+      if (!text) { setPreedit(''); return; }
+      const ss = Math.min(anchor, focus_);
+      const se = Math.max(anchor, focus_);
+      commit(value.slice(0, ss) + text + value.slice(se), ss + text.length);
+      setPreedit('');
     },
     onKeyPress: async ({ key, text, ctrl, shift }) => {
       const ss     = Math.min(anchor, focus_);
@@ -432,18 +499,24 @@ export function TextInput({
     if (sy !== scrollYRef.current) setScrollYBoth(sy);
   }, [focus_, renderValue, multiline, focused]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const C = React.useContext(SelectColorsContext);
+
   // Show placeholder only when unfocused and value is empty (masked for
   // password fields so the real text never renders).
-  const displayText  = (focused || value) ? renderValue : placeholder;
-  // Respect the style's text color (themed apps); white is only the default
-  // for the built-in dark field chrome.
-  const textColor    = value ? ((style && style.color) || '#ffffff') : '#888888';
+  const displayValue = preedit
+    ? renderValue.slice(0, focus_) + preedit + renderValue.slice(focus_)
+    : renderValue;
+  const displayText  = (focused || value) ? displayValue : placeholder;
+  const displayingPlaceholder = !focused && !value;
+  const textColor    = displayingPlaceholder
+    ? C.triggerPlaceholder
+    : ((style && style.color) || C.triggerText);
 
   const inputStyle = {
-    backgroundColor: focused ? '#4a4a7e' : '#2a2a3e',
+    backgroundColor: C.triggerBg,
     borderRadius: 6,
     borderWidth: focused ? 2 : 1,
-    borderColor: focused ? '#8080ff' : '#44446a',
+    borderColor: focused ? C.triggerBorderFocus : C.triggerBorder,
     justifyContent: multiline ? 'flex-start' : 'center',
     alignItems: 'flex-start',
     padding: innerPadding,
@@ -455,7 +528,7 @@ export function TextInput({
 
   return React.createElement(
     'view',
-    { _glyxOnMount: onMount, style: inputStyle, width: nodeWidth, height: resolvedHeight, ...props },
+    { _glyxOnMount: onMount, style: inputStyle, width: nodeWidth, height: resolvedHeight, role: 'textbox', ...props },
     React.createElement('text', {
       text:           displayText,
       fontSize,
@@ -467,6 +540,10 @@ export function TextInput({
       cursorPosition: focused ? focus_ : undefined,
       selectionStart: (focused && selStart < selEnd) ? selStart : undefined,
       selectionEnd:   (focused && selStart < selEnd) ? selEnd   : undefined,
+      // IME composition underline — char range within `displayText` (not
+      // `value`), since preedit is spliced in for display only.
+      imePreeditStart: preedit ? focus_ : undefined,
+      imePreeditEnd:   preedit ? focus_ + [...preedit].length : undefined,
       textAlign:      'left',
       textScrollX:    multiline ? undefined : scrollX,
     })
@@ -528,6 +605,9 @@ export function Checkbox({ checked = false, onChange, disabled = false, label, s
   return React.createElement(Pressable, {
     onPress: () => { if (!disabled && onChange) onChange(!checked); },
     style: { flexDirection: 'row', alignItems: 'center', gap: 8, ...style },
+    role: 'checkbox',
+    checked,
+    ariaLabel: label != null ? String(label) : undefined,
     ...rest,
   }, box, lbl);
 }
@@ -550,6 +630,8 @@ export function Switch({ value = false, onValueChange, disabled = false, style, 
       padding: 2,
       ...style,
     },
+    role: 'switch',
+    checked: value,
     ...rest,
   },
     React.createElement(View, {
@@ -605,6 +687,9 @@ export function Radio({ value, label, disabled = false, style, ...rest }) {
   return React.createElement(Pressable, {
     onPress: () => { if (!disabled && ctx && ctx.onValueChange) ctx.onValueChange(value); },
     style: { flexDirection: 'row', alignItems: 'center', gap: 8, ...style },
+    role: 'radio',
+    checked: selected,
+    ariaLabel: label != null ? String(label) : undefined,
     ...rest,
   }, circle, lbl);
 }
@@ -656,6 +741,8 @@ export function FileInput({
 
   return React.createElement(Pressable, {
     onPress: handlePress,
+    role: 'button',
+    ariaLabel: label,
     style: {
       paddingVertical: 8,
       paddingHorizontal: 14,
@@ -723,6 +810,7 @@ export function Slider({
   const stepRef     = useRef(step);  stepRef.current     = step;
   const disabledRef = useRef(disabled); disabledRef.current = disabled;
   const onChangeRef = useRef(_cb); onChangeRef.current = _cb;
+  const valueRef    = useRef(value); valueRef.current    = value;
 
   // Shared update logic: compute value from absolute cursor x position.
   // Using absolute x (not delta) means each dragMove is independent — no
@@ -752,12 +840,44 @@ export function Slider({
   const onTrackMount = useCallback((id) => {
     trackNodeId.current = id;
     registerDraggable(id, {
-      onDragStart({ x }) { updateFromX(x); },
+      onDragStart({ x }) {
+        if (typeof __glyx_setFocus !== 'undefined') __glyx_setFocus(id);
+        updateFromX(x);
+      },
       onDragMove({ x })  { updateFromX(x); },
     });
     registerPressable(id, {
-      onPress({ x }) { updateFromX(x); },
+      // Slider is a raw View + registerPressable, NOT the <Pressable>
+      // component — so it never went through core.js's focus-registry fix.
+      // Same class of bug as Checkbox/Switch/etc before that fix: without
+      // this, clicking/dragging the slider never moves `focused_node`.
+      onPress({ x }) {
+        if (typeof __glyx_setFocus !== 'undefined') __glyx_setFocus(id);
+        updateFromX(x);
+      },
       onPressIn() {}, onPressOut() {}, onHoverIn() {}, onHoverOut() {},
+    });
+    // Makes the slider operable by a screen reader, not just clickable/
+    // draggable by a sighted mouse user — Increment/Decrement step by the
+    // slider's own `step` (or 1% of the range if unstepped), SetValue clamps
+    // to [min, max] the same way updateFromX's drag math does.
+    registerA11yValue(id, {
+      onIncrement() {
+        if (disabledRef.current || !onChangeRef.current) return;
+        const range = maxRef.current - minRef.current;
+        const step = stepRef.current > 0 ? stepRef.current : range / 100;
+        onChangeRef.current(Math.min(maxRef.current, valueRef.current + step));
+      },
+      onDecrement() {
+        if (disabledRef.current || !onChangeRef.current) return;
+        const range = maxRef.current - minRef.current;
+        const step = stepRef.current > 0 ? stepRef.current : range / 100;
+        onChangeRef.current(Math.max(minRef.current, valueRef.current - step));
+      },
+      onSetValue(v) {
+        if (disabledRef.current || !onChangeRef.current) return;
+        onChangeRef.current(Math.max(minRef.current, Math.min(maxRef.current, v)));
+      },
     });
     setTimeout(measureWidth, 0); // measure after the first native layout pass
   }, []); // stable — updateFromX and all refs are stable
@@ -771,6 +891,7 @@ export function Slider({
       if (trackNodeId.current !== null) {
         unregisterDraggable(trackNodeId.current);
         unregisterPressable(trackNodeId.current);
+        unregisterA11yValue(trackNodeId.current);
       }
     };
   }, []);
@@ -783,6 +904,10 @@ export function Slider({
     width: widthProp,
     pressable: true, // mark interactive so clicks hit-test to this node
     style: { flexDirection: 'row', alignItems: 'center', ...style },
+    role: 'slider',
+    numericValue: value,
+    numericMin: min,
+    numericMax: max,
     ...rest,
   },
     React.createElement(View, { width: fillW,  height: TRACK, style: { backgroundColor: accent } }),
@@ -792,7 +917,7 @@ export function Slider({
 }
 
 // One option row in a Select dropdown — hover highlight + selected state + check.
-function _SelectOption({ label, selected, onSelect }) {
+function _SelectOption({ label, selected, onSelect, C }) {
   const [hover, setHover] = useState(false);
   return React.createElement(Pressable, {
     onPress: onSelect,
@@ -803,11 +928,11 @@ function _SelectOption({ label, selected, onSelect }) {
       alignSelf: 'stretch',   // fill the full popup width so hover spans the row
       flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
       paddingLeft: 12, paddingRight: 12,
-      backgroundColor: selected ? '#2e3555' : (hover ? '#2a3048' : 'transparent'),
+      backgroundColor: selected ? C.optionSelectedBg : (hover ? C.optionHoverBg : 'transparent'),
     },
   },
-    React.createElement(Text, { height: 18, style: { color: selected ? '#7aa2f7' : '#cdd6f4', fontSize: 14 } }, label),
-    selected ? React.createElement(Text, { width: 14, height: 16, style: { color: '#7aa2f7', fontSize: 13 } }, '✓') : null,
+    React.createElement(Text, { height: 18, style: { color: selected ? C.optionSelectedText : C.optionText, fontSize: 14 } }, label),
+    selected ? React.createElement(Text, { width: 14, height: 16, style: { color: C.optionCheck, fontSize: 13 } }, '✓') : null,
   );
 }
 
@@ -823,6 +948,7 @@ export function Select({
   disabled = false, placeholder = 'Select…', style,
   ...rest
 }) {
+  const C    = React.useContext(SelectColorsContext);
   const [open, setOpen] = React.useState(false);
   const selected = options.find(o => o.value === value);
   const containerNodeId = useRef(null);
@@ -830,7 +956,19 @@ export function Select({
   const onContainerMount = useCallback((id) => { containerNodeId.current = id; }, []);
 
   const OPTION_H = 40;
-  const close = () => { if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; } };
+  const close = () => {
+    if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; }
+    // Return focus to the (stable) trigger — without this, focus was last on
+    // the option/day-cell that just got removed by closing the popover, and
+    // `focused_node` snaps back to the root before a screen reader ever gets
+    // a chance to observe or announce the selection (found via manual
+    // Narrator testing: clicking a Select option or DatePicker day never
+    // announced anything, unlike Checkbox/Switch/Radio which don't remove
+    // themselves on click and so don't have this race).
+    if (typeof __glyx_setFocus !== 'undefined' && containerNodeId.current != null) {
+      __glyx_setFocus(containerNodeId.current);
+    }
+  };
 
   const toggle = () => {
     if (disabled) return;
@@ -843,16 +981,19 @@ export function Select({
     popoverId.current = openPopover({
       x: l.x, y: l.y, h: l.height, width: cw, contentH: dropH + 2,
       onClose: () => { popoverId.current = null; setOpen(false); },
-      render: () => React.createElement(
-        ScrollView,
-        { width: cw, height: dropH, contentHeight: options.length * OPTION_H,
-          style: { backgroundColor: '#1e2235', borderRadius: 8, borderWidth: 1, borderColor: '#3c4464' } },
-        ...options.map((opt, i) => React.createElement(_SelectOption, {
-          key: String(i),
-          label: opt.label,
-          selected: opt.value === value,
-          onSelect: () => { onValueChange?.(opt.value); close(); },
-        })),
+      render: () => React.createElement(SelectColorsProvider, { colors: C },
+        React.createElement(
+          ScrollView,
+          { width: cw, height: dropH, contentHeight: options.length * OPTION_H,
+            style: { backgroundColor: C.dropdownBg, borderRadius: 8, borderWidth: 1, borderColor: C.dropdownBorder } },
+          ...options.map((opt, i) => React.createElement(_SelectOption, {
+            key: String(i),
+            label: opt.label,
+            selected: opt.value === value,
+            onSelect: () => { onValueChange?.(opt.value); close(); },
+            C,
+          })),
+        ),
       ),
     });
   };
@@ -862,6 +1003,12 @@ export function Select({
 
   return React.createElement(View, {
     _glyxOnMount: onContainerMount,
+    // Mirrors the trigger Pressable's role/label — `close()` returns focus
+    // to THIS container (not the trigger, which Pressable doesn't expose an
+    // id ref for) when the popover closes, so it needs to be meaningful to
+    // an AT on its own, not a label-less generic container.
+    role: 'combobox',
+    ariaLabel: selected ? selected.label : placeholder,
     // Default to a sensible width (not full-window). alignSelf:flex-start stops
     // the parent's default `alignItems: stretch` from expanding it. User `style`
     // (incl. width) overrides.
@@ -871,6 +1018,8 @@ export function Select({
     // Trigger button — fixed height so text never overflows.
     React.createElement(Pressable, {
       onPress: toggle,
+      role: 'combobox',
+      ariaLabel: selected ? selected.label : placeholder,
       style: {
         flexDirection: 'row',
         justifyContent: 'space-between',
@@ -879,19 +1028,19 @@ export function Select({
         paddingRight: 10,
         height: 40,
         borderRadius: 8,
-        backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
+        backgroundColor: disabled ? C.triggerBgDisabled : C.triggerBg,
         borderWidth: 1,
-        borderColor: open ? '#7aa2f7' : '#3c4464',
+        borderColor: open ? C.triggerBorderFocus : C.triggerBorder,
         clip: true,
       },
     },
       // Label auto-sizes; trigger clip:true prevents overflow past the arrow.
       React.createElement(Text, {
         height: 20,
-        style: { color: selected ? '#e7ecff' : '#9aa0b6', fontSize: 14 },
+        style: { color: selected ? C.triggerText : C.triggerPlaceholder, fontSize: 14 },
       }, selected ? selected.label : placeholder),
       React.createElement(Text, {
-        style: { color: '#7aa2f7', fontSize: 11 },
+        style: { color: C.chevron, fontSize: 11 },
         width: 16, height: 16,
       }, open ? '▲' : '▼'),
     ),
@@ -904,6 +1053,7 @@ export function Select({
 // columns.  Uses an explicit hover background (Pressable's opacity feedback
 // is invisible on transparent backgrounds).
 function _HoverCell({ selected, onPress, w = 36, h = 32, fontSize = 13, children }) {
+  const C = React.useContext(SelectColorsContext);
   const [hov, setHov] = useState(false);
   return React.createElement(Pressable, {
     onPress,
@@ -913,25 +1063,26 @@ function _HoverCell({ selected, onPress, w = 36, h = 32, fontSize = 13, children
     width: w, height: h,
     style: {
       alignItems: 'center', justifyContent: 'center', borderRadius: 4,
-      backgroundColor: selected ? '#7aa2f7' : hov ? '#2a3048' : 'transparent',
+      backgroundColor: selected ? C.calCellSelectedBg : hov ? C.optionHoverBg : 'transparent',
     },
   },
     React.createElement(Text, {
       height: Math.round(fontSize * 1.4),
-      style: { color: selected ? '#171923' : '#cdd6f4', fontSize, textAlign: 'center' },
+      style: { color: selected ? C.calCellSelectedText : C.optionText, fontSize, textAlign: 'center' },
     }, children)
   );
 }
 
 // Small hoverable arrow button used in the calendar header.
 function _CalArrow({ onPress, children }) {
+  const C = React.useContext(SelectColorsContext);
   const [hov, setHov] = useState(false);
   return React.createElement(Pressable, {
     onPress, feedback: false,
     onHoverIn: () => setHov(true), onHoverOut: () => setHov(false),
     width: 28, height: 28,
-    style: { justifyContent: 'center', alignItems: 'center', borderRadius: 4, backgroundColor: hov ? '#2a3048' : 'transparent' },
-  }, React.createElement(Text, { height: 22, style: { color: '#7aa2f7', fontSize: 18 } }, children));
+    style: { justifyContent: 'center', alignItems: 'center', borderRadius: 4, backgroundColor: hov ? C.optionHoverBg : 'transparent' },
+  }, React.createElement(Text, { height: 22, style: { color: C.chevron, fontSize: 18 } }, children));
 }
 
 function _Calendar({ value, onSelect }) {
@@ -1016,8 +1167,9 @@ function _Calendar({ value, onSelect }) {
     ? String(viewYear)
     : `${monthNames[viewMonth]} ${viewYear}`;
 
+  const C = React.useContext(SelectColorsContext);
   return React.createElement(View, {
-    style: { backgroundColor: '#1e2235', borderRadius: 8, padding: 8, borderWidth: 1, borderColor: '#3c4464' },
+    style: { backgroundColor: C.dropdownBg, borderRadius: 8, padding: 8, borderWidth: 1, borderColor: C.dropdownBorder },
   },
     // header row
     React.createElement(View, {
@@ -1029,9 +1181,9 @@ function _Calendar({ value, onSelect }) {
         feedback: false,
         onHoverIn: () => setLabelHov(true), onHoverOut: () => setLabelHov(false),
         onPress: () => setMode(m => m === 'days' ? 'months' : m === 'months' ? 'years' : 'days'),
-        style: { paddingHorizontal: 6, height: 24, justifyContent: 'center', alignItems: 'center', borderRadius: 4, backgroundColor: labelHov ? '#2a3048' : 'transparent' },
+        style: { paddingHorizontal: 6, height: 24, justifyContent: 'center', alignItems: 'center', borderRadius: 4, backgroundColor: labelHov ? C.optionHoverBg : 'transparent' },
       },
-        React.createElement(Text, { height: 18, style: { color: '#cdd6f4', fontSize: 13, textAlign: 'center' } }, headerLabel)
+        React.createElement(Text, { height: 18, style: { color: C.optionText, fontSize: 13, textAlign: 'center' } }, headerLabel)
       ),
       React.createElement(_CalArrow, { onPress: onNext }, '>'),
     ),
@@ -1041,7 +1193,7 @@ function _Calendar({ value, onSelect }) {
     React.createElement(View, null,
       React.createElement(View, { width: CAL_W, height: 20, style: { flexDirection: 'row', marginBottom: 2 } },
         ...dayNames.map(d => React.createElement(View, { key: d, width: CELL_W, height: 20, style: { alignItems: 'center', justifyContent: 'center' } },
-          React.createElement(Text, { height: 14, style: { color: '#666', fontSize: 10, textAlign: 'center' } }, d))),
+          React.createElement(Text, { height: 14, style: { color: C.calDayName, fontSize: 10, textAlign: 'center' } }, d))),
       ),
       ...rows.map((row, ri) => React.createElement(View, {
         key: `${viewYear}-${viewMonth}-${ri}`, width: CAL_W, height: CELL_H, style: { flexDirection: 'row' },
@@ -1070,12 +1222,25 @@ function _Calendar({ value, onSelect }) {
  *           disabled?: boolean, style?: object }} props
  */
 export function DatePicker({ value = null, onValueChange, disabled = false, style, ...rest }) {
+  const C = React.useContext(SelectColorsContext);
   const [open, setOpen] = React.useState(false);
   const containerNodeId = useRef(null);
   const popoverId = useRef(null);
   const onContainerMount = useCallback((id) => { containerNodeId.current = id; }, []);
 
-  const close = () => { if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; } };
+  const close = () => {
+    if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; }
+    // Return focus to the (stable) trigger — without this, focus was last on
+    // the option/day-cell that just got removed by closing the popover, and
+    // `focused_node` snaps back to the root before a screen reader ever gets
+    // a chance to observe or announce the selection (found via manual
+    // Narrator testing: clicking a Select option or DatePicker day never
+    // announced anything, unlike Checkbox/Switch/Radio which don't remove
+    // themselves on click and so don't have this race).
+    if (typeof __glyx_setFocus !== 'undefined' && containerNodeId.current != null) {
+      __glyx_setFocus(containerNodeId.current);
+    }
+  };
   const toggle = () => {
     if (disabled) return;
     if (open) { close(); return; }
@@ -1085,10 +1250,12 @@ export function DatePicker({ value = null, onValueChange, disabled = false, styl
     popoverId.current = openPopover({
       x: l.x, y: l.y, h: l.height, width: 36 * 7 + 18, contentH: 8 + 28 + 22 + 6 * 32 + 8,
       onClose: () => { popoverId.current = null; setOpen(false); },
-      render: () => React.createElement(_Calendar, {
-        value,
-        onSelect: (d) => { onValueChange?.(d); close(); },
-      }),
+      render: () => React.createElement(SelectColorsProvider, { colors: C },
+        React.createElement(_Calendar, {
+          value,
+          onSelect: (d) => { onValueChange?.(d); close(); },
+        }),
+      ),
     });
   };
   useEffect(() => () => close(), []);
@@ -1099,20 +1266,24 @@ export function DatePicker({ value = null, onValueChange, disabled = false, styl
 
   return React.createElement(View, {
     _glyxOnMount: onContainerMount,
+    role: 'combobox',
+    ariaLabel: dlabel,
     style: _sizedRootStyle(style, 240),
     ...rest,
   },
     React.createElement(Pressable, {
       onPress: toggle,
+      role: 'combobox',
+      ariaLabel: dlabel,
       style: {
         flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
         paddingLeft: 12, paddingRight: 10, height: 40, borderRadius: 8,
-        backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
-        borderWidth: 1, borderColor: open ? '#7aa2f7' : '#3c4464',
+        backgroundColor: disabled ? C.triggerBgDisabled : C.triggerBg,
+        borderWidth: 1, borderColor: open ? C.triggerBorderFocus : C.triggerBorder,
       },
     },
-      React.createElement(Text, { height: 20, style: { color: value ? '#e7ecff' : '#9aa0b6', fontSize: 14 } }, dlabel),
-      React.createElement(Text, { width: 16, height: 16, style: { color: '#7aa2f7', fontSize: 11 } }, open ? '▲' : '▼'),
+      React.createElement(Text, { height: 20, style: { color: value ? C.triggerText : C.triggerPlaceholder, fontSize: 14 } }, dlabel),
+      React.createElement(Text, { width: 16, height: 16, style: { color: C.chevron, fontSize: 11 } }, open ? '▲' : '▼'),
     ),
   );
 }
@@ -1145,10 +1316,11 @@ function _TimeColumns({ hour, minute, use24, minuteStep, onChange }) {
     key: String(it), selected: isSel(it), onPress: () => pick(it), w, h: 28,
   }, String(it).padStart(2, '0'))));
 
+  const C = React.useContext(SelectColorsContext);
   return React.createElement(View, {
     style: {
       flexDirection: 'row', gap: 4, padding: 8,
-      backgroundColor: '#1e2235', borderRadius: 8, borderWidth: 1, borderColor: '#3c4464',
+      backgroundColor: C.dropdownBg, borderRadius: 8, borderWidth: 1, borderColor: C.dropdownBorder,
     },
   },
     col(hours,   (h) => (use24 ? h === hour : h === h12),
@@ -1173,6 +1345,7 @@ export function TimePicker({
   value = null, onValueChange, use24Hour = false, minuteStep = 5,
   disabled = false, style, ...rest
 }) {
+  const C = React.useContext(SelectColorsContext);
   const [open, setOpen] = React.useState(false);
   const containerNodeId = useRef(null);
   const popoverId = useRef(null);
@@ -1182,7 +1355,19 @@ export function TimePicker({
   const hour   = Number.isFinite(hh) ? Math.max(0, Math.min(23, hh)) : 12;
   const minute = Number.isFinite(mm) ? Math.max(0, Math.min(59, mm)) : 0;
 
-  const close = () => { if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; } };
+  const close = () => {
+    if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; }
+    // Return focus to the (stable) trigger — without this, focus was last on
+    // the option/day-cell that just got removed by closing the popover, and
+    // `focused_node` snaps back to the root before a screen reader ever gets
+    // a chance to observe or announce the selection (found via manual
+    // Narrator testing: clicking a Select option or DatePicker day never
+    // announced anything, unlike Checkbox/Switch/Radio which don't remove
+    // themselves on click and so don't have this race).
+    if (typeof __glyx_setFocus !== 'undefined' && containerNodeId.current != null) {
+      __glyx_setFocus(containerNodeId.current);
+    }
+  };
   const emit  = (h, m) => onValueChange?.(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
 
   const toggle = () => {
@@ -1196,9 +1381,11 @@ export function TimePicker({
       width: (use24Hour ? 48 * 2 + 4 : 48 * 2 + 44 + 8) + 18,
       contentH: 6 * 28 + 18,
       onClose: () => { popoverId.current = null; setOpen(false); },
-      render: () => React.createElement(_TimeColumnsLive, {
-        initial: { hour, minute }, use24: use24Hour, minuteStep, onEmit: emit,
-      }),
+      render: () => React.createElement(SelectColorsProvider, { colors: C },
+        React.createElement(_TimeColumnsLive, {
+          initial: { hour, minute }, use24: use24Hour, minuteStep, onEmit: emit,
+        }),
+      ),
     });
   };
   useEffect(() => () => close(), []);
@@ -1207,20 +1394,24 @@ export function TimePicker({
 
   return React.createElement(View, {
     _glyxOnMount: onContainerMount,
+    role: 'combobox',
+    ariaLabel: label,
     style: _sizedRootStyle(style, 160),
     ...rest,
   },
     React.createElement(Pressable, {
       onPress: toggle,
+      role: 'combobox',
+      ariaLabel: label,
       style: {
         flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
         paddingLeft: 12, paddingRight: 10, height: 40, borderRadius: 8,
-        backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
-        borderWidth: 1, borderColor: open ? '#7aa2f7' : '#3c4464',
+        backgroundColor: disabled ? C.triggerBgDisabled : C.triggerBg,
+        borderWidth: 1, borderColor: open ? C.triggerBorderFocus : C.triggerBorder,
       },
     },
-      React.createElement(Text, { height: 20, style: { color: value ? '#e7ecff' : '#9aa0b6', fontSize: 14 } }, label),
-      React.createElement(Text, { width: 16, height: 16, style: { color: '#7aa2f7', fontSize: 11 } }, open ? '▲' : '▼'),
+      React.createElement(Text, { height: 20, style: { color: value ? C.triggerText : C.triggerPlaceholder, fontSize: 14 } }, label),
+      React.createElement(Text, { width: 16, height: 16, style: { color: C.chevron, fontSize: 11 } }, open ? '▲' : '▼'),
     ),
   );
 }
@@ -1248,13 +1439,26 @@ export function DateTimePicker({
   value = null, onValueChange, use24Hour = false, minuteStep = 5,
   disabled = false, style, ...rest
 }) {
+  const C = React.useContext(SelectColorsContext);
   const [open, setOpen] = React.useState(false);
   const containerNodeId = useRef(null);
   const popoverId = useRef(null);
   const onContainerMount = useCallback((id) => { containerNodeId.current = id; }, []);
 
   const d = value ? new Date(value) : null;
-  const close = () => { if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; } };
+  const close = () => {
+    if (popoverId.current != null) { closePopover(popoverId.current); popoverId.current = null; }
+    // Return focus to the (stable) trigger — without this, focus was last on
+    // the option/day-cell that just got removed by closing the popover, and
+    // `focused_node` snaps back to the root before a screen reader ever gets
+    // a chance to observe or announce the selection (found via manual
+    // Narrator testing: clicking a Select option or DatePicker day never
+    // announced anything, unlike Checkbox/Switch/Radio which don't remove
+    // themselves on click and so don't have this race).
+    if (typeof __glyx_setFocus !== 'undefined' && containerNodeId.current != null) {
+      __glyx_setFocus(containerNodeId.current);
+    }
+  };
 
   const toggle = () => {
     if (disabled) return;
@@ -1267,10 +1471,12 @@ export function DateTimePicker({
       width: 36 * 7 + (use24Hour ? 48 * 2 + 4 : 48 * 2 + 44 + 8) + 34,
       contentH: 8 + 28 + 22 + 6 * 32 + 8,
       onClose: () => { popoverId.current = null; setOpen(false); },
-      render: () => React.createElement(_DateTimePanel, {
-        initial: d, use24: use24Hour, minuteStep,
-        onEmit: (nd) => onValueChange?.(nd),
-      }),
+      render: () => React.createElement(SelectColorsProvider, { colors: C },
+        React.createElement(_DateTimePanel, {
+          initial: d, use24: use24Hour, minuteStep,
+          onEmit: (nd) => onValueChange?.(nd),
+        }),
+      ),
     });
   };
   useEffect(() => () => close(), []);
@@ -1281,20 +1487,24 @@ export function DateTimePicker({
 
   return React.createElement(View, {
     _glyxOnMount: onContainerMount,
+    role: 'combobox',
+    ariaLabel: label,
     style: _sizedRootStyle(style, 280),
     ...rest,
   },
     React.createElement(Pressable, {
       onPress: toggle,
+      role: 'combobox',
+      ariaLabel: label,
       style: {
         flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
         paddingLeft: 12, paddingRight: 10, height: 40, borderRadius: 8,
-        backgroundColor: disabled ? '#1a1d2e' : '#262b3f',
-        borderWidth: 1, borderColor: open ? '#7aa2f7' : '#3c4464',
+        backgroundColor: disabled ? C.triggerBgDisabled : C.triggerBg,
+        borderWidth: 1, borderColor: open ? C.triggerBorderFocus : C.triggerBorder,
       },
     },
-      React.createElement(Text, { height: 20, style: { color: d ? '#e7ecff' : '#9aa0b6', fontSize: 14 } }, label),
-      React.createElement(Text, { width: 16, height: 16, style: { color: '#7aa2f7', fontSize: 11 } }, open ? '▲' : '▼'),
+      React.createElement(Text, { height: 20, style: { color: d ? C.triggerText : C.triggerPlaceholder, fontSize: 14 } }, label),
+      React.createElement(Text, { width: 16, height: 16, style: { color: C.chevron, fontSize: 11 } }, open ? '▲' : '▼'),
     ),
   );
 }

@@ -1,7 +1,7 @@
-// @glyx/design — ThemeProvider + useTheme hook
+// @glyx-dev/design — ThemeProvider + useTheme hook
 //
 // Usage:
-//   import { ThemeProvider, useTheme } from '@glyx/design';
+//   import { ThemeProvider, useTheme } from '@glyx-dev/design';
 //
 //   // Wrap your app root:
 //   render(
@@ -28,6 +28,7 @@
 //   }
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { system, SelectColorsProvider } from '@glyx-dev/react';
 import { tokens, darkTokens } from './tokens.js';
 
 // ── Context ───────────────────────────────────────────────────────────────────
@@ -66,7 +67,15 @@ export function ThemeProvider({ colorScheme = 'system', overrides, children }) {
       setIsDark(colorScheme === 'dark');
       return;
     }
-    // Poll every 2 seconds (winit doesn't fire a change event today).
+    // Rust-side watcher: fires ONLY when the OS preference changes — no JS
+    // timer, V8 stays idle between changes.
+    if (typeof __glyx_system_watch !== 'undefined') {
+      const id = system.watch('darkMode', (mode) => {
+        setIsDark((prev) => (prev === (mode === 'dark') ? prev : mode === 'dark'));
+      });
+      return () => system.unwatch(id);
+    }
+    // Fallback (snapshot stubs / old runtimes): 2s JS poll.
     const id = setInterval(() => {
       try {
         if (typeof __glyx_system_getDarkMode !== 'undefined') {
@@ -85,9 +94,33 @@ export function ThemeProvider({ colorScheme = 'system', overrides, children }) {
     ? _deepMerge(base, overrides)
     : base;
 
+  const { colors } = theme;
+  // Memoize so SelectColorsContext only re-emits when the theme actually changes.
+  const selectColors = React.useMemo(() => ({
+    triggerBg:           colors.surface,
+    triggerBgDisabled:   colors.bg,
+    triggerBorder:       colors.border,
+    triggerBorderFocus:  colors.borderFocus,
+    triggerText:         colors.text,
+    triggerPlaceholder:  colors.textMuted,
+    chevron:             colors.textMuted,   // arrows blend — not primary accent
+    dropdownBg:          colors.surface,
+    dropdownBorder:      colors.border,
+    optionText:          colors.text,
+    optionSelectedText:  colors.primary,
+    optionHoverBg:       colors.surfaceHover,
+    optionSelectedBg:    colors.secondary,
+    optionCheck:         colors.primary,
+    calCellSelectedBg:   colors.primary,
+    calCellSelectedText: colors.primaryText,
+    calDayName:          colors.textDisabled,
+  }), [colors]);
+
   return (
     <ThemeContext.Provider value={theme}>
-      {children}
+      <SelectColorsProvider colors={selectColors}>
+        {children}
+      </SelectColorsProvider>
     </ThemeContext.Provider>
   );
 }

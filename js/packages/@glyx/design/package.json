@@ -1,5 +1,5 @@
 {
-  "name": "@glyx/design",
+  "name": "@glyx-dev/design",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",

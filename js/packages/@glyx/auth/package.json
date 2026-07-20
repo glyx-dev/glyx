@@ -1,12 +1,12 @@
 {
-  "name": "@glyx/auth",
+  "name": "@glyx-dev/auth",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",
   "description": "OAuth flows via deep links + OS keychain token storage.",
   "peerDependencies": {
     "react": "^18.2.0",
-    "@glyx/react": "0.1.0"
+    "@glyx-dev/react": "0.1.0"
   },
   "scripts": {
     "test": "bun test"

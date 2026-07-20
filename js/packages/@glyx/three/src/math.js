@@ -1,4 +1,4 @@
-// @glyx/three/src/math.js — column-major 4×4 matrix helpers (no external deps).
+// @glyx-dev/three/src/math.js — column-major 4×4 matrix helpers (no external deps).
 //
 // Glyx's wgpu renderer consumes matrices via `Mat4::from_cols_array(&mesh.transform)`,
 // which expects 16 floats in column-major order (column 0 first, then column 1, etc.).

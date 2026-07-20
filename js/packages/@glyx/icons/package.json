@@ -1,11 +1,11 @@
 {
-  "name": "@glyx/icons",
+  "name": "@glyx-dev/icons",
   "version": "0.1.0",
   "description": "Icon set for Glyx apps — Lucide icons rendered as inline SVG.",
   "main": "src/index.js",
   "license": "MIT",
   "peerDependencies": {
-    "@glyx/react": "*",
+    "@glyx-dev/react": "*",
     "react": "*"
   }
 }

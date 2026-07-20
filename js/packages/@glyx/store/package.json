@@ -1,12 +1,12 @@
 {
-  "name": "@glyx/store",
+  "name": "@glyx-dev/store",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",
   "description": "Persistent reactive Zustand-style store for Glyx apps — backed by SQLite.",
   "peerDependencies": {
     "react": "^18.2.0",
-    "@glyx/react": "0.1.0"
+    "@glyx-dev/react": "0.1.0"
   },
   "scripts": {
     "test": "bun test"

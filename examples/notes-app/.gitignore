@@ -1,0 +1,10 @@
+/node_modules
+/js/dist/
+/dist/
+/target/
+*.db
+*.db-shm
+*.db-wal
+/data/*.db
+/data/*.db-shm
+/data/*.db-wal

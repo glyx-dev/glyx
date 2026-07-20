@@ -1,6 +1,6 @@
 //! Capability module loader.
 //!
-//! Resolves the five optional capabilities (audio, AI, camera, gamepad, HID)
+//! Resolves the six optional capabilities (audio, AI, camera, gamepad, HID, webview)
 //! in priority order:
 //!
 //! 1. **Static** -- compiled in via Cargo feature flags (e.g. `--features audio`).
@@ -20,8 +20,8 @@
 #[allow(unused_imports)]
 use glyx_cap_abi::{
     ABI_VERSION, ABI_VERSION_MIN,
-    AudioCap, AiCap, CameraCap, GamepadCap, HidCap,
-    SYM_AUDIO, SYM_AI, SYM_CAMERA, SYM_GAMEPAD, SYM_HID,
+    AudioCap, AiCap, CameraCap, GamepadCap, HidCap, WebviewCap,
+    SYM_AUDIO, SYM_AI, SYM_CAMERA, SYM_GAMEPAD, SYM_HID, SYM_WEBVIEW,
     CapSet,
 };
 
@@ -229,6 +229,7 @@ pub fn load_caps() -> CapSet {
         camera:  load_camera(),
         gamepad: load_gamepad(),
         hid:     load_hid(),
+        webview: load_webview(),
     }
 }
 
@@ -267,5 +268,12 @@ fn load_hid() -> Option<&'static HidCap> {
     { return Some(glyx_cap_hid::static_cap()); }
     #[cfg(not(feature = "hid"))]
     unsafe { try_load_dynamic::<HidCap>("hid", "glyx_cap_hid", SYM_HID) }
+}
+
+fn load_webview() -> Option<&'static WebviewCap> {
+    #[cfg(feature = "webview")]
+    { return Some(glyx_cap_webview::static_cap()); }
+    #[cfg(not(feature = "webview"))]
+    unsafe { try_load_dynamic::<WebviewCap>("webview", "glyx_cap_webview", SYM_WEBVIEW) }
 }
 

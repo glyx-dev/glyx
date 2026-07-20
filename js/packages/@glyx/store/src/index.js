@@ -1,17 +1,17 @@
-// @glyx/store — Persistent reactive state store for Glyx apps.
+// @glyx-dev/store — Persistent reactive state store for Glyx apps.
 //
 // Architecture:
 //   • In-memory JS object = reactive truth (instant reads, React subscriptions)
-//   • SQLite via @glyx/react db = persistence layer (async writes/reads)
+//   • SQLite via @glyx-dev/react db = persistence layer (async writes/reads)
 //   • One shared table: glyx_store (namespace TEXT, key TEXT, value TEXT)
 //
 // Usage:
 //   // app startup (after db is open):
-//   import { initStore } from '@glyx/store';
+//   import { initStore } from '@glyx-dev/store';
 //   await initStore();
 //
 //   // define a store (module-level singleton):
-//   import { createStore } from '@glyx/store';
+//   import { createStore } from '@glyx-dev/store';
 //   const useSettings = createStore('settings', {
 //     theme: 'dark',
 //     fontSize: 14,
@@ -33,7 +33,7 @@
 //   • Requires `db: true` in glyx.config.json.
 
 import React from 'react';
-import { db } from '@glyx/react';
+import { db } from '@glyx-dev/react';
 
 const TABLE = 'glyx_store';
 let _initPromise = null;
@@ -68,7 +68,7 @@ const _registry = new Map();
  */
 export function createStore(namespace, defaults) {
   if (!namespace || typeof namespace !== 'string') {
-    throw new Error('@glyx/store: namespace must be a non-empty string');
+    throw new Error('@glyx-dev/store: namespace must be a non-empty string');
   }
   if (_registry.has(namespace)) return _registry.get(namespace).hook;
 

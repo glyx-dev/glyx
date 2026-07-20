@@ -21,6 +21,9 @@ members = [
     "examples/calculator",
     "examples/files",
     "examples/model-viewer",
+    "examples/webview-demo",
+    "examples/a11y-ime-demo",
+    "examples/bench-app",
     "crates/glyx-snapshot",
     "crates/glyx-media",
     "crates/glyx-cap-abi",
@@ -29,8 +32,11 @@ members = [
     "crates/glyx-cap-gamepad",
     "crates/glyx-cap-hid",
     "crates/glyx-cap-camera",
+    "crates/glyx-cap-webview",
     "crates/glyx-macros",
     "crates/glyx-verify",
+    "crates/glyx-tray",
+    # "crates/glyx-webview",  # TODO: not yet scaffolded
 ]
 
 [workspace.dependencies]
@@ -50,10 +56,10 @@ parley    = "0.10"
 taffy     = "0.10"
 
 # JS Runtime
-v8        = { package = "rusty_v8", version = "0.32" }
+v8        = "150"
 
 # Async
-tokio     = { version = "1", features = ["rt-multi-thread", "fs", "sync", "time"] }
+tokio     = { version = "1", features = ["rt-multi-thread", "fs", "sync", "time", "process", "io-util"] }
 
 # Serialisation
 serde      = { version = "1", features = ["derive"] }
@@ -77,7 +83,7 @@ image     = { version = "0.25", default-features = false, features = ["png", "jp
 notify    = "6.1"
 sqlx            = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 libsqlite3-sys  = { version = "0.30", features = ["bundled"] }
-rfd                 = { version = "0.14", features = ["tokio"] }
+rfd                 = { version = "0.14", default-features = false, features = ["xdg-portal", "tokio"] }
 arboard             = "3"
 keyring             = "3"
 clipboard-win       = "5"
@@ -98,7 +104,6 @@ mimalloc            = "0.1"
 dark-light          = "1"
 tiny-skia           = "0.11"
 swash               = "0.1"
-femtovg             = { version = "0.25", features = ["wgpu"] }
 rodio               = { version = "0.17", features = ["symphonia-all"] }
 glam                = "0.28"
 gltf                = { version = "1" }
@@ -121,6 +126,22 @@ hound               = "3"
 hex                 = "0.4"
 windows-sys         = { version = "0.59", features = [] }
 
+# System tray
+tray-icon           = "0.24"
+muda                = "0.19"
+
+# WebView (wry wraps the OS web engine: WebView2 / WKWebView / WebKitGTK)
+wry                 = "0.50"
+
+# Accessibility (accesskit surfaces to NSAccessibility / UIAutomation / AT-SPI)
+accesskit           = "0.19"
+accesskit_winit     = "0.27"
+
+# QuickJS (mobile-required, desktop-optional lightweight engine — see
+# glyx_rough_docs/QUICKJS_PERFORMANCE_PLAN.md). Mutually exclusive with `v8`
+# at the glyx-runtime feature level — never both linked into one binary.
+rquickjs            = { version = "0.12", features = ["full-async", "parallel"] }
+
 # AI / ML — Candle (Hugging Face minimalist ML framework, CPU-only by default)
 candle-core         = { version = "0.8", default-features = false }
 candle-nn           = { version = "0.8", default-features = false }
@@ -141,4 +162,3 @@ panic = "abort"        # no unwinding machinery; smaller binary, lower working s
 [patch.crates-io]
 vello            = { path = "vendor/vello" }
 libmimalloc-sys  = { path = "vendor/libmimalloc-sys" }
-femtovg          = { path = "vendor/femtovg" }

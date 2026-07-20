@@ -323,7 +323,7 @@ pub(super) fn handle_dev_build_events(state: &mut PerWindowState) {
                 state.label_cache.clear();
                 state.resolved.clear();
                 state.layout = glyx_layout::LayoutTree::new();
-                state.runtime.layout_cache.lock().clear();
+                state.runtime.layout_cache().lock().clear();
                 state.canvas_cmds.clear();
                 #[cfg(feature = "canvas3d")]
                 state.canvas3d_scenes.clear();
@@ -520,7 +520,11 @@ pub(super) fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFram
     frame.fill_rect(0.0, panel_y + 25.0, win_w, 1.0,
         peniko::Color::from_rgba8(90, 20, 20, 140));
 
-    let max_ch = (win_w as usize).saturating_sub(56) / 7;
+    // Conservative average glyph width (px) — 7 undercounts for some content
+    // (bold-ish rendering, wider default metrics), letting truncated lines
+    // still run past the panel edge. 6 leaves more margin at the cost of a
+    // slightly shorter visible line, which is the safe direction to be wrong.
+    let max_ch = (win_w as usize).saturating_sub(56) / 6;
     let trunc = |s: &str| -> String {
         if s.len() > max_ch {
             let end = s.char_indices().nth(max_ch).map(|(i, _)| i).unwrap_or(s.len());
@@ -546,7 +550,10 @@ pub(super) fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFram
         if drawn_msg >= 2 { break; }
         let lbl = state.text_sys.label(&trunc(t), 12.0);
         frame.draw_text(&lbl, 16.0, y, msg_col);
-        y += 19.0;
+        // Line-height margin: fixed increments (not measured against actual
+        // glyph ascent/descent) — widened from 19 to guard against taller
+        // glyphs visually overlapping the next line.
+        y += 22.0;
         drawn_msg += 1;
     }
     y += 5.0;
@@ -568,7 +575,7 @@ pub(super) fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFram
 
         let lbl = state.text_sys.label(&trunc(t), 10.5);
         frame.draw_text(&lbl, 26.0, y, col);
-        y += 17.0;
+        y += 19.0; // widened, same reasoning as the message-line increment above
         drawn_frames += 1;
     }
 

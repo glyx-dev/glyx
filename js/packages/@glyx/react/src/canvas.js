@@ -358,6 +358,28 @@ export const Canvas = React.forwardRef(function Canvas({ style, ...props }, ref)
 //     ],
 //   }
 
+// reqId → resolve function for a pending raycast(), settled by
+// _pollCanvas3DRaycasts() once glyx-core answers it on a later frame (see
+// bindings::RaycastRequest's doc — raycasting needs the live Renderer3D,
+// which only exists on the render side, so it's request/poll like video
+// and webview events, not a directly-resolved native promise).
+const _pendingRaycasts = new Map();
+
+export function _pollCanvas3DRaycasts() {
+  if (typeof __glyx_canvas3d_raycast_poll === 'undefined') return;
+  let raw;
+  try { raw = __glyx_canvas3d_raycast_poll(); } catch { return; }
+  if (!raw || raw === '[]') return;
+  let results;
+  try { results = JSON.parse(raw); } catch { return; }
+  for (const r of results) {
+    const resolve = _pendingRaycasts.get(r.reqId);
+    if (!resolve) continue;
+    _pendingRaycasts.delete(r.reqId);
+    resolve(r.hit === null ? null : { meshIndex: r.meshIndex, point: r.point, distance: r.distance });
+  }
+}
+
 class GlyxCanvas3DContext {
   constructor(nativeId) {
     this._id = nativeId;
@@ -384,6 +406,29 @@ class GlyxCanvas3DContext {
   unloadGltf(path) {
     if (typeof __glyx_canvas3d_unload_gltf === 'undefined') return;
     __glyx_canvas3d_unload_gltf(path);
+  }
+
+  /**
+   * Cast a ray from the camera through a screen-space point within this
+   * canvas (e.g. from a click/press handler's local x/y) and resolve with
+   * the closest hit mesh, or `null` if nothing was hit.
+   * @param {number} x       screen-space x, relative to this canvas's own top-left
+   * @param {number} y       screen-space y, relative to this canvas's own top-left
+   * @param {number} width   this canvas's current width (caller-supplied — not tracked natively per-call)
+   * @param {number} height  this canvas's current height
+   * @returns {Promise<{meshIndex:number, point:[number,number,number], distance:number}|null>}
+   */
+  raycast(x, y, width, height) {
+    if (typeof __glyx_canvas3d_raycast === 'undefined' || !width || !height) return Promise.resolve(null);
+    const ndcX = (x / width) * 2 - 1;
+    const ndcY = 1 - (y / height) * 2;
+    try {
+      const reqId = __glyx_canvas3d_raycast(this._id, ndcX, ndcY);
+      return new Promise((resolve) => { _pendingRaycasts.set(reqId, resolve); });
+    } catch (e) {
+      __glyx_log('[canvas3d] raycast error: ' + e);
+      return Promise.resolve(null);
+    }
   }
 }
 

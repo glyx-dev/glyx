@@ -123,6 +123,19 @@ impl GpuContext {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
 
+        // 2 = allows CPU to encode frame N+1 while GPU renders frame N; costs an
+        // extra buffered frame of GPU memory. 1 serialises CPU+GPU (real
+        // throughput cost) but drops that buffered frame.
+        //
+        // On integrated/virtual/no adapters, GPU memory IS system RAM (see the
+        // DX12-preference comment above), so we trade the throughput for the
+        // memory there. Discrete GPUs have their own VRAM budget separate from
+        // process RSS, so they keep the full pipeline depth.
+        let frame_latency = match tier_from_info(&adapter.get_info()) {
+            GpuTier::Integrated | GpuTier::None => 1,
+            GpuTier::Discrete | GpuTier::DiscreteIntel => 2,
+        };
+
         let config = wgpu::SurfaceConfiguration {
             usage:                         wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -133,9 +146,7 @@ impl GpuContext {
             present_mode:                  wgpu::PresentMode::AutoVsync,
             alpha_mode:                    caps.alpha_modes[0],
             view_formats:                  vec![],
-            // 2 = allows CPU to encode frame N+1 while GPU renders frame N.
-            // Setting this to 1 serialises CPU+GPU and halves throughput on iGPU.
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: frame_latency,
         };
         surface.configure(&device, &config);
 

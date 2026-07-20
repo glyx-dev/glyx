@@ -1,4 +1,4 @@
-// @glyx/testing/setup — bun test preload.
+// @glyx-dev/testing/setup — bun test preload.
 //
 // Installs stub implementations of every __glyx_* native binding so React
 // components and packages that touch Glyx APIs can run in a plain Bun

@@ -1,8 +1,8 @@
 /**
- * @glyx/drizzle — Drizzle ORM adapter for Glyx SQLite
+ * @glyx-dev/drizzle — Drizzle ORM adapter for Glyx SQLite
  *
  * Usage:
- *   import { createDrizzle } from '@glyx/drizzle';
+ *   import { createDrizzle } from '@glyx-dev/drizzle';
  *   import { sqliteTable, integer, text } from 'drizzle-orm/sqlite-core';
  *
  *   const handle = await db.open('myapp.db');

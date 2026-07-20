@@ -1,11 +1,11 @@
-// @glyx/command — command palette (Cmd/Ctrl+K) with fuzzy search.
+// @glyx-dev/command — command palette (Cmd/Ctrl+K) with fuzzy search.
 //
-//   import { CommandPalette, useCommands } from '@glyx/command';
+//   import { CommandPalette, useCommands } from '@glyx-dev/command';
 //   useCommands([{ id:'new', label:'New Note', section:'Notes', action: newNote }]);
 //   <CommandPalette />   // render once near the app root
 
 import React from 'react';
-import { View, Text, Pressable, ScrollView, TextInput, useWindowSize, input } from '@glyx/react';
+import { View, Text, Pressable, ScrollView, TextInput, useWindowSize, input } from '@glyx-dev/react';
 
 const { useState, useEffect, useMemo } = React;
 
@@ -14,6 +14,12 @@ const registry = [];
 
 export function useCommands(commands) {
   useEffect(() => {
+    // Dedupe by id: a later registration of the same id replaces the
+    // earlier entry instead of appearing twice in the palette.
+    const ids = new Set(commands.map((c) => c.id));
+    for (let i = registry.length - 1; i >= 0; i--) {
+      if (ids.has(registry[i].id)) registry.splice(i, 1);
+    }
     registry.push(...commands);
     return () => {
       for (const c of commands) {

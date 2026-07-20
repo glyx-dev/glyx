@@ -116,6 +116,21 @@ pub fn resolve_and_check_write(path: &Path) -> Result<PathBuf, DenyReason> {
     }
 }
 
+/// Canonicalize `requested` and verify it lies within `shellAgent.scopeDir`
+/// (also canonicalized). Used to hard-scope a spawned agent-shell process's
+/// cwd — `..`/absolute-path escapes are rejected here, not just discouraged.
+pub fn resolve_shell_agent_cwd(requested: &Path) -> Result<PathBuf, DenyReason> {
+    let caps = get();
+    let Some(scope) = caps.shell_agent_scope() else { return Err(DenyReason::CapabilityMissing) };
+    let scope_canonical = Path::new(scope).canonicalize().map_err(DenyReason::Canonicalize)?;
+    let requested_canonical = requested.canonicalize().map_err(DenyReason::Canonicalize)?;
+    if requested_canonical.starts_with(&scope_canonical) {
+        Ok(requested_canonical)
+    } else {
+        Err(DenyReason::NotAllowed)
+    }
+}
+
 // ── Capability definitions ────────────────────────────────────────────────────
 
 /// File-system access declarations.
@@ -224,6 +239,38 @@ pub struct NetworkCapability {
     pub allow: Vec<String>,
 }
 
+/// Scoped shell access — an explicit allowlist of exact binary names.
+///
+/// Binaries are matched by exact name (never glob/prefix, to avoid PATH
+/// tricks) and resolved to an explicit path before spawning. Arguments are
+/// always passed as a real argv array via `std::process::Command` — never
+/// through a shell interpreter (`sh -c`/`cmd /c`) — so this capability
+/// cannot be used for shell-metacharacter injection regardless of what a
+/// caller passes as arguments; that's a structural property of how the
+/// process is spawned, not a filter applied on top of it.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ShellCapability {
+    /// Exact binary names (or absolute paths) the app may spawn, e.g.
+    /// `["git", "ffmpeg"]`.
+    pub allow: Vec<String>,
+}
+
+/// Open-ended shell access for agent-style apps (e.g. an AI coding
+/// assistant) that can't enumerate which binaries they'll need ahead of
+/// time. No binary allowlist — any command runs — but every spawned
+/// process is hard-scoped to `scope_dir` (canonicalized; `..`/absolute-path
+/// escapes are rejected before spawn, not just discouraged) and every
+/// invocation must be shown via the native (JS-independent) activity
+/// overlay — see `crates/glyx-core/src/lib.rs`'s `shell_agent_log`. This is
+/// deliberately a much higher trust level than `ShellCapability` and is
+/// meant to require an explicit, loud opt-in, not a boolean flip.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ShellAgentCapability {
+    /// The only filesystem root spawned processes' cwd may resolve within.
+    #[serde(rename = "scopeDir")]
+    pub scope_dir: String,
+}
+
 /// Environment variable access declarations.
 ///
 /// Only variables whose names match an entry in `allow` are readable from JS.
@@ -280,12 +327,28 @@ pub struct Capabilities {
     pub clipboard:    bool,
     #[serde(default)]
     pub notification: bool,
+    /// System tray icon and menu.
+    #[serde(default)]
+    pub tray: bool,
     #[serde(default)]
     pub battery:          bool,
     #[serde(default)]
     pub usb:              bool,
+    /// `open_external()` — opens a URL/file via the OS (rundll32/open/
+    /// xdg-open), no shell interpreter involved. NOT the same capability as
+    /// `shellExec`/`shellAgent` below — this one predates them and only
+    /// permits handing a URL to the OS's default handler.
     #[serde(default)]
     pub shell:            bool,
+    /// Scoped shell access (Tier 1) — explicit binary allowlist. Distinct
+    /// from `shell` above — this permits spawning arbitrary declared
+    /// binaries with arbitrary args, `shell` only opens URLs.
+    #[serde(rename = "shellExec")]
+    pub shell_exec:       Option<ShellCapability>,
+    /// Agent-style shell access (Tier 2) — no allowlist, cwd-scoped, requires
+    /// the native activity overlay. See `ShellAgentCapability`'s docs.
+    #[serde(rename = "shellAgent")]
+    pub shell_agent:      Option<ShellAgentCapability>,
     #[serde(default)]
     pub mdns:             bool,
     #[serde(default)]
@@ -342,6 +405,13 @@ pub struct Capabilities {
     pub crash: bool,
     /// Deep-link URL scheme registration.  `None` = no deep-link support.
     pub deeplink: Option<DeeplinkCapability>,
+    /// Native OS-embedded webview (WebView2/WKWebView/WebKitGTK) via the
+    /// `<WebView>` component. Gates whether a `<WebView>` node is allowed to
+    /// load content at all — separate from (and does not affect) the
+    /// GPU-rendered UI everything else uses. Gracefully degrades to
+    /// "not available" if the `webview` Cargo feature/DLL isn't present.
+    #[serde(default)]
+    pub webview: bool,
 }
 
 impl Capabilities {
@@ -390,6 +460,16 @@ impl Capabilities {
     /// True if the app declared `mdns: true`.
     pub fn can_mdns(&self) -> bool { self.mdns }
 
+    /// True if `bin` (exact name) is in the `shellExec.allow` list.
+    pub fn can_shell_run(&self, bin: &str) -> bool {
+        self.shell_exec.as_ref().is_some_and(|s| s.allow.iter().any(|b| b == bin))
+    }
+
+    /// The declared `shellAgent.scopeDir`, if the capability is present.
+    pub fn shell_agent_scope(&self) -> Option<&str> {
+        self.shell_agent.as_ref().map(|s| s.scope_dir.as_str())
+    }
+
     /// True if the app declared `aiModelDownload: true`.
     /// Without this, AI model downloads are blocked; APIs only succeed if the
     /// model weights are already present in the HuggingFace cache.
@@ -423,6 +503,39 @@ pub fn init_version(version: String) {
 /// Returns the app version string, or `"0.0.0"` if not set.
 pub fn app_version() -> &'static str {
     APP_VERSION.get().map(|s| s.as_str()).unwrap_or("0.0.0")
+}
+
+// ── Update origin store ───────────────────────────────────────────────────────
+//
+// The GitHub owner/repo/binName the auto-updater checks against. Read from
+// `glyx.config.json`'s `updater` block at startup — NOT from a build-time
+// `option_env!`, since the real build pipeline (`glyx build`) mostly ships a
+// shared, cached `glyx-runner` binary plus embedded/runtime-supplied config
+// (see `glyx-core::config::read_config_json`'s three sources: embedded
+// payload, `GLYX_CONFIG_JSON` env var, or the config file itself) rather than
+// a full per-app `cargo build` with unique compile-time constants baked in.
+// This mirrors `init_version`/`app_version` above exactly.
+
+/// GitHub owner/repo + release asset binary-name prefix for the auto-updater.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateOrigin {
+    pub owner:    String,
+    pub repo:     String,
+    pub bin_name: String,
+}
+
+static UPDATE_ORIGIN: OnceLock<UpdateOrigin> = OnceLock::new();
+
+/// Store the update origin declared in `glyx.config.json`'s `updater` block.
+/// Must be called once during startup. Subsequent calls are silently ignored.
+pub fn init_update_origin(origin: UpdateOrigin) {
+    let _ = UPDATE_ORIGIN.set(origin);
+}
+
+/// Returns the configured update origin, or `None` if `glyx.config.json` has
+/// no `updater` block (or `init_update_origin` was never called).
+pub fn update_origin() -> Option<&'static UpdateOrigin> {
+    UPDATE_ORIGIN.get()
 }
 
 /// Lock in the capability set from the parsed config.
@@ -467,6 +580,9 @@ mod tests {
         assert!(!caps.can_get_env("PATH"));
         assert!(!caps.db);
         assert!(!caps.shell);
+        assert!(caps.shell_exec.is_none());
+        assert!(!caps.can_shell_run("git"));
+        assert!(caps.shell_agent.is_none());
         assert!(!caps.credentials);
         assert!(!caps.ai);
         assert!(caps.deeplink.is_none());
@@ -732,6 +848,20 @@ mod tests {
     fn empty_env_name_denied() {
         let caps = parse(r#"{ "env": { "allow": ["*"] } }"#);
         assert!(!caps.can_get_env(""), "empty env name must be denied even under '*'");
+    }
+
+    // ── Update origin ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn update_origin_round_trips_through_init() {
+        assert!(update_origin().is_none(), "should be unset before init in this test binary");
+        init_update_origin(UpdateOrigin {
+            owner: "acme-inc".into(), repo: "my-app".into(), bin_name: "my-app".into(),
+        });
+        let o = update_origin().expect("should be set after init");
+        assert_eq!(o.owner, "acme-inc");
+        assert_eq!(o.repo, "my-app");
+        assert_eq!(o.bin_name, "my-app");
     }
 }
 

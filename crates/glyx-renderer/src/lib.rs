@@ -152,7 +152,11 @@ impl GlyxRenderer {
             pipeline_cache:       pipeline_cache.clone(),
         }).map_err(|e| RendererError::Init(e.to_string()))?;
 
-        let blit   = wgpu::util::TextureBlitter::new(&gpu.device, gpu.surface_format());
+        // Pipeline format must match the raw (non-sRGB) view render_frame blits
+        // into below — Vello's output is already final-encoded bytes, and a
+        // pipeline built against the sRGB surface format would double-encode
+        // them again on write. See `GpuContext::surface_format_raw`.
+        let blit   = wgpu::util::TextureBlitter::new(&gpu.device, gpu.surface_format_raw());
         let target = RenderTarget::new(&gpu.device, gpu.width().max(1), gpu.height().max(1));
 
         Ok(Self {
@@ -247,7 +251,15 @@ impl GlyxRenderer {
             },
         ).map_err(|e| RendererError::Render(e.to_string()))?;
 
-        let surface_view = texture.texture.create_view(&Default::default());
+        // Raw (non-sRGB) view: Vello's compute pass already wrote final,
+        // correctly gamma-encoded bytes into `self.target` — blitting through
+        // the surface's default (sRGB) view would trigger a second, unwanted
+        // linear→sRGB encode on store, washing everything out. See
+        // `GpuContext::surface_format_raw`.
+        let surface_view = texture.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(gpu.surface_format_raw()),
+            ..Default::default()
+        });
         let mut enc = gpu.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("blit") });
         self.blit.copy(&gpu.device, &mut enc, &self.target.view, &surface_view);
@@ -271,7 +283,11 @@ impl GlyxRenderer {
         gpu:     &GpuContext,
         texture: &wgpu::SurfaceTexture,
     ) -> Result<(), RendererError> {
-        let surface_view = texture.texture.create_view(&Default::default());
+        // Raw (non-sRGB) view — see the comment in render_frame above.
+        let surface_view = texture.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(gpu.surface_format_raw()),
+            ..Default::default()
+        });
         let mut enc = gpu.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("blit-cached") });
         self.blit.copy(&gpu.device, &mut enc, &self.target.view, &surface_view);

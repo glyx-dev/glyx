@@ -78,6 +78,7 @@ pub(super) struct WindowCfgJson {
     #[serde(rename = "startupMode")]
     pub(super) startup_mode: Option<String>,
     pub(super) decorations:  Option<bool>,
+    pub(super) resizable:    Option<bool>,
     pub(super) background:   Option<String>,
     #[serde(rename = "renderMode")]
     pub(super) render_mode:  Option<String>,
@@ -303,6 +304,7 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
     if let Some(w) = file.as_ref().and_then(|f| f.window.as_ref()) {
         if let Some(t) = &w.title { cfg.title = t.clone(); }
         if let Some(d) = w.decorations { cfg.decorations = d; }
+        if let Some(r) = w.resizable   { cfg.resizable   = r; }
         if let Some(bg) = w.background.as_deref().and_then(parse_hex_color) {
             cfg.background_color = bg;
         }

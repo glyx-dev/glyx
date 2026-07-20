@@ -252,6 +252,30 @@ enum CapsCommands {
         /// Target OS to cross-compile for (windows, macos, linux)
         target: Option<String>,
     },
+    /// Generate a new Ed25519 keypair for signing capability DLLs.
+    ///
+    /// Writes a raw 32-byte private key to `out` and prints the matching
+    /// 44-byte DER SubjectPublicKeyInfo public key as hex — paste that into
+    /// `crates/glyx-verify/keys/cap.pub` (as raw bytes, not hex) to make it
+    /// the runtime's trusted verification key. Keep the private key file out
+    /// of the repo; store it as a CI secret for real releases.
+    Keygen {
+        /// Path to write the raw 32-byte private key
+        #[arg(long, default_value = "cap-signing-key.bin")]
+        out: std::path::PathBuf,
+    },
+    /// Sign a capability DLL with a private key from `caps keygen`.
+    ///
+    /// Writes `<dll>.sig` (64 raw bytes) next to the DLL — this is the
+    /// sidecar `glyx-runtime::cap_loader` looks for at load time. The key
+    /// must be the raw 32-byte private key file `caps keygen` produces.
+    Sign {
+        /// Path to the capability DLL to sign
+        dll: std::path::PathBuf,
+        /// Path to the raw 32-byte private key
+        #[arg(long)]
+        key: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -338,8 +362,59 @@ fn run() -> Result<()> {
                 println!("Done. DLLs and glyx-caps.lock written to {}", dest.display());
                 Ok(())
             }
+            CapsCommands::Keygen { out } => cmd_caps_keygen(&out),
+            CapsCommands::Sign { dll, key } => cmd_caps_sign(&dll, &key),
         },
     }
+}
+
+/// Generate a new Ed25519 keypair for `caps sign`. See `CapsCommands::Keygen` doc.
+fn cmd_caps_keygen(out: &std::path::Path) -> Result<()> {
+    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::pkcs8::EncodePublicKey;
+    use rand_core::OsRng;
+
+    let signing_key = SigningKey::generate(&mut OsRng);
+    std::fs::write(out, signing_key.to_bytes())
+        .with_context(|| format!("failed to write private key to {}", out.display()))?;
+
+    let pub_der = signing_key.verifying_key().to_public_key_der()
+        .context("failed to DER-encode public key")?;
+    println!("Private key written to: {}", out.display());
+    println!("Keep this file out of the repo — store it as a CI secret for real releases.");
+    println!();
+    println!("Public key (44-byte DER SPKI, hex):");
+    println!("{}", pub_der.as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>());
+    println!();
+    println!("To make this the runtime's trusted key, write these 44 bytes (not the hex text)");
+    println!("to crates/glyx-verify/keys/cap.pub, replacing the existing file.");
+    Ok(())
+}
+
+/// Sign a capability DLL, writing `<dll>.sig` next to it. See `CapsCommands::Sign` doc.
+fn cmd_caps_sign(dll: &std::path::Path, key: &std::path::Path) -> Result<()> {
+    let key_bytes = std::fs::read(key)
+        .with_context(|| format!("failed to read private key {}", key.display()))?;
+    let secret: [u8; 32] = key_bytes.as_slice().try_into()
+        .map_err(|_| anyhow::anyhow!(
+            "private key must be exactly 32 raw bytes (got {}) — use `glyx caps keygen`'s output",
+            key_bytes.len()
+        ))?;
+
+    let dll_bytes = std::fs::read(dll)
+        .with_context(|| format!("failed to read DLL {}", dll.display()))?;
+    let sig = glyx_verify::sign_ed25519(&secret, &dll_bytes);
+
+    let sig_path = dll.with_extension({
+        let ext = dll.extension()
+            .map(|e| format!("{}.sig", e.to_string_lossy()))
+            .unwrap_or_else(|| "sig".to_string());
+        ext
+    });
+    std::fs::write(&sig_path, sig)
+        .with_context(|| format!("failed to write signature to {}", sig_path.display()))?;
+    println!("Signed: {}", sig_path.display());
+    Ok(())
 }
 
 // ── Runner management ─────────────────────────────────────────────────────────
@@ -974,24 +1049,42 @@ fn write_caps_lock(dest_root: &Path) -> Result<()> {
     let cap_names = read_capabilities_from_config();
     let mut hashes = serde_json::Map::new();
 
+    // `glyx build` places cap DLLs in target/release/ (see cmd_build.rs's
+    // build_cap_dlls), not the project root — search both so this also
+    // works for a developer who's manually copied a DLL into cwd (e.g. via
+    // `glyx caps build --dest .`).
+    let search_dirs: &[&Path] = &[Path::new("target/release"), Path::new(".")];
+
     for cap in &cap_names {
         let stem = format!("glyx_cap_{cap}");
-        for ext in extensions {
+        'found: for ext in extensions {
             // On macOS/Linux the lib prefix is optional depending on how the
             // developer built their module; check both.
             for prefix in &["", "lib"] {
                 let filename = format!("{prefix}{stem}.{ext}");
-                let path = PathBuf::from(&filename);
-                if path.exists() {
+                for dir in search_dirs {
+                    let path = dir.join(&filename);
+                    if !path.exists() { continue; }
                     let bytes = std::fs::read(&path)
-                        .with_context(|| format!("read {filename}"))?;
+                        .with_context(|| format!("read {}", path.display()))?;
                     let hex = format!("{:x}", Sha256::digest(&bytes));
                     hashes.insert(cap.to_string(), serde_json::Value::String(hex));
                     // Copy the module into the dist dir alongside the binary.
                     std::fs::copy(&path, dest_root.join(&filename))
                         .with_context(|| format!("copy {filename} to dist"))?;
                     println!("Capability module: {filename} (hash pinned in glyx-caps.lock)");
-                    break;
+                    // Also copy the Ed25519 .sig sidecar cap_loader requires
+                    // in release builds — silently missing this left every
+                    // packaged app with a capability that refuses to load.
+                    let sig_path = path.with_extension(format!("{ext}.sig"));
+                    if sig_path.exists() {
+                        std::fs::copy(&sig_path, dest_root.join(format!("{filename}.sig")))
+                            .with_context(|| format!("copy {filename}.sig to dist"))?;
+                        println!("  + {filename}.sig");
+                    } else {
+                        println!("  Warning: no {filename}.sig found next to it — this capability will refuse to load in a release build. Sign it with `glyx caps sign`.");
+                    }
+                    break 'found;
                 }
             }
         }

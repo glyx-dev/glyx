@@ -241,12 +241,6 @@ pub(super) fn append_trailer_snapshot(
     app_js:       &Path,
     app_config:   &Path,
 ) -> Result<PathBuf> {
-    use std::io::Write;
-
-    const MAGIC:   u64 = 0x4C52_5458_4F4C_4556; // b"GLYXTRL" little-endian
-    const VERSION: u32 = 1;
-    const FLAGS:   u32 = 0; // reserved for future feature bits
-
     if target.is_some() {
         println!("⚠ Cross-compilation for JS-only snapshot: the cached runner must be built for the target platform.");
         println!("  On the target machine: run `glyx runtime build` then copy the prod runner to");
@@ -265,26 +259,48 @@ pub(super) fn append_trailer_snapshot(
     let js_bytes     = std::fs::read(app_js)   .with_context(|| format!("read {}", app_js.display()))?;
     let config_bytes = std::fs::read(app_config).with_context(|| format!("read {}", app_config.display()))?;
 
+    write_trailer(&dest, &snap_bytes, &js_bytes, &config_bytes)?;
+    println!("✓ Binary: {} (no cargo recompile)", dest.display());
+
+    Ok(std::env::current_dir()?.join(dest))
+}
+
+/// Append a GLYXTRL trailer (snapshot + JS + config + footer) onto `dest`,
+/// which must not already have one (offsets are computed from `dest`'s
+/// current length — call `strip_trailer` first if re-trailering a binary
+/// that might already carry one, e.g. after a tool like rcedit rewrote it).
+///
+/// Shared by `append_trailer_snapshot` (initial build) and `cmd_package`'s
+/// icon-embedding step (rcedit rewrites the PE image and discards anything
+/// appended past the end of the file it recognizes, so the trailer must be
+/// re-written — with fresh offsets — after rcedit runs, not just copied).
+pub(super) fn write_trailer(dest: &Path, snap_bytes: &[u8], js_bytes: &[u8], config_bytes: &[u8]) -> Result<u32> {
+    use std::io::Write;
+
+    const MAGIC:   u64 = 0x4C52_5458_4F4C_4556; // b"GLYXTRL" little-endian
+    const VERSION: u32 = 1;
+    const FLAGS:   u32 = 0; // reserved for future feature bits
+
     // CRC32 over the entire payload for integrity checking at runtime.
     let mut digest = crc32fast::Hasher::new();
-    digest.update(&snap_bytes);
-    digest.update(&js_bytes);
-    digest.update(&config_bytes);
+    digest.update(snap_bytes);
+    digest.update(js_bytes);
+    digest.update(config_bytes);
     let crc32 = digest.finalize();
 
-    let runner_len  = std::fs::metadata(&dest)?.len();
-    let snap_offset = runner_len;
-    let js_offset   = snap_offset + snap_bytes.len()   as u64;
-    let cfg_offset  = js_offset   + js_bytes.len()     as u64;
+    let base_len    = std::fs::metadata(dest)?.len();
+    let snap_offset = base_len;
+    let js_offset   = snap_offset + snap_bytes.len() as u64;
+    let cfg_offset  = js_offset   + js_bytes.len()   as u64;
 
     let mut file = std::fs::OpenOptions::new()
         .append(true)
-        .open(&dest)
+        .open(dest)
         .with_context(|| format!("open {} for append", dest.display()))?;
 
-    file.write_all(&snap_bytes)  .context("write snapshot")?;
-    file.write_all(&js_bytes)    .context("write app JS")?;
-    file.write_all(&config_bytes).context("write config")?;
+    file.write_all(snap_bytes)  .context("write snapshot")?;
+    file.write_all(js_bytes)    .context("write app JS")?;
+    file.write_all(config_bytes).context("write config")?;
 
     // Footer v1 (72 bytes): 6 × u64 offsets/lengths, 4 × u32 metadata, 1 × u64 magic.
     file.write_all(&snap_offset.to_le_bytes())               .context("write footer")?;
@@ -301,9 +317,70 @@ pub(super) fn append_trailer_snapshot(
 
     println!("✓ Trailer: snapshot={} KB  js={} KB  config={} B  crc32={:#010x}",
         snap_bytes.len() / 1024, js_bytes.len() / 1024, config_bytes.len(), crc32);
-    println!("✓ Binary: {} (no cargo recompile)", dest.display());
 
-    Ok(std::env::current_dir()?.join(dest))
+    Ok(crc32)
+}
+
+/// Footer size in bytes (v1): 6×u64 + 4×u32 + 1×u64 = 72. Mirrors
+/// glyx-runner's own `FOOTER_SIZE` constant — keep in sync.
+const TRAILER_FOOTER_SIZE: u64 = 72;
+const TRAILER_MAGIC: u64 = 0x4C52_5458_4F4C_4556;
+
+/// Parsed trailer payload, as read back by `strip_trailer`.
+pub(super) struct TrailerBytes {
+    pub snapshot: Vec<u8>,
+    pub js:       Vec<u8>,
+    pub config:   Vec<u8>,
+}
+
+/// If `path` carries a valid GLYXTRL trailer, read its payload out, truncate
+/// the file back to its pre-trailer (bare runner) length, and return the
+/// payload. Returns `Ok(None)` if no trailer is present — e.g. a workspace-
+/// member app whose config is compiled in rather than appended.
+///
+/// Used by `cmd_package` to survive rcedit's icon patch: extract, let rcedit
+/// rewrite the now-bare runner exe, then `write_trailer` back on with fresh
+/// offsets (rcedit changes the runner's byte length, so the old offsets would
+/// no longer line up even if the same trailer bytes were just reappended).
+pub(super) fn strip_trailer(path: &Path) -> Result<Option<TrailerBytes>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut f = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let flen = f.metadata()?.len();
+    if flen < TRAILER_FOOTER_SIZE { return Ok(None); }
+
+    f.seek(SeekFrom::End(-(TRAILER_FOOTER_SIZE as i64)))?;
+    let mut footer = [0u8; 72];
+    if f.read_exact(&mut footer).is_err() { return Ok(None); }
+
+    let magic = u64::from_le_bytes(footer[64..72].try_into().unwrap());
+    if magic != TRAILER_MAGIC { return Ok(None); }
+
+    let snap_off = u64::from_le_bytes(footer[0..8].try_into().unwrap());
+    let snap_len = u64::from_le_bytes(footer[8..16].try_into().unwrap()) as usize;
+    let js_off   = u64::from_le_bytes(footer[16..24].try_into().unwrap());
+    let js_len   = u64::from_le_bytes(footer[24..32].try_into().unwrap()) as usize;
+    let cfg_off  = u64::from_le_bytes(footer[32..40].try_into().unwrap());
+    let cfg_len  = u64::from_le_bytes(footer[40..48].try_into().unwrap()) as usize;
+
+    let mut snapshot = vec![0u8; snap_len];
+    f.seek(SeekFrom::Start(snap_off))?;
+    f.read_exact(&mut snapshot).context("read trailer snapshot section")?;
+
+    let mut js = vec![0u8; js_len];
+    f.seek(SeekFrom::Start(js_off))?;
+    f.read_exact(&mut js).context("read trailer js section")?;
+
+    let mut config = vec![0u8; cfg_len];
+    f.seek(SeekFrom::Start(cfg_off))?;
+    f.read_exact(&mut config).context("read trailer config section")?;
+
+    drop(f);
+    // Truncate back to the bare runner (everything before the trailer).
+    let file = std::fs::OpenOptions::new().write(true).open(path)?;
+    file.set_len(snap_off)?;
+
+    Ok(Some(TrailerBytes { snapshot, js, config }))
 }
 
 /// For JS-only bundle/portable builds: find the cached prod runner and copy it

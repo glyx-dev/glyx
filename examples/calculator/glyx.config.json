@@ -1,4 +1,5 @@
 {
+  "engine": "quickjs",
   "app": {
     "version":     "0.1.0",
     "publisher":   "Glyx Examples",
@@ -12,6 +13,7 @@
     "startupMode": "windowed",
     "background":  "#1e1e2e",
     "decorations": false,
+    "resizable":   false,
     "renderMode":  "skia"
   },
   "capabilities": {

@@ -530,8 +530,13 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             ctx.frame.draw_text(&label.layout, tx, ty, apply_opacity(rgba_to_vello(color), child_opacity));
 
             // 2a. Underline — drawn as a thin rect 1px below the baseline.
+            // Uses cur_top/cur_height (font-metrics-derived, same values the
+            // caret uses) rather than label.text_height, which is Parley's
+            // full line-box height including leading — for rows mixing
+            // regular/bold spans of different metrics, text_height put the
+            // underline well below the glyphs it was meant to decorate.
             if underline && label.width > 0.0 {
-                let ul_y = ty + label.text_height + 1.0;
+                let ul_y = cur_top + cur_height + 1.0;
                 ctx.frame.fill_rounded_rect(
                     tx, ul_y, label.width, 1.0, 0.0,
                     apply_opacity(rgba_to_vello(color), child_opacity),

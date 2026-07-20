@@ -148,6 +148,47 @@ struct TinySkiaShared {
     glyph_cache: lru::LruCache<GlyphKey, CachedAlphaGlyph>,
     /// Reusable pixel buffer — avoids a fresh 8 MB allocation every frame.
     pixmap:      Option<tiny_skia::Pixmap>,
+    /// sRGB-converted copies of `peniko::ImageData` bytes, keyed by the source
+    /// blob's pointer identity — see `linear_premul_to_srgb_premul` below.
+    /// Avoids redoing the per-pixel conversion every frame for an unchanged
+    /// image (same convention as `Direct2DImageCache`).
+    image_cache: lru::LruCache<usize, Vec<u8>>,
+}
+
+/// `peniko::ImageData` bytes are linear-premultiplied (`glyx-core/src/scene.rs`'s
+/// `rgba_to_peniko`, chosen for Vello's colorspace-correct GPU compositing).
+/// TinySkia blits raw bytes with no colorspace conversion of its own, so
+/// linear bytes displayed as-is come out visibly darker/desaturated than
+/// intended — this converts back to standard sRGB-premultiplied bytes first.
+/// Identical math to `direct2d.rs`'s `linear_premul_to_srgb_premul`.
+fn linear_to_srgb_u8(v: u8) -> u8 {
+    let c = v as f32 / 255.0;
+    let srgb = if c <= 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (srgb * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+fn linear_premul_to_srgb_premul(bytes: &[u8]) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    for px in out.chunks_exact_mut(4) {
+        let a = px[3];
+        if a == 0 { continue; }
+        let inv = 255.0 / a as f32;
+        let lr = (px[0] as f32 * inv).min(255.0) as u8;
+        let lg = (px[1] as f32 * inv).min(255.0) as u8;
+        let lb = (px[2] as f32 * inv).min(255.0) as u8;
+        let sr = linear_to_srgb_u8(lr);
+        let sg = linear_to_srgb_u8(lg);
+        let sb = linear_to_srgb_u8(lb);
+        let a16 = a as u16;
+        px[0] = ((sr as u16 * a16 + 127) / 255) as u8;
+        px[1] = ((sg as u16 * a16 + 127) / 255) as u8;
+        px[2] = ((sb as u16 * a16 + 127) / 255) as u8;
+    }
+    out
 }
 
 // ── TinySkiaFrame ─────────────────────────────────────────────────────────────
@@ -524,20 +565,35 @@ impl TinySkiaFrame {
         if self.culled(x, y, w, h) { return; }
         let (iw, ih) = (image.width, image.height);
         if iw == 0 || ih == 0 { return; }
+        let rgba = self.srgb_bytes(image);
+        self.blit_scaled(&rgba, iw, ih, x, y, w, h);
+    }
+
+    /// Convert `image`'s linear-premultiplied (and possibly BGRA) bytes to
+    /// sRGB-premultiplied RGBA, memoized per source blob in `shared.image_cache`
+    /// — see `linear_premul_to_srgb_premul` above.
+    fn srgb_bytes(&mut self, image: &peniko::ImageData) -> Vec<u8> {
         let bytes = image.data.data();
-        if image.format == peniko::ImageFormat::Bgra8 {
-            let mut rgba = bytes.to_vec();
-            for px in rgba.chunks_exact_mut(4) { px.swap(0, 2); }
-            self.blit_scaled(&rgba, iw, ih, x, y, w, h);
-        } else {
-            self.blit_scaled(bytes, iw, ih, x, y, w, h);
+        let key = bytes.as_ptr() as usize;
+        if let Some(cached) = self.shared.image_cache.get(&key) {
+            return cached.clone();
         }
+        let converted = match image.format {
+            peniko::ImageFormat::Bgra8 => {
+                let mut rgba = bytes.to_vec();
+                for px in rgba.chunks_exact_mut(4) { px.swap(0, 2); }
+                linear_premul_to_srgb_premul(&rgba)
+            }
+            _ => linear_premul_to_srgb_premul(bytes),
+        };
+        self.shared.image_cache.put(key, converted.clone());
+        converted
     }
 
     pub fn draw_image_with_transform(&mut self, image: &peniko::ImageData, transform: Affine) {
         let (iw, ih) = (image.width, image.height);
         if iw == 0 || ih == 0 { return; }
-        let bytes = image.data.data();
+        let bytes = self.srgb_bytes(image);
 
         // kurbo Affine [a,b,c,d,e,f]:  x'=ax+cy+e, y'=bx+dy+f
         // tiny-skia from_row(sx,ky,kx,sy,tx,ty): x'=sx*x+kx*y+tx, y'=ky*x+sy*y+ty
@@ -565,14 +621,11 @@ impl TinySkiaFrame {
             }
         };
 
+        // `bytes` is already RGBA + sRGB-converted by `srgb_bytes` above —
+        // the BGRA swap (if any) already happened there, doing it again here
+        // would undo it.
         let mask = self.current_mask.as_ref();
-        if image.format == peniko::ImageFormat::Bgra8 {
-            let mut rgba = bytes.to_vec();
-            for px in rgba.chunks_exact_mut(4) { px.swap(0, 2); }
-            apply(&rgba, &mut self.pixmap, mask);
-        } else {
-            apply(bytes, &mut self.pixmap, mask);
-        }
+        apply(&bytes, &mut self.pixmap, mask);
     }
 
     /// Scale and blit `src` (RGBA, iw×ih) to fill the destination rect.
@@ -759,6 +812,7 @@ impl TinySkiaRenderer {
             // several font sizes' worth of Latin glyphs without thrashing.
             glyph_cache: lru::LruCache::new(std::num::NonZeroUsize::new(2048).unwrap()),
             pixmap:      None,
+            image_cache: lru::LruCache::new(std::num::NonZeroUsize::new(256).unwrap()),
         })
     }
 
@@ -767,7 +821,11 @@ impl TinySkiaRenderer {
         let w = gpu.width().max(1);
         let h = gpu.height().max(1);
         let (texture, view) = Self::make_upload(gpu, w, h);
-        let mut blit = CachedBlit::new(&gpu.device, gpu.surface_format());
+        // Raw (non-sRGB) pipeline format: the upload texture holds TinySkia's
+        // raw CPU pixmap bytes, already final-encoded — writing them through
+        // an sRGB-format pipeline/view would double-apply gamma on store.
+        // See `GpuContext::surface_format_raw` (same fix as Vello's blit).
+        let mut blit = CachedBlit::new(&gpu.device, gpu.surface_format_raw());
         blit.set_source(&gpu.device, &view);
         let staging = StagingBuf::new(&gpu.device, w, h);
         Ok(Self {
@@ -918,7 +976,11 @@ impl TinySkiaRenderer {
         up.staging.buf.unmap();
 
         // One command buffer: copy staging → upload texture, then blit to surface.
-        let surface_view = texture.texture.create_view(&Default::default());
+        // Raw (non-sRGB) view — see the comment on `blit`'s construction above.
+        let surface_view = texture.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(gpu.surface_format_raw()),
+            ..Default::default()
+        });
         let mut enc = gpu.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("skia-blit") });
         enc.copy_buffer_to_texture(
@@ -961,7 +1023,11 @@ impl TinySkiaRenderer {
         texture: &wgpu::SurfaceTexture,
     ) -> Result<(), RendererError> {
         let Some(up) = self.gpu_upload.as_ref() else { return Ok(()) };
-        let surface_view = texture.texture.create_view(&Default::default());
+        // Raw (non-sRGB) view — see the comment on `blit`'s construction above.
+        let surface_view = texture.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(gpu.surface_format_raw()),
+            ..Default::default()
+        });
         let mut enc = gpu.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("skia-blit-cached") });
         up.blit.copy(&mut enc, &surface_view);
@@ -979,10 +1045,12 @@ impl TinySkiaRenderer {
         self.height = h;
     }
 
-    /// Drop cached glyph alpha masks to free CPU memory under pressure.
+    /// Drop cached glyph alpha masks / converted image bytes to free CPU
+    /// memory under pressure.
     pub fn trim_resources(&mut self) {
         if let Some(shared) = self.shared.as_mut() {
             shared.glyph_cache.clear();
+            shared.image_cache.clear();
         }
     }
 

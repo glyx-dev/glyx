@@ -2527,17 +2527,19 @@ pub fn run(mut config: AppConfig) -> bool {
                     Present::Direct2D(dp) => {
                         // D2D draws directly into its own device context during
                         // frame-build (no CPU pixel buffer, no wgpu texture) —
-                        // `finish()` is just EndDraw(); presenting the swap
-                        // chain is D2DPresent's own job, called right after.
+                        // finish_frame_d2d is EndDraw() + reclaiming the font
+                        // cache moved into the frame at begin_frame; presenting
+                        // the swap chain is D2DPresent's own job, called right after.
                         #[cfg(feature = "canvas3d")]
                         if !canvas3d_overlays.is_empty() {
                             // Canvas3D-on-Direct2D lazy GPU sharing is Phase 6
                             // (deferred) — not yet supported.
                             log::debug!("Canvas3D overlays skipped: not yet supported on the Direct2D backend.");
                         }
-                        match frame {
-                            glyx_renderer::AnyFrame::Direct2D(f) => {
-                                if let Err(e) = f.finish() {
+                        match (&mut s.renderer, frame) {
+                            (glyx_renderer::AnyRenderer::Direct2D(r),
+                             glyx_renderer::AnyFrame::Direct2D(f)) => {
+                                if let Err(e) = r.finish_frame_d2d(f) {
                                     log::error!("Direct2D render error: {e}");
                                     return;
                                 }

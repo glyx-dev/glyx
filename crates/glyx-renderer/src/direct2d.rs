@@ -16,9 +16,12 @@
 
 #![cfg(target_os = "windows")]
 
+use std::collections::HashMap;
+
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
+use windows::Win32::Graphics::DirectWrite::*;
 
 use vello::{kurbo, peniko};
 
@@ -34,9 +37,169 @@ fn to_d2d_color(c: peniko::Color) -> D2D1_COLOR_F {
     }
 }
 
+/// Bridges Parley's in-memory font blobs (raw TTF/OTF/TTC bytes + face index
+/// — the same `linebender_resource_handle::FontData` Vello consumes directly
+/// and TinySkia rasterizes via `swash`) to real `IDWriteFontFace` objects, so
+/// `DrawGlyphRun` gets native DirectWrite/ClearType text instead of a
+/// from-scratch CPU rasterizer. Uses `IDWriteInMemoryFontFileLoader`
+/// (Windows 10+) rather than hand-implementing `IDWriteFontFileLoader`/
+/// `IDWriteFontFileStream` — avoids writing a custom COM object for what the
+/// OS already provides.
+///
+/// Persists across frames on `Direct2DRenderer` (moved into `Direct2DFrame`
+/// at `begin_frame` and back at `finish_frame_d2d`, mirroring TinySkia's
+/// `TinySkiaShared`/glyph-cache dance) — `IDWriteFontFace` creation isn't
+/// free, and the same font blob is drawn every frame for any static text.
+struct Direct2DFontCache {
+    dwrite_factory: IDWriteFactory5,
+    mem_loader:     IDWriteInMemoryFontFileLoader,
+    faces:          HashMap<(usize, u32), IDWriteFontFace>,
+}
+
+impl Direct2DFontCache {
+    fn new() -> Option<Self> {
+        unsafe {
+            let dwrite_factory: IDWriteFactory5 =
+                DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
+            let mem_loader = dwrite_factory.CreateInMemoryFontFileLoader().ok()?;
+            dwrite_factory.RegisterFontFileLoader(&mem_loader).ok()?;
+            Some(Self { dwrite_factory, mem_loader, faces: HashMap::new() })
+        }
+    }
+
+    /// `data_ptr` doubles as the cache key's font identity — same convention
+    /// TinySkia's `GlyphKey` already uses (`skia.rs`'s `data_ptr: usize`),
+    /// valid because Parley/Vello's `FontData` blob is a stable,
+    /// reference-counted allocation for the lifetime it's referenced.
+    fn get_or_create(&mut self, font_bytes: &[u8], font_index: u32) -> Option<IDWriteFontFace> {
+        let key = (font_bytes.as_ptr() as usize, font_index);
+        if let Some(face) = self.faces.get(&key) {
+            return Some(face.clone());
+        }
+        unsafe {
+            let font_file = self
+                .mem_loader
+                .CreateInMemoryFontFileReference(
+                    &self.dwrite_factory,
+                    font_bytes.as_ptr() as *const core::ffi::c_void,
+                    font_bytes.len() as u32,
+                    None,
+                )
+                .ok()?;
+            // TTF/OTF/TTC all analyze as TRUETYPE or TRUETYPE_COLLECTION in
+            // DirectWrite's classification (bare CFF-only fonts are rare in
+            // practice); try both rather than requiring exact upfront
+            // knowledge of the container format.
+            let files = [Some(font_file)];
+            let face = self.dwrite_factory
+                .CreateFontFace(
+                    DWRITE_FONT_FACE_TYPE_TRUETYPE,
+                    &files,
+                    font_index,
+                    DWRITE_FONT_SIMULATIONS_NONE,
+                )
+                .or_else(|_| self.dwrite_factory.CreateFontFace(
+                    DWRITE_FONT_FACE_TYPE_TRUETYPE_COLLECTION,
+                    &files,
+                    font_index,
+                    DWRITE_FONT_SIMULATIONS_NONE,
+                ))
+                .ok()?;
+            self.faces.insert(key, face.clone());
+            Some(face)
+        }
+    }
+}
+
+fn linear_to_srgb_u8(v: u8) -> u8 {
+    let c = v as f32 / 255.0;
+    let srgb = if c <= 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (srgb * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// Inverse of `glyx-core/src/scene.rs`'s `rgba_to_peniko`: `peniko::ImageData`
+/// bytes are linear-premultiplied (chosen for Vello's colorspace-correct GPU
+/// compositing). D2D's `D2D1_ALPHA_MODE_PREMULTIPLIED` bitmap format expects
+/// standard sRGB-premultiplied bytes, not linear ones — uploading the linear
+/// bytes as-is would double-apply gamma and look visibly wrong (too dark/
+/// desaturated), unlike TinySkia's shortcut of blitting them unconverted
+/// (flagged in the plan as a pre-existing latent inconsistency, not
+/// something to replicate here).
+fn linear_premul_to_srgb_premul(bytes: &[u8]) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    for px in out.chunks_exact_mut(4) {
+        let a = px[3];
+        if a == 0 { continue; }
+        let inv = 255.0 / a as f32;
+        let lr = (px[0] as f32 * inv).min(255.0) as u8;
+        let lg = (px[1] as f32 * inv).min(255.0) as u8;
+        let lb = (px[2] as f32 * inv).min(255.0) as u8;
+        let sr = linear_to_srgb_u8(lr);
+        let sg = linear_to_srgb_u8(lg);
+        let sb = linear_to_srgb_u8(lb);
+        let a16 = a as u16;
+        px[0] = ((sr as u16 * a16 + 127) / 255) as u8;
+        px[1] = ((sg as u16 * a16 + 127) / 255) as u8;
+        px[2] = ((sb as u16 * a16 + 127) / 255) as u8;
+    }
+    out
+}
+
+/// Cache of `ID2D1Bitmap`s keyed by the source `peniko::ImageData` blob's
+/// identity (same convention as `Direct2DFontCache` and TinySkia's glyph
+/// cache) — avoids redoing the sRGB/premultiply conversion above every
+/// frame for an image that hasn't changed. Persists across frames on
+/// `Direct2DRenderer`, moved into `Direct2DFrame` at `begin_frame` and back
+/// at `finish_frame_d2d`, same shape as the font cache.
+#[derive(Default)]
+struct Direct2DImageCache {
+    bitmaps: HashMap<usize, ID2D1Bitmap>,
+}
+
+impl Direct2DImageCache {
+    fn new() -> Self { Self::default() }
+
+    fn get_or_create(&mut self, rt: &ID2D1RenderTarget, image: &peniko::ImageData) -> Option<ID2D1Bitmap> {
+        let bytes = image.data.data();
+        let key = bytes.as_ptr() as usize;
+        if let Some(bmp) = self.bitmaps.get(&key) {
+            return Some(bmp.clone());
+        }
+        let rgba: Vec<u8> = match image.format {
+            peniko::ImageFormat::Bgra8 => {
+                let mut b = bytes.to_vec();
+                for px in b.chunks_exact_mut(4) { px.swap(0, 2); }
+                linear_premul_to_srgb_premul(&b)
+            }
+            _ => linear_premul_to_srgb_premul(bytes),
+        };
+        let props = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        let size = D2D_SIZE_U { width: image.width, height: image.height };
+        let pitch = image.width * 4;
+        let bmp = unsafe {
+            rt.CreateBitmap(size, Some(rgba.as_ptr() as *const core::ffi::c_void), pitch, &props as *const _).ok()?
+        };
+        self.bitmaps.insert(key, bmp.clone());
+        Some(bmp)
+    }
+}
+
 pub struct Direct2DRenderer {
     pub background_color: peniko::Color,
     device_context: ID2D1DeviceContext,
+    font_cache: Option<Direct2DFontCache>,
+    image_cache: Direct2DImageCache,
 }
 
 impl Direct2DRenderer {
@@ -46,7 +209,16 @@ impl Direct2DRenderer {
     /// wgpu-taking signature entirely — mirrors `TinySkiaRenderer::new_cpu_only`'s
     /// bypass of the same constructor for the soft-present path).
     pub fn new(device_context: ID2D1DeviceContext) -> Self {
-        Self { background_color: peniko::Color::WHITE, device_context }
+        let font_cache = Direct2DFontCache::new();
+        if font_cache.is_none() {
+            log::warn!("Direct2D backend: DirectWrite font cache init failed — text will not render.");
+        }
+        Self {
+            background_color: peniko::Color::WHITE,
+            device_context,
+            font_cache,
+            image_cache: Direct2DImageCache::new(),
+        }
     }
 
     /// No-op: the target bitmap's size is owned and resized by `D2DPresent`
@@ -64,7 +236,27 @@ impl Direct2DRenderer {
             let color = to_d2d_color(self.background_color);
             rt.Clear(Some(&color as *const _));
         }
-        Direct2DFrame { ctx, rt }
+        Direct2DFrame {
+            ctx, rt,
+            font_cache: self.font_cache.take(),
+            image_cache: std::mem::take(&mut self.image_cache),
+        }
+    }
+
+    /// Finish the frame — `EndDraw()`, and reclaim the font/image caches
+    /// moved into the frame at `begin_frame` (mirrors `TinySkiaRenderer::
+    /// render_frame`/`finish_frame_soft` moving `TinySkiaShared` back after
+    /// drawing). Presenting the swap chain is `D2DPresent::present()`'s job,
+    /// called directly from glyx-core's `Present::Direct2D` dispatch arm
+    /// right after this returns.
+    pub fn finish_frame_d2d(&mut self, frame: Direct2DFrame) -> Result<(), RendererError> {
+        self.font_cache  = frame.font_cache;
+        self.image_cache = frame.image_cache;
+        unsafe {
+            frame.rt
+                .EndDraw(None, None)
+                .map_err(|e| RendererError::Render(format!("D2D EndDraw failed: {e}")))
+        }
     }
 
     /// D2D/D3D11 resource caches are OS/driver-managed, not an app-owned
@@ -76,7 +268,7 @@ impl Direct2DRenderer {
 }
 
 pub struct Direct2DFrame {
-    /// Kept for later phases (`PushLayer`/`DrawGlyphRun`/`CreateBitmapFromWicBitmap`
+    /// Kept for later phases (`PushLayer`/`CreateBitmapFromWicBitmap`
     /// live on the device-context interface, not the base render-target one).
     #[allow(dead_code)]
     ctx: ID2D1DeviceContext,
@@ -85,6 +277,13 @@ pub struct Direct2DFrame {
     /// gotcha hit in the standalone spike) — cast once here rather than
     /// per draw call.
     rt: ID2D1RenderTarget,
+    /// Moved out of `Direct2DRenderer` at `begin_frame`, moved back at
+    /// `finish_frame_d2d`. `None` only if `Direct2DFontCache::new()` failed
+    /// at renderer construction (logged once there) — `draw_text` no-ops
+    /// rather than panicking in that case.
+    font_cache: Option<Direct2DFontCache>,
+    /// Same move-in/move-out pattern as `font_cache`.
+    image_cache: Direct2DImageCache,
 }
 
 impl Direct2DFrame {
@@ -254,18 +453,120 @@ impl Direct2DFrame {
         unsafe { self.rt.DrawGeometry(&geometry, &brush, width as f32, None); }
     }
 
-    // ── Phase 3/4/5 stubs — log once per call and no-op ────────────────────
+    /// Same Parley traversal Vello/TinySkia already use (`layout.inner.lines()`
+    /// → `line.items()` → `GlyphRun`), translated to `DWRITE_GLYPH_RUN` +
+    /// `ID2D1RenderTarget::DrawGlyphRun` instead of Vello's `draw_glyphs` or
+    /// TinySkia's swash rasterization. Pen-accumulation (`pen_x += g.advance`)
+    /// matches TinySkia's approach (skia.rs) rather than Vello's — Parley's
+    /// `g.x`/`g.y` are shaping *adjustments* from the current pen, not
+    /// absolute positions, so accumulating advances is correct and needs no
+    /// "all glyph x are zero" fallback hack.
+    pub fn draw_text(&mut self, layout: &glyx_text::TextLayout, x: f64, y: f64, color: peniko::Color) {
+        let Some(brush) = self.solid_brush(color) else { return };
+        let Some(cache) = self.font_cache.as_mut() else { return };
+        let brush: ID2D1Brush = match brush.cast() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
 
-    pub fn draw_text(&mut self, _layout: &glyx_text::TextLayout, _x: f64, _y: f64, _color: peniko::Color) {
-        log::warn!("Direct2D backend: draw_text not yet implemented (Phase 3), skipping.");
+        for line in layout.inner.lines() {
+            for item in line.items() {
+                let parley::layout::PositionedLayoutItem::GlyphRun(gr) = item else { continue };
+                let run  = gr.run();
+                let font = run.font();
+                let size = run.font_size();
+                let baseline = gr.baseline() as f64;
+                let run_off  = gr.offset()   as f64;
+
+                let font_bytes = font.data.data();
+                let font_index = font.index;
+                let Some(face) = cache.get_or_create(font_bytes, font_index) else { continue };
+
+                let mut pen_x = run_off;
+                let mut indices  = Vec::new();
+                let mut advances = Vec::new();
+                let mut offsets  = Vec::new();
+                for g in gr.glyphs() {
+                    let gx = x + pen_x + g.x as f64;
+                    let gy = y + baseline + g.y as f64;
+                    // DWRITE_GLYPH_OFFSET is relative to the run's shared
+                    // baseline origin (set below), not absolute — encode each
+                    // glyph's absolute position as an offset from that origin.
+                    indices.push(g.id as u16);
+                    advances.push(0.0f32); // advance folded into per-glyph offset instead
+                    offsets.push(DWRITE_GLYPH_OFFSET {
+                        advanceOffset:  (gx - x - run_off) as f32,
+                        ascenderOffset: -(gy - y - baseline) as f32, // DWrite Y-up offset convention
+                    });
+                    pen_x += g.advance as f64;
+                }
+                if indices.is_empty() { continue; }
+
+                let glyph_run = DWRITE_GLYPH_RUN {
+                    fontFace: std::mem::ManuallyDrop::new(Some(face)),
+                    fontEmSize: size,
+                    glyphCount: indices.len() as u32,
+                    glyphIndices: indices.as_ptr(),
+                    glyphAdvances: advances.as_ptr(),
+                    glyphOffsets: offsets.as_ptr(),
+                    isSideways: windows::Win32::Foundation::BOOL(0),
+                    bidiLevel: 0,
+                };
+                let baseline_origin = D2D_POINT_2F { x: (x + run_off) as f32, y: (y + baseline) as f32 };
+                unsafe {
+                    self.rt.DrawGlyphRun(
+                        baseline_origin,
+                        &glyph_run as *const _,
+                        &brush,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+            }
+        }
     }
 
-    pub fn draw_image(&mut self, _image: &peniko::ImageData, _x: f64, _y: f64, _w: f64, _h: f64) {
-        log::warn!("Direct2D backend: draw_image not yet implemented (Phase 4), skipping.");
+    pub fn draw_image(&mut self, image: &peniko::ImageData, x: f64, y: f64, w: f64, h: f64) {
+        if w <= 0.0 || h <= 0.0 || image.width == 0 || image.height == 0 { return; }
+        let Some(bitmap) = self.image_cache.get_or_create(&self.rt, image) else { return };
+        let dest = D2D_RECT_F { left: x as f32, top: y as f32, right: (x + w) as f32, bottom: (y + h) as f32 };
+        unsafe {
+            self.rt.DrawBitmap(
+                &bitmap,
+                Some(&dest as *const _),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
+        }
     }
 
-    pub fn draw_image_with_transform(&mut self, _image: &peniko::ImageData, _transform: kurbo::Affine) {
-        log::warn!("Direct2D backend: draw_image_with_transform not yet implemented (Phase 4), skipping.");
+    /// `transform` carries both position and scale — draw the bitmap at its
+    /// natural size under a world transform, matching TinySkia's
+    /// `Pattern`-based approach (skia.rs) rather than pre-computing a
+    /// destination rect.
+    pub fn draw_image_with_transform(&mut self, image: &peniko::ImageData, transform: kurbo::Affine) {
+        if image.width == 0 || image.height == 0 { return; }
+        let Some(bitmap) = self.image_cache.get_or_create(&self.rt, image) else { return };
+        let [a, b, c, d, e, f] = transform.as_coeffs();
+        let matrix = windows::Foundation::Numerics::Matrix3x2 {
+            M11: a as f32, M12: b as f32,
+            M21: c as f32, M22: d as f32,
+            M31: e as f32, M32: f as f32,
+        };
+        let dest = D2D_RECT_F { left: 0.0, top: 0.0, right: image.width as f32, bottom: image.height as f32 };
+        unsafe {
+            self.rt.SetTransform(&matrix as *const _);
+            self.rt.DrawBitmap(
+                &bitmap,
+                Some(&dest as *const _),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
+            self.rt.SetTransform(&windows::Foundation::Numerics::Matrix3x2 {
+                M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: 0.0, M32: 0.0,
+            } as *const _);
+        }
     }
 
     pub fn push_layer(&mut self, _x: f64, _y: f64, _w: f64, _h: f64) {
@@ -292,18 +593,5 @@ impl Direct2DFrame {
     }
     pub fn append_scene(&mut self, _scene: &vello::Scene, _transform: Option<kurbo::Affine>) {
         panic!("Direct2DFrame::append_scene called — supports_caching() is false, callers must check it first");
-    }
-
-    /// Finish the frame — `EndDraw()` only. Presenting the swap chain is
-    /// `D2DPresent::present()`'s job, called directly from `glyx-core`'s
-    /// `Present::Direct2D` render-dispatch arm after this returns, mirroring
-    /// `finish_frame_soft`'s split (renderer finishes drawing, present
-    /// target owns the actual OS-level present call).
-    pub fn finish(self) -> Result<(), RendererError> {
-        unsafe {
-            self.rt
-                .EndDraw(None, None)
-                .map_err(|e| RendererError::Render(format!("D2D EndDraw failed: {e}")))
-        }
     }
 }

@@ -569,20 +569,58 @@ impl Direct2DFrame {
         }
     }
 
-    pub fn push_layer(&mut self, _x: f64, _y: f64, _w: f64, _h: f64) {
-        log::warn!("Direct2D backend: push_layer not yet implemented (Phase 5), skipping.");
+    /// Shared implementation for all three `push_*_layer` variants —
+    /// `ID2D1DeviceContext::PushLayer` with `D2D1_LAYER_PARAMETERS1`, which
+    /// (unlike `ID2D1HwndRenderTarget`'s older layer API) supports a real
+    /// per-layer `opacity` field. This is the correctness win the plan
+    /// called out for choosing the device-context path over the legacy
+    /// HWND render target: TinySkia's `push_layer_with_alpha` only clips,
+    /// it doesn't actually apply opacity (see skia.rs doc comment) — this
+    /// implementation does both correctly.
+    fn push_layer_impl(&mut self, x: f64, y: f64, w: f64, h: f64, radius: f64, opacity: f32) {
+        if w <= 0.0 || h <= 0.0 { return; }
+        let bounds = D2D_RECT_F { left: x as f32, top: y as f32, right: (x + w) as f32, bottom: (y + h) as f32 };
+
+        let geometric_mask: Option<ID2D1Geometry> = if radius > 0.0 {
+            unsafe {
+                self.rt.GetFactory().ok().and_then(|factory: ID2D1Factory| {
+                    let rr = D2D1_ROUNDED_RECT { rect: bounds, radiusX: radius as f32, radiusY: radius as f32 };
+                    factory.CreateRoundedRectangleGeometry(&rr as *const _).ok()
+                }).and_then(|g| g.cast::<ID2D1Geometry>().ok())
+            }
+        } else {
+            None
+        };
+
+        let identity = windows::Foundation::Numerics::Matrix3x2 {
+            M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: 0.0, M32: 0.0,
+        };
+        let params = D2D1_LAYER_PARAMETERS1 {
+            contentBounds: bounds,
+            geometricMask: std::mem::ManuallyDrop::new(geometric_mask),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: identity,
+            opacity,
+            opacityBrush: std::mem::ManuallyDrop::new(None),
+            layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+        };
+        unsafe { self.ctx.PushLayer(&params as *const _, None); }
     }
 
-    pub fn push_rounded_layer(&mut self, _x: f64, _y: f64, _w: f64, _h: f64, _radius: f64) {
-        log::warn!("Direct2D backend: push_rounded_layer not yet implemented (Phase 5), skipping.");
+    pub fn push_layer(&mut self, x: f64, y: f64, w: f64, h: f64) {
+        self.push_layer_impl(x, y, w, h, 0.0, 1.0);
     }
 
-    pub fn push_layer_with_alpha(&mut self, _x: f64, _y: f64, _w: f64, _h: f64, _alpha: f32) {
-        log::warn!("Direct2D backend: push_layer_with_alpha not yet implemented (Phase 5), skipping.");
+    pub fn push_rounded_layer(&mut self, x: f64, y: f64, w: f64, h: f64, radius: f64) {
+        self.push_layer_impl(x, y, w, h, radius, 1.0);
+    }
+
+    pub fn push_layer_with_alpha(&mut self, x: f64, y: f64, w: f64, h: f64, alpha: f32) {
+        self.push_layer_impl(x, y, w, h, 0.0, alpha);
     }
 
     pub fn pop_layer(&mut self) {
-        log::warn!("Direct2D backend: pop_layer not yet implemented (Phase 5), skipping.");
+        unsafe { self.ctx.PopLayer(); }
     }
 
     pub fn scene_mut(&mut self) -> &mut vello::Scene {

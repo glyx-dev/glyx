@@ -59,10 +59,11 @@ changes.
 - New native bindings (`__glyx_*`) need: the binding in
   `glyx-runtime/src/bindings.rs`, a snapshot stub so snapshot builds don't
   break, and a JS wrapper in `@glyx-dev/react`.
-- Renderer changes must be checked against all three backends (TinySkia,
-  FemtoVG, Vello) — behavior that only works on one is a bug. Note that
-  WGSL shaders validate at pipeline creation (runtime), not at
-  `cargo build`, so shader changes need a real render smoke test.
+- Renderer changes must be checked against every backend the change applies
+  to (TinySkia, Vello, and Direct2D on Windows) — behavior that only works
+  on one is a bug. Note that WGSL shaders validate at pipeline creation
+  (runtime), not at `cargo build`, so shader changes need a real render
+  smoke test.
 - Match the style of surrounding code. Comments explain *why*, not *what*.
 
 ## Commit messages

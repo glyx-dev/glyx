@@ -13,6 +13,8 @@ use glyx_text::TextSystem;
 
 use crate::{LabelKey, CachedLabel};
 use crate::soft_present::SoftPresent;
+#[cfg(target_os = "windows")]
+use crate::d2d_present::D2DPresent;
 
 // ── Present target ───────────────────────────────────────────────────────────
 
@@ -24,17 +26,38 @@ use crate::soft_present::SoftPresent;
 pub(super) enum Present {
     Gpu(GpuContext),
     Soft(SoftPresent),
+    /// Direct2D (Windows only, experimental — see `d2d_present.rs`). Owns its
+    /// own D3D11 device + DXGI swap chain, entirely separate from `Gpu`'s
+    /// wgpu device — the two never coexist for the same window in Phase 1-5
+    /// (Canvas3D-on-Direct2D compatibility is Phase 6, deferred).
+    #[cfg(target_os = "windows")]
+    Direct2D(D2DPresent),
 }
 
 impl Present {
     pub(super) fn width(&self) -> u32 {
-        match self { Present::Gpu(g) => g.width(),  Present::Soft(s) => s.width() }
+        match self {
+            Present::Gpu(g)  => g.width(),
+            Present::Soft(s) => s.width(),
+            #[cfg(target_os = "windows")]
+            Present::Direct2D(d) => d.width(),
+        }
     }
     pub(super) fn height(&self) -> u32 {
-        match self { Present::Gpu(g) => g.height(), Present::Soft(s) => s.height() }
+        match self {
+            Present::Gpu(g)  => g.height(),
+            Present::Soft(s) => s.height(),
+            #[cfg(target_os = "windows")]
+            Present::Direct2D(d) => d.height(),
+        }
     }
     pub(super) fn resize(&mut self, w: u32, h: u32) {
-        match self { Present::Gpu(g) => g.resize(w, h), Present::Soft(s) => s.resize(w, h) }
+        match self {
+            Present::Gpu(g)  => g.resize(w, h),
+            Present::Soft(s) => s.resize(w, h),
+            #[cfg(target_os = "windows")]
+            Present::Direct2D(d) => d.resize(w, h),
+        }
     }
     pub(super) fn poll(&self) {
         if let Present::Gpu(g) = self { g.poll(); }
@@ -43,6 +66,8 @@ impl Present {
         match self {
             Present::Gpu(g)  => g.memory_counters(),
             Present::Soft(_) => (0, 0, 0, 0, 0),
+            #[cfg(target_os = "windows")]
+            Present::Direct2D(_) => (0, 0, 0, 0, 0),
         }
     }
 }
@@ -204,6 +229,26 @@ pub(super) struct PerWindowState {
     pub(super) cursor_blink_on:       bool,
     pub(super) cursor_blink_deadline: Instant,
     pub(super) cursor_was_active: bool,
+    /// Consecutive frames that hit the early-return gate (nothing changed).
+    /// Once this crosses the trim threshold, GPU scratch buffers are
+    /// reclaimed via `trim_resources()` even though the window never lost
+    /// focus/occlusion — bounds RSS if a stray timer keeps waking the loop.
+    pub(super) idle_gate_frames: u32,
+    /// GPU capability tier probed at window creation — reused (not
+    /// re-probed) to scale the idle-trim check interval: integrated/none
+    /// tiers pay real system RAM for the GPU pool and get checked often,
+    /// discrete tiers have their own VRAM budget and are checked rarely.
+    pub(super) gpu_tier: glyx_gpu::GpuTier,
+    /// Wall-clock time of the last idle-trim check (not necessarily the
+    /// last actual trim — a check can decide the pool hasn't grown enough
+    /// to bother). Independent of `idle_gate_frames` so a periodically
+    /// (but not fully) idle screen — e.g. a blinking text cursor resetting
+    /// the frame-streak counter every ~500ms — still gets checked.
+    pub(super) last_idle_trim_check: Instant,
+    /// `allocator_reserved_bytes` (from `memory_counters()`) as of the last
+    /// actual trim. The next check only trims again once reserved bytes
+    /// have grown past this by the trim margin.
+    pub(super) last_trim_reserved_bytes: u64,
     /// Screen rect of the focused TextInput (captured during render) — the
     /// damage region for blink-only frames under software present.
     pub(super) cursor_node_rect: Option<(f64, f64, f64, f64)>,

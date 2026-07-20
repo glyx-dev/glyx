@@ -98,6 +98,8 @@ mod scene;
 mod layout;
 mod render;
 mod soft_present;
+#[cfg(target_os = "windows")]
+mod d2d_present;
 #[cfg(feature = "a11y")]
 mod a11y;
 
@@ -922,6 +924,21 @@ pub fn run(mut config: AppConfig) -> bool {
                     pollster::block_on(glyx_gpu::probe_adapter_info())
                         .unwrap_or((glyx_gpu::GpuTier::None, "no adapter".into()));
                 let backend_kind = resolve_backend(render_mode_config, probe_tier, force_cpu);
+                // renderMode:'gpu' forced on a tier the 'auto' heuristic would have
+                // routed to TinySkia (integrated/virtual GPU, or no adapter) puts
+                // Vello's persistent compute buffer pool on what is effectively
+                // system RAM — a real cost, not a false alarm. One-time warning so
+                // apps that explicitly opted into 'gpu' know what they're trading.
+                if render_mode_config == RenderMode::Gpu
+                    && matches!(probe_tier, glyx_gpu::GpuTier::Integrated | glyx_gpu::GpuTier::None)
+                {
+                    log::warn!(
+                        "[glyx] renderMode='gpu' forced on an integrated/virtual GPU ({}) — \
+                         Vello's GPU buffer pool counts as system RAM here; 'auto' or \
+                         'skia' would use TinySkia instead and use significantly less memory",
+                        probe_name,
+                    );
+                }
                 if render_mode_config == RenderMode::Auto {
                     log::info!(
                         "[glyx] renderMode=auto → {} ({})",
@@ -929,6 +946,10 @@ pub fn run(mut config: AppConfig) -> bool {
                             BackendKind::TinySkia                 => "skia",
                             BackendKind::Vello { use_cpu: false } => "vello",
                             BackendKind::Vello { use_cpu: true  } => "vello/cpu",
+                            // Auto never resolves to Direct2D (see resolve_backend
+                            // and auto_never_selects_direct2d test) — unreachable
+                            // in practice, kept for match exhaustiveness.
+                            BackendKind::Direct2D                 => "direct2d",
                         },
                         probe_name,
                     );
@@ -956,6 +977,32 @@ pub fn run(mut config: AppConfig) -> bool {
                                 (Present::Gpu(gpu_ctx), r)
                             }
                         }
+                    } else if cfg!(target_os = "windows") && matches!(backend_kind, BackendKind::Direct2D) {
+                        // Direct2D bypasses AnyRenderer::new entirely (same
+                        // shape as the TinySkia soft-present branch above) —
+                        // its device context comes from D2DPresent, which
+                        // needs the window's raw HWND, not a wgpu GpuContext.
+                        #[cfg(target_os = "windows")]
+                        {
+                            match d2d_present::D2DPresent::new(Arc::clone(&window)) {
+                                Ok(dp) => {
+                                    let r = AnyRenderer::Direct2D(
+                                        glyx_renderer::Direct2DRenderer::new(
+                                            dp.device_context().clone()));
+                                    (Present::Direct2D(dp), r)
+                                }
+                                Err(e) => {
+                                    log::warn!("Direct2D present unavailable ({e}); falling back to wgpu/TinySkia");
+                                    let gpu_ctx = pollster::block_on(GpuContext::new(window.clone()))
+                                        .expect("Failed to initialise GPU");
+                                    let r = AnyRenderer::new(&gpu_ctx, BackendKind::TinySkia)
+                                        .expect("Failed to initialise renderer");
+                                    (Present::Gpu(gpu_ctx), r)
+                                }
+                            }
+                        }
+                        #[cfg(not(target_os = "windows"))]
+                        unreachable!("cfg!(target_os = \"windows\") guard above")
                     } else {
                         let gpu_ctx = pollster::block_on(GpuContext::new(window.clone()))
                             .expect("Failed to initialise GPU");
@@ -1291,6 +1338,10 @@ pub fn run(mut config: AppConfig) -> bool {
                     cursor_blink_on:       true,
                     cursor_blink_deadline: Instant::now() + Duration::from_millis(500),
                     cursor_was_active:     false,
+                    idle_gate_frames:      0,
+                    gpu_tier:              probe_tier,
+                    last_idle_trim_check:  Instant::now(),
+                    last_trim_reserved_bytes: 0,
                     cursor_node_rect:      None,
                     focused_node:          None,
                     #[cfg(feature = "a11y")]
@@ -1841,7 +1892,52 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 // Release: skip entirely when nothing changed.
                 #[cfg(not(feature = "dev"))]
-                if !scene_needs_gpu { return; }
+                if !scene_needs_gpu {
+                    // Defense in depth against a stray/self-rearming timer keeping
+                    // the loop awake on an otherwise-static screen: after enough
+                    // consecutive no-op frames, reclaim Vello's scratch buffer pool
+                    // the same way occlusion/focus-loss already do. Re-fires every
+                    // IDLE_GATE_TRIM_THRESHOLD frames, not just once per streak.
+                    const IDLE_GATE_TRIM_THRESHOLD: u32 = 120;
+                    s.idle_gate_frames = s.idle_gate_frames.saturating_add(1);
+                    let mut should_trim = s.idle_gate_frames % IDLE_GATE_TRIM_THRESHOLD == 0;
+
+                    // Wall-clock check, independent of the frame streak above: a
+                    // screen with a focused blinking text cursor forces a real
+                    // render every ~500ms (blink_changed), which resets
+                    // idle_gate_frames well before it reaches the streak
+                    // threshold — that screen would otherwise never trim. Scaled
+                    // by GPU tier: integrated/none tiers pay real system RAM for
+                    // the pool and get checked often; discrete tiers have their
+                    // own VRAM budget and are checked rarely.
+                    let trim_check_interval = match s.gpu_tier {
+                        glyx_gpu::GpuTier::Integrated | glyx_gpu::GpuTier::None => Duration::from_secs(2),
+                        glyx_gpu::GpuTier::DiscreteIntel | glyx_gpu::GpuTier::Discrete => Duration::from_secs(15),
+                    };
+                    if now.duration_since(s.last_idle_trim_check) >= trim_check_interval {
+                        s.last_idle_trim_check = now;
+                        // Only actually trim if the reserved pool has grown
+                        // meaningfully since the last trim — skips the
+                        // reallocation cost on a pool that's already small and
+                        // stable (memory_counters() is atomic reads, cheap to
+                        // call on every check either way).
+                        const TRIM_GROWTH_MARGIN_BYTES: u64 = 24 * 1024 * 1024;
+                        let (_, _, reserved, _, _) = s.gpu.memory_counters();
+                        if reserved >= s.last_trim_reserved_bytes.saturating_add(TRIM_GROWTH_MARGIN_BYTES) {
+                            should_trim = true;
+                        }
+                    }
+
+                    if should_trim {
+                        s.renderer.trim_resources();
+                        if let Present::Gpu(gpu) = &s.gpu { gpu.poll(); }
+                        let (_, _, reserved_after, _, _) = s.gpu.memory_counters();
+                        s.last_trim_reserved_bytes = reserved_after;
+                    }
+                    return;
+                }
+                #[cfg(not(feature = "dev"))]
+                { s.idle_gate_frames = 0; }
 
                 // Dev: compute whether a full render is actually required.
                 #[cfg(feature = "dev")]
@@ -1865,6 +1961,8 @@ pub fn run(mut config: AppConfig) -> bool {
                         None    => { surface_lost = true; None }
                     },
                     Present::Soft(_) => None,
+                    #[cfg(target_os = "windows")]
+                    Present::Direct2D(_) => None,
                 };
                 if surface_lost {
                     log::warn!("Surface lost or outdated; reconfiguring.");
@@ -1905,8 +2003,17 @@ pub fn run(mut config: AppConfig) -> bool {
                 // Without this fix, TinySkia (supports_caching=false) never
                 // populates scene_cache, so the old guard was always false and
                 // TinySkia ran a full 60fps re-rasterize even on static screens.
+                // Direct2D has no cached-frame blit yet (Phase 1) — always
+                // take the full-render path there rather than risk presenting
+                // a stale/nonexistent cached frame.
+                #[cfg(all(feature = "dev", target_os = "windows"))]
+                let direct2d_active = matches!(s.gpu, Present::Direct2D(_));
+                #[cfg(all(feature = "dev", not(target_os = "windows")))]
+                let direct2d_active = false;
+
                 #[cfg(feature = "dev")]
-                if !needs_full_render && (s.pipeline_cache_saved || !s.scene_cache.is_empty()) {
+                if !needs_full_render && !direct2d_active
+                    && (s.pipeline_cache_saved || !s.scene_cache.is_empty()) {
                     // Stamp last_frame_at so FPS reflects the visual refresh rate
                     // (~20fps from the overlay timer), not the full-render rate (~4fps).
                     s.perf.lock().last_frame_at = Some(frame_start);
@@ -1921,6 +2028,8 @@ pub fn run(mut config: AppConfig) -> bool {
                             }
                         }
                         Present::Soft(sp) => sp.re_present(),
+                        #[cfg(target_os = "windows")]
+                        Present::Direct2D(_) => unreachable!("excluded via direct2d_active guard above"),
                     }
                     return;
                 }
@@ -2414,6 +2523,34 @@ pub fn run(mut config: AppConfig) -> bool {
                             }
                         }
                     }
+                    #[cfg(target_os = "windows")]
+                    Present::Direct2D(dp) => {
+                        // D2D draws directly into its own device context during
+                        // frame-build (no CPU pixel buffer, no wgpu texture) —
+                        // finish_frame_d2d is EndDraw() + reclaiming the font
+                        // cache moved into the frame at begin_frame; presenting
+                        // the swap chain is D2DPresent's own job, called right after.
+                        #[cfg(feature = "canvas3d")]
+                        if !canvas3d_overlays.is_empty() {
+                            // Canvas3D-on-Direct2D lazy GPU sharing is Phase 6
+                            // (deferred) — not yet supported.
+                            log::debug!("Canvas3D overlays skipped: not yet supported on the Direct2D backend.");
+                        }
+                        match (&mut s.renderer, frame) {
+                            (glyx_renderer::AnyRenderer::Direct2D(r),
+                             glyx_renderer::AnyFrame::Direct2D(f)) => {
+                                if let Err(e) = r.finish_frame_d2d(f) {
+                                    log::error!("Direct2D render error: {e}");
+                                    return;
+                                }
+                                dp.present();
+                            }
+                            _ => {
+                                log::error!("Direct2D present requires the Direct2D renderer");
+                                return;
+                            }
+                        }
+                    }
                 }
 
                 // Release staging buffers and D3D12 command allocators from
@@ -2662,6 +2799,27 @@ mod tests {
         assert_eq!(resolve_backend(RenderMode::TinySkia, GpuTier::None, true), BackendKind::TinySkia);
     }
 
+    #[test]
+    fn auto_never_selects_direct2d() {
+        // Direct2D is experimental/opt-in — Auto must only ever choose between
+        // Vello and TinySkia, regardless of tier, even on Windows.
+        for tier in [GpuTier::None, GpuTier::Integrated, GpuTier::DiscreteIntel, GpuTier::Discrete] {
+            let backend = resolve_backend(RenderMode::Auto, tier, false);
+            assert_ne!(backend, BackendKind::Direct2D);
+        }
+    }
+
+    #[test]
+    fn explicit_direct2d_pin_resolves_per_platform() {
+        let backend = resolve_backend(RenderMode::Direct2D, GpuTier::Integrated, false);
+        #[cfg(target_os = "windows")]
+        assert_eq!(backend, BackendKind::Direct2D);
+        // Non-Windows: falls back to TinySkia (with a logged warning) rather
+        // than erroring, since Direct2D isn't a real option on that platform.
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(backend, BackendKind::TinySkia);
+    }
+
     // ── renderMode string parsing ──────────────────────────────────────────────
 
     #[test]
@@ -2670,6 +2828,7 @@ mod tests {
         assert_eq!(parse_render_mode("skia"), RenderMode::TinySkia);
         assert_eq!(parse_render_mode("cpu"), RenderMode::Cpu);
         assert_eq!(parse_render_mode("gpu"), RenderMode::Gpu);
+        assert_eq!(parse_render_mode("direct2d"), RenderMode::Direct2D);
         // Unknown values fall back to Gpu rather than erroring.
         assert_eq!(parse_render_mode("not-a-mode"), RenderMode::Gpu);
     }

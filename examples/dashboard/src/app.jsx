@@ -166,13 +166,20 @@ function ChartWidget({ config, timeseries, deviceData, width }) {
   // Card already applies 16px padding on each side; leave a little extra right
   // breathing room so the last axis labels aren't clipped.
   const cw = Math.max(80, width - 36);
+  const [selected, setSelected] = useState(null);
   let chart = null;
+
+  // Real click-to-select: every chart type reports the raw data point it was
+  // built from (not just x/y pixel coords), so apps can drive selection,
+  // drill-down, etc. straight off onPointPress.
+  const onPointPress = (point) => setSelected(point);
 
   if (config.type === 'area') {
     chart = (
       <AreaChart
         data={timeseries.map((d) => ({ x: d.timestamp, y: d[config.dataKey] }))}
         width={cw} height={h} color={COLORS.sky}
+        onPointPress={onPointPress} zoomPan
       />
     );
   } else if (config.type === 'line') {
@@ -180,6 +187,7 @@ function ChartWidget({ config, timeseries, deviceData, width }) {
       <LineChart
         data={timeseries.map((d) => ({ x: d.timestamp, y: d[config.dataKey] }))}
         width={cw} height={h} color={COLORS.emerald} showDots={false}
+        onPointPress={onPointPress}
       />
     );
   } else if (config.type === 'bar') {
@@ -187,16 +195,36 @@ function ChartWidget({ config, timeseries, deviceData, width }) {
       <BarChart
         data={timeseries.map((d) => ({ x: d.timestamp, y: d[config.dataKey] }))}
         width={cw} height={h} color={COLORS.indigo}
+        onPointPress={onPointPress}
       />
     );
   } else if (config.type === 'pie') {
-    chart = <PieChart data={deviceData} width={cw} height={h} innerRadius={0.5} />;
+    // Legend adds its own row below the donut — give it real room within the
+    // widget's fixed height budget instead of letting it overflow the card.
+    chart = (
+      <PieChart
+        data={deviceData} width={cw} height={h - 36} innerRadius={0.5}
+        onPointPress={onPointPress} showLegend
+      />
+    );
   }
 
   return (
     <Card style={{ padding: 16, width }}>
-      <Text fontSize={14} style={{ color: C.text, fontWeight: '600', marginBottom: 12 }}>{config.title}</Text>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <Text fontSize={14} style={{ color: C.text, fontWeight: '600' }}>{config.title}</Text>
+        {selected ? (
+          <Text fontSize={12} style={{ color: C.textMuted }}>
+            {String(selected.x)}: {fmtNum(selected[config.dataKey] ?? selected.y)}
+          </Text>
+        ) : null}
+      </View>
       <View style={{ height: h }}>{chart}</View>
+      {config.type === 'area' ? (
+        <Text fontSize={11} style={{ color: C.textMuted, marginTop: 6 }}>
+          Drag to pan, use +/−/⟲ to zoom · click a point to select it
+        </Text>
+      ) : null}
     </Card>
   );
 }

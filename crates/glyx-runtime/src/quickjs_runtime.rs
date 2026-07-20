@@ -100,6 +100,11 @@ pub struct QuickJsRuntime {
     next_window_id:     Arc<std::sync::atomic::AtomicU32>,
     backend_commands:   crate::BackendRegistry,
     js_plugins:         crate::JsPlugins,
+    /// `cmd_name -> (global_name, export_key)` for JS-plugin exports. Shared
+    /// (same `Rc<RefCell<...>>`) between the registered `backend_call`
+    /// closure and `reload_plugin`'s dev-mode HMR path — see
+    /// `quickjs_ipc`'s module doc.
+    js_backend_commands: crate::quickjs_ipc::JsBackendCommands,
 }
 
 impl QuickJsRuntime {
@@ -194,6 +199,8 @@ impl QuickJsRuntime {
         let gamepad_gilrs: crate::quickjs_sys::GamepadGilrs = Arc::new(std::cell::RefCell::new(None));
         let hotkey_state: crate::quickjs_sys::HotkeyStateCell = Arc::new(std::cell::RefCell::new(None));
         let next_hotkey_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let js_backend_commands: crate::quickjs_ipc::JsBackendCommands =
+            Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
 
         let this = Self {
             rt, ctx, tokio, queue, redraw, window, next_id, next_image_id,
@@ -229,6 +236,7 @@ impl QuickJsRuntime {
             db_pools, video_events, next_video_id, webview_events,
             raycast_requests, raycast_results,
             ipc_bus, my_handle, next_window_id, backend_commands, js_plugins,
+            js_backend_commands,
         };
         this.register_core_bindings()?;
         this.install_polyfills()?;
@@ -413,6 +421,7 @@ impl QuickJsRuntime {
             next_window_id:   Arc::clone(&self.next_window_id),
             backend_commands: Arc::clone(&self.backend_commands),
             js_plugins:       Arc::clone(&self.js_plugins),
+            js_backend_commands: Rc::clone(&self.js_backend_commands),
         };
         self.ctx.with(|ctx| do_register(ctx, reg))
             .map_err(|e| RuntimeError::CompileError(format!("quickjs binding registration: {e}")))
@@ -520,6 +529,7 @@ struct RegisterState {
     next_window_id:   Arc<std::sync::atomic::AtomicU32>,
     backend_commands: crate::BackendRegistry,
     js_plugins:       crate::JsPlugins,
+    js_backend_commands: crate::quickjs_ipc::JsBackendCommands,
 }
 
 /// Registers every `__glyx_*` binding for this backend. A plain fn item
@@ -1266,14 +1276,13 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
 
         // Eval each JS plugin's bundled IIFE (sets globalThis.<global_name> to
         // its exports object), then walk each exports object's own function
-        // properties into `js_backend_commands`, mirroring V8's identical
-        // pass in bindings/mod.rs's register_all. Static registration only —
-        // no dev-mode hot-reload port yet (V8's reload_plugin equivalent),
-        // so a plugin edit during `glyx dev` needs a full window restart on
-        // QuickJS today, unlike V8.
-        let js_backend_commands = crate::quickjs_ipc::eval_js_plugins(&ctx, &reg.js_plugins);
+        // properties into `reg.js_backend_commands`, mirroring V8's identical
+        // pass in bindings/mod.rs's register_all. `reload_plugin` (dev-mode
+        // HMR) mutates this same shared cell in place after startup.
+        crate::quickjs_ipc::eval_js_plugins(&ctx, &reg.js_plugins, &reg.js_backend_commands);
 
         let commands = reg.backend_commands.clone();
+        let js_backend_commands = Rc::clone(&reg.js_backend_commands);
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
         let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, name: String, args_json: Opt<String>| {
             crate::quickjs_ipc::backend_call(
@@ -1716,10 +1725,11 @@ impl JsRuntime for QuickJsRuntime {
         }
     }
 
-    fn reload_plugin(&mut self, _global_name: &str, _prefix: Option<&str>, _bundled_js: &str) {
-        // Plugin hot-reload depends on the backend-command registry being
-        // wired (Phase 2 work) — no-op until then.
-        log::warn!("QuickJsRuntime: reload_plugin is not yet implemented");
+    fn reload_plugin(&mut self, global_name: &str, prefix: Option<&str>, bundled_js: &str) {
+        let commands = Rc::clone(&self.js_backend_commands);
+        self.ctx.with(|ctx| {
+            crate::quickjs_ipc::reload_js_plugin(&ctx, &commands, global_name, prefix, bundled_js);
+        });
     }
 
     fn gc_hint(&mut self) {
@@ -1821,6 +1831,66 @@ mod tests {
         rt.tick();
         let out = rt.eval("globalThis.__err").expect("eval should succeed");
         assert!(out.contains("no such command"), "got: {out}");
+    }
+
+    #[test]
+    fn reload_plugin_picks_up_new_exports_and_drops_removed_ones() {
+        let (_tokio_rt, mut rt) = new_runtime_with_plugin(
+            Some("notes"),
+            "globalThis.__glyx_plugin_notes = { \
+                getAll: async function() { return 'v1'; }, \
+                oldOnly: async function() { return 'gone-after-reload'; } \
+             };",
+            "__glyx_plugin_notes",
+        );
+
+        // v1: both commands work.
+        rt.eval(
+            "globalThis.__v1a = null; globalThis.__v1b = null; \
+             __glyx_backend_call('notes.getAll', '{}').then(r => { globalThis.__v1a = r; }); \
+             __glyx_backend_call('notes.oldOnly', '{}').then(r => { globalThis.__v1b = r; });"
+        ).expect("eval should succeed");
+        rt.tick();
+        assert!(rt.eval("globalThis.__v1a").unwrap().contains('v'));
+        assert!(rt.eval("globalThis.__v1b").unwrap().contains("gone-after-reload"));
+
+        // Simulate a dev-mode rebundle: getAll's behavior changes, oldOnly is removed,
+        // newFn is added.
+        rt.reload_plugin(
+            "__glyx_plugin_notes",
+            Some("notes"),
+            "globalThis.__glyx_plugin_notes = { \
+                getAll: async function() { return 'v2'; }, \
+                newFn:  async function() { return 'added-after-reload'; } \
+             };",
+        );
+
+        // getAll now returns the new behavior.
+        rt.eval(
+            "globalThis.__v2 = null; \
+             __glyx_backend_call('notes.getAll', '{}').then(r => { globalThis.__v2 = r; });"
+        ).expect("eval should succeed");
+        rt.tick();
+        let v2 = rt.eval("globalThis.__v2").expect("eval should succeed");
+        assert!(v2.contains("v2"), "expected reloaded behavior, got: {v2}");
+
+        // The new export is callable.
+        rt.eval(
+            "globalThis.__newFn = null; \
+             __glyx_backend_call('notes.newFn', '{}').then(r => { globalThis.__newFn = r; });"
+        ).expect("eval should succeed");
+        rt.tick();
+        let new_fn = rt.eval("globalThis.__newFn").expect("eval should succeed");
+        assert!(new_fn.contains("added-after-reload"), "got: {new_fn}");
+
+        // The removed export now rejects, same as any unknown command.
+        rt.eval(
+            "globalThis.__gone = null; \
+             __glyx_backend_call('notes.oldOnly', '{}').catch(e => { globalThis.__gone = String(e); });"
+        ).expect("eval should succeed");
+        rt.tick();
+        let gone = rt.eval("globalThis.__gone").expect("eval should succeed");
+        assert!(gone.contains("no such command"), "got: {gone}");
     }
 
     #[test]

@@ -174,6 +174,13 @@ pub enum RenderMode {
     Cpu,
     /// tiny-skia CPU rasterizer. Minimal RAM, pure Rust, no GPU pool.
     TinySkia,
+    /// Direct2D (Windows only, experimental). OS/driver-managed GPU-accelerated
+    /// 2D — measured to stay near TinySkia's flat memory profile instead of
+    /// Vello's persistent scene-buffer pool, since D2D's caches are shared at
+    /// the OS/driver level rather than privately allocated per app. Falls back
+    /// to TinySkia with a warning on non-Windows targets. Never auto-selected —
+    /// must be requested explicitly via `renderMode: 'direct2d'`.
+    Direct2D,
     /// Auto-detect: discrete GPU → Gpu, no GPU → TinySkia.
     #[default]
     Auto,

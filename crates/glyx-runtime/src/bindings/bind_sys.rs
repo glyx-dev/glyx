@@ -352,6 +352,9 @@ pub fn dialog_save_file_callback(
 
     let default_name = v8_arg_to_string(scope, &args, 0);
     let filters_json = v8_arg_to_string(scope, &args, 1);
+    // Only read inside the #[cfg(target_os = "windows")] block below —
+    // genuinely unused on other platforms, not a bug.
+    #[allow(unused_variables)]
     let hwnd         = state.hwnd;
     let (resolver, promise, queue, redraw) = make_promise(scope, state);
     rv.set(promise.into());
@@ -391,11 +394,18 @@ pub fn dialog_open_folder_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
+    // Only read inside the #[cfg(target_os = "windows")] block below —
+    // genuinely unused on other platforms, not a bug.
+    #[allow(unused_variables)]
     let hwnd = state.hwnd;
     let (resolver, promise, queue, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
     state.tokio.spawn(async move {
+        // Never reassigned on non-Windows (the only `dialog = ...` rebind is
+        // inside the cfg(windows) block below) — `mut` is genuinely unused
+        // there, not a bug.
+        #[allow(unused_mut)]
         let mut dialog = rfd::AsyncFileDialog::new();
         #[cfg(target_os = "windows")]
         if let Some(h) = hwnd {

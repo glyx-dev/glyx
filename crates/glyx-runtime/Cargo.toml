@@ -55,10 +55,13 @@ glyx-macros        = { path = "../glyx-macros" }
 glyx-verify        = { path = "../glyx-verify" }
 libloading         = { workspace = true }
 hex                = { workspace = true }
+# fs.watch (bind_fs.rs) is cross-platform (inotify/FSEvents/ReadDirectoryChangesW) —
+# must not live in the Windows-only [target] block below (it did, by accident,
+# alongside windows-sys/clipboard-win, which genuinely are Windows-only).
+notify             = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader"] }
-notify             = { workspace = true }
 # Windows-only clipboard backend — clipboard-win wraps Win32 OpenClipboard/
 # GetClipboardData and doesn't build on other targets. macOS/Linux use the
 # cross-platform `arboard` dep above instead (see bindings/mod.rs's

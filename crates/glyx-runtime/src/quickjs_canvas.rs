@@ -12,6 +12,8 @@
 use rquickjs::{ArrayBuffer, Ctx, Function, TypedArray, Value};
 
 use crate::bindings::{decode_canvas_binary, CanvasCmd, SceneCommand, SceneQueue};
+#[cfg(feature = "canvas3d")]
+use crate::bindings::{RaycastRequest, RaycastRequestQueue, RaycastResults};
 
 // Only used by canvas3d_raycast below, which is `#[cfg(feature = "canvas3d")]`.
 #[cfg(feature = "canvas3d")]

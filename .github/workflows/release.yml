@@ -194,8 +194,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-cap-${{ matrix.cap }}
+      # libudev-dev is only actually needed for the "gamepad" cap (gilrs), but
+      # installed unconditionally here since apt is cheap and this matrix
+      # runs one job per cap anyway — simpler than a per-cap conditional.
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libv4l-dev libusb-1.0-0-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libv4l-dev libusb-1.0-0-dev libudev-dev
       - name: Build
         run: cargo build --release -p glyx-cap-${{ matrix.cap }}
       - name: Stage

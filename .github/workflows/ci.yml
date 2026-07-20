@@ -31,9 +31,11 @@ jobs:
       # also pulls in glyx-cap-webview → wry → glib-sys/webkit2gtk, which
       # release.yml's cap-linux job never builds (its cap matrix excludes
       # "webview" on every platform) — so those GTK/WebKitGTK dev packages
-      # are only needed here, not there.
+      # are only needed here, not there. Same story for libudev-dev:
+      # glyx-cap-gamepad → gilrs needs it here (--workspace) AND in
+      # release.yml's cap-linux job (which does build the gamepad cap).
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libv4l-dev libusb-1.0-0-dev libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libv4l-dev libusb-1.0-0-dev libudev-dev libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev
       # Zero-warnings bar (see CONTRIBUTING.md). RUSTFLAGS="-D warnings" is not
       # used because it would also deny warnings inside vendored path deps
       # (vendor/vello); instead, fail on any warning whose

@@ -18,7 +18,7 @@ v8       = ["glyx-runtime/v8"]
 quickjs  = ["glyx-runtime/quickjs"]
 dev      = ["notify", "glyx-runtime/dev", "ffmpeg-sidecar", "arboard"]
 camera   = ["dep:nokhwa", "glyx-runtime/camera"]
-canvas3d = ["dep:glyx-3d", "glyx-runtime/canvas3d"]
+canvas3d = ["dep:glyx-3d", "glyx-runtime/canvas3d", "glyx-renderer/canvas3d"]
 audio    = ["glyx-runtime/audio", "dep:rodio"]
 gamepad  = ["glyx-runtime/gamepad"]
 hid      = ["glyx-runtime/hid"]
@@ -86,7 +86,14 @@ windows-sys = { workspace = true, features = [
 # vtable calls would be significantly more error-prone, and this exact API
 # surface was already proven working in a standalone spike before this
 # dependency was added.
-windows = { version = "0.58", features = [
+# Pinned to 0.62 (matches wgpu-hal's own windows dependency, avoiding two
+# windows crate versions in the dependency graph). Note some base types
+# moved out of this crate between 0.58 and 0.62: D2D_POINT_2F ->
+# windows_numerics::Vector2, Foundation::Numerics::Matrix3x2 ->
+# windows_numerics::Matrix3x2 (same field names, different crate path),
+# BOOL -> a plain i32 type alias (was a tuple struct) - see direct2d.rs
+# call sites for the fixed usages.
+windows = { version = "0.62", features = [
     "Foundation_Numerics",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
@@ -97,3 +104,4 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
 ] }
+windows-numerics = "0.3"

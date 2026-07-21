@@ -34,21 +34,16 @@ pub(crate) struct D2DPresent {
 }
 
 impl D2DPresent {
+    /// A plain, independent D3D11 device — no `wgpu` involved at all. This is
+    /// what keeps Direct2D's normal case cheap (no GPU pool beyond D2D's own
+    /// OS-shared caches). Canvas3D content is composited via a separate,
+    /// independently-owned headless `wgpu` device instead of sharing this one
+    /// — see `direct2d_3d_bridge.rs`'s module doc for why a device-sharing
+    /// design was tried and abandoned.
     pub fn new(window: Arc<Window>) -> Result<Self, String> {
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-        let hwnd = match window
-            .window_handle()
-            .map_err(|e| format!("no window handle: {e}"))?
-            .as_raw()
-        {
-            RawWindowHandle::Win32(h) => HWND(h.hwnd.get() as *mut core::ffi::c_void),
-            _ => return Err("D2DPresent requires a Win32 window handle".into()),
-        };
-
+        let hwnd = Self::hwnd(&window)?;
         let size = window.inner_size();
-        let w = size.width.max(1);
-        let h = size.height.max(1);
+        let (w, h) = (size.width.max(1), size.height.max(1));
 
         unsafe {
             let mut d3d_device: Option<ID3D11Device> = None;
@@ -56,7 +51,7 @@ impl D2DPresent {
             D3D11CreateDevice(
                 None,
                 D3D_DRIVER_TYPE_HARDWARE,
-                None,
+                windows::Win32::Foundation::HMODULE::default(),
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                 None,
                 D3D11_SDK_VERSION,
@@ -67,55 +62,71 @@ impl D2DPresent {
             .map_err(|e| format!("D3D11CreateDevice: {e}"))?;
             let d3d_device = d3d_device.ok_or("D3D11CreateDevice returned no device")?;
 
-            let dxgi_device: IDXGIDevice = d3d_device
-                .cast()
-                .map_err(|e| format!("ID3D11Device -> IDXGIDevice: {e}"))?;
-            let dxgi_adapter = dxgi_device
-                .GetAdapter()
-                .map_err(|e| format!("IDXGIDevice::GetAdapter: {e}"))?;
-            let dxgi_factory: IDXGIFactory2 = dxgi_adapter
-                .GetParent()
-                .map_err(|e| format!("IDXGIAdapter::GetParent -> IDXGIFactory2: {e}"))?;
-
-            let swap_chain_desc = DXGI_SWAP_CHAIN_DESC1 {
-                Width: w,
-                Height: h,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                Stereo: false.into(),
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-                BufferCount: 2,
-                Scaling: DXGI_SCALING_STRETCH,
-                SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-                AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-                Flags: 0,
-            };
-            let swap_chain = dxgi_factory
-                .CreateSwapChainForHwnd(&d3d_device, hwnd, &swap_chain_desc, None, None)
-                .map_err(|e| format!("CreateSwapChainForHwnd: {e}"))?;
-
-            let d2d_factory: ID2D1Factory1 =
-                D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
-                    .map_err(|e| format!("D2D1CreateFactory: {e}"))?;
-            let d2d_device = d2d_factory
-                .CreateDevice(&dxgi_device)
-                .map_err(|e| format!("ID2D1Factory1::CreateDevice: {e}"))?;
-            let d2d_context = d2d_device
-                .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
-                .map_err(|e| format!("ID2D1Device::CreateDeviceContext: {e}"))?;
-
-            bind_target_bitmap(&swap_chain, &d2d_context)?;
-
+            let present = Self::from_d3d11_device(hwnd, w, h, d3d_device)?;
             log::info!("glyx-core: Direct2D present active ({w}x{h}, experimental).");
-
-            Ok(Self {
-                _d3d_device: d3d_device,
-                swap_chain,
-                d2d_context,
-                width: w,
-                height: h,
-            })
+            Ok(present)
         }
+    }
+
+    fn hwnd(window: &Window) -> Result<HWND, String> {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        match window
+            .window_handle()
+            .map_err(|e| format!("no window handle: {e}"))?
+            .as_raw()
+        {
+            RawWindowHandle::Win32(h) => Ok(HWND(h.hwnd.get() as *mut core::ffi::c_void)),
+            _ => Err("D2DPresent requires a Win32 window handle".into()),
+        }
+    }
+
+    unsafe fn from_d3d11_device(hwnd: HWND, w: u32, h: u32, d3d_device: ID3D11Device) -> Result<Self, String> {
+        let dxgi_device: IDXGIDevice = d3d_device
+            .cast()
+            .map_err(|e| format!("ID3D11Device -> IDXGIDevice: {e}"))?;
+        let dxgi_adapter = dxgi_device
+            .GetAdapter()
+            .map_err(|e| format!("IDXGIDevice::GetAdapter: {e}"))?;
+        let dxgi_factory: IDXGIFactory2 = dxgi_adapter
+            .GetParent()
+            .map_err(|e| format!("IDXGIAdapter::GetParent -> IDXGIFactory2: {e}"))?;
+
+        let swap_chain_desc = DXGI_SWAP_CHAIN_DESC1 {
+            Width: w,
+            Height: h,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Stereo: false.into(),
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: 2,
+            Scaling: DXGI_SCALING_STRETCH,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+            Flags: 0,
+        };
+        let swap_chain = dxgi_factory
+            .CreateSwapChainForHwnd(&d3d_device, hwnd, &swap_chain_desc, None, None)
+            .map_err(|e| format!("CreateSwapChainForHwnd: {e}"))?;
+
+        let d2d_factory: ID2D1Factory1 =
+            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
+                .map_err(|e| format!("D2D1CreateFactory: {e}"))?;
+        let d2d_device = d2d_factory
+            .CreateDevice(&dxgi_device)
+            .map_err(|e| format!("ID2D1Factory1::CreateDevice: {e}"))?;
+        let d2d_context = d2d_device
+            .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
+            .map_err(|e| format!("ID2D1Device::CreateDeviceContext: {e}"))?;
+
+        bind_target_bitmap(&swap_chain, &d2d_context)?;
+
+        Ok(Self {
+            _d3d_device: d3d_device,
+            swap_chain,
+            d2d_context,
+            width: w,
+            height: h,
+        })
     }
 
     pub fn width(&self) -> u32 { self.width }

@@ -286,6 +286,19 @@ pub struct Direct2DFrame {
     image_cache: Direct2DImageCache,
 }
 
+/// Direct2D clamps `radiusX`/`radiusY` independently, per axis (`radiusX` to
+/// `width/2`, `radiusY` to `height/2`) — unlike a CSS-style "fully rounded"
+/// pill radius (e.g. a large/`9999px` value meaning "as round as this shape
+/// allows"), which needs ONE radius clamped to the smaller of the two half
+/// extents so both ends stay circular with straight sides between them.
+/// Passing an unclamped large radius straight through degenerates a wide,
+/// short pill into a full ellipse instead. Mirrors `skia.rs`'s equivalent
+/// clamp (`radius.min(w * 0.5).min(h * 0.5)`) so both backends draw the same
+/// shape for the same input.
+fn clamp_radius(radius: f64, w: f64, h: f64) -> f32 {
+    radius.min(w * 0.5).min(h * 0.5) as f32
+}
+
 impl Direct2DFrame {
     pub fn supports_caching(&self) -> bool { false }
 
@@ -298,7 +311,8 @@ impl Direct2DFrame {
         if w <= 0.0 || h <= 0.0 { return; }
         let Some(brush) = self.solid_brush(color) else { return };
         let rect = D2D_RECT_F { left: x as f32, top: y as f32, right: (x + w) as f32, bottom: (y + h) as f32 };
-        let rr = D2D1_ROUNDED_RECT { rect, radiusX: radius as f32, radiusY: radius as f32 };
+        let r = clamp_radius(radius, w, h);
+        let rr = D2D1_ROUNDED_RECT { rect, radiusX: r, radiusY: r };
         unsafe { self.rt.FillRoundedRectangle(&rr as *const _, &brush); }
     }
 
@@ -330,7 +344,8 @@ impl Direct2DFrame {
     pub fn fill_rounded_rect_with_brush(&mut self, x: f64, y: f64, w: f64, h: f64, radius: f64, brush: &peniko::Brush) {
         if w <= 0.0 || h <= 0.0 { return; }
         let rect = D2D_RECT_F { left: x as f32, top: y as f32, right: (x + w) as f32, bottom: (y + h) as f32 };
-        let rr = D2D1_ROUNDED_RECT { rect, radiusX: radius as f32, radiusY: radius as f32 };
+        let r = clamp_radius(radius, w, h);
+        let rr = D2D1_ROUNDED_RECT { rect, radiusX: r, radiusY: r };
 
         match brush {
             peniko::Brush::Solid(color) => self.fill_rounded_rect(x, y, w, h, radius, *color),
@@ -339,18 +354,18 @@ impl Direct2DFrame {
                 match &grad.kind {
                     peniko::GradientKind::Linear(pos) => {
                         let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                            startPoint: D2D_POINT_2F { x: pos.start.x as f32, y: pos.start.y as f32 },
-                            endPoint:   D2D_POINT_2F { x: pos.end.x   as f32, y: pos.end.y   as f32 },
+                            startPoint: windows_numerics::Vector2 { X: pos.start.x as f32, Y: pos.start.y as f32 },
+                            endPoint:   windows_numerics::Vector2 { X: pos.end.x   as f32, Y: pos.end.y   as f32 },
                         };
                         let Ok(gb) = (unsafe { self.rt.CreateLinearGradientBrush(&props as *const _, None, &stops) }) else { return };
                         unsafe { self.rt.FillRoundedRectangle(&rr as *const _, &gb); }
                     }
                     peniko::GradientKind::Radial(pos) => {
                         let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
-                            center: D2D_POINT_2F { x: pos.end_center.x as f32, y: pos.end_center.y as f32 },
-                            gradientOriginOffset: D2D_POINT_2F {
-                                x: (pos.start_center.x - pos.end_center.x) as f32,
-                                y: (pos.start_center.y - pos.end_center.y) as f32,
+                            center: windows_numerics::Vector2 { X: pos.end_center.x as f32, Y: pos.end_center.y as f32 },
+                            gradientOriginOffset: windows_numerics::Vector2 {
+                                X: (pos.start_center.x - pos.end_center.x) as f32,
+                                Y: (pos.start_center.y - pos.end_center.y) as f32,
                             },
                             radiusX: pos.end_radius,
                             radiusY: pos.end_radius,
@@ -383,7 +398,8 @@ impl Direct2DFrame {
         let rect = D2D_RECT_F { left: x as f32, top: y as f32, right: (x + w) as f32, bottom: (y + h) as f32 };
         unsafe {
             if radius > 0.0 {
-                let rr = D2D1_ROUNDED_RECT { rect, radiusX: radius as f32, radiusY: radius as f32 };
+                let r = clamp_radius(radius, w, h);
+                let rr = D2D1_ROUNDED_RECT { rect, radiusX: r, radiusY: r };
                 self.rt.DrawRoundedRectangle(&rr as *const _, &brush, stroke_width as f32, None);
             } else {
                 self.rt.DrawRectangle(&rect as *const _, &brush, stroke_width as f32, None);
@@ -395,7 +411,7 @@ impl Direct2DFrame {
         if r <= 0.0 { return; }
         let Some(brush) = self.solid_brush(color) else { return };
         let ellipse = D2D1_ELLIPSE {
-            point: D2D_POINT_2F { x: cx as f32, y: cy as f32 },
+            point: windows_numerics::Vector2 { X: cx as f32, Y: cy as f32 },
             radiusX: r as f32,
             radiusY: r as f32,
         };
@@ -406,7 +422,7 @@ impl Direct2DFrame {
         if r <= 0.0 { return; }
         let Some(brush) = self.solid_brush(color) else { return };
         let ellipse = D2D1_ELLIPSE {
-            point: D2D_POINT_2F { x: cx as f32, y: cy as f32 },
+            point: windows_numerics::Vector2 { X: cx as f32, Y: cy as f32 },
             radiusX: r as f32,
             radiusY: r as f32,
         };
@@ -415,8 +431,8 @@ impl Direct2DFrame {
 
     pub fn stroke_line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64, width: f64, color: peniko::Color) {
         let Some(brush) = self.solid_brush(color) else { return };
-        let p0 = D2D_POINT_2F { x: x0 as f32, y: y0 as f32 };
-        let p1 = D2D_POINT_2F { x: x1 as f32, y: y1 as f32 };
+        let p0 = windows_numerics::Vector2 { X: x0 as f32, Y: y0 as f32 };
+        let p1 = windows_numerics::Vector2 { X: x1 as f32, Y: y1 as f32 };
         unsafe { self.rt.DrawLine(p0, p1, &brush, width as f32, None); }
     }
 
@@ -427,12 +443,12 @@ impl Direct2DFrame {
             let geometry = factory.CreatePathGeometry().ok()?;
             let sink = geometry.Open().ok()?;
             sink.BeginFigure(
-                D2D_POINT_2F { x: pts[0], y: pts[1] },
+                windows_numerics::Vector2 { X: pts[0], Y: pts[1] },
                 D2D1_FIGURE_BEGIN_FILLED,
             );
             let mut i = 2;
             while i + 1 < pts.len() {
-                sink.AddLine(D2D_POINT_2F { x: pts[i], y: pts[i + 1] });
+                sink.AddLine(windows_numerics::Vector2 { X: pts[i], Y: pts[i + 1] });
                 i += 2;
             }
             sink.EndFigure(if closed { D2D1_FIGURE_END_CLOSED } else { D2D1_FIGURE_END_OPEN });
@@ -509,10 +525,10 @@ impl Direct2DFrame {
                     glyphIndices: indices.as_ptr(),
                     glyphAdvances: advances.as_ptr(),
                     glyphOffsets: offsets.as_ptr(),
-                    isSideways: windows::Win32::Foundation::BOOL(0),
+                    isSideways: windows::core::BOOL(0),
                     bidiLevel: 0,
                 };
-                let baseline_origin = D2D_POINT_2F { x: (x + run_off) as f32, y: (y + baseline) as f32 };
+                let baseline_origin = windows_numerics::Vector2 { X: (x + run_off) as f32, Y: (y + baseline) as f32 };
                 unsafe {
                     self.rt.DrawGlyphRun(
                         baseline_origin,
@@ -522,6 +538,49 @@ impl Direct2DFrame {
                     );
                 }
             }
+        }
+    }
+
+    /// Draw a full-window Canvas3D-bridge overlay: `bytes` is straight-alpha
+    /// (not premultiplied, not linearized — see `direct2d_3d_bridge.rs`'s
+    /// module doc) RGBA8 the size of `(w, h)`, freshly rendered this frame.
+    /// Unlike `draw_image`, this is never cached — the content is dynamic
+    /// (a live 3D scene), so there's nothing to key a cache on across frames.
+    #[cfg(feature = "canvas3d")]
+    pub fn draw_raw_rgba_overlay(&mut self, bytes: &[u8], w: u32, h: u32) {
+        if w == 0 || h == 0 { return; }
+        // Straight → premultiplied alpha. No gamma/linear handling needed —
+        // unlike `Direct2DImageCache`'s images (deliberately linearized
+        // upstream for Vello, see `linear_premul_to_srgb_premul`'s doc
+        // comment), this buffer came straight out of a wgpu Rgba8Unorm
+        // render target using the same "direct, no color management"
+        // convention Vello/TinySkia already write in this codebase.
+        let mut premul = bytes.to_vec();
+        for px in premul.chunks_exact_mut(4) {
+            let a = px[3] as u16;
+            px[0] = ((px[0] as u16 * a + 127) / 255) as u8;
+            px[1] = ((px[1] as u16 * a + 127) / 255) as u8;
+            px[2] = ((px[2] as u16 * a + 127) / 255) as u8;
+        }
+        let props = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        let size = D2D_SIZE_U { width: w, height: h };
+        let pitch = w * 4;
+        let bmp = unsafe {
+            match self.rt.CreateBitmap(size, Some(premul.as_ptr() as *const core::ffi::c_void), pitch, &props as *const _) {
+                Ok(b) => b,
+                Err(e) => { log::error!("Direct2D 3D overlay: CreateBitmap failed: {e}"); return; }
+            }
+        };
+        let dest = D2D_RECT_F { left: 0.0, top: 0.0, right: w as f32, bottom: h as f32 };
+        unsafe {
+            self.rt.DrawBitmap(&bmp, Some(&dest as *const _), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
         }
     }
 
@@ -548,7 +607,7 @@ impl Direct2DFrame {
         if image.width == 0 || image.height == 0 { return; }
         let Some(bitmap) = self.image_cache.get_or_create(&self.rt, image) else { return };
         let [a, b, c, d, e, f] = transform.as_coeffs();
-        let matrix = windows::Foundation::Numerics::Matrix3x2 {
+        let matrix = windows_numerics::Matrix3x2 {
             M11: a as f32, M12: b as f32,
             M21: c as f32, M22: d as f32,
             M31: e as f32, M32: f as f32,
@@ -563,7 +622,7 @@ impl Direct2DFrame {
                 D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
                 None,
             );
-            self.rt.SetTransform(&windows::Foundation::Numerics::Matrix3x2 {
+            self.rt.SetTransform(&windows_numerics::Matrix3x2 {
                 M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: 0.0, M32: 0.0,
             } as *const _);
         }
@@ -584,7 +643,8 @@ impl Direct2DFrame {
         let geometric_mask: Option<ID2D1Geometry> = if radius > 0.0 {
             unsafe {
                 self.rt.GetFactory().ok().and_then(|factory: ID2D1Factory| {
-                    let rr = D2D1_ROUNDED_RECT { rect: bounds, radiusX: radius as f32, radiusY: radius as f32 };
+                    let r = clamp_radius(radius, w, h);
+                    let rr = D2D1_ROUNDED_RECT { rect: bounds, radiusX: r, radiusY: r };
                     factory.CreateRoundedRectangleGeometry(&rr as *const _).ok()
                 }).and_then(|g| g.cast::<ID2D1Geometry>().ok())
             }
@@ -592,7 +652,7 @@ impl Direct2DFrame {
             None
         };
 
-        let identity = windows::Foundation::Numerics::Matrix3x2 {
+        let identity = windows_numerics::Matrix3x2 {
             M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: 0.0, M32: 0.0,
         };
         let params = D2D1_LAYER_PARAMETERS1 {

@@ -15,6 +15,7 @@ export default defineConfig({
     width:       1280,
     height:      800,
     startupMode: 'windowed',
+    renderMode:  'direct2d',
   },
   capabilities: {
     fs:           { read: ['public/**'], write: [] },

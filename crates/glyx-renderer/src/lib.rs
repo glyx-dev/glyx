@@ -19,6 +19,10 @@ pub use skia::{TinySkiaFrame, TinySkiaRenderer};
 mod direct2d;
 #[cfg(target_os = "windows")]
 pub use direct2d::{Direct2DFrame, Direct2DRenderer};
+#[cfg(all(target_os = "windows", feature = "canvas3d"))]
+mod direct2d_3d_bridge;
+#[cfg(all(target_os = "windows", feature = "canvas3d"))]
+pub use direct2d_3d_bridge::Direct2DGpuBridge;
 
 use std::path::PathBuf;
 use thiserror::Error;

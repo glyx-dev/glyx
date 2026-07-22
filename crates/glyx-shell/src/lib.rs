@@ -199,6 +199,10 @@ pub struct ShellConfig {
     /// `true` = OS title bar + borders (default). `false` = frameless; Glyx
     /// renders its own title bar and handles resize/drag hit zones.
     pub decorations:  bool,
+    /// `true` (default) = user can resize the window (drag edges, maximize).
+    /// `false` = fixed size, locked to `width`×`height`. Controlled by
+    /// `resizable` in `glyx.config.json` / `glyx.config.ts`.
+    pub resizable:    bool,
     /// Raw RGBA icon pixels + dimensions decoded from the app's icon PNG.
     /// Used to set the window icon (taskbar on Windows/Linux, Dock on macOS).
     /// `None` = no icon set (system default).
@@ -234,6 +238,7 @@ impl Default for ShellConfig {
             continuous:   false,
             startup_mode: StartupMode::Windowed,
             decorations:  true,
+            resizable:    true,
             icon_rgba:    None,
             background_color: [0x14, 0x14, 0x1A, 0xFF],
             render_mode:  RenderMode::Auto,
@@ -420,7 +425,8 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
         let mut attrs = WindowAttributes::default()
             .with_title(&self.config.title)
             .with_visible(true)
-            .with_decorations(self.config.decorations);
+            .with_decorations(self.config.decorations)
+            .with_resizable(self.config.resizable);
 
         if let Some((ref rgba, w, h)) = self.config.icon_rgba {
             if let Ok(icon) = winit::window::Icon::from_rgba(rgba.clone(), w, h) {
@@ -606,7 +612,13 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
                 // When frameless and left mouse pressed: check resize edge zones.
                 // If the cursor is on an 8px border, initiate OS resize and swallow
                 // the event (don't forward to glyx-core / JS).
+                // `resizable: false` must also disable THIS path — it's a separate
+                // mechanism from winit's own resizable flag (which only governs the
+                // OS-native border on a decorated window), so a frameless window
+                // could otherwise still be resized by dragging its edge even with
+                // resizable:false set.
                 if btn == 0 && pressed
+                    && self.config.resizable
                     && self.frameless.get(&handle).copied().unwrap_or(false)
                 {
                     if let Some(w) = self.window_arcs.get(&handle) {
@@ -637,7 +649,7 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
                     y: position.y,
                 });
                 // When frameless, update cursor icon at resize border zones.
-                if self.frameless.get(&handle).copied().unwrap_or(false) {
+                if self.config.resizable && self.frameless.get(&handle).copied().unwrap_or(false) {
                     if let Some(w) = self.window_arcs.get(&handle) {
                         let s = w.inner_size();
                         let icon = edge_resize_direction(

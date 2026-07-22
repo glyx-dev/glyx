@@ -21,6 +21,8 @@ export default defineConfig({
     dialog:       true,
     clipboard:    false,
     notification: false,
+    video:        true,
+    system:       true,
   },
   dev: {
     entry:  'ui/app.jsx',

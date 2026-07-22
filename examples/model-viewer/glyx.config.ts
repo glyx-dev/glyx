@@ -3,6 +3,7 @@ import { defineConfig } from '@glyx-dev/config';
 export default defineConfig({
   name:    'model-viewer',
   version: '1.0.0',
+  engine:  'quickjs',
   app: {
     publisher:   'model-viewer',              // Company or author name (used in installer)
     description: 'A model-viewer app.',      // Short app description
@@ -14,6 +15,7 @@ export default defineConfig({
     width:       1280,
     height:      800,
     startupMode: 'windowed',
+    renderMode:  'direct2d',
   },
   capabilities: {
     fs:           { read: ['public/**'], write: [] },
@@ -21,6 +23,7 @@ export default defineConfig({
     dialog:       false,
     clipboard:    false,
     notification: false,
+    system:       true,
   },
   dev: {
     entry:  'ui/app.jsx',

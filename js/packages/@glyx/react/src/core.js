@@ -81,7 +81,7 @@ export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', 
 // always delegate to the latest closure values without needing re-registration
 // on every render.
 
-export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, disabled, feedback = true, style, ...props }) {
+export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, disabled, feedback = true, style, _glyxOnMount: externalOnMount, ...props }) {
   const nodeIdRef    = useRef(null);
   const handlersRef  = useRef(null);
   const [pressed, setPressed] = useState(false);
@@ -124,7 +124,13 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
       onHoverOut: () => handlersRef.current.onHoverOut(),
     });
     registerDisabledNode(id, !!disabled);
-  }, [disabled]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Let a caller (e.g. RichTextEditor) also learn the native node id,
+    // without clobbering Pressable's own registration below (see the
+    // _glyxOnMount destructure above — this used to be spread in via
+    // ...props, which silently overwrote this callback since it was
+    // declared later in the object literal).
+    externalOnMount?.(id);
+  }, [disabled, externalOnMount]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep disabled state in sync when the prop changes; also clear any
   // stuck interaction state so the button doesn't appear hovered/pressed

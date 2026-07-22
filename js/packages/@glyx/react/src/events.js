@@ -511,6 +511,7 @@ export function dispatchEvents() {
         // A plain View absorbs the click even without a handler, preventing
         // fallthrough to pressables/inputs rendered beneath it in z-order.
         const topmostId = findTopmostSolid(ev.x, ev.y);
+        let inputTarget;
 
         if (topmostId !== null) {
           // Walk up the parent chain to find the nearest pressable ancestor
@@ -536,21 +537,29 @@ export function dispatchEvents() {
             }
           }
 
-          // Route to TextInput handler if the topmost node is an input.
-          // Inputs are leaf nodes with no children, so no walk-up needed.
-          const ih = inputRegistry.get(topmostId);
-          if (ih && !isDisabled(topmostId)) {
-            setFocus(topmostId);
-            const layout = __glyx_getLayout(topmostId);
+          // Route to TextInput handler if the topmost node (or a solid
+          // ancestor) is a registered input. Plain leaf TextInputs register
+          // at the topmost node directly (no walk needed), but composite
+          // editors like RichTextEditor register on an outer container node
+          // while multiple child Views (paragraph rows, spans) sit above it
+          // in the solid stack — same walk-up pattern as pressableRegistry.
+          inputTarget = topmostId;
+          while (inputTarget !== undefined && !inputRegistry.has(inputTarget)) {
+            inputTarget = parentMap.get(inputTarget);
+          }
+          const ih = inputTarget !== undefined ? inputRegistry.get(inputTarget) : undefined;
+          if (ih && !isDisabled(inputTarget)) {
+            setFocus(inputTarget);
+            const layout = __glyx_getLayout(inputTarget);
             if (layout) ih.onClickAt?.(ev.x - layout.x, ev.y - layout.y);
             // Begin drag-selection: subsequent cursorMoved events extend the
             // selection from this anchor until the button is released.
-            if (!isRight) inputDragNodeId = topmostId;
+            if (!isRight) inputDragNodeId = inputTarget;
           }
         }
 
         // Blur focused input if the click landed elsewhere.
-        if (focusedNodeId !== null && focusedNodeId !== topmostId) {
+        if (focusedNodeId !== null && focusedNodeId !== inputTarget) {
           inputRegistry.get(focusedNodeId)?.onBlur?.();
           focusedNodeId = null;
         }

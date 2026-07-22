@@ -251,6 +251,7 @@ use super::{
     png_to_ico, png_to_icns,
     DEFAULT_ICON_PNG,
 };
+use super::cmd_build::{strip_trailer, write_trailer};
 
 pub(super) fn cmd_package(target: Option<&str>, installer: bool) -> Result<()> {
     let project_name = read_project_name()
@@ -335,6 +336,20 @@ pub(super) fn package_windows(name: &str, bin: &Path) -> Result<()> {
             println!("  Icon: {}", ico_dest.display());
             // Embed the icon resource into the exe so Task Manager shows it.
             // rcedit patches the PE header — no recompile needed.
+            //
+            // BUT: for snapshot-mode apps (glyx-runner + appended GLYXTRL
+            // trailer — see cmd_build.rs), rcedit rewrites the PE image and
+            // discards everything appended past the end of the file it
+            // recognizes, silently destroying the trailer (confirmed: the
+            // exe shrinks by hundreds of KB). That left every such packaged
+            // app falling back to hardcoded window defaults with ALL
+            // capabilities OFF — the app "worked" visually but every
+            // capability-gated feature (fs, dialog, audio, ...) silently
+            // failed. Strip the trailer first, let rcedit do its thing, then
+            // re-append it with freshly computed offsets (rcedit changes the
+            // runner's byte length, so the old absolute offsets no longer
+            // line up even with the exact same trailer bytes).
+            let saved_trailer = strip_trailer(&exe_dest).unwrap_or(None);
             match ensure_rcedit() {
                 Ok(rcedit) => {
                     let out = Command::new(&rcedit)
@@ -351,6 +366,12 @@ pub(super) fn package_windows(name: &str, bin: &Path) -> Result<()> {
                     }
                 }
                 Err(e) => println!("  Warning: exe icon not embedded ({e})"),
+            }
+            if let Some(t) = saved_trailer {
+                match write_trailer(&exe_dest, &t.snapshot, &t.js, &t.config) {
+                    Ok(_)  => println!("  Trailer restored after icon patch (config/capabilities intact)"),
+                    Err(e) => println!("  Warning: failed to restore trailer after icon patch: {e} — this package's capabilities will not work!"),
+                }
             }
         }
         Err(e) => println!("  Warning: icon.ico not generated: {e}"),
@@ -545,8 +566,11 @@ pub(super) fn ensure_nsis() -> Result<PathBuf> {
     }
 
     const DEFAULT_URL: &str = "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10.zip";
-    // SHA-256 of the canonical nsis-3.10.zip from SourceForge.
-    const SHA256: &str = "2735f04e5d1686b8aeecb8a9a56a80ae08c5e37f0dfa78ba9a7bf7f90a397c81";
+    // SHA-256 of the canonical nsis-3.10.zip from SourceForge — verified
+    // 2026-07-20 by independently downloading the same URL and hashing it;
+    // the previous constant here didn't match a real download of this file
+    // (blocked every --installer build with an integrity-check failure).
+    const SHA256: &str = "fcdce3229717a2a148e7cda0ab5bdb667f39d8fb33ede1da8dabc336bd5ad110";
     let zip_tmp = home.join(".glyx").join("tools").join("nsis-download.zip");
     std::fs::create_dir_all(zip_tmp.parent().unwrap())?;
 
@@ -599,8 +623,10 @@ pub(super) fn ensure_rcedit() -> Result<PathBuf> {
     if rcedit.exists() { return Ok(rcedit); }
 
     const DEFAULT_URL: &str = "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe";
-    // SHA-256 of rcedit-x64.exe v2.0.0 from the official GitHub release.
-    const SHA256: &str = "4088d04409b4db9c35acdb01b0e1a9a27f64b3e62562c7dc6e37b8a6b7be75f7";
+    // SHA-256 of rcedit-x64.exe v2.0.0 from the official GitHub release —
+    // verified 2026-07-20 the same way as NSIS's hash above; the previous
+    // constant didn't match a real download either.
+    const SHA256: &str = "3e7801db1a5edbec91b49a24a094aad776cb4515488ea5a4ca2289c400eade2a";
     // Use the self-hosted mirror when $GLYX_TOOLS_BASE is set, else upstream.
     let url = super::tools::resolve_tool_url(DEFAULT_URL, super::tools::paths::RCEdit);
     println!("Downloading rcedit (icon patcher, ~200 KB)...");

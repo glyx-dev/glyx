@@ -139,6 +139,7 @@ jobs:
   cap-windows:
     name: Cap DLLs (windows)
     runs-on: windows-latest
+    environment: release
     strategy:
       fail-fast: false
       matrix:
@@ -154,14 +155,27 @@ jobs:
       - name: Stage
         shell: bash
         run: cp "target/release/glyx_cap_${{ matrix.cap }}.dll" "glyx_cap_${{ matrix.cap }}-windows.dll"
+      - name: Sign
+        shell: bash
+        env:
+          CAP_SIGNING_KEY: ${{ secrets.CAP_SIGNING_KEY }}
+        run: |
+          echo "$CAP_SIGNING_KEY" > cap-key.pem
+          openssl pkeyutl -sign -rawin -inkey cap-key.pem \
+            -in "glyx_cap_${{ matrix.cap }}-windows.dll" \
+            -out "glyx_cap_${{ matrix.cap }}-windows.dll.sig"
+          rm -f cap-key.pem
       - uses: actions/upload-artifact@v4
         with:
           name: cap-${{ matrix.cap }}-windows
-          path: glyx_cap_${{ matrix.cap }}-windows.dll
+          path: |
+            glyx_cap_${{ matrix.cap }}-windows.dll
+            glyx_cap_${{ matrix.cap }}-windows.dll.sig
 
   cap-macos:
     name: Cap DLLs (macos)
     runs-on: macos-latest
+    environment: release
     strategy:
       fail-fast: false
       matrix:
@@ -176,14 +190,26 @@ jobs:
         run: cargo build --release -p glyx-cap-${{ matrix.cap }}
       - name: Stage
         run: cp "target/release/libglyx_cap_${{ matrix.cap }}.dylib" "glyx_cap_${{ matrix.cap }}-macos.dylib"
+      - name: Sign
+        env:
+          CAP_SIGNING_KEY: ${{ secrets.CAP_SIGNING_KEY }}
+        run: |
+          echo "$CAP_SIGNING_KEY" > cap-key.pem
+          openssl pkeyutl -sign -rawin -inkey cap-key.pem \
+            -in "glyx_cap_${{ matrix.cap }}-macos.dylib" \
+            -out "glyx_cap_${{ matrix.cap }}-macos.dylib.sig"
+          rm -f cap-key.pem
       - uses: actions/upload-artifact@v4
         with:
           name: cap-${{ matrix.cap }}-macos
-          path: glyx_cap_${{ matrix.cap }}-macos.dylib
+          path: |
+            glyx_cap_${{ matrix.cap }}-macos.dylib
+            glyx_cap_${{ matrix.cap }}-macos.dylib.sig
 
   cap-linux:
     name: Cap DLLs (linux)
     runs-on: ubuntu-latest
+    environment: release
     strategy:
       fail-fast: false
       matrix:
@@ -203,10 +229,21 @@ jobs:
         run: cargo build --release -p glyx-cap-${{ matrix.cap }}
       - name: Stage
         run: cp "target/release/libglyx_cap_${{ matrix.cap }}.so" "glyx_cap_${{ matrix.cap }}-linux.so"
+      - name: Sign
+        env:
+          CAP_SIGNING_KEY: ${{ secrets.CAP_SIGNING_KEY }}
+        run: |
+          echo "$CAP_SIGNING_KEY" > cap-key.pem
+          openssl pkeyutl -sign -rawin -inkey cap-key.pem \
+            -in "glyx_cap_${{ matrix.cap }}-linux.so" \
+            -out "glyx_cap_${{ matrix.cap }}-linux.so.sig"
+          rm -f cap-key.pem
       - uses: actions/upload-artifact@v4
         with:
           name: cap-${{ matrix.cap }}-linux
-          path: glyx_cap_${{ matrix.cap }}-linux.so
+          path: |
+            glyx_cap_${{ matrix.cap }}-linux.so
+            glyx_cap_${{ matrix.cap }}-linux.so.sig
 
   # ── Publish GitHub Release ─────────────────────────────────────────────────
   publish:

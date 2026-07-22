@@ -329,6 +329,8 @@ pub(crate) fn rebuild_layout_from_scene(
                         text: props.text.clone().unwrap_or_default(),
                         font_size,
                         max_height,
+                        bold:   props.font_weight.as_deref() == Some("bold"),
+                        italic: props.font_style.as_deref()  == Some("italic"),
                     };
                     layout.add_text_node(style, ctx, Some(format!("js-{}", id))).ok()?
                 }
@@ -456,7 +458,7 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
             },
         };
 
-        let (tw, th) = text_sys.measure(&ctx.text, ctx.font_size, max_w);
+        let (tw, th) = text_sys.measure_styled(&ctx.text, ctx.font_size, max_w, ctx.bold, ctx.italic);
         let th = if let Some(max_h) = ctx.max_height { th.min(max_h) } else { th };
 
         Size {

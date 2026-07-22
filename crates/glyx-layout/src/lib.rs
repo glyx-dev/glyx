@@ -64,6 +64,11 @@ pub struct TextMeasureCtx {
     /// Pre-computed height cap from `numberOfLines × estimated_line_height`.
     /// `None` = no cap (text wraps freely).
     pub max_height: Option<f32>,
+    /// Bold/italic glyphs are wider/taller than regular — must match what
+    /// render.rs actually shapes, or Taffy reserves too little space and
+    /// sibling text nodes (e.g. rich-text's per-span Text row) overlap.
+    pub bold:       bool,
+    pub italic:     bool,
 }
 
 // ── LayoutTree ────────────────────────────────────────────────────────────────

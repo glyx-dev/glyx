@@ -68,16 +68,20 @@ impl TextSystem {
                         let name = entry.file_name()
                             .to_string_lossy()
                             .to_ascii_lowercase();
-                        // Load the three core Segoe UI text variants (regular,
-                        // bold, semibold) plus the emoji/symbol fallbacks so
-                        // emoji and pictographs don't render as tofu.  Italic and
-                        // light variants are omitted — fontique synthesises oblique
-                        // on demand and the app rarely needs true italic faces.
-                        // seguiemj/seguisym cost ~40 MB of RAM; set
-                        // GLYX_NO_EMOJI_FONT=1 to skip them in memory-critical apps.
+                        // Load the core Segoe UI text variants (regular, bold,
+                        // semibold, italic) plus the emoji/symbol fallbacks so
+                        // emoji and pictographs don't render as tofu. Real
+                        // italic faces are loaded rather than relying on
+                        // fontique's on-the-fly oblique synthesis, which was
+                        // observed to silently no-op (StyleProperty::FontStyle
+                        // request had no visible effect) — a registered italic
+                        // face is the reliable path. seguiemj/seguisym cost
+                        // ~40 MB of RAM; set GLYX_NO_EMOJI_FONT=1 to skip them
+                        // in memory-critical apps.
                         let no_emoji = std::env::var("GLYX_NO_EMOJI_FONT").ok().as_deref() == Some("1");
                         let wanted = matches!(name.as_str(),
-                            "segoeui.ttf" | "segoeuib.ttf" | "seguisb.ttf"
+                            "segoeui.ttf" | "segoeuib.ttf" | "seguisb.ttf" |
+                            "segoeuii.ttf" | "segoeuiz.ttf"
                         ) || (!no_emoji && matches!(name.as_str(),
                             "seguiemj.ttf" | "seguisym.ttf"
                         ));
@@ -305,6 +309,15 @@ impl TextSystem {
     pub fn measure(&mut self, text: &str, font_size: f32, max_width: f32) -> (f32, f32) {
         let layout = self.shape(text, font_size, max_width.max(1.0), FontWeight::NORMAL, Alignment::Start);
         (layout.width(), layout.height())
+    }
+
+    /// Like [`measure`](Self::measure), but shapes with the given bold/italic
+    /// flags so the reported size matches what render.rs will actually draw —
+    /// bold glyphs are wider than `measure`'s NORMAL-weight assumption, so
+    /// layout must account for it or siblings laid out beside this node overlap.
+    pub fn measure_styled(&mut self, text: &str, font_size: f32, max_width: f32, bold: bool, italic: bool) -> (f32, f32) {
+        let layout = self.styled_label(text, font_size, max_width.max(1.0), bold, italic);
+        (layout.inner.width(), layout.inner.height())
     }
 }
 

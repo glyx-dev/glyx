@@ -35,7 +35,7 @@ use self::cmd_runtime::*;
 
 /// Default Glyx logo embedded so `glyx package` always produces an icon even
 /// when the app doesn't configure one in `glyx.config.json`.
-static DEFAULT_ICON_PNG: &[u8] = include_bytes!("../../../glyx.png");
+static DEFAULT_ICON_PNG: &[u8] = include_bytes!("../../../assets/glyx.png");
 
 #[derive(Parser)]
 #[command(
@@ -770,11 +770,22 @@ fn read_app_metadata() -> AppMeta {
     }
 }
 
+const GLYX_FIRST_YEAR: i32 = 2025;
+
 /// The Glyx framework MIT license — always included in the installation folder.
-const GLYX_LICENSE_TEXT: &str = "\
+/// The copyright year is computed at packaging time (not hardcoded) so an app
+/// packaged years from now doesn't ship a stale "Copyright (c) 2024" notice.
+fn glyx_license_text() -> String {
+    let year = time::OffsetDateTime::now_utc().year();
+    let copyright_years = if year > GLYX_FIRST_YEAR {
+        format!("{GLYX_FIRST_YEAR}-{year}")
+    } else {
+        GLYX_FIRST_YEAR.to_string()
+    };
+    format!("\
 MIT License
 
-Copyright (c) 2024 Glyx Contributors
+Copyright (c) {copyright_years} Glyx Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the \"Software\"), to deal
@@ -793,7 +804,8 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-";
+")
+}
 
 /// Write license files into `licenses_dir` (created if needed).
 /// Always writes `glyx.txt`. Copies the app license as `app.txt` if specified.
@@ -804,7 +816,7 @@ fn install_license_files(licenses_dir: &Path, app_license: Option<&str>) -> Resu
 
     // Glyx framework license — always present
     let glyx_lic = licenses_dir.join("glyx.txt");
-    std::fs::write(&glyx_lic, GLYX_LICENSE_TEXT)?;
+    std::fs::write(&glyx_lic, glyx_license_text())?;
     println!("  License (Glyx): {}", glyx_lic.display());
 
     // App license — optional

@@ -22,6 +22,7 @@ flate2     = { workspace = true }
 tar        = { workspace = true }
 sha2       = { workspace = true }
 ureq       = "2"
+time       = { version = "0.3", default-features = false, features = ["std"] }
 # "signing" feature is a CLI-tooling-only escape hatch (never linked into the
 # runtime) — powers `glyx caps sign`/`glyx caps keygen`. See
 # glyx-verify/src/lib.rs's module doc for the trust-chain design.

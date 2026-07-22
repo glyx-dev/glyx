@@ -470,7 +470,7 @@ pub(super) fn load_icon_from_bytes(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> 
 }
 
 /// Default Glyx icon embedded in all builds.
-pub(super) static DEFAULT_ICON_BYTES: &[u8] = include_bytes!("../../../glyx.png");
+pub(super) static DEFAULT_ICON_BYTES: &[u8] = include_bytes!("../../../assets/glyx.png");
 
 /// Return the platform-specific directory for Glyx crash dumps.
 pub(super) fn crash_reports_dir() -> std::path::PathBuf {

@@ -1313,6 +1313,10 @@ pub fn run(mut config: AppConfig) -> bool {
                     canvas3d_last_used: None,
                     #[cfg(feature = "canvas3d")]
                     downgrade_timer_armed: false,
+                    #[cfg(all(target_os = "windows", feature = "canvas3d"))]
+                    d2d_3d_bridge: None,
+                    #[cfg(all(target_os = "windows", feature = "canvas3d"))]
+                    d2d_3d_bridge_failed: false,
                     renderer,
                     text_sys:     TextSystem::new(),
                     layout:       LayoutTree::new(),
@@ -2378,6 +2382,30 @@ pub fn run(mut config: AppConfig) -> bool {
                             });
                         }
                     }
+                    // Direct2D-on-Canvas3D bridge downgrade (Phase 6): the
+                    // bridge owns its own independent headless wgpu device
+                    // (not Direct2D's own D3D11 device/swap chain, which is
+                    // untouched throughout), so tearing it down after idle is
+                    // just dropping that device — no swap-chain-recreation
+                    // risk, unlike the shared-device design this replaced.
+                    #[cfg(all(target_os = "windows", feature = "canvas3d"))]
+                    if s.d2d_3d_bridge.is_some() {
+                        let last = s.canvas3d_last_used.unwrap_or(frame_start);
+                        if last.elapsed() >= IDLE_3D {
+                            log::info!("Canvas3D idle for 60 s — releasing Direct2D 3D bridge device.");
+                            s.d2d_3d_bridge = None;
+                            s.d2d_3d_bridge_failed = false;
+                        } else if !s.downgrade_timer_armed {
+                            s.downgrade_timer_armed = true;
+                            let req = Arc::clone(&s.request_redraw);
+                            let wait = IDLE_3D.saturating_sub(last.elapsed())
+                                + Duration::from_millis(100);
+                            tokio_handle.spawn(async move {
+                                tokio::time::sleep(wait).await;
+                                req();
+                            });
+                        }
+                    }
                 }
 
                 // ── Lazy soft→wgpu upgrade for Canvas3D ──────────────────────
@@ -2415,6 +2443,48 @@ pub fn run(mut config: AppConfig) -> bool {
                             log::error!("Canvas3D wgpu upgrade failed (GPU): {e}");
                         }
                     }
+                }
+
+                // ── Lazy Direct2D-on-Canvas3D bridge creation (Phase 6) ───────
+                // Direct2D's own D3D11 device/swap chain (s.gpu) is never
+                // touched here — only an independent, headless wgpu device
+                // owned by the bridge is created, so there's no
+                // swap-chain-recreation risk. Crucially, this must NOT
+                // discard-and-return like the wgpu/TinySkia upgrade blocks
+                // above: `s.renderer.begin_frame()` (well before this point)
+                // has already called Direct2D's `BeginDraw()` on the device
+                // context for this frame, and `BeginDraw`/`EndDraw` must be
+                // paired — an early return here would skip `EndDraw`,
+                // leaving the context in a bad state that fails the NEXT
+                // frame's `EndDraw` instead. Since creating the bridge
+                // doesn't touch `s.gpu`/`s.renderer` at all, this frame's
+                // already-drawn 2D content stays perfectly valid; just create
+                // the bridge and fall through so the render arm below picks
+                // it up immediately (no frame needs to be thrown away).
+                #[cfg(all(target_os = "windows", feature = "canvas3d"))]
+                if !canvas3d_overlays.is_empty()
+                    && matches!(s.gpu, Present::Direct2D(_))
+                    && s.d2d_3d_bridge.is_none()
+                    && !s.d2d_3d_bridge_failed
+                {
+                    let (w, h) = match &s.gpu {
+                        Present::Direct2D(dp) => (dp.width(), dp.height()),
+                        _ => unreachable!(),
+                    };
+                    log::info!("Canvas3D node detected — creating Direct2D 3D bridge device.");
+                    match glyx_renderer::Direct2DGpuBridge::new(w, h) {
+                        Ok(bridge) => {
+                            s.d2d_3d_bridge = Some(bridge);
+                        }
+                        Err(e) => {
+                            s.d2d_3d_bridge_failed = true;
+                            log::error!("Direct2D 3D bridge creation failed: {e}");
+                        }
+                    }
+                }
+                #[cfg(feature = "canvas3d")]
+                if !canvas3d_overlays.is_empty() {
+                    s.canvas3d_last_used = Some(Instant::now());
                 }
 
                 let gpu_start = Instant::now();
@@ -2530,15 +2600,32 @@ pub fn run(mut config: AppConfig) -> bool {
                         // finish_frame_d2d is EndDraw() + reclaiming the font
                         // cache moved into the frame at begin_frame; presenting
                         // the swap chain is D2DPresent's own job, called right after.
-                        #[cfg(feature = "canvas3d")]
-                        if !canvas3d_overlays.is_empty() {
-                            // Canvas3D-on-Direct2D lazy GPU sharing is Phase 6
-                            // (deferred) — not yet supported.
-                            log::debug!("Canvas3D overlays skipped: not yet supported on the Direct2D backend.");
-                        }
                         match (&mut s.renderer, frame) {
+                            #[cfg_attr(not(feature = "canvas3d"), allow(unused_mut))]
                             (glyx_renderer::AnyRenderer::Direct2D(r),
-                             glyx_renderer::AnyFrame::Direct2D(f)) => {
+                             glyx_renderer::AnyFrame::Direct2D(mut f)) => {
+                                // Canvas3D bridge overlay (Phase 6) — must draw
+                                // into `f` BEFORE finish_frame_d2d's EndDraw()
+                                // below, same "more draw calls before present"
+                                // window the Present::Gpu arm above uses for its
+                                // own 3D overlay blit.
+                                #[cfg(feature = "canvas3d")]
+                                if !canvas3d_overlays.is_empty() {
+                                    if let Some(bridge) = s.d2d_3d_bridge.as_mut() {
+                                        let (w, h) = (dp.width(), dp.height());
+                                        if let Some(bytes) = bridge.render_overlays(
+                                            &canvas3d_overlays, &s.canvas3d_scenes, w, h,
+                                        ) {
+                                            f.draw_raw_rgba_overlay(&bytes, w, h);
+                                        }
+                                    } else if !s.d2d_3d_bridge_failed {
+                                        // Bridge creation is still pending this frame
+                                        // (see the lazy-init block above) — nothing
+                                        // to draw yet, next frame will have it.
+                                    } else {
+                                        log::debug!("Canvas3D overlays skipped: Direct2D 3D bridge unavailable.");
+                                    }
+                                }
                                 if let Err(e) = r.finish_frame_d2d(f) {
                                     log::error!("Direct2D render error: {e}");
                                     return;

@@ -27,7 +27,7 @@ that is code you write. You write components, hooks, and state, same as any
 React app.
 
 ```tsx
-import { View, Text, Pressable, db } from 'glyx'
+import { View, Text, Pressable, db } from '@glyx-dev/react'
 import { useState } from 'react'
 
 export default function App() {
@@ -54,10 +54,21 @@ export default function App() {
 | | |
 |---|---|
 | **~50ms** cold startup | A V8 snapshot ships inside the binary with a pre-warmed heap — no cold JIT on first launch. |
-| **~20MB** binary size | No bundled Chromium. A purpose-built V8 runtime and wgpu renderer fit in a fraction of what a browser-engine-based app ships. |
+| **As low as ~20MB** binary size | No bundled Chromium either way — see [Choosing a JS engine](#choosing-a-js-engine) below for what drives the range. |
 | **Flat, low idle memory** | TinySkia (CPU rasterizer, no GPU at all) is the default on integrated/no-GPU hardware — the common case. Vello (wgpu compute) is available for GPU-throughput-bound 2D scenes; Canvas 3D is always GPU-accelerated via wgpu regardless of the 2D backend. |
 
-<sub>Measured on Apple M2, macOS 14.5. See [full comparison](https://glyx.dev/comparison) for methodology and how this stacks up against other frameworks.</sub>
+<sub>Startup/idle-memory figures measured on Apple M2, macOS 14.5. See [full comparison](https://glyx.dev/comparison) for methodology and how this stacks up against other frameworks.</sub>
+
+## Choosing a JS engine
+
+Glyx runs your JS on either **V8** or **QuickJS** — pick per-project via `engine` in `glyx.config.ts`. Same React/TS code either way; the trade-off is binary size vs. V8's more complete JS engine internals:
+
+| | V8 (default) | QuickJS |
+|---|---|---|
+| Binary size (`hello-world`, Windows x64, release) | ~57 MB | ~18 MB |
+| Idle working set (same build) | ~49 MB | ~41 MB |
+
+<sub>Measured this session, Windows 11, lean/prod builds (no dev-mode HMR tooling). Not yet measured on macOS/Linux — treat as directional until cross-platform numbers land. QuickJS is newer in Glyx and covers the same public API surface, but has seen less production mileage than V8.</sub>
 
 ## How it works
 
@@ -185,6 +196,11 @@ js/packages/@glyx/
 
 tools/
   vscode-glyx/         VS Code extension (snippets, glyx.config.json JSON schema)
+
+glyx-media-c/          Standalone C library wrapping FFmpeg — the only interface
+                        between glyx-runner and the media codec DLL. Not a Cargo
+                        crate (no Cargo.toml), so it lives outside crates/; built
+                        via its own platform scripts (build-{windows,macos,linux}).
 
 examples/
   hello-world/         Minimal starting point

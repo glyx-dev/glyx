@@ -20,6 +20,8 @@ export interface WindowConfig {
   startupMode?: string;
   /** true = OS title bar (default). false = frameless / custom title bar. */
   decorations?: boolean;
+  /** true = user can resize the window (default). false = fixed size, locked to width x height. */
+  resizable?:   boolean;
   /**
    * GPU clear color before the first JS frame renders.
    * Format: '#rrggbb' or '#rrggbbaa'.

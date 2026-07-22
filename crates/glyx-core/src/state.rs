@@ -283,6 +283,16 @@ pub(super) struct PerWindowState {
     pub(super) canvas3d_dirty: std::collections::HashSet<u32>,
     #[cfg(feature = "canvas3d")]
     pub(super) renderer_3d: Option<glyx_3d::Renderer3D>,
+    /// Canvas3D-on-Direct2D bridge (Phase 6) — lazily created on first
+    /// Canvas3D node under a Direct2D-backed window, torn down after 60s of
+    /// 3D inactivity. `None` on non-Direct2D windows and on Direct2D windows
+    /// with no live 3D content. See `glyx_renderer::Direct2DGpuBridge`.
+    #[cfg(all(target_os = "windows", feature = "canvas3d"))]
+    pub(super) d2d_3d_bridge: Option<glyx_renderer::Direct2DGpuBridge>,
+    /// Set after a failed bridge creation so we only log the error once
+    /// (mirrors `gpu_upgrade_failed`'s role for the TinySkia/Vello path).
+    #[cfg(all(target_os = "windows", feature = "canvas3d"))]
+    pub(super) d2d_3d_bridge_failed: bool,
     #[cfg(feature = "camera")]
     pub(super) camera_streams: std::collections::HashMap<u32, CameraStream>,
     pub(super) video_streams: std::collections::HashMap<u32, VideoStream>,

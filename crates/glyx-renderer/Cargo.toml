@@ -3,14 +3,24 @@ name    = "glyx-renderer"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Canvas3D-on-Direct2D bridge (direct2d_3d_bridge.rs): a headless wgpu device
+# renders the 3D scene into an offscreen texture, reads it back, and the
+# Direct2D backend draws it as an image overlay — Direct2D has no wgpu
+# surface of its own to composite onto directly, unlike the TinySkia/Vello
+# paths. Mirrors glyx-core's own "canvas3d" feature/dep:glyx-3d convention.
+canvas3d = ["dep:glyx-3d"]
+
 [dependencies]
 glyx-gpu  = { path = "../glyx-gpu" }
 glyx-text = { path = "../glyx-text" }
+glyx-3d   = { path = "../glyx-3d", optional = true }
 vello      = { workspace = true }
 peniko     = { workspace = true }
 kurbo      = { workspace = true }
 parley     = { workspace = true }
 wgpu       = { workspace = true }
+pollster   = { workspace = true }
 log        = { workspace = true }
 thiserror  = { workspace = true }
 tiny-skia  = { workspace = true }
@@ -22,8 +32,10 @@ lru        = { workspace = true }
 # Direct2D backend (experimental `renderMode: 'direct2d'`, see direct2d.rs) —
 # same crate/version/feature set as glyx-core's d2d_present.rs; see that
 # Cargo.toml entry for why `windows` (COM wrapper methods) is used here
-# instead of the workspace's usual windows-sys.
-windows = { version = "0.58", features = [
+# instead of the workspace's usual windows-sys, and why it's pinned to 0.62
+# (to match wgpu-hal) with a few base types (D2D_POINT_2F, Matrix3x2, BOOL)
+# moved/renamed as a result — see the fixed call sites in this file.
+windows = { version = "0.62", features = [
     "Foundation_Numerics",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
@@ -34,3 +46,4 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
 ] }
+windows-numerics = "0.3"

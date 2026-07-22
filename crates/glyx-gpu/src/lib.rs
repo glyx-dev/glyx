@@ -136,6 +136,15 @@ impl GpuContext {
             GpuTier::Discrete | GpuTier::DiscreteIntel => 2,
         };
 
+        // `view_formats` lets a view be created in the paired non-sRGB format
+        // (e.g. Bgra8UnormSrgb ↔ Bgra8Unorm) — needed so blit passes that
+        // write already-encoded final bytes (Vello's compute output, TinySkia's
+        // raw pixmap bytes) can target a raw view of the swapchain texture
+        // without the hardware applying an extra, unwanted linear→sRGB encode
+        // on store. See `GpuContext::surface_format_raw`.
+        let format_raw = format.remove_srgb_suffix();
+        let view_formats = if format_raw != format { vec![format_raw] } else { vec![] };
+
         let config = wgpu::SurfaceConfiguration {
             usage:                         wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -145,7 +154,7 @@ impl GpuContext {
             // On Windows this avoids the DWM Fifo stall that costs ~5–15ms/frame.
             present_mode:                  wgpu::PresentMode::AutoVsync,
             alpha_mode:                    caps.alpha_modes[0],
-            view_formats:                  vec![],
+            view_formats,
             desired_maximum_frame_latency: frame_latency,
         };
         surface.configure(&device, &config);
@@ -183,6 +192,15 @@ impl GpuContext {
 
     pub fn surface_format(&self) -> wgpu::TextureFormat {
         self.config.format
+    }
+
+    /// The non-sRGB pair of `surface_format()` (identical if the surface
+    /// format isn't an sRGB variant to begin with). Use this to create a
+    /// swapchain texture *view* for blit passes that write pre-encoded final
+    /// pixel bytes — writing through an sRGB-format view would apply an
+    /// unwanted second gamma encode on top of bytes that are already correct.
+    pub fn surface_format_raw(&self) -> wgpu::TextureFormat {
+        self.config.format.remove_srgb_suffix()
     }
 
     /// Non-blocking poll — frees staging buffers and command allocators from

@@ -12,7 +12,7 @@
 // Cursor pixel position is computed via __glyx_measure_text (styled).
 
 import React, { useState, useEffect, useRef, useCallback, useContext, createContext } from 'react';
-import { View, Text, Pressable, addKeyListener, removeKeyListener, addGlobalClickListener, removeGlobalClickListener, clipboard } from '@glyx-dev/react';
+import { View, Text, Pressable, addKeyListener, removeKeyListener, addGlobalClickListener, removeGlobalClickListener, clipboard, registerInput, unregisterInput } from '@glyx-dev/react';
 
 // ── Document helpers ──────────────────────────────────────────────────────────
 
@@ -455,23 +455,52 @@ export function RichTextEditor({
     return () => removeGlobalClickListener(onGlobalClick);
   }, [onGlobalClick]);
 
-  // Click inside → position cursor
+  // Shared by click-to-position and drag-to-select: pixel (x, y) relative to
+  // the editor's own top-left → nearest { para, offset }.
+  const posFromXY = useCallback((x, y) => {
+    const LINE_H = fontSize * 1.5;
+    const PADDING = 8;
+    const paraIdx = Math.min(
+      docRef.current.paragraphs.length - 1,
+      Math.max(0, Math.floor((y - PADDING) / LINE_H))
+    );
+    const offset = clickToOffset(docRef.current.paragraphs[paraIdx], x - PADDING, fontSize);
+    return { para: paraIdx, offset };
+  }, [fontSize]);
+
+  // Click inside → position cursor, anchor a possible drag-selection.
+  const dragAnchorRef = useRef({ para: 0, offset: 0 });
   const onPress = useCallback((ev) => {
     _focusedEditor = nodeIdRef.current;
     setFocused(true);
     setBlinkOn(true);
-    const LINE_H = fontSize * 1.5;
-    const PADDING = 8;
-    const paraIdx = Math.min(
-      doc.paragraphs.length - 1,
-      Math.max(0, Math.floor((ev.locationY - PADDING) / LINE_H))
-    );
-    const offset = clickToOffset(doc.paragraphs[paraIdx], ev.locationX - PADDING, fontSize);
-    const c = { para: paraIdx, offset };
+    const c = posFromXY(ev.locationX, ev.locationY);
+    dragAnchorRef.current = c;
     setCursor(c);
-  }, [doc, fontSize, setCursor]);
+  }, [posFromXY, setCursor]);
 
-  const onMount = useCallback((id) => { nodeIdRef.current = id; }, []);
+  // Mouse-drag selection: registered as an "input" node (alongside the
+  // Pressable) so events.js routes per-frame cursorMoved deltas here while
+  // the button is held — Pressable only ever fires a single onPress on
+  // release, with no drag/move callback of its own.
+  const onDragAt = useCallback((x, y) => {
+    const c = posFromXY(x, y);
+    setCursor_(c);
+    setSel_({ anchor: dragAnchorRef.current, focus: c });
+  }, [posFromXY]);
+
+  const onMount = useCallback((id) => {
+    nodeIdRef.current = id;
+    registerInput(id, {
+      onClickAt: (x, y) => { onPress({ locationX: x, locationY: y }); },
+      onDragAt,
+      onBlur: () => { if (_focusedEditor === id) { _focusedEditor = null; setFocused(false); } },
+    });
+  }, [onPress, onDragAt]);
+
+  useEffect(() => {
+    return () => { if (nodeIdRef.current !== null) unregisterInput(nodeIdRef.current); };
+  }, []);
 
   const LINE_H  = fontSize * 1.5;
   const PADDING = 8;

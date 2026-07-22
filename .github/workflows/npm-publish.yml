@@ -3,7 +3,9 @@ name: Publish npm packages
 # Publishes every @glyx-dev/* workspace package to npm.
 # Trigger with a `js-v*` tag (e.g. js-v0.1.0) or manually from the Actions tab.
 #
-# Requires the repo secret NPM_TOKEN (an npm token for the glyx-dev org).
+# Requires NPM_TOKEN (an npm token for the glyx-dev org) as a secret in the
+# "release" GitHub environment — same environment as CAP_SIGNING_KEY /
+# UPDATE_SIGNING_KEY, so publishing is gated by the same protection rules.
 
 on:
   push:
@@ -18,6 +20,7 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: read
       id-token: write   # npm provenance

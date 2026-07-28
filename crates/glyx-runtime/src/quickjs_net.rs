@@ -17,7 +17,13 @@ use tokio::runtime::Handle;
 
 use crate::bindings::{CompletionQueue, RedrawRequest};
 #[cfg(any(feature = "fetch", feature = "websocket"))]
-use crate::bindings::{check_fetch_scheme, extract_host, is_private_host};
+use crate::bindings::{extract_host, is_private_host};
+// `check_fetch_scheme` (unlike `extract_host`/`is_private_host`) is only
+// ever called from `fetch()` below, which is itself `fetch`-gated — so this
+// import must be narrower than the `any(fetch, websocket)` cfg above, or a
+// websocket-only build (no fetch) fails with an unresolved import.
+#[cfg(feature = "fetch")]
+use crate::bindings::check_fetch_scheme;
 use crate::quickjs_runtime::QuickJsRuntime;
 
 #[cfg(feature = "websocket")]

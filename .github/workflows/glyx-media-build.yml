@@ -44,10 +44,18 @@ jobs:
           $dir = Get-ChildItem ffmpeg-dist | Select-Object -First 1 -ExpandProperty FullName
           echo "FFMPEG_DIR=$dir" >> $env:GITHUB_ENV
 
+      # Locates cl.exe/link.exe via vswhere regardless of which VS edition
+      # (Community/Professional/Enterprise) the runner image actually has —
+      # the previous hardcoded "...Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+      # path assumed an edition that isn't guaranteed to match the image.
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Build glyx-media.dll (MSVC)
         shell: cmd
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           cl /LD /O2 /I "%FFMPEG_DIR%\include" ^
             glyx-media-c\glyx_media.c ^
             /Fe:glyx-media-%GLYX_MEDIA_VERSION%-windows-x64.dll ^
@@ -87,13 +95,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ffmpeg (Homebrew)
+      # macos-latest runners are Apple Silicon — /opt/homebrew's ffmpeg is
+      # arm64-only, so the x64 (Intel) leg needs its own x86_64 Homebrew
+      # under Rosetta at /usr/local instead. The arm64 leg uses the native
+      # /opt/homebrew install as before.
+      - name: Install ffmpeg (Homebrew, arm64)
+        if: matrix.arch == 'arm64'
         run: brew install ffmpeg pkg-config
+
+      - name: Install ffmpeg (Rosetta Homebrew, x64)
+        if: matrix.arch == 'x64'
+        run: |
+          softwareupdate --install-rosetta --agree-to-license
+          if [ ! -x /usr/local/bin/brew ]; then
+            arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          fi
+          arch -x86_64 /usr/local/bin/brew install ffmpeg pkg-config
 
       - name: Build glyx-media.dylib
         run: |
-          FFMPEG_CFLAGS=$(pkg-config --cflags libavformat libavcodec libswscale libswresample libavutil)
-          FFMPEG_LIBS=$(pkg-config --libs libavformat libavcodec libswscale libswresample libavutil)
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            export PKG_CONFIG_PATH="/usr/local/opt/ffmpeg/lib/pkgconfig:/usr/local/lib/pkgconfig"
+            PKG_CONFIG=/usr/local/bin/pkg-config
+          else
+            PKG_CONFIG=pkg-config
+          fi
+          FFMPEG_CFLAGS=$($PKG_CONFIG --cflags libavformat libavcodec libswscale libswresample libavutil)
+          FFMPEG_LIBS=$($PKG_CONFIG --libs libavformat libavcodec libswscale libswresample libavutil)
           clang -arch ${{ matrix.arch == 'arm64' && 'arm64' || 'x86_64' }} \
             -shared -fPIC -O2 \
             $FFMPEG_CFLAGS \

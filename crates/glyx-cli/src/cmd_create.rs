@@ -112,10 +112,20 @@ pub(super) fn cmd_create_native(name: &str, dest: &Path, glyx_home: Option<&Path
         Some(h) => {
             let core_path  = relpath(dest, &h.join("crates/glyx-core"));
             let shell_path = relpath(dest, &h.join("crates/glyx-shell"));
+            let vello_path = relpath(dest, &h.join("vendor/vello"));
+            let mimalloc_path = relpath(dest, &h.join("vendor/libmimalloc-sys"));
             format!(
                 r#"glyx-core  = {{ path = "{core_path}", default-features = false }}
 glyx-shell = {{ path = "{shell_path}" }}
 env_logger  = "0.11"
+
+# Same as the git-deps branch below — patch tables do NOT propagate through
+# path dependencies either, so a project outside the workspace still needs
+# its own copy of this to get Glyx's vendored vello/mimalloc fixes instead
+# of upstream crates.io behavior (large GPU-buffer pools, CRT link errors).
+[patch.crates-io]
+vello           = {{ path = "{vello_path}" }}
+libmimalloc-sys = {{ path = "{mimalloc_path}" }}
 "#)
         }
         None => {
@@ -145,9 +155,16 @@ edition = "2021"
 
 [features]
 # "dev" gates hot-reload, bun watcher, and dev overlay in glyx-core.
-# Production builds (glyx build) use --no-default-features to exclude them.
-default = ["dev"]
+# Production builds (glyx build) use --no-default-features, then re-add just
+# the engine feature (v8 or quickjs) to exclude dev-only tooling.
+# glyx-core is pulled in below with default-features = false, so an engine
+# must be selected explicitly — v8 is the desktop default; switch to
+# quickjs for a mobile or lightweight-desktop build (mutually exclusive,
+# never both).
+default = ["dev", "v8"]
 dev     = ["glyx-core/dev"]
+v8      = ["glyx-core/v8"]
+quickjs = ["glyx-core/quickjs"]
 
 [dependencies]
 {rust_deps}"#))?;

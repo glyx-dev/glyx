@@ -735,3 +735,138 @@ impl JsRuntime for V8Runtime {
         self.gc_hint();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::JsPlugin;
+
+    /// Same shape as `QuickJsRuntime::new_runtime_with_plugin` (quickjs_runtime.rs)
+    /// — one JS plugin loaded, for exercising `register_all`/`__glyx_backend_call`'s
+    /// JS-command path end to end on the V8 side, which (unlike QuickJS) had no
+    /// plugin-specific test coverage at all before this.
+    fn new_runtime_with_plugin(prefix: Option<&str>, bundled_js: &str, global_name: &str) -> V8Runtime {
+        // Must run exactly once per process before any V8Runtime/isolate is
+        // created — safe to call repeatedly (see `crate::init_v8`'s doc
+        // comment), which is what makes it safe here even though multiple
+        // tests in this module call this helper under parallel test execution.
+        crate::init_v8();
+        let tokio_rt = tokio::runtime::Runtime::new().expect("tokio runtime should build");
+        let perf_state = Arc::new(parking_lot::Mutex::new(glyx_perf::PerfState::new()));
+        let ipc_bus = new_ipc_bus();
+        let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let backend_commands: BackendRegistry = Arc::new(std::collections::HashMap::new());
+        let js_plugins: crate::JsPlugins = Arc::new(vec![JsPlugin {
+            prefix: prefix.map(String::from),
+            bundled_js: bundled_js.to_string(),
+            global_name: global_name.to_string(),
+            capabilities: vec![],
+            entry: None,
+        }]);
+        V8Runtime::new_with_ipc(
+            tokio_rt.handle().clone(), None, ipc_bus, 0, next_window_id, perf_state,
+            backend_commands, js_plugins, 256,
+        )
+    }
+
+    #[test]
+    fn js_plugin_export_is_registered_and_callable_via_backend_call() {
+        let mut rt = new_runtime_with_plugin(
+            Some("notes"),
+            "globalThis.__glyx_plugin_notes = { getAll: async function(args) { return { echoed: args.title }; } };",
+            "__glyx_plugin_notes",
+        );
+        rt.eval(
+            "globalThis.__out = null; \
+             __glyx_backend_call('notes.getAll', JSON.stringify({ title: 'hi' })) \
+                .then(r => { globalThis.__out = JSON.stringify(r); });"
+        ).expect("eval should succeed");
+        rt.tick();
+        let out = rt.eval("globalThis.__out").expect("eval should succeed");
+        assert!(out.contains("\"echoed\":\"hi\""), "got: {out}");
+    }
+
+    #[test]
+    fn js_plugin_without_prefix_registers_under_the_bare_function_name() {
+        let mut rt = new_runtime_with_plugin(
+            None,
+            "globalThis.__glyx_plugin_util = { ping: async function() { return 'pong'; } };",
+            "__glyx_plugin_util",
+        );
+        rt.eval(
+            "globalThis.__out = null; \
+             __glyx_backend_call('ping', '{}').then(r => { globalThis.__out = r; });"
+        ).expect("eval should succeed");
+        rt.tick();
+        let out = rt.eval("globalThis.__out").expect("eval should succeed");
+        assert!(out.contains("pong"), "got: {out}");
+    }
+
+    #[test]
+    fn unknown_backend_command_still_rejects_with_a_plugin_loaded() {
+        let mut rt = new_runtime_with_plugin(
+            Some("notes"),
+            "globalThis.__glyx_plugin_notes = { getAll: async function() { return []; } };",
+            "__glyx_plugin_notes",
+        );
+        rt.eval(
+            "globalThis.__err = null; \
+             __glyx_backend_call('notes.missing', '{}').catch(e => { globalThis.__err = String(e); });"
+        ).expect("eval should succeed");
+        rt.tick();
+        let out = rt.eval("globalThis.__err").expect("eval should succeed");
+        assert!(out.contains("no such command"), "got: {out}");
+    }
+
+    #[test]
+    fn reload_plugin_picks_up_new_exports_and_drops_removed_ones() {
+        let mut rt = new_runtime_with_plugin(
+            Some("notes"),
+            "globalThis.__glyx_plugin_notes = { \
+                getAll: async function() { return 'v1'; }, \
+                oldOnly: async function() { return 'gone-after-reload'; } \
+             };",
+            "__glyx_plugin_notes",
+        );
+
+        // v1: both commands work.
+        rt.eval(
+            "globalThis.__v1a = null; globalThis.__v1b = null; \
+             __glyx_backend_call('notes.getAll', '{}').then(r => { globalThis.__v1a = r; }); \
+             __glyx_backend_call('notes.oldOnly', '{}').then(r => { globalThis.__v1b = r; });"
+        ).expect("eval should succeed");
+        rt.tick();
+        assert!(rt.eval("globalThis.__v1a").unwrap().contains('v'));
+        assert!(rt.eval("globalThis.__v1b").unwrap().contains("gone-after-reload"));
+
+        // Simulate a dev-mode rebundle: getAll's behavior changes, oldOnly is removed,
+        // newFn is added.
+        rt.reload_plugin(
+            "__glyx_plugin_notes",
+            Some("notes"),
+            "globalThis.__glyx_plugin_notes = { \
+                getAll: async function() { return 'v2'; }, \
+                newFn:  async function() { return 'added-after-reload'; } \
+             };",
+        );
+
+        // getAll now returns the new behavior.
+        rt.eval(
+            "globalThis.__v2 = null; \
+             __glyx_backend_call('notes.getAll', '{}').then(r => { globalThis.__v2 = r; });"
+        ).expect("eval should succeed");
+        rt.tick();
+        let v2 = rt.eval("globalThis.__v2").expect("eval should succeed");
+        assert!(v2.contains('2'), "got: {v2}");
+
+        // oldOnly is gone; newFn works.
+        rt.eval(
+            "globalThis.__old_err = null; globalThis.__new_out = null; \
+             __glyx_backend_call('notes.oldOnly', '{}').catch(e => { globalThis.__old_err = String(e); }); \
+             __glyx_backend_call('notes.newFn', '{}').then(r => { globalThis.__new_out = r; });"
+        ).expect("eval should succeed");
+        rt.tick();
+        assert!(rt.eval("globalThis.__old_err").unwrap().contains("no such command"));
+        assert!(rt.eval("globalThis.__new_out").unwrap().contains("added-after-reload"));
+    }
+}

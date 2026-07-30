@@ -69,6 +69,11 @@ use glyx_runtime::{
 use glyx_runtime::{init_v8, GlyxRuntime};
 
 pub use glyx_runtime::GlyxExtension;
+/// Re-exported so native `GlyxExtension` implementations (a generated
+/// project's own `src/`) can `use glyx_core::BackendRegistryBuilder`
+/// without needing `glyx-runtime` as a direct dependency — a native
+/// project's Cargo.toml only depends on `glyx-core`/`glyx-shell`.
+pub use glyx_runtime::BackendRegistryBuilder;
 use glyx_security;
 use glyx_media;
 use glyx_shell::{ShellEvent, GlyxUserEvent};
@@ -1145,9 +1150,10 @@ pub fn run(mut config: AppConfig) -> bool {
                 // QuickJS has no snapshot equivalent — this uses eval-from-source
                 // every time, no bytecode precompilation path yet. IPC/multi-window,
                 // the async-Rust-command half of backend_call, AND JS plugins
-                // (backend.<name>.<fn>()) are all wired via `new_with_ipc`. Unlike
-                // V8, there's no dev-mode hot-reload for a plugin edit yet — a
-                // full window restart picks up the change instead.
+                // (backend.<name>.<fn>()) are all wired via `new_with_ipc`. Plugin
+                // dev-mode hot-reload also works here — dev_mode.rs's watcher calls
+                // `reload_plugin` through the engine-neutral `JsRuntime` trait, and
+                // QuickJsRuntime implements it the same way V8Runtime does.
                 #[cfg(feature = "quickjs")]
                 let mut rt: Box<dyn glyx_runtime::JsRuntime> = Box::new(
                     glyx_runtime::QuickJsRuntime::new_with_ipc(

@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import {
-  View, Text, Pressable, ScrollView, render, useWindowSize,
+  View, Text, Pressable, ScrollView, render, useWindowSize, backend,
 } from '@glyx-dev/react';
 
 // ── Theme ─────────────────────────────────────────────────────────────────────
@@ -93,8 +93,11 @@ function App() {
   const [gridMode, setGridMode] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState([]);
+  // Demo JS plugin round trip (js/plugins/format.plugin.js → backend.format.toFraction).
+  const [fractionHint, setFractionHint] = useState(null);
 
   const press = useCallback((key) => {
+    setFractionHint(null);
     setState(s => {
       const next = calc(s, key);
       if (key === '=' && next.lastResult !== undefined) {
@@ -104,6 +107,11 @@ function App() {
       return next;
     });
   }, []);
+
+  const showAsFraction = useCallback(async () => {
+    const result = await backend.format.toFraction({ value: state.disp });
+    setFractionHint(result.fraction);
+  }, [state.disp]);
 
   const pad = 8;
   const titleH = 32;
@@ -188,6 +196,9 @@ function App() {
             <Pressable onPress={() => setGridMode(m => !m)} width={36} height={24} style={{ backgroundColor: C.mauve, borderRadius: 6, alignItems: 'center', justifyContent: 'center' }}>
               <Text fontSize={10} height={12} style={{ color: C.onLight }}>{gridMode ? 'Std' : 'Sci'}</Text>
             </Pressable>
+            <Pressable onPress={showAsFraction} width={24} height={24} style={{ backgroundColor: C.teal, borderRadius: 6, alignItems: 'center', justifyContent: 'center' }}>
+              <Text fontSize={10} height={12} style={{ color: C.onLight }}>⅟x</Text>
+            </Pressable>
             <Pressable onPress={() => __glyx_quit()}             width={24} height={24} style={{ backgroundColor: C.red, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}>
               <Text fontSize={10} height={12} style={{ color: C.onLight }}>×</Text>
             </Pressable>
@@ -225,7 +236,7 @@ function App() {
           height={20}
         >
           <Text fontSize={11} height={16} style={{ color: C.dim }}>
-            {state.expr}
+            {fractionHint ? '= ' + fractionHint : state.expr}
           </Text>
         </View>
 

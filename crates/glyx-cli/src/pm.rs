@@ -199,39 +199,65 @@ fn raw_cmd_with_args(bin: &str, args: &[&str]) -> Command {
 
 // ── Bundling ──────────────────────────────────────────────────────────────────
 
-/// Bundle JS via esbuild (invoked through the PM's dlx/npx mechanism).
+/// Bundle JS via `bun build` — Bun's own built-in bundler, not a separate
+/// `esbuild` package.
 ///
-/// esbuild is a peer dep of @glyx-dev/react so it is always in node_modules after
-/// install; dlx resolves the local version first, no network needed.
+/// Previously this shelled out to `esbuild` via the configured PM's dlx/npx
+/// mechanism, on the assumption that "esbuild is a peer dep of
+/// @glyx-dev/react so it is always in node_modules after install" — that
+/// assumption doesn't hold (no such peer dep exists, `esbuild` is not
+/// actually installed), so dlx fell back to fetching a fresh copy over the
+/// network on every call, which fails in restricted/offline environments
+/// with a `Cannot find module '...esbuild/bin/esbuild'` error. `dev_mode.rs`
+/// already bundles this way for incremental HMR rebuilds and it works
+/// reliably with no external dependency — this unifies both bundling paths
+/// onto that same, already-proven mechanism. `pm` is accepted for call-site
+/// compatibility (this always used bun regardless of the configured PM
+/// before too, dlx_cmd's fallback path already assumed bun) but unused now
+/// that there's no PM-specific dlx invocation to build.
 ///
 /// `minify`     — set to true for production bundles
 /// `source_map` — inline source map (useful for dev + crash reports)
 pub fn js_bundle(
-    pm:         Pm,
+    _pm:        Pm,
     entry:      &str,
     output:     &str,
     minify:     bool,
     source_map: bool,
 ) -> Result<()> {
-    let mut cmd = dlx_cmd(pm, "esbuild");
-    cmd.arg(entry)
-        .arg(format!("--outfile={output}"))
-        .arg("--bundle")
-        .arg("--target=chrome108")   // V8 version shipped with rusty_v8 0.32
-        .arg("--format=iife")
-        .arg("--define:process.env.NODE_ENV='production'")
-        .arg("--loader:.js=jsx")
-        .arg("--loader:.ts=tsx");
-    if minify     { cmd.arg("--minify"); }
-    if source_map { cmd.arg("--sourcemap=inline"); }
+    let mut args = vec![
+        "build".to_string(), entry.to_string(),
+        "--outfile".to_string(), output.to_string(),
+        "--target".to_string(), "browser".to_string(),
+        "--format".to_string(), "iife".to_string(),
+        "--define".to_string(), "process.env.NODE_ENV='production'".to_string(),
+    ];
+    if minify     { args.push("--minify".to_string()); }
+    if source_map { args.push("--sourcemap=inline".to_string()); }
 
-    let pm_name = pm.name();
-    let status = cmd
-        .status()
-        .map_err(|e| anyhow::anyhow!("Failed to run esbuild via {pm_name}: {e}\nMake sure dependencies are installed (`{pm_name} install`)"))?;
+    let run = || -> std::io::Result<std::process::Output> {
+        #[cfg(target_os = "windows")]
+        {
+            match Command::new("bun").args(&args).output() {
+                Ok(o) => Ok(o),
+                Err(_) => {
+                    let mut cmd_args = vec!["/C".to_string(), "bun".to_string()];
+                    cmd_args.extend(args.iter().cloned());
+                    Command::new("cmd").args(&cmd_args).output()
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        Command::new("bun").args(&args).output()
+    };
 
-    if !status.success() {
-        bail!("esbuild bundle failed (via {pm_name})");
+    let out = run().map_err(|e| anyhow::anyhow!(
+        "Failed to run `bun build`: {e}\nMake sure bun is installed and on PATH."
+    ))?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("bun build failed:\n{stderr}");
     }
     Ok(())
 }

@@ -678,15 +678,16 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     // ── Text measurement (table auto-sizing, caret hit-testing) ────────
     {
         let text_measure = Arc::clone(&reg.text_measure);
-        let measure_text_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>, text: String, font_size: Opt<f64>, max_width: Opt<f64>, style: Opt<String>| -> rquickjs::Result<rquickjs::Value<'js>> {
+        let measure_text_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>, text: String, font_size: Opt<f64>, max_width: Opt<f64>, style: Opt<String>, line_height: Opt<f64>| -> rquickjs::Result<rquickjs::Value<'js>> {
             let font_size = font_size.0.unwrap_or(14.0) as f32;
             let mw = max_width.0.unwrap_or(0.0);
             let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
             let style = style.0.unwrap_or_default();
             let (bold, italic) = (style.contains("bold"), style.contains("italic"));
+            let line_height = line_height.0.map(|v| v as f32);
             let mut tm = text_measure.lock();
-            let (w, h) = if bold || italic {
-                let layout = tm.styled_label(&text, font_size, max_width, bold, italic);
+            let (w, h) = if bold || italic || line_height.is_some() {
+                let layout = tm.styled_label(&text, font_size, max_width, bold, italic, line_height);
                 (layout.width(), layout.height())
             } else {
                 tm.measure(&text, font_size, max_width)
@@ -697,14 +698,29 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     }
     {
         let text_measure = Arc::clone(&reg.text_measure);
-        let char_at_x_fn = Function::new(ctx.clone(), move |text: String, font_size: Opt<f64>, max_width: Opt<f64>, x: Opt<f64>| -> u32 {
+        let char_at_x_fn = Function::new(ctx.clone(), move |text: String, font_size: Opt<f64>, max_width: Opt<f64>, x: Opt<f64>, style: Opt<String>| -> u32 {
             let font_size = font_size.0.unwrap_or(16.0) as f32;
             let mw = max_width.0.unwrap_or(0.0);
             let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
             let x = x.0.unwrap_or(0.0) as f32;
-            text_measure.lock().char_at_x(&text, font_size, max_width, x) as u32
+            let style = style.0.unwrap_or_default();
+            let (bold, italic) = (style.contains("bold"), style.contains("italic"));
+            text_measure.lock().char_at_x_styled(&text, font_size, max_width, x, bold, italic) as u32
         })?;
         globals.set("__glyx_text_char_at_x", char_at_x_fn)?;
+    }
+    {
+        let text_measure = Arc::clone(&reg.text_measure);
+        let cursor_x_fn = Function::new(ctx.clone(), move |text: String, font_size: Opt<f64>, max_width: Opt<f64>, char_idx: Opt<f64>, style: Opt<String>| -> f64 {
+            let font_size = font_size.0.unwrap_or(16.0) as f32;
+            let mw = max_width.0.unwrap_or(0.0);
+            let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
+            let char_idx = char_idx.0.unwrap_or(0.0).max(0.0) as usize;
+            let style = style.0.unwrap_or_default();
+            let (bold, italic) = (style.contains("bold"), style.contains("italic"));
+            text_measure.lock().cursor_x_at_styled(&text, font_size, max_width, char_idx, bold, italic) as f64
+        })?;
+        globals.set("__glyx_text_cursor_x", cursor_x_fn)?;
     }
     {
         let text_measure = Arc::clone(&reg.text_measure);

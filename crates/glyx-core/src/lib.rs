@@ -232,18 +232,19 @@ use render::{render_subtree, RenderCtx, compute_scrollbar_thumb};
 /// produce a cache miss (re-shape), never a correctness bug.
 #[derive(Hash, Eq, PartialEq)]
 struct LabelKey {
-    text_hash:      u64,
-    font_size_bits: u32,
-    max_width_bits: u32,
-    bold:           bool,
-    italic:         bool,
+    text_hash:       u64,
+    font_size_bits:  u32,
+    max_width_bits:  u32,
+    bold:            bool,
+    italic:          bool,
+    line_height_bits: Option<u32>,
     // Color is intentionally NOT part of the key: CachedLabel stores only the
     // shaped layout, not color.  Color is applied at draw time via frame.draw_text,
     // so the same shaped result can be reused across all color variants of a string.
 }
 
 impl LabelKey {
-    fn new(text: &str, font_size: f32, max_width: f32, bold: bool, italic: bool) -> Self {
+    fn new(text: &str, font_size: f32, max_width: f32, bold: bool, italic: bool, line_height: Option<f32>) -> Self {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut h);
@@ -253,6 +254,7 @@ impl LabelKey {
             max_width_bits: max_width.to_bits(),
             bold,
             italic,
+            line_height_bits: line_height.map(f32::to_bits),
         }
     }
 }
@@ -393,8 +395,8 @@ struct CachedLabel {
 }
 
 impl CachedLabel {
-    fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4], bold: bool, italic: bool) -> Self {
-        let layout      = ts.styled_label(text, font_size, max_width, bold, italic);
+    fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4], bold: bool, italic: bool, line_height: Option<f32>) -> Self {
+        let layout      = ts.styled_label(text, font_size, max_width, bold, italic, line_height);
         let width       = layout.width() as f64;
         let text_height = layout.height() as f64;
         // For an empty string Parley produces no glyph runs, so ascent() = 0.

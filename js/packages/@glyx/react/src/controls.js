@@ -591,7 +591,12 @@ export function TextInput({
     clip: true,   // prevent text from rendering outside the input bounds
     ...style,
     // Vertical scroll state (after the user-style spread — not overridable).
-    ...(multiline ? { scrollOffsetY: scrollY } : null),
+    // `showScrollbar`/`scrollbarWidth`/`scrollbarColor` use the same native
+    // clip+scroll mechanism (and the same visual defaults) as
+    // @glyx-dev/rich-text's RichTextEditor — multiline already scrolled
+    // correctly via mouse wheel and caret-follow, it just never rendered a
+    // visible scrollbar for it.
+    ...(multiline ? { scrollOffsetY: scrollY, showScrollbar: true, scrollbarWidth: 8, scrollbarColor: '#8c8caa99' } : null),
   };
 
   return React.createElement(

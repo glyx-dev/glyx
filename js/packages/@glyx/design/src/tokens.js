@@ -56,14 +56,19 @@ export const tokens = {
     // NOTE: cards are WHITE on a grey window background — Catppuccin's
     // surface0-2 greys are hover/overlay shades; using them as panel
     // backgrounds makes everything blend into itself (grey-on-grey).
-    bg:          _latte.base,          // window background (soft grey)
+    // `bg` uses `crust` (not the paler `base`) and `border` uses `surface1`
+    // (not a near-white custom grey) specifically because the previous,
+    // paler values were too close to `surface` (#ffffff) to actually read
+    // as distinct sections — cards, the search bar, and dividers all
+    // blended into the page background instead of popping off it.
+    bg:          _latte.crust,         // window background — clearly greyer than surface
     surface:     '#ffffff',            // cards / panels — pops on bg
     surfaceRaised: '#f6f7fa',          // nested panels, table headers
     surfaceHover: '#e9ecf2',           // row/list hover on a surface
     text:        '#303446',            // darker than Latte text for contrast
     textMuted:   '#5d6274',
     textDisabled: _latte.overlay0,
-    border:      '#d5d9e2',            // visible on white AND on bg
+    border:      _latte.surface1,      // clearly visible on white AND on bg
     borderFocus: _latte.blue,
 
     // Interactive

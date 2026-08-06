@@ -110,7 +110,7 @@ function Sidebar({ filter, onFilter }) {
 }
 
 // ── Track row ──────────────────────────────────────────────────────────────────
-function TrackRow({ track, index, isCurrent, playing, onPlay, onToggleFav }) {
+function TrackRow({ track, index, isCurrent, playing, onPlay, onToggleFav, onRemove }) {
   return (
     <Pressable
       onPress={() => onPlay(track)}
@@ -145,6 +145,16 @@ function TrackRow({ track, index, isCurrent, playing, onPlay, onToggleFav }) {
         <Text style={{ fontSize: 15, color: track.favorite ? P.fav : P.faint }}>
           {track.favorite ? '★' : '☆'}
         </Text>
+      </Pressable>
+
+      <Pressable
+        onPress={() => onRemove(track)}
+        style={({ hovered }) => ({
+          padding: 6, borderRadius: 6,
+          backgroundColor: hovered ? P.border : 'transparent',
+        })}
+      >
+        <Text style={{ fontSize: 15, color: P.faint }}>✕</Text>
       </Pressable>
     </Pressable>
   );
@@ -474,6 +484,24 @@ function PlayerScreen() {
     if (current?.id === track.id) setCurrent(c => ({ ...c, favorite: next }));
   };
 
+  // Removes a track from the library (just the DB row + local state — the
+  // underlying file on disk is never touched). Stops playback first if the
+  // removed track is the one currently playing, so audio/video don't keep
+  // running against a track that no longer exists in the list.
+  const removeTrack = async (track) => {
+    if (current?.id === track.id) {
+      stopAudio();
+      stopVideo();
+      setCurrent(null);
+      setPlaying(false);
+      setPosition(0);
+      setDuration(0);
+    }
+    await db.run('DELETE FROM media WHERE id=?', [track.id]);
+    setTracks(ts => ts.filter(t => t.id !== track.id));
+    showToast({ message: `Removed "${track.title}"`, variant: 'success' });
+  };
+
   const addMedia = async () => {
     const paths = await dialog.openFile({
       multiple: true,
@@ -588,6 +616,7 @@ function PlayerScreen() {
                 playing={playing}
                 onPlay={playTrack}
                 onToggleFav={toggleFav}
+                onRemove={removeTrack}
               />
             ))}
 

@@ -5953,6 +5953,12 @@ No matching component was found for:
   var globalClickListeners = [];
   var focusedNodeId = null;
   var inputDragNodeId = null;
+  var lastClickTime = 0;
+  var lastClickX = 0;
+  var lastClickY = 0;
+  var lastClickTarget = null;
+  var DOUBLE_CLICK_MS = 400;
+  var DOUBLE_CLICK_PX = 5;
   var hoveredPressableId = null;
   var ctrlHeld = false;
   var shiftHeld = false;
@@ -6143,8 +6149,20 @@ No matching component was found for:
             if (ih && !isDisabled(inputTarget)) {
               setFocus(inputTarget);
               const layout = __glyx_getLayout(inputTarget);
-              if (layout)
-                ih.onClickAt?.(ev.x - layout.x, ev.y - layout.y);
+              if (layout) {
+                const now = Date.now();
+                const isDoubleClick = !isRight && inputTarget === lastClickTarget && now - lastClickTime <= DOUBLE_CLICK_MS && Math.abs(ev.x - lastClickX) <= DOUBLE_CLICK_PX && Math.abs(ev.y - lastClickY) <= DOUBLE_CLICK_PX;
+                if (isDoubleClick && ih.onDoubleClickAt) {
+                  ih.onDoubleClickAt(ev.x - layout.x, ev.y - layout.y);
+                  lastClickTime = 0;
+                } else {
+                  ih.onClickAt?.(ev.x - layout.x, ev.y - layout.y);
+                  lastClickTime = now;
+                  lastClickX = ev.x;
+                  lastClickY = ev.y;
+                  lastClickTarget = inputTarget;
+                }
+              }
               if (!isRight)
                 inputDragNodeId = inputTarget;
             }
@@ -7961,6 +7979,9 @@ No matching component was found for:
   // js/app.jsx
   var jsx_runtime = __toESM(require_jsx_runtime(), 1);
   function App() {
+    import_react8.useEffect(() => {
+      glyxWindow.hideSplash();
+    }, []);
     return /* @__PURE__ */ jsx_runtime.jsx(View, {
       style: {
         flex: 1,

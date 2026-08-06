@@ -7,7 +7,7 @@ use glyx_renderer::peniko;
 use glyx_runtime::JsPlugin;
 use glyx_security::Capabilities;
 
-use crate::{DevModeConfig, WindowConfig, SplashState, StartupMode, RenderMode};
+use crate::{DevModeConfig, WindowConfig, SplashState, SplashFrame, StartupMode, RenderMode};
 use glyx_gpu::GpuTier;
 use glyx_renderer::{BackendKind};
 
@@ -520,6 +520,46 @@ pub(super) fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
     }
 }
 
+/// Decode an animated GIF into one `SplashFrame` per GIF frame, each
+/// carrying that frame's own delay straight from the file.
+fn decode_gif_frames(path: &str) -> image::ImageResult<Vec<SplashFrame>> {
+    use image::AnimationDecoder;
+    let file = std::fs::File::open(path).map_err(image::ImageError::IoError)?;
+    let reader = std::io::BufReader::new(file);
+    let decoder = image::codecs::gif::GifDecoder::new(reader)?;
+    let raw_frames = decoder.into_frames().collect_frames()?;
+    Ok(raw_frames.into_iter().map(|f| {
+        let delay = Duration::from(f.delay());
+        let rgba = f.into_buffer();
+        let (w, h) = rgba.dimensions();
+        SplashFrame {
+            image: peniko::ImageData {
+                data: peniko::Blob::from(rgba.into_raw()),
+                format: peniko::ImageFormat::Rgba8,
+                alpha_type: peniko::ImageAlphaType::Alpha,
+                width: w, height: h,
+            },
+            delay,
+        }
+    }).collect())
+}
+
+/// Decode a single static image (PNG/JPEG/WebP/BMP) into one `SplashFrame`
+/// with a zero delay — the "static" case is just a one-element animation.
+fn decode_static_frame(path: &str) -> image::ImageResult<Vec<SplashFrame>> {
+    let rgba = image::open(path)?.into_rgba8();
+    let (w, h) = rgba.dimensions();
+    Ok(vec![SplashFrame {
+        image: peniko::ImageData {
+            data: peniko::Blob::from(rgba.into_raw()),
+            format: peniko::ImageFormat::Rgba8,
+            alpha_type: peniko::ImageAlphaType::Alpha,
+            width: w, height: h,
+        },
+        delay: Duration::ZERO,
+    }])
+}
+
 /// Build a `SplashState` from the `"splash"` section of `glyx.config.json`.
 pub(super) fn load_splash_state() -> Option<SplashState> {
     let json = read_config_json()?;
@@ -527,31 +567,34 @@ pub(super) fn load_splash_state() -> Option<SplashState> {
     let cfg = file.splash?;
     let now = Instant::now();
     let min_ms = cfg.minimum_ms;
-    let min_until    = now + Duration::from_millis(min_ms);
-    let auto_hide_at = now + Duration::from_millis(min_ms.max(30_000));
+    let min_until = now + Duration::from_millis(min_ms);
+    // Safety net for apps that never call `hideSplash()` at all — NOT the
+    // primary dismissal mechanism (that's still `hideSplash()`, which wins
+    // immediately whenever it's actually called; see `SplashState::is_visible`).
+    // A few seconds, not the old flat 30s: forgetting the call should be a
+    // minor annoyance, not a stuck half-minute splash.
+    const FORGOT_TO_HIDE_MS: u64 = 4_000;
+    let auto_hide_at = now + Duration::from_millis(min_ms.max(FORGOT_TO_HIDE_MS));
 
     let background = cfg.background.as_deref()
         .and_then(parse_hex_color)
         .unwrap_or([0, 0, 0, 255]);
 
-    let img = cfg.image.as_ref().and_then(|path| {
-        match image::open(path) {
-            Ok(img) => {
-                let rgba = img.into_rgba8();
-                let (w, h) = rgba.dimensions();
-                Some(peniko::ImageData {
-                    data: peniko::Blob::from(rgba.into_raw()),
-                    format: peniko::ImageFormat::Rgba8,
-                    alpha_type: peniko::ImageAlphaType::Alpha,
-                    width: w, height: h,
-                })
-            }
-            Err(e) => { log::warn!("[splash] failed to load '{path}': {e}"); None }
+    let frames = cfg.image.as_ref().map(|path| {
+        let is_gif = path.rsplit('.').next()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gif"));
+        let result = if is_gif { decode_gif_frames(path) } else { decode_static_frame(path) };
+        match result {
+            Ok(f) => f,
+            Err(e) => { log::warn!("[splash] failed to load '{path}': {e}"); Vec::new() }
         }
-    });
+    }).unwrap_or_default();
 
     let image_scale = cfg.image_scale.unwrap_or(0.5).clamp(0.05, 1.0);
-    Some(SplashState { image: img, image_scale, background, min_until, auto_hide_at, hidden: false })
+    Some(SplashState {
+        frames, current_frame: 0, last_advance: now,
+        image_scale, background, min_until, auto_hide_at, hidden: false,
+    })
 }
 
 /// Calculate a sensible V8 max-heap cap from the JS bundle size.

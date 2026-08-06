@@ -131,11 +131,26 @@ export interface Capabilities {
 }
 
 export interface SplashConfig {
-  /** Path to a PNG image displayed centred on the splash background. */
+  /**
+   * Path to an image displayed centred on the splash background — a static
+   * PNG/JPEG/WebP/BMP, or an animated GIF (detected from the file
+   * extension; no separate flag needed). The splash appears the instant
+   * the app window opens — before the GPU backend or JS engine have
+   * initialized — so it's shown via a small, separate native window first,
+   * then handed off seamlessly once the real window is ready.
+   */
   image?:      string;
   /** Hex background colour, e.g. '#1e1e2e'. Defaults to black. */
   background?: string;
-  /** Minimum display time in ms before hideSplash() takes effect. */
+  /**
+   * Minimum display time in ms before `glyxWindow.hideSplash()` actually
+   * dismisses the splash — `hideSplash()` is still the recommended way to
+   * say "the app is ready" (e.g. after an initial data fetch); this only
+   * sets a floor so a very fast-loading app doesn't flash the splash for a
+   * single frame. If `hideSplash()` is never called at all, the splash is
+   * dismissed automatically after a short safety-net timeout instead of
+   * staying up indefinitely.
+   */
   minimumMs?:  number;
   /**
    * Max fraction (0.0-1.0) of the smaller window dimension `image` may

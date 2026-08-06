@@ -7,6 +7,12 @@
     "background":  "#0f0f14",
     "renderMode":  "skia"
   },
+  "splash": {
+    "image":      "assets/splash.gif",
+    "background": "#0f0f14",
+    "minimumMs":  600,
+    "imageScale": 0.4
+  },
   "capabilities": {},
   "locales": ["en"],
   "dev": {

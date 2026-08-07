@@ -503,22 +503,31 @@ pub fn backend_call_callback(
         return;
     }
 
-    let handler = state.backend_commands.get(&name).cloned();
+    // Checked here (not just once at plugin-load time) so a command
+    // registered via `add_gated` enforces its required capabilities on
+    // every call, the same way JS plugins are capability-gated.
+    let dispatch = match state.backend_commands.get(&name) {
+        Some(cmd) => match crate::command_capabilities_ok(cmd, glyx_security::get()) {
+            Ok(())   => Ok(cmd.handler.clone()),
+            Err(e)   => Err(format!("backend.{name}: {e}")),
+        },
+        None => Err(format!("backend.{name}: no such command registered")),
+    };
+
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
     rv.set(promise.into());
 
-    if let Some(handler) = handler {
-        state.tokio.spawn(async move {
-            let result = handler(args_json).await;
-            queue_clone.lock().push_back(Completion { resolver_ptr: resolver, result });
+    match dispatch {
+        Ok(handler) => {
+            state.tokio.spawn(async move {
+                let result = handler(args_json).await;
+                queue_clone.lock().push_back(Completion { resolver_ptr: resolver, result });
+                if let Some(r) = redraw { r(); }
+            });
+        }
+        Err(msg) => {
+            queue_clone.lock().push_back(Completion { resolver_ptr: resolver, result: Err(msg) });
             if let Some(r) = redraw { r(); }
-        });
-    } else {
-        let msg = format!("backend.{name}: no such command registered");
-        queue_clone.lock().push_back(Completion {
-            resolver_ptr: resolver,
-            result: Err(msg),
-        });
-        if let Some(r) = redraw { r(); }
+        }
     }
 }

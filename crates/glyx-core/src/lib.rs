@@ -69,6 +69,11 @@ use glyx_runtime::{
 use glyx_runtime::{init_v8, GlyxRuntime};
 
 pub use glyx_runtime::GlyxExtension;
+/// Re-exported so native `GlyxExtension` implementations (a generated
+/// project's own `src/`) can `use glyx_core::BackendRegistryBuilder`
+/// without needing `glyx-runtime` as a direct dependency — a native
+/// project's Cargo.toml only depends on `glyx-core`/`glyx-shell`.
+pub use glyx_runtime::BackendRegistryBuilder;
 use glyx_security;
 use glyx_media;
 use glyx_shell::{ShellEvent, GlyxUserEvent};
@@ -227,18 +232,19 @@ use render::{render_subtree, RenderCtx, compute_scrollbar_thumb};
 /// produce a cache miss (re-shape), never a correctness bug.
 #[derive(Hash, Eq, PartialEq)]
 struct LabelKey {
-    text_hash:      u64,
-    font_size_bits: u32,
-    max_width_bits: u32,
-    bold:           bool,
-    italic:         bool,
+    text_hash:       u64,
+    font_size_bits:  u32,
+    max_width_bits:  u32,
+    bold:            bool,
+    italic:          bool,
+    line_height_bits: Option<u32>,
     // Color is intentionally NOT part of the key: CachedLabel stores only the
     // shaped layout, not color.  Color is applied at draw time via frame.draw_text,
     // so the same shaped result can be reused across all color variants of a string.
 }
 
 impl LabelKey {
-    fn new(text: &str, font_size: f32, max_width: f32, bold: bool, italic: bool) -> Self {
+    fn new(text: &str, font_size: f32, max_width: f32, bold: bool, italic: bool, line_height: Option<f32>) -> Self {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut h);
@@ -248,6 +254,7 @@ impl LabelKey {
             max_width_bits: max_width.to_bits(),
             bold,
             italic,
+            line_height_bits: line_height.map(f32::to_bits),
         }
     }
 }
@@ -388,8 +395,8 @@ struct CachedLabel {
 }
 
 impl CachedLabel {
-    fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4], bold: bool, italic: bool) -> Self {
-        let layout      = ts.styled_label(text, font_size, max_width, bold, italic);
+    fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4], bold: bool, italic: bool, line_height: Option<f32>) -> Self {
+        let layout      = ts.styled_label(text, font_size, max_width, bold, italic, line_height);
         let width       = layout.width() as f64;
         let text_height = layout.height() as f64;
         // For an empty string Parley produces no glyph runs, so ascent() = 0.
@@ -416,6 +423,69 @@ impl CachedLabel {
 
 fn rgba_to_vello(c: [u8; 4]) -> peniko::Color {
     peniko::Color::from_rgba8(c[0], c[1], c[2], c[3])
+}
+
+/// One-shot CPU compositing of a splash frame (background fill + centered/
+/// scaled image) into a raw RGBA8 buffer, for the pre-init splash window's
+/// single `SoftPresent::present_rgba` call — before any GPU renderer or
+/// Vello frame exists. Scaling math mirrors the normal (post-handoff)
+/// splash overlay drawn in the main render loop, just writing bytes
+/// directly instead of issuing `AnyFrame` draw calls. Nearest-neighbor
+/// sampling: adequate for a single, typically-small splash asset, and
+/// keeps this self-contained rather than pulling in a general image-
+/// resizing dependency for one call site.
+fn composite_splash_frame(
+    bg: [u8; 4], img: Option<&peniko::ImageData>, image_scale: f64, w: u32, h: u32,
+) -> Vec<u8> {
+    let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
+    for px in buf.chunks_exact_mut(4) { px.copy_from_slice(&bg); }
+
+    let Some(img) = img else { return buf };
+    let (sw, sh) = (w as f64, h as f64);
+    let (iw, ih) = (img.width as f64, img.height as f64);
+    if iw <= 0.0 || ih <= 0.0 || w == 0 || h == 0 { return buf; }
+
+    let fit_scale = (sw / iw).min(sh / ih).min(1.0);
+    let max_dim   = sw.min(sh) * image_scale;
+    let cap_scale = (max_dim / iw).min(max_dim / ih);
+    let scale = fit_scale.min(cap_scale);
+    let dw = ((iw * scale).round() as i64).max(1);
+    let dh = ((ih * scale).round() as i64).max(1);
+    let dx = ((sw - dw as f64) * 0.5).round() as i64;
+    let dy = ((sh - dh as f64) * 0.5).round() as i64;
+
+    let src   = img.data.as_ref();
+    let src_w = img.width  as i64;
+    let src_h = img.height as i64;
+
+    for out_y in 0..dh {
+        let py = dy + out_y;
+        if py < 0 || py >= h as i64 { continue; }
+        let sy = ((out_y as f64 / dh as f64) * src_h as f64) as i64;
+        let sy = sy.clamp(0, src_h - 1);
+        for out_x in 0..dw {
+            let pxi = dx + out_x;
+            if pxi < 0 || pxi >= w as i64 { continue; }
+            let sx = ((out_x as f64 / dw as f64) * src_w as f64) as i64;
+            let sx = sx.clamp(0, src_w - 1);
+            let src_i = ((sy * src_w + sx) * 4) as usize;
+            if src_i + 4 > src.len() { continue; }
+            let dst_i = ((py * w as i64 + pxi) * 4) as usize;
+            let sa = src[src_i + 3] as u32;
+            if sa >= 255 {
+                buf[dst_i..dst_i + 4].copy_from_slice(&src[src_i..src_i + 4]);
+            } else if sa > 0 {
+                let inv = 255 - sa;
+                for c in 0..3 {
+                    let s = src[src_i + c] as u32;
+                    let d = buf[dst_i + c] as u32;
+                    buf[dst_i + c] = ((s * sa + d * inv) / 255) as u8;
+                }
+                buf[dst_i + 3] = 255;
+            }
+        }
+    }
+    buf
 }
 
 /// Returns `true` if any descendant of `id` with `pressable=true` covers (cx, cy).
@@ -857,7 +927,7 @@ pub fn run(mut config: AppConfig) -> bool {
         glyx_runtime::icu::set_default_locale(locale);
     }
 
-    let AppConfig { window, js_src, snapshot_blob, dev_mode: _dev_mode, extensions, js_plugins, locales: _locales } = config;
+    let AppConfig { mut window, js_src, snapshot_blob, dev_mode: _dev_mode, extensions, js_plugins, locales: _locales } = config;
     // Capture before `window` is moved into glyx_shell::run().
     let window_decorations = window.decorations;
 
@@ -907,8 +977,43 @@ pub fn run(mut config: AppConfig) -> bool {
         }
     };
 
+    // Pre-init splash window sizing: mirror the main window's own configured
+    // dimensions so the handoff feels seamless (same size, no visible
+    // resize/jump) — see `ShellConfig::splash_window`'s doc comment.
+    if main_splash_state.is_some() {
+        window.splash_window = Some(glyx_shell::ShellSplashWindow {
+            width:  window.width,
+            height: window.height,
+        });
+    }
+
+    // Holds the pre-init splash window + its softbuffer surface from the
+    // moment `SplashWindowReady` fires until the real main window's first
+    // frame has rendered — at which point it's shown and this is dropped,
+    // closing the splash window (glyx-shell never keeps its own reference —
+    // see `ShellEvent::SplashWindowReady`'s doc comment). `None` for the
+    // entire run when no splash is configured, or once handed off.
+    let mut pending_splash: Option<(Arc<winit::window::Window>, soft_present::SoftPresent)> = None;
+
     let restart = glyx_shell::run(window, move |event| {
         match event {
+            // ── Pre-init splash window — paint it immediately, before any
+            // GPU/JS setup for the real main window even starts. ──────────
+            ShellEvent::SplashWindowReady { window } => {
+                match soft_present::SoftPresent::new(Arc::clone(&window)) {
+                    Ok(mut sp) => {
+                        let (w, h) = (sp.width(), sp.height());
+                        if let Some(splash) = &mut main_splash_state {
+                            let bg    = splash.background;
+                            let scale = splash.image_scale;
+                            let rgba  = composite_splash_frame(bg, splash.current_image(), scale, w, h);
+                            sp.present_rgba(&rgba, w, h, None);
+                        }
+                        pending_splash = Some((window, sp));
+                    }
+                    Err(e) => log::error!("glyx-core: failed to create splash window's SoftPresent: {}", e),
+                }
+            }
             // ── Window ready — initialise per-window subsystems ──────────
             ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy, #[cfg(feature = "a11y")] a11y_update } => {
                 // Resolve RenderMode → BackendKind.
@@ -1145,9 +1250,10 @@ pub fn run(mut config: AppConfig) -> bool {
                 // QuickJS has no snapshot equivalent — this uses eval-from-source
                 // every time, no bytecode precompilation path yet. IPC/multi-window,
                 // the async-Rust-command half of backend_call, AND JS plugins
-                // (backend.<name>.<fn>()) are all wired via `new_with_ipc`. Unlike
-                // V8, there's no dev-mode hot-reload for a plugin edit yet — a
-                // full window restart picks up the change instead.
+                // (backend.<name>.<fn>()) are all wired via `new_with_ipc`. Plugin
+                // dev-mode hot-reload also works here — dev_mode.rs's watcher calls
+                // `reload_plugin` through the engine-neutral `JsRuntime` trait, and
+                // QuickJsRuntime implements it the same way V8Runtime does.
                 #[cfg(feature = "quickjs")]
                 let mut rt: Box<dyn glyx_runtime::JsRuntime> = Box::new(
                     glyx_runtime::QuickJsRuntime::new_with_ipc(
@@ -2289,13 +2395,14 @@ pub fn run(mut config: AppConfig) -> bool {
                 }
 
                 // Splash screen overlay — drawn on top of JS scene.
-                if let Some(sp) = &s.splash_state {
+                if let Some(sp) = &mut s.splash_state {
                     if sp.is_visible() {
                         let sw = s.gpu.width()  as f64;
                         let sh = s.gpu.height() as f64;
                         let bg = rgba_to_vello(sp.background);
+                        let image_scale = sp.image_scale; // read before the &mut borrow below
                         frame.fill_rect(0.0, 0.0, sw, sh, bg);
-                        if let Some(img) = &sp.image {
+                        if let Some(img) = sp.current_image() {
                             let iw = img.width  as f64;
                             let ih = img.height as f64;
                             // Two caps, take the smaller: (1) fit within the
@@ -2305,7 +2412,7 @@ pub fn run(mut config: AppConfig) -> bool {
                             // with no transparent margin, say) from filling
                             // the whole window and swallowing `background`.
                             let fit_scale = (sw / iw).min(sh / ih).min(1.0);
-                            let max_dim   = sw.min(sh) * sp.image_scale;
+                            let max_dim   = sw.min(sh) * image_scale;
                             let cap_scale = (max_dim / iw).min(max_dim / ih);
                             let scale = fit_scale.min(cap_scale);
                             let dw = iw * scale;
@@ -2637,6 +2744,24 @@ pub fn run(mut config: AppConfig) -> bool {
                                 return;
                             }
                         }
+                    }
+                }
+
+                // Pre-init splash handoff: the main window's first real frame
+                // has now actually rendered and presented (we just did it,
+                // above). The main window has been visible the whole time —
+                // `AlwaysOnTop` on the splash window is what's actually kept
+                // its blank content off-screen (see glyx-shell's `resumed()`)
+                // — so all that's left is closing the splash, which reveals
+                // the main window's already-rendered frame underneath
+                // instantly. `set_visible(true)` here is just a defensive
+                // no-op should that ever change. One-shot: `pending_splash`
+                // is `None` on every later frame, so this has no cost after
+                // the first successful frame.
+                if window_handle == 0 {
+                    if let Some((splash_window, _splash_present)) = pending_splash.take() {
+                        s.window.set_visible(true);
+                        drop(splash_window);
                     }
                 }
 

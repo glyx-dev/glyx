@@ -3,10 +3,20 @@ import {
   emptyDoc, paraText, splitSpansAt, mergeSpans, cursorEq, hasSelection, normSel,
   clampCursor, moveCursorBy, insertText, insertBreak, deleteChar, deleteSelection,
   applyFormat, selectionHasFormat, selectedText, docToPlainText, docFromPlainText,
+  computeListNumber, wordRangeAt, charIndexAtPoint,
 } from './index.js';
 
 function doc(...paraTexts) {
   return { paragraphs: paraTexts.map((t) => ({ spans: [{ text: t }] })) };
+}
+
+// `spec` entries: 'text' (plain) or [text, listType, indent].
+function listDoc(...specs) {
+  return {
+    paragraphs: specs.map((s) => Array.isArray(s)
+      ? { spans: [{ text: s[0] }], listType: s[1], indent: s[2] ?? 0 }
+      : { spans: [{ text: s }] }),
+  };
 }
 
 // ── paraText / mergeSpans / splitSpansAt ────────────────────────────────────
@@ -201,4 +211,150 @@ test('emptyDoc has a single empty paragraph', () => {
   const d = emptyDoc();
   expect(d.paragraphs.length).toBe(1);
   expect(paraText(d.paragraphs[0])).toBe('');
+});
+
+// ── Lists: insertBreak continue/exit ─────────────────────────────────────────
+
+test('insertBreak on a non-empty list item continues the list onto the new paragraph', () => {
+  const d = listDoc(['one', 'bullet', 0]);
+  const r = insertBreak(d, { para: 0, offset: 3 });
+  expect(r.doc.paragraphs.length).toBe(2);
+  expect(r.doc.paragraphs[1].listType).toBe('bullet');
+  expect(r.doc.paragraphs[1].indent).toBe(0);
+});
+
+test('insertBreak on an EMPTY list item exits the list instead of adding another item', () => {
+  const d = listDoc(['', 'bullet', 1]);
+  const r = insertBreak(d, { para: 0, offset: 0 });
+  expect(r.doc.paragraphs.length).toBe(1); // no new paragraph created
+  expect(r.doc.paragraphs[0].listType).toBe(null);
+  expect(r.doc.paragraphs[0].indent).toBe(0);
+  expect(r.cursor).toEqual({ para: 0, offset: 0 });
+});
+
+test('insertBreak on a plain (non-list) paragraph is unaffected by list logic', () => {
+  const d = doc('helloworld');
+  const r = insertBreak(d, { para: 0, offset: 5 });
+  expect(r.doc.paragraphs[1].listType).toBeUndefined();
+});
+
+// ── Lists: merge keeps the earlier paragraph's list/indent state ────────────
+
+test('deleteChar backward-merge keeps the earlier (previous) paragraph\'s list state', () => {
+  const d = listDoc(['foo', 'number', 0], ['bar', 'bullet', 2]);
+  const r = deleteChar(d, { para: 1, offset: 0 }, true);
+  expect(r.doc.paragraphs.length).toBe(1);
+  expect(paraText(r.doc.paragraphs[0])).toBe('foobar');
+  expect(r.doc.paragraphs[0].listType).toBe('number');
+  expect(r.doc.paragraphs[0].indent).toBe(0);
+});
+
+test('deleteChar forward-merge keeps the earlier (current) paragraph\'s list state', () => {
+  const d = listDoc(['foo', 'bullet', 1], ['bar', 'number', 3]);
+  const r = deleteChar(d, { para: 0, offset: 3 }, false);
+  expect(r.doc.paragraphs.length).toBe(1);
+  expect(r.doc.paragraphs[0].listType).toBe('bullet');
+  expect(r.doc.paragraphs[0].indent).toBe(1);
+});
+
+test('deleteSelection cross-paragraph merge keeps the anchor paragraph\'s list state', () => {
+  const d = listDoc(['hello', 'number', 0], ['world', 'bullet', 2]);
+  const r = deleteSelection(d, { anchor: { para: 0, offset: 2 }, focus: { para: 1, offset: 3 } });
+  expect(r.doc.paragraphs.length).toBe(1);
+  expect(paraText(r.doc.paragraphs[0])).toBe('held');
+  expect(r.doc.paragraphs[0].listType).toBe('number');
+  expect(r.doc.paragraphs[0].indent).toBe(0);
+});
+
+// ── computeListNumber ────────────────────────────────────────────────────────
+
+test('computeListNumber numbers a simple consecutive run starting at 1', () => {
+  const d = listDoc(['a', 'number', 0], ['b', 'number', 0], ['c', 'number', 0]);
+  expect(computeListNumber(d.paragraphs, 0)).toBe(1);
+  expect(computeListNumber(d.paragraphs, 1)).toBe(2);
+  expect(computeListNumber(d.paragraphs, 2)).toBe(3);
+});
+
+test('computeListNumber resets after a non-number paragraph at the same indent', () => {
+  const d = listDoc(['a', 'number', 0], ['plain'], ['b', 'number', 0]);
+  expect(computeListNumber(d.paragraphs, 2)).toBe(1);
+});
+
+test('computeListNumber renumbers correctly after deleting a middle item', () => {
+  const d = listDoc(['a', 'number', 0], ['b', 'number', 0], ['c', 'number', 0]);
+  d.paragraphs.splice(1, 1); // delete 'b' — 'c' should become #2, not #3
+  expect(computeListNumber(d.paragraphs, 1)).toBe(2);
+});
+
+test('computeListNumber skips over more-deeply-indented nested items without breaking the outer count', () => {
+  const d = listDoc(
+    ['a', 'number', 0],
+    ['nested', 'number', 1],
+    ['b', 'number', 0],
+  );
+  expect(computeListNumber(d.paragraphs, 1)).toBe(1); // nested run starts fresh at its own indent
+  expect(computeListNumber(d.paragraphs, 2)).toBe(2); // outer run continues past the nested item
+});
+
+test('computeListNumber stops at a shallower (dedented) paragraph', () => {
+  const d = listDoc(
+    ['outer', 'number', 0],
+    ['inner', 'number', 1],
+    ['inner2', 'number', 1],
+  );
+  expect(computeListNumber(d.paragraphs, 2)).toBe(2); // counts only within indent-1 run
+});
+
+test('computeListNumber returns 1 for a non-number paragraph', () => {
+  const d = listDoc(['a', 'bullet', 0]);
+  expect(computeListNumber(d.paragraphs, 0)).toBe(1);
+});
+
+// ── wordRangeAt (double-click selection) ─────────────────────────────────────
+
+test('wordRangeAt selects the whole word containing the offset', () => {
+  expect(wordRangeAt('hello world', 2)).toEqual({ start: 0, end: 5 });
+  expect(wordRangeAt('hello world', 8)).toEqual({ start: 6, end: 11 });
+});
+
+test('wordRangeAt selects a run of whitespace when clicking on a space', () => {
+  expect(wordRangeAt('a   b', 2)).toEqual({ start: 1, end: 4 });
+});
+
+test('wordRangeAt selects a run of punctuation without bleeding into adjacent whitespace', () => {
+  // Word / whitespace / punctuation are three separate classes, so the '!'
+  // run stops at the space rather than merging with it.
+  expect(wordRangeAt('foo!!! bar', 4)).toEqual({ start: 3, end: 6 });
+});
+
+test('wordRangeAt selecting a word never includes an adjacent space', () => {
+  expect(wordRangeAt('hello world', 4)).toEqual({ start: 0, end: 5 });   // 'hello', not 'hello '
+  expect(wordRangeAt('hello world', 6)).toEqual({ start: 6, end: 11 });  // 'world', not ' world'
+});
+
+test('wordRangeAt handles an empty string', () => {
+  expect(wordRangeAt('', 0)).toEqual({ start: 0, end: 0 });
+});
+
+// ── charIndexAtPoint (double-click hit-testing) ──────────────────────────────
+// No native __glyx_measure_text in the test environment, so measureSpan
+// falls back to its deterministic `text.length * fontSize * 0.55` estimate
+// — at fontSize 20 that's exactly 11px per character, used below.
+
+test('charIndexAtPoint names the character whose box contains clickX, not a boundary', () => {
+  const para = { spans: [{ text: 'hello world' }] };
+  // 'o' (index 4) occupies px [44, 55); clicking anywhere inside it must
+  // resolve to index 4, not round to an adjacent boundary.
+  expect(charIndexAtPoint(para, 44, 20)).toBe(4);
+  expect(charIndexAtPoint(para, 50, 20)).toBe(4);
+  expect(charIndexAtPoint(para, 54, 20)).toBe(4);
+});
+
+test('charIndexAtPoint resolves a click on a space to the space itself, not the adjacent word', () => {
+  const para = { spans: [{ text: 'hello world' }] };
+  // ' ' (index 5) occupies px [55, 66).
+  expect(charIndexAtPoint(para, 60, 20)).toBe(5);
+  // 'w' (index 6) occupies px [66, 77) — one pixel into it must resolve to
+  // the word, not bleed back into the space.
+  expect(charIndexAtPoint(para, 66, 20)).toBe(6);
 });

@@ -76,6 +76,7 @@ pub(crate) fn parse_props_json(json: &str) -> NodeProps {
 
     props.text                  = get_str(&v, "text");
     props.font_size             = get_num(&v, "fontSize");
+    props.line_height           = get_num(&v, "lineHeight");
     props.font_weight           = get_str(&v, "fontWeight");
     props.font_style            = get_str(&v, "fontStyle");
     props.text_decoration_line  = get_str(&v, "textDecorationLine");

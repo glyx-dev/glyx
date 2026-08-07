@@ -83,6 +83,27 @@ function Explorer() {
     setStatus('Saved ' + basename(selected));
   };
 
+  const newFile = async () => {
+    if (!current) return;
+    const path = await dialog.saveFile({
+      defaultName: 'Untitled.txt',
+      filters: [{ name: 'Text', extensions: ['txt', 'md'] }],
+    });
+    if (!path) return;
+    try {
+      await fs.writeFile(path, '');
+      // Open first (the state change that actually matters to the user) and
+      // let the sidebar listing refresh separately, not chained right after
+      // it — two back-to-back full-tree state transitions in the same tick
+      // is exactly the kind of thing that can race with the native layout
+      // tree's root bookkeeping (this framework rebuilds the whole layout
+      // tree per render rather than diffing incrementally).
+      await openFile(path);
+      setStatus('Created ' + basename(path));
+      list(parentOf(path) || current);
+    } catch (e) { setStatus('Create error: ' + (e && e.message ? e.message : e)); }
+  };
+
   const del = async () => {
     if (!selected) return;
     await fs.deleteFile(selected);
@@ -102,6 +123,9 @@ function Explorer() {
     <View style={{ flex: 1, backgroundColor: C.surface }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, padding: 10, borderBottomWidth: 1, borderBottomColor: C.border }}>
         <IconButton icon="folder" variant="primary" label="Open folder" onPress={openFolder} />
+        {current ? (
+          <IconButton icon="plus" variant="secondary" label="New file" onPress={newFile} />
+        ) : null}
         {current && current !== root ? (
           <IconButton icon="arrow-left" variant="ghost" label="Up" onPress={() => setCurrent(parentOf(current))} />
         ) : null}
@@ -153,12 +177,14 @@ function Explorer() {
           </View>
         ) : (
           <RichTextEditor
+            key={selected}
             value={doc}
             onChange={onChangeDoc}
             width={paneW}
             height={paneH}
             color={C.text}
             placeholder="Start typing…"
+            autoFocus
             style={{ backgroundColor: C.surface, borderRadius: 8, padding: 12 }}
           >
             <RichTextToolbar />

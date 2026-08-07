@@ -35,7 +35,7 @@
 use parley::{
     layout::{Alignment, AlignmentOptions},
     style::{FontFamily, FontWeight, StyleProperty},
-    FontContext, LayoutContext,
+    Affinity, Cursor, FontContext, LayoutContext,
 };
 
 pub struct TextSystem {
@@ -195,21 +195,30 @@ impl TextSystem {
     }
 
     /// Shape with explicit bold + italic flags and optional max_width.
+    /// `line_height`, when `Some`, overrides Parley's default
+    /// metrics-relative line spacing with an absolute px value — needed so
+    /// JS-side row-height math (e.g. TextInput's auto-height sizing) and the
+    /// actual rendered line spacing can never diverge. `None` preserves the
+    /// exact prior behavior (the font's own metrics).
     pub fn styled_label(
         &mut self,
-        text:      &str,
-        font_size: f32,
-        max_width: f32,
-        bold:      bool,
-        italic:    bool,
+        text:        &str,
+        font_size:   f32,
+        max_width:   f32,
+        bold:        bool,
+        italic:      bool,
+        line_height: Option<f32>,
     ) -> TextLayout {
-        use parley::style::{FontStyle};
+        use parley::style::{FontStyle, LineHeight};
         let weight = if bold { FontWeight::BOLD } else { FontWeight::NORMAL };
         let mut builder = self.layout_cx.ranged_builder(&mut self.font_cx, text, 1.0, false);
         builder.push_default(StyleProperty::FontSize(font_size));
         builder.push_default(StyleProperty::FontWeight(weight));
         if italic {
             builder.push_default(StyleProperty::FontStyle(FontStyle::Italic));
+        }
+        if let Some(lh) = line_height {
+            builder.push_default(StyleProperty::LineHeight(LineHeight::Absolute(lh)));
         }
         builder.push_default(StyleProperty::FontFamily(FontFamily::Source(
             std::borrow::Cow::Borrowed("Segoe UI, Helvetica Neue, DejaVu Sans, Segoe UI Emoji, Segoe UI Symbol, sans-serif"),
@@ -272,33 +281,46 @@ impl TextSystem {
     /// Return the character index (0-based) whose left edge is closest to `target_x`
     /// pixels from the start of the text.  Used for pointer hit-testing in SelectableText.
     ///
-    /// Binary-searches over `measure_to_cursor` calls so shaping work is O(n log n)
-    /// in character count — acceptable for single-line labels up to a few thousand chars.
+    /// Shapes `text` exactly once, then hit-tests `target_x` directly against that
+    /// single shaped `Layout` via Parley's `Cursor::from_point`.  Previously this
+    /// binary-searched over `measure_to_cursor` calls on independently re-shaped
+    /// growing substrings — since Parley's shaping isn't purely per-character
+    /// additive (kerning, clustering), that approach could drift from the actual
+    /// rendered glyph positions by an accumulating, off-by-one-ish amount as the
+    /// substring grew. Hit-testing the one real layout can't diverge from itself.
     pub fn char_at_x(&mut self, text: &str, font_size: f32, max_width: f32, target_x: f32) -> usize {
-        let char_count = text.chars().count();
-        if char_count == 0 { return 0; }
+        self.char_at_x_styled(text, font_size, max_width, target_x, false, false)
+    }
 
-        // Total text width — clamp target to [0, width].
-        let total_w = self.measure_to_cursor(text, font_size, max_width, char_count);
-        if target_x <= 0.0       { return 0; }
-        if target_x >= total_w   { return char_count; }
+    /// Bold/italic-aware variant of `char_at_x` — needed so hit-testing a
+    /// styled span (rich-text bold/italic runs) shapes with the same
+    /// weight/style as what was actually rendered for it.
+    pub fn char_at_x_styled(&mut self, text: &str, font_size: f32, max_width: f32, target_x: f32, bold: bool, italic: bool) -> usize {
+        if text.is_empty() { return 0; }
+        let layout = self.styled_label(text, font_size, max_width, bold, italic, None);
+        let cursor = Cursor::from_point(&layout.inner, target_x, 0.0);
+        let byte = cursor.index();
+        text[..byte.min(text.len())].chars().count()
+    }
 
-        // Binary search: find the largest i where measure_to_cursor(i) <= target_x.
-        let (mut lo, mut hi) = (0usize, char_count);
-        while lo + 1 < hi {
-            let mid = (lo + hi) / 2;
-            let x   = self.measure_to_cursor(text, font_size, max_width, mid);
-            if x <= target_x { lo = mid; } else { hi = mid; }
-        }
+    /// Return the X pixel offset (from the start of the text) of the cursor
+    /// sitting at character index `char_idx`, for `text` shaped exactly once.
+    ///
+    /// This is the horizontal counterpart to `caret_line`'s vertical lookup:
+    /// both query an already-shaped `Layout` directly (via Parley's `Cursor`
+    /// API) instead of re-measuring an isolated substring, so the returned X
+    /// always matches what was actually rendered for the *full* string.
+    pub fn cursor_x_at(&mut self, text: &str, font_size: f32, max_width: f32, char_idx: usize) -> f32 {
+        self.cursor_x_at_styled(text, font_size, max_width, char_idx, false, false)
+    }
 
-        // Snap to the closer char boundary (lo or lo+1).
-        let x_lo   = self.measure_to_cursor(text, font_size, max_width, lo);
-        let x_next = if lo + 1 <= char_count {
-            self.measure_to_cursor(text, font_size, max_width, lo + 1)
-        } else {
-            total_w
-        };
-        if (target_x - x_lo) < (x_next - target_x) { lo } else { lo + 1 }
+    /// Bold/italic-aware variant of `cursor_x_at` — see `char_at_x_styled`.
+    pub fn cursor_x_at_styled(&mut self, text: &str, font_size: f32, max_width: f32, char_idx: usize, bold: bool, italic: bool) -> f32 {
+        if text.is_empty() { return 0.0; }
+        let layout = self.styled_label(text, font_size, max_width, bold, italic, None);
+        let byte = text.char_indices().nth(char_idx).map(|(i, _)| i).unwrap_or(text.len());
+        let cursor = Cursor::from_byte_index(&layout.inner, byte, Affinity::Downstream);
+        cursor.geometry(&layout.inner, 0.0).x0 as f32
     }
 
     /// Measure the natural (width, height) of `text` at `font_size` wrapped to
@@ -316,7 +338,7 @@ impl TextSystem {
     /// bold glyphs are wider than `measure`'s NORMAL-weight assumption, so
     /// layout must account for it or siblings laid out beside this node overlap.
     pub fn measure_styled(&mut self, text: &str, font_size: f32, max_width: f32, bold: bool, italic: bool) -> (f32, f32) {
-        let layout = self.styled_label(text, font_size, max_width.max(1.0), bold, italic);
+        let layout = self.styled_label(text, font_size, max_width.max(1.0), bold, italic, None);
         (layout.inner.width(), layout.inner.height())
     }
 }

@@ -3,9 +3,11 @@ name: Publish npm packages
 # Publishes every @glyx-dev/* workspace package to npm.
 # Trigger with a `js-v*` tag (e.g. js-v0.1.0) or manually from the Actions tab.
 #
-# Requires NPM_TOKEN (an npm token for the glyx-dev org) as a secret in the
-# "release" GitHub environment — same environment as CAP_SIGNING_KEY /
-# UPDATE_SIGNING_KEY, so publishing is gated by the same protection rules.
+# Uses npm Trusted Publishing (OIDC) — no NPM_TOKEN secret. Each package must
+# have this repo + this workflow file + the "release" environment configured
+# as its Trusted Publisher under npmjs.com → package → Settings → Publishing
+# access. Requires npm >= 11.5.1 (installed explicitly below; setup-node's
+# bundled npm is usually older).
 
 on:
   push:
@@ -35,6 +37,9 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
+      - name: Update npm (OIDC trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@latest
+
       - name: Install workspace deps
         run: bun install
         env:
@@ -47,7 +52,6 @@ jobs:
 
       - name: Publish all @glyx packages
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           DIST_TAG: ${{ github.event.inputs.dist_tag || 'latest' }}
         run: |
           set -e

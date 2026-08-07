@@ -91,6 +91,16 @@ let focusedNodeId = null;
 // on a TextInput); cursorMoved extends its selection until release.
 let inputDragNodeId = null;
 
+// Double-click detection for text inputs — same node, within both a time
+// window and a pixel-distance threshold of the previous press counts as a
+// double-click (standard desktop-editor convention; word selection).
+let lastClickTime   = 0;
+let lastClickX      = 0;
+let lastClickY      = 0;
+let lastClickTarget = null;
+const DOUBLE_CLICK_MS = 400;
+const DOUBLE_CLICK_PX = 5;
+
 // Currently hovered pressable node id (or null).
 // Updated once per frame from the last cursorMoved event's position.
 let hoveredPressableId = null;
@@ -551,7 +561,25 @@ export function dispatchEvents() {
           if (ih && !isDisabled(inputTarget)) {
             setFocus(inputTarget);
             const layout = __glyx_getLayout(inputTarget);
-            if (layout) ih.onClickAt?.(ev.x - layout.x, ev.y - layout.y);
+            if (layout) {
+              const now = Date.now();
+              const isDoubleClick = !isRight
+                && inputTarget === lastClickTarget
+                && (now - lastClickTime) <= DOUBLE_CLICK_MS
+                && Math.abs(ev.x - lastClickX) <= DOUBLE_CLICK_PX
+                && Math.abs(ev.y - lastClickY) <= DOUBLE_CLICK_PX;
+              if (isDoubleClick && ih.onDoubleClickAt) {
+                ih.onDoubleClickAt(ev.x - layout.x, ev.y - layout.y);
+                // Don't chain into a triple-click as another double-click.
+                lastClickTime = 0;
+              } else {
+                ih.onClickAt?.(ev.x - layout.x, ev.y - layout.y);
+                lastClickTime   = now;
+                lastClickX      = ev.x;
+                lastClickY      = ev.y;
+                lastClickTarget = inputTarget;
+              }
+            }
             // Begin drag-selection: subsequent cursorMoved events extend the
             // selection from this anchor until the button is released.
             if (!isRight) inputDragNodeId = inputTarget;

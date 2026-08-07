@@ -7,7 +7,7 @@ use glyx_renderer::peniko;
 use glyx_runtime::JsPlugin;
 use glyx_security::Capabilities;
 
-use crate::{DevModeConfig, WindowConfig, SplashState, StartupMode, RenderMode};
+use crate::{DevModeConfig, WindowConfig, SplashState, SplashFrame, StartupMode, RenderMode};
 use glyx_gpu::GpuTier;
 use glyx_renderer::{BackendKind};
 
@@ -149,6 +149,22 @@ pub(super) fn read_config_json() -> Option<String> {
     std::fs::read_to_string("glyx.config.json").ok()
 }
 
+/// Wrap a bun `--format cjs` bundle (which ends in `module.exports = ...`)
+/// in a standard browserify-style shim so its exports land on
+/// `globalThis.<global_name>` — the shape every plugin consumer expects.
+/// Shared by the initial load path (`bundle_plugin`) and the dev-mode
+/// rebuild path (`dev_mode.rs`), which both bundle plugins the same way.
+pub(super) fn wrap_cjs_as_global(cjs: &str, global_name: &str) -> String {
+    format!(
+        "globalThis.{global_name} = (function() {{\n\
+         \x20\x20var module = {{ exports: {{}} }};\n\
+         \x20\x20var exports = module.exports;\n\
+         {cjs}\n\
+         \x20\x20return module.exports;\n\
+         }})();"
+    )
+}
+
 /// Bundle a single plugin entry using bun.
 pub(super) fn bundle_plugin(entry: &str, safe_name: &str) -> Option<String> {
     let global_name = format!("__glyx_plugin_{safe_name}");
@@ -171,21 +187,30 @@ pub(super) fn bundle_plugin(entry: &str, safe_name: &str) -> Option<String> {
     };
 
     let out_str = tmp_out.to_str()?;
+    // `--global-name` is not a real `bun build` CLI flag (only `Bun.build()`'s
+    // JS API supports naming an IIFE global) — passing it here silently got
+    // misparsed by bun as a second entry-point path. Plain `--format iife`
+    // alone produces an anonymous closure that discards all exports, so
+    // there was no way to reach the plugin's exports afterwards either.
+    // Fix: bundle as CommonJS instead (produces a real `module.exports =
+    // ...`) and wrap it ourselves in a `module`/`exports` shim that exposes
+    // the result on `globalThis.<global_name>`, which is what every
+    // downstream consumer (register_all/reload_plugin_in_scope for V8,
+    // eval_js_plugins for QuickJS) already expects.
     let bun_args = [
         "build", entry,
         "--outfile", out_str,
         "--target", "browser",
-        "--format", "iife",
-        "--global-name", &global_name,
+        "--format", "cjs",
     ];
 
     match run(&bun_args) {
         Ok(o) if o.status.success() => {
             match std::fs::read_to_string(&tmp_out) {
-                Ok(js) => {
+                Ok(cjs) => {
                     log::info!("[plugins] bundled '{entry}' → {global_name}");
                     let _ = std::fs::remove_file(&tmp_out);
-                    Some(js)
+                    Some(wrap_cjs_as_global(&cjs, &global_name))
                 }
                 Err(e) => {
                     log::error!("[plugins] could not read bundle for '{entry}': {e}");
@@ -207,48 +232,55 @@ pub(super) fn bundle_plugin(entry: &str, safe_name: &str) -> Option<String> {
 
 /// All valid capability field names from `glyx_security::Capabilities`.
 fn is_valid_cap_name(cap: &str) -> bool {
-    matches!(cap,
-        "fs" | "network" | "env" | "db" | "dialog" | "clipboard" | "notification"
-        | "battery" | "usb" | "shell" | "mdns" | "system" | "power" | "storage"
-        | "gamepads" | "globalShortcuts" | "credentials" | "audio" | "ai"
-        | "camera" | "microphone" | "hid" | "updater" | "video" | "crash" | "deeplink"
-        | "tray" | "webview"
-    )
+    Capabilities::is_valid_name(cap)
 }
 
 /// Returns true if the app's capabilities include the named capability.
 fn app_has_cap(caps: &glyx_security::Capabilities, cap: &str) -> bool {
-    match cap {
-        "fs"               => caps.fs.is_some(),
-        "network"          => caps.network.is_some(),
-        "env"              => caps.env.is_some(),
-        "db"               => caps.db,
-        "dialog"           => caps.dialog,
-        "clipboard"        => caps.clipboard,
-        "notification"     => caps.notification,
-        "battery"          => caps.battery,
-        "usb"              => caps.usb,
-        "shell"            => caps.shell,
-        "mdns"             => caps.mdns,
-        "system"           => caps.system,
-        "power"            => caps.power,
-        "storage"          => caps.storage,
-        "gamepads"         => caps.gamepads,
-        "globalShortcuts"  => caps.global_shortcuts,
-        "credentials"      => caps.credentials,
-        "audio"            => caps.audio,
-        "ai"               => caps.ai,
-        "camera"           => caps.camera,
-        "microphone"       => caps.microphone,
-        "hid"              => caps.hid,
-        "updater"          => caps.updater,
-        "video"            => caps.video,
-        "crash"            => caps.crash,
-        "deeplink"         => caps.deeplink.is_some(),
-        "tray"             => caps.tray,
-        "webview"          => caps.webview,
-        _                  => false,
+    caps.has_named(cap)
+}
+
+/// Pure validation for one `plugins` entry — decides whether it should be
+/// loaded at all, before any bundling I/O happens (bundling shells out to
+/// `bun`, which isn't available/wanted in unit tests). Returns the
+/// sanitized "safe" name (used for the global var name / logging) on
+/// success, or `None` if the plugin should be skipped: empty `entry`,
+/// an unknown capability name, or a capability the app hasn't enabled.
+fn validate_plugin_entry(p: &PluginConfigJson, index: usize, app_caps: Option<&Capabilities>) -> Option<String> {
+    if p.entry.is_empty() { return None; }
+    let safe = p.name.as_deref()
+        .map(|n| n.replace(|c: char| !c.is_alphanumeric() && c != '_', "_"))
+        .unwrap_or_else(|| format!("plugin{index}"));
+
+    let declared_caps = &p.capabilities;
+    for cap in declared_caps {
+        if !is_valid_cap_name(cap) {
+            log::error!(
+                "[plugins] plugin '{}' declares unknown capability '{}'. \
+                 Valid names: fs, network, env, db, dialog, clipboard, notification, \
+                 battery, usb, shell, mdns, system, power, storage, gamepads, \
+                 globalShortcuts, credentials, audio, ai, camera, microphone, \
+                 hid, updater, video, crash, deeplink, webview",
+                safe, cap
+            );
+            return None;
+        }
+        if let Some(caps) = app_caps {
+            if !app_has_cap(caps, cap) {
+                log::error!(
+                    "[plugins] plugin '{}' declares capability '{}' \
+                     but the app does not enable it in glyx.config.json. \
+                     Add it to 'capabilities' or remove it from the plugin declaration.",
+                    safe, cap
+                );
+                return None;
+            }
+        }
     }
+    if !declared_caps.is_empty() {
+        log::info!("[plugins] '{}' granted capabilities: {}", safe, declared_caps.join(", "));
+    }
+    Some(safe)
 }
 
 /// Map the `renderMode` config string to a `RenderMode`.
@@ -359,41 +391,8 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
 
     let plugins = file.as_ref().map(|f| {
         f.plugins.iter().enumerate().filter_map(|(i, p)| {
-            if p.entry.is_empty() { return None; }
-            let safe = p.name.as_deref()
-                .map(|n| n.replace(|c: char| !c.is_alphanumeric() && c != '_', "_"))
-                .unwrap_or_else(|| format!("plugin{i}"));
+            let safe = validate_plugin_entry(p, i, app_caps)?;
             let global_name = format!("__glyx_plugin_{safe}");
-
-            // Validate declared capability names and check against app capabilities.
-            let declared_caps = &p.capabilities;
-            for cap in declared_caps {
-                if !is_valid_cap_name(cap) {
-                    log::error!(
-                        "[plugins] plugin '{}' declares unknown capability '{}'. \
-                         Valid names: fs, network, env, db, dialog, clipboard, notification, \
-                         battery, usb, shell, mdns, system, power, storage, gamepads, \
-                         globalShortcuts, credentials, audio, ai, camera, microphone, \
-                         hid, updater, video, crash, deeplink, webview",
-                        safe, cap
-                    );
-                    return None;
-                }
-                if let Some(caps) = app_caps {
-                    if !app_has_cap(caps, cap) {
-                        log::error!(
-                            "[plugins] plugin '{}' declares capability '{}' \
-                             but the app does not enable it in glyx.config.json. \
-                             Add it to 'capabilities' or remove it from the plugin declaration.",
-                            safe, cap
-                        );
-                        return None;
-                    }
-                }
-            }
-            if !declared_caps.is_empty() {
-                log::info!("[plugins] '{}' granted capabilities: {}", safe, declared_caps.join(", "));
-            }
 
             // Hard-fail if bun bundling fails — a missing plugin is a startup error.
             let bundled_js = match bundle_plugin(&p.entry, &safe) {
@@ -412,7 +411,7 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
                 prefix: p.name.clone(),
                 bundled_js,
                 global_name,
-                capabilities: declared_caps.clone(),
+                capabilities: p.capabilities.clone(),
                 entry: Some(p.entry.clone()),
             })
         }).collect::<Vec<_>>()
@@ -521,6 +520,46 @@ pub(super) fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
     }
 }
 
+/// Decode an animated GIF into one `SplashFrame` per GIF frame, each
+/// carrying that frame's own delay straight from the file.
+fn decode_gif_frames(path: &str) -> image::ImageResult<Vec<SplashFrame>> {
+    use image::AnimationDecoder;
+    let file = std::fs::File::open(path).map_err(image::ImageError::IoError)?;
+    let reader = std::io::BufReader::new(file);
+    let decoder = image::codecs::gif::GifDecoder::new(reader)?;
+    let raw_frames = decoder.into_frames().collect_frames()?;
+    Ok(raw_frames.into_iter().map(|f| {
+        let delay = Duration::from(f.delay());
+        let rgba = f.into_buffer();
+        let (w, h) = rgba.dimensions();
+        SplashFrame {
+            image: peniko::ImageData {
+                data: peniko::Blob::from(rgba.into_raw()),
+                format: peniko::ImageFormat::Rgba8,
+                alpha_type: peniko::ImageAlphaType::Alpha,
+                width: w, height: h,
+            },
+            delay,
+        }
+    }).collect())
+}
+
+/// Decode a single static image (PNG/JPEG/WebP/BMP) into one `SplashFrame`
+/// with a zero delay — the "static" case is just a one-element animation.
+fn decode_static_frame(path: &str) -> image::ImageResult<Vec<SplashFrame>> {
+    let rgba = image::open(path)?.into_rgba8();
+    let (w, h) = rgba.dimensions();
+    Ok(vec![SplashFrame {
+        image: peniko::ImageData {
+            data: peniko::Blob::from(rgba.into_raw()),
+            format: peniko::ImageFormat::Rgba8,
+            alpha_type: peniko::ImageAlphaType::Alpha,
+            width: w, height: h,
+        },
+        delay: Duration::ZERO,
+    }])
+}
+
 /// Build a `SplashState` from the `"splash"` section of `glyx.config.json`.
 pub(super) fn load_splash_state() -> Option<SplashState> {
     let json = read_config_json()?;
@@ -528,31 +567,34 @@ pub(super) fn load_splash_state() -> Option<SplashState> {
     let cfg = file.splash?;
     let now = Instant::now();
     let min_ms = cfg.minimum_ms;
-    let min_until    = now + Duration::from_millis(min_ms);
-    let auto_hide_at = now + Duration::from_millis(min_ms.max(30_000));
+    let min_until = now + Duration::from_millis(min_ms);
+    // Safety net for apps that never call `hideSplash()` at all — NOT the
+    // primary dismissal mechanism (that's still `hideSplash()`, which wins
+    // immediately whenever it's actually called; see `SplashState::is_visible`).
+    // A few seconds, not the old flat 30s: forgetting the call should be a
+    // minor annoyance, not a stuck half-minute splash.
+    const FORGOT_TO_HIDE_MS: u64 = 4_000;
+    let auto_hide_at = now + Duration::from_millis(min_ms.max(FORGOT_TO_HIDE_MS));
 
     let background = cfg.background.as_deref()
         .and_then(parse_hex_color)
         .unwrap_or([0, 0, 0, 255]);
 
-    let img = cfg.image.as_ref().and_then(|path| {
-        match image::open(path) {
-            Ok(img) => {
-                let rgba = img.into_rgba8();
-                let (w, h) = rgba.dimensions();
-                Some(peniko::ImageData {
-                    data: peniko::Blob::from(rgba.into_raw()),
-                    format: peniko::ImageFormat::Rgba8,
-                    alpha_type: peniko::ImageAlphaType::Alpha,
-                    width: w, height: h,
-                })
-            }
-            Err(e) => { log::warn!("[splash] failed to load '{path}': {e}"); None }
+    let frames = cfg.image.as_ref().map(|path| {
+        let is_gif = path.rsplit('.').next()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gif"));
+        let result = if is_gif { decode_gif_frames(path) } else { decode_static_frame(path) };
+        match result {
+            Ok(f) => f,
+            Err(e) => { log::warn!("[splash] failed to load '{path}': {e}"); Vec::new() }
         }
-    });
+    }).unwrap_or_default();
 
     let image_scale = cfg.image_scale.unwrap_or(0.5).clamp(0.05, 1.0);
-    Some(SplashState { image: img, image_scale, background, min_until, auto_hide_at, hidden: false })
+    Some(SplashState {
+        frames, current_frame: 0, last_advance: now,
+        image_scale, background, min_until, auto_hide_at, hidden: false,
+    })
 }
 
 /// Calculate a sensible V8 max-heap cap from the JS bundle size.
@@ -649,4 +691,74 @@ pub(super) fn embedded_snapshot_blob() -> Option<Vec<u8>> {
 /// Return the app JS embedded at build time via `GLYX_APP_JS` env var, if present.
 pub(super) fn embedded_app_js() -> Option<String> {
     super::EMBEDDED_APP_JS.map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plugin(entry: &str, name: Option<&str>, caps: &[&str]) -> PluginConfigJson {
+        PluginConfigJson {
+            entry: entry.to_string(),
+            name: name.map(String::from),
+            capabilities: caps.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn app_caps_with(json: &str) -> Capabilities {
+        serde_json::from_str(json).expect("test capabilities JSON should parse")
+    }
+
+    #[test]
+    fn empty_entry_is_skipped() {
+        let p = plugin("", Some("foo"), &[]);
+        assert_eq!(validate_plugin_entry(&p, 0, None), None);
+    }
+
+    #[test]
+    fn unknown_capability_name_is_rejected() {
+        let p = plugin("src/plugins/foo.plugin.js", Some("foo"), &["not_a_real_capability"]);
+        let app_caps = app_caps_with(r#"{"fs":{"read":["**"]}}"#);
+        assert_eq!(validate_plugin_entry(&p, 0, Some(&app_caps)), None);
+    }
+
+    #[test]
+    fn capability_not_granted_by_app_is_rejected() {
+        // Plugin declares "network", app only declares "fs" — must be rejected,
+        // not silently loaded with more access than the app itself has.
+        let p = plugin("src/plugins/foo.plugin.js", Some("foo"), &["network"]);
+        let app_caps = app_caps_with(r#"{"fs":{"read":["**"]}}"#);
+        assert_eq!(validate_plugin_entry(&p, 0, Some(&app_caps)), None);
+    }
+
+    #[test]
+    fn capabilities_that_are_a_subset_of_the_apps_load_successfully() {
+        let p = plugin("src/plugins/foo.plugin.js", Some("foo"), &["fs"]);
+        let app_caps = app_caps_with(r#"{"fs":{"read":["**"]},"dialog":true}"#);
+        assert_eq!(
+            validate_plugin_entry(&p, 0, Some(&app_caps)),
+            Some("foo".to_string()),
+        );
+    }
+
+    #[test]
+    fn plugin_with_no_declared_capabilities_loads_regardless_of_app_capabilities() {
+        let p = plugin("src/plugins/foo.plugin.js", Some("foo"), &[]);
+        // No app capabilities declared at all (`app_caps: None`, as happens
+        // when glyx.config.json has no "capabilities" key) — a plugin that
+        // doesn't ask for anything should still load.
+        assert_eq!(validate_plugin_entry(&p, 0, None), Some("foo".to_string()));
+    }
+
+    #[test]
+    fn name_is_sanitized_to_a_safe_identifier() {
+        let p = plugin("src/plugins/foo.plugin.js", Some("my-plugin!"), &[]);
+        assert_eq!(validate_plugin_entry(&p, 0, None), Some("my_plugin_".to_string()));
+    }
+
+    #[test]
+    fn missing_name_falls_back_to_index_based_name() {
+        let p = plugin("src/plugins/foo.plugin.js", None, &[]);
+        assert_eq!(validate_plugin_entry(&p, 3, None), Some("plugin3".to_string()));
+    }
 }

@@ -254,29 +254,119 @@ pub type BackendCommandFn = std::sync::Arc<
         + Sync,
 >;
 
+/// A registered command's handler plus the capability names (if any) a
+/// caller's app must have declared in `glyx.config.json` to invoke it.
+/// Native `GlyxExtension` commands have no capability enforcement built in
+/// otherwise — unlike JS plugins, which get a load-time capability-subset
+/// check — so `add_gated` exists specifically to let an extension opt a
+/// command into the same named-capability model.
+pub struct RegisteredCommand {
+    pub capabilities: Vec<String>,
+    pub handler: BackendCommandFn,
+}
+
 /// Immutable registry of named backend commands. Built once at startup from the
 /// list of extensions and then shared read-only across all async invocations.
-pub type BackendRegistry = std::sync::Arc<std::collections::HashMap<String, BackendCommandFn>>;
+pub type BackendRegistry = std::sync::Arc<std::collections::HashMap<String, RegisteredCommand>>;
 
 /// Builder used by `GlyxExtension::register_commands` to accumulate commands.
 pub struct BackendRegistryBuilder {
-    commands: std::collections::HashMap<String, BackendCommandFn>,
+    commands: std::collections::HashMap<String, RegisteredCommand>,
 }
 
 impl BackendRegistryBuilder {
     pub fn new() -> Self { Self { commands: std::collections::HashMap::new() } }
 
-    /// Register an async command handler.
+    /// Register an async command handler with no capability requirement —
+    /// the common case for most native commands.
     pub fn add<F, Fut>(&mut self, name: impl Into<String>, f: F)
     where
         F:   Fn(String) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
     {
-        self.commands.insert(name.into(), std::sync::Arc::new(move |args| Box::pin(f(args))));
+        self.add_gated(name, &[], f);
+    }
+
+    /// Register an async command handler that requires the caller's app to
+    /// have every named capability enabled in `glyx.config.json` (checked
+    /// via `glyx_security::Capabilities::has_named` on every call, not just
+    /// at load time). A call missing any required capability rejects with
+    /// a message naming it, without ever running `f`.
+    pub fn add_gated<F, Fut>(&mut self, name: impl Into<String>, capabilities: &[&str], f: F)
+    where
+        F:   Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
+    {
+        self.commands.insert(name.into(), RegisteredCommand {
+            capabilities: capabilities.iter().map(|s| s.to_string()).collect(),
+            handler: std::sync::Arc::new(move |args| Box::pin(f(args))),
+        });
     }
 
     pub fn build(self) -> BackendRegistry {
         std::sync::Arc::new(self.commands)
+    }
+}
+
+/// True if `caps` has every capability `cmd` requires. Empty requirements
+/// (the common case, via plain `add()`) always pass. Shared by both
+/// engines' `backend_call` dispatch.
+pub fn command_capabilities_ok(cmd: &RegisteredCommand, caps: &glyx_security::Capabilities) -> Result<(), String> {
+    for cap in &cmd.capabilities {
+        if !caps.has_named(cap) {
+            return Err(format!(
+                "missing capability \"{cap}\" — add it to glyx.config.json's \"capabilities\" to call this command"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod backend_registry_tests {
+    use super::*;
+    use glyx_security::Capabilities;
+
+    fn app_caps_with(json: &str) -> Capabilities {
+        serde_json::from_str(json).expect("test capabilities JSON should parse")
+    }
+
+    fn gated_cmd(capabilities: &[&str]) -> RegisteredCommand {
+        let mut builder = BackendRegistryBuilder::new();
+        builder.add_gated("test", capabilities, |_| async { Ok("null".to_string()) });
+        builder.build().get("test").map(|c| RegisteredCommand {
+            capabilities: c.capabilities.clone(),
+            handler: c.handler.clone(),
+        }).unwrap()
+    }
+
+    #[test]
+    fn ungated_command_always_passes() {
+        let cmd = gated_cmd(&[]);
+        assert!(command_capabilities_ok(&cmd, &app_caps_with("{}")).is_ok());
+    }
+
+    #[test]
+    fn gated_command_rejects_when_app_lacks_capability() {
+        let cmd = gated_cmd(&["fs"]);
+        let caps = app_caps_with(r#"{"dialog":true}"#);
+        let err = command_capabilities_ok(&cmd, &caps).unwrap_err();
+        assert!(err.contains("fs"), "got: {err}");
+    }
+
+    #[test]
+    fn gated_command_succeeds_when_app_has_capability() {
+        let cmd = gated_cmd(&["fs"]);
+        let caps = app_caps_with(r#"{"fs":{"read":["**"]}}"#);
+        assert!(command_capabilities_ok(&cmd, &caps).is_ok());
+    }
+
+    #[test]
+    fn gated_command_with_multiple_capabilities_requires_all_of_them() {
+        let cmd = gated_cmd(&["fs", "network"]);
+        // Only "fs" granted — "network" missing — must still reject.
+        let caps = app_caps_with(r#"{"fs":{"read":["**"]}}"#);
+        assert!(command_capabilities_ok(&cmd, &caps).is_err());
     }
 }
 

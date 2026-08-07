@@ -20,6 +20,9 @@
     "fs": { "read": ["**"], "write": ["**"] },
     "dialog": true
   },
+  "plugins": [
+    { "entry": "js/plugins/format.plugin.js", "name": "format", "capabilities": [] }
+  ],
   "dev": {
     "entry":  "js/app.jsx",
     "output": "js/dist/app.js",

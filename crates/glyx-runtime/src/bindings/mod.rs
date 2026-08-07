@@ -803,6 +803,10 @@ pub struct NodeProps {
     // Text
     pub text:            Option<String>,
     pub font_size:       Option<f32>,
+    /// Absolute line height in the same px units as `font_size`. Absent
+    /// means Parley's own metrics-relative default (the font's own line
+    /// gap) — this only overrides it when a caller explicitly sets it.
+    pub line_height:     Option<f32>,
     /// `"bold"` or `"normal"` (default). Maps to Parley FontWeight.
     pub font_weight:     Option<String>,
     /// `"italic"` or `"normal"` (default). Maps to Parley FontStyle.
@@ -1503,6 +1507,7 @@ pub fn register_all(
     register!("__glyx_getLayout",   get_layout_callback);
     register!("__glyx_measure_text",    measure_text_callback);
     register!("__glyx_text_char_at_x", text_char_at_x_callback);
+    register!("__glyx_text_cursor_x",  text_cursor_x_callback);
     register!("__glyx_text_pos_at",    text_pos_at_callback);
 
     register!("__glyx_getWindowSize", get_window_size_callback);
@@ -2191,6 +2196,7 @@ fn parse_props(
     props.width       = get_length_prop(scope, obj, "width");
     props.height      = get_length_prop(scope, obj, "height");
     props.font_size             = get_num_prop(scope, obj, "fontSize");
+    props.line_height           = get_num_prop(scope, obj, "lineHeight");
     props.font_weight           = get_str_prop(scope, obj, "fontWeight").map(|s| s.to_string());
     props.font_style            = get_str_prop(scope, obj, "fontStyle").map(|s| s.to_string());
     props.text_decoration_line  = get_str_prop(scope, obj, "textDecorationLine").map(|s| s.to_string());

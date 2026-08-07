@@ -1,7 +1,7 @@
 /// Per-window application-state type definitions for glyx-core.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 
@@ -77,9 +77,21 @@ use std::sync::mpsc::Receiver;
 
 // ── Splash state ─────────────────────────────────────────────────────────────
 
+/// One decoded splash frame. A static image (PNG/JPEG/etc.) is represented
+/// as a single-element frame list with an irrelevant `delay`; an animated
+/// GIF decodes to one `SplashFrame` per GIF frame, each carrying that
+/// frame's own delay straight from the file — no separate "static vs
+/// animated" code path anywhere else in the splash logic.
+pub(super) struct SplashFrame {
+    pub(super) image: peniko::ImageData,
+    pub(super) delay: Duration,
+}
+
 /// Splash screen overlay state. Active from window open until dismissed.
 pub(super) struct SplashState {
-    pub(super) image:        Option<peniko::ImageData>,
+    pub(super) frames:       Vec<SplashFrame>,
+    pub(super) current_frame: usize,
+    pub(super) last_advance: Instant,
     /// Max fraction (0.0-1.0) of the smaller window dimension the splash
     /// image may occupy — keeps a full-bleed source image (e.g. an app
     /// icon with no transparent margin) from filling the whole window and
@@ -97,6 +109,21 @@ impl SplashState {
         if now < self.min_until { return true; }
         if now >= self.auto_hide_at { return false; }
         !self.hidden
+    }
+
+    /// Current frame's image, advancing `current_frame` first if its delay
+    /// has elapsed. Single-frame (static) splashes never advance — `delay`
+    /// is meaningless for them, `frames.len() == 1` short-circuits below.
+    pub(super) fn current_image(&mut self) -> Option<&peniko::ImageData> {
+        if self.frames.len() > 1 {
+            let now = Instant::now();
+            let cur_delay = self.frames[self.current_frame].delay;
+            if cur_delay > Duration::ZERO && now.duration_since(self.last_advance) >= cur_delay {
+                self.current_frame = (self.current_frame + 1) % self.frames.len();
+                self.last_advance = now;
+            }
+        }
+        self.frames.get(self.current_frame).map(|f| &f.image)
     }
 }
 

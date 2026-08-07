@@ -484,6 +484,58 @@ impl Capabilities {
             .map(|e| e.allow.iter().any(|p| env_pattern_matches(p, name)))
             .unwrap_or(false)
     }
+
+    /// True if `name` is a recognized `glyx.config.json` capability key
+    /// (`"fs"`, `"network"`, `"db"`, ...). Unknown names return `false`.
+    pub fn is_valid_name(name: &str) -> bool {
+        matches!(name,
+            "fs" | "network" | "env" | "db" | "dialog" | "clipboard" | "notification"
+            | "battery" | "usb" | "shell" | "mdns" | "system" | "power" | "storage"
+            | "gamepads" | "globalShortcuts" | "credentials" | "audio" | "ai"
+            | "camera" | "microphone" | "hid" | "updater" | "video" | "crash" | "deeplink"
+            | "tray" | "webview"
+        )
+    }
+
+    /// True if this capability set has the named capability enabled at all
+    /// (a boolean/presence check, not a scoped check like `can_read_path`).
+    /// Single source of truth for "does the app have X enabled" by string
+    /// name — used both by JS-plugin load-time capability validation
+    /// (`glyx-core::config`) and native `GlyxExtension` command gating
+    /// (`glyx-runtime`'s `add_gated`/`backend_call`).
+    pub fn has_named(&self, name: &str) -> bool {
+        match name {
+            "fs"               => self.fs.is_some(),
+            "network"          => self.network.is_some(),
+            "env"              => self.env.is_some(),
+            "db"               => self.db,
+            "dialog"           => self.dialog,
+            "clipboard"        => self.clipboard,
+            "notification"     => self.notification,
+            "battery"          => self.battery,
+            "usb"              => self.usb,
+            "shell"            => self.shell,
+            "mdns"             => self.mdns,
+            "system"           => self.system,
+            "power"            => self.power,
+            "storage"          => self.storage,
+            "gamepads"         => self.gamepads,
+            "globalShortcuts"  => self.global_shortcuts,
+            "credentials"      => self.credentials,
+            "audio"            => self.audio,
+            "ai"               => self.ai,
+            "camera"           => self.camera,
+            "microphone"       => self.microphone,
+            "hid"              => self.hid,
+            "updater"          => self.updater,
+            "video"            => self.video,
+            "crash"            => self.crash,
+            "deeplink"         => self.deeplink.is_some(),
+            "tray"             => self.tray,
+            "webview"          => self.webview,
+            _                  => false,
+        }
+    }
 }
 
 // ── Global capability store ───────────────────────────────────────────────────

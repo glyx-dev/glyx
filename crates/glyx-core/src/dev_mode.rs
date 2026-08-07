@@ -256,10 +256,12 @@ pub(super) fn start_dev_mode_worker(
                     let entry_str = abs_entry.to_str().unwrap_or("");
                     let tmp = std::env::temp_dir().join(format!("glyx_plugin_{safe_name}.js"));
                     let tmp_str = tmp.to_str().unwrap_or("");
+                    // Same fix as `config::bundle_plugin` — `--global-name` isn't a
+                    // real `bun build` flag; bundle as CJS and wrap it ourselves
+                    // (see `config::wrap_cjs_as_global`) instead.
                     let bun_args = [
                         "build", entry_str, "--outfile", tmp_str,
-                        "--target", "browser", "--format", "iife",
-                        "--global-name", &global_name,
+                        "--target", "browser", "--format", "cjs",
                     ];
                     #[cfg(target_os = "windows")]
                     {
@@ -280,12 +282,12 @@ pub(super) fn start_dev_mode_worker(
                     Ok(out) if out.status.success() => {
                         let tmp = std::env::temp_dir().join(format!("glyx_plugin_{safe_name}.js"));
                         match std::fs::read_to_string(&tmp) {
-                            Ok(js) => {
+                            Ok(cjs) => {
                                 let _ = std::fs::remove_file(&tmp);
                                 let _ = out_tx2.send(DevBuildEvent::PluginReload {
                                     global_name: global_name.clone(),
                                     prefix:      prefix.clone(),
-                                    bundled_js:  js,
+                                    bundled_js:  crate::config::wrap_cjs_as_global(&cjs, &global_name),
                                 });
                                 redraw2();
                             }

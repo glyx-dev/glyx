@@ -70,12 +70,54 @@ export function SelectColorsProvider({ colors, children }) {
 
 // ── TextInput ─────────────────────────────────────────────────────────────────
 
+// Three classes, not two — word / whitespace / punctuation-or-other — so a
+// word-boundary scan can never bleed into an adjacent space (or vice
+// versa). A two-class "word vs. everything else" split would merge
+// whitespace and punctuation into one run, which is what let a
+// double-click's selection include a trailing/leading space next to a word.
+function _charClass(ch) {
+  if (/[A-Za-z0-9_]/.test(ch)) return 0; // word
+  if (/\s/.test(ch)) return 1;           // whitespace
+  return 2;                              // punctuation / other
+}
+
+// Word-boundary scan for double-click selection: a "word" is a maximal run
+// of the same character class, matching standard desktop-editor
+// double-click behavior (double-clicking a run of spaces, or a run of
+// punctuation, selects that run too — but never merges the two).
+// Real single-line height for `fontSize`, honoring an explicit `lineHeight`
+// override when given. Falls back to measuring a reference character
+// against the native shaper (the font's own real metrics) rather than the
+// `fontSize * 1.4` guess previously used everywhere here — that guess had
+// no relationship to what the renderer actually draws, which is what
+// caused overlapping rows whenever a font's real line height was smaller
+// than 1.4×. Only falls back further to the guess if the native binding
+// isn't available at all (e.g. very early in startup).
+function realLineHeight(fontSize, lineHeight) {
+  if (lineHeight) return lineHeight;
+  if (typeof __glyx_measure_text !== 'undefined') {
+    return __glyx_measure_text('M', fontSize, 1e6).height;
+  }
+  return fontSize * 1.4;
+}
+
+function wordRangeAt(text, offset) {
+  if (!text.length) return { start: 0, end: 0 };
+  const idx = Math.max(0, Math.min(offset, text.length - 1));
+  const sameClass = _charClass(text[idx]);
+  let start = idx, end = idx + 1;
+  while (start > 0 && _charClass(text[start - 1]) === sameClass) start--;
+  while (end < text.length && _charClass(text[end]) === sameClass) end++;
+  return { start, end };
+}
+
 export function TextInput({
   value = '',
   onChangeText,
   onSubmitEditing,
   placeholder = '',
   fontSize = 16,
+  lineHeight,                // absolute px override; default is the font's own metrics
   multiline = false,
   width,                     // explicit width; default 240 ONLY when no width-affecting style is given
   height,                    // default: 44 single-line; auto-sized multiline
@@ -179,7 +221,13 @@ export function TextInput({
     if (multiline) return;
     if (typeof __glyx_measure_text === 'undefined') return;
     const visibleW   = innerW;
-    const caretX     = __glyx_measure_text(renderValue.slice(0, focus_), fontSize, 1e6).width;
+    // Cursor X from a single shape of the FULL string via the native Cursor
+    // API, not a re-shaped growing prefix (`renderValue.slice(0, focus_)`) —
+    // the latter can drift from the real rendered position since shaping
+    // isn't purely per-character additive (kerning/clustering).
+    const caretX     = (typeof __glyx_text_cursor_x !== 'undefined')
+      ? __glyx_text_cursor_x(renderValue, fontSize, 1e6, focus_)
+      : __glyx_measure_text(renderValue.slice(0, focus_), fontSize, 1e6).width;
     const textW      = __glyx_measure_text(renderValue, fontSize, 1e6).width;
     let sx = scrollXRef.current;
     if (caretX - sx > visibleW) sx = caretX - visibleW;
@@ -197,7 +245,7 @@ export function TextInput({
   // Multiline auto-height: count rendered lines (explicit '\n' plus soft
   // wraps at the real field width) and size the box between minLines and
   // maxLines.  An explicit `height` prop opts out.
-  const lineH = fontSize * 1.4;
+  const lineH = realLineHeight(fontSize, lineHeight);
   let autoHeight;
   if (multiline && height == null) {
     const lo = Math.max(1, minLines ?? 3);
@@ -346,7 +394,7 @@ export function TextInput({
         // the caret-follow effect then scrolls the view along with it.
         const id = nodeIdRef.current;
         const l = (id != null && typeof __glyx_getLayout !== 'undefined') ? __glyx_getLayout(id) : null;
-        const lineH = fontSize * 1.4;
+        const lineH = realLineHeight(fontSize, lineHeight);
         const pageLines = Math.max(1, Math.floor(((l ? l.height : 300) - innerPadding * 2) / lineH) - 1);
         if (typeof __glyx_measure_text !== 'undefined' && typeof __glyx_text_pos_at !== 'undefined') {
           const caretY = __glyx_measure_text(renderValue.slice(0, focus_) || ' ', fontSize, innerW).height - lineH / 2;
@@ -412,8 +460,8 @@ export function TextInput({
           return __glyx_text_pos_at(renderValue, fontSize, innerW, Math.max(0, textX), Math.max(0, contentY));
         }
         // Fallback: '\n'-split line mapping (inaccurate with soft wraps).
-        const lineHeight = fontSize * 1.4;
-        const lineIdx    = Math.max(0, Math.floor(contentY / lineHeight));
+        const rowH    = realLineHeight(fontSize, lineHeight);
+        const lineIdx = Math.max(0, Math.floor(contentY / rowH));
         const lines      = renderValue.split('\n');
         const clampedLine = Math.min(lineIdx, lines.length - 1);
         const lineText   = lines[clampedLine];
@@ -435,6 +483,14 @@ export function TextInput({
     onClickAt: (relX, relY) => {
       moveCursor(handlersRef.current.posAt(relX, relY));
     },
+    // Double-click: select the word (or whitespace/punctuation run) under
+    // the click — standard desktop-editor behavior.
+    onDoubleClickAt: (relX, relY) => {
+      const offset = handlersRef.current.posAt(relX, relY);
+      const { start, end } = wordRangeAt(renderValue, offset);
+      setAnchor(start);
+      setFocus_(end);
+    },
     // Mouse drag: keep the press-down anchor, move only the focus end.
     onDragAt: (relX, relY) => {
       extendTo(handlersRef.current.posAt(relX, relY));
@@ -451,33 +507,45 @@ export function TextInput({
     return Math.min(max, Math.max(0, y));
   };
 
+  // `_glyxOnMount` fires exactly once, at native-node creation — the host
+  // config explicitly ignores identity changes on this prop across renders
+  // (see hostConfig.test.js), so it is NOT a place to react to `multiline`
+  // changing later. Scroll-view registration is handled separately below,
+  // in an effect keyed on `multiline`, so a field that becomes multiline
+  // after its first render still gets wheel-scroll wired up.
   const onMount = useCallback((id) => {
     nodeIdRef.current = id;
     registerInput(id, {
-      onFocus:    () => handlersRef.current.onFocus(),
-      onBlur:     () => handlersRef.current.onBlur(),
-      onKeyPress: (ev) => handlersRef.current.onKeyPress(ev),
-      onClickAt:  (relX, relY) => handlersRef.current.onClickAt(relX, relY),
-      onDragAt:   (relX, relY) => handlersRef.current.onDragAt(relX, relY),
+      onFocus:         () => handlersRef.current.onFocus(),
+      onBlur:          () => handlersRef.current.onBlur(),
+      onKeyPress:      (ev) => handlersRef.current.onKeyPress(ev),
+      onClickAt:       (relX, relY) => handlersRef.current.onClickAt(relX, relY),
+      onDoubleClickAt: (relX, relY) => handlersRef.current.onDoubleClickAt(relX, relY),
+      onDragAt:        (relX, relY) => handlersRef.current.onDragAt(relX, relY),
     });
-    // Multiline fields scroll vertically like a ScrollView: wheel + native
-    // scrollbar thumb/track drags both route here.
-    if (multiline) {
-      registerScrollView(id, {
-        onScroll:         (dy) => setScrollYBoth(clampScrollY(scrollYRef.current + dy)),
-        onAbsoluteScroll: (y)  => setScrollYBoth(clampScrollY(y)),
-      });
-    }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     return () => {
       if (nodeIdRef.current !== null) {
         unregisterInput(nodeIdRef.current);
-        unregisterScrollView(nodeIdRef.current);
       }
     };
   }, []);
+
+  // Multiline fields scroll vertically like a ScrollView: wheel + native
+  // scrollbar thumb/track drags both route here. Re-runs whenever
+  // `multiline` changes so a field that isn't multiline on its first
+  // render still gets wheel-scroll wired up once it becomes multiline.
+  useEffect(() => {
+    const id = nodeIdRef.current;
+    if (id == null || !multiline) return;
+    registerScrollView(id, {
+      onScroll:         (dy) => setScrollYBoth(clampScrollY(scrollYRef.current + dy)),
+      onAbsoluteScroll: (y)  => setScrollYBoth(clampScrollY(y)),
+    });
+    return () => unregisterScrollView(id);
+  }, [multiline]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Caret follow: when typing/moving the caret in a scrolled multiline field,
   // keep the caret's line inside the viewport.
@@ -488,7 +556,7 @@ export function TextInput({
     if (id == null || typeof __glyx_getLayout === 'undefined') return;
     const l = __glyx_getLayout(id);
     if (!l) return;
-    const lineH = Math.ceil(fontSize * 1.4);
+    const lineH = Math.ceil(realLineHeight(fontSize, lineHeight));
     // Caret bottom y within the content = height of the text up to the caret.
     const caretBottom = __glyx_measure_text(renderValue.slice(0, focus_) || ' ', fontSize, innerW).height + innerPadding;
     const viewH = l.height;
@@ -523,7 +591,12 @@ export function TextInput({
     clip: true,   // prevent text from rendering outside the input bounds
     ...style,
     // Vertical scroll state (after the user-style spread — not overridable).
-    ...(multiline ? { scrollOffsetY: scrollY } : null),
+    // `showScrollbar`/`scrollbarWidth`/`scrollbarColor` use the same native
+    // clip+scroll mechanism (and the same visual defaults) as
+    // @glyx-dev/rich-text's RichTextEditor — multiline already scrolled
+    // correctly via mouse wheel and caret-follow, it just never rendered a
+    // visible scrollbar for it.
+    ...(multiline ? { scrollOffsetY: scrollY, showScrollbar: true, scrollbarWidth: 8, scrollbarColor: '#8c8caa99' } : null),
   };
 
   return React.createElement(
@@ -532,6 +605,7 @@ export function TextInput({
     React.createElement('text', {
       text:           displayText,
       fontSize,
+      lineHeight,
       // Wrap (multiline) at the REAL measured width, not the 240 prop default.
       width:          innerW,
       height:         multiline ? undefined : resolvedHeight - innerPadding * 2,

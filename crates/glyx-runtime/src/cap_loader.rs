@@ -86,11 +86,15 @@ unsafe fn load_dll(path: &std::path::Path) -> Result<libloading::Library, libloa
 
 /// Returns `true` if DLL signature verification should be skipped.
 ///
-/// Only possible in debug builds and only when `GLYX_UNSAFE_SKIP_CAP_VERIFY=1`
-/// is set.  The env-var branch is compiled out entirely in release so the
-/// escape hatch cannot be triggered by an attacker at runtime.
+/// Only possible in debug builds, or builds with the `dev` feature enabled
+/// (the prebuilt "dev" glyx-runner is compiled with `--release` for size and
+/// speed, so it never has `debug_assertions` — the `dev` feature is what
+/// actually marks it as a development build), and only when
+/// `GLYX_UNSAFE_SKIP_CAP_VERIFY=1` is set. Both branches are compiled out
+/// entirely in a lean release build (no `dev` feature, no debug_assertions)
+/// so the escape hatch cannot be triggered by an attacker at runtime.
 fn skip_cap_verify() -> bool {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "dev"))]
     {
         if std::env::var("GLYX_UNSAFE_SKIP_CAP_VERIFY").as_deref() == Ok("1") {
             log::warn!("[cap] GLYX_UNSAFE_SKIP_CAP_VERIFY=1 -- Ed25519 check bypassed (dev only)");

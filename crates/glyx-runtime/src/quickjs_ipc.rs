@@ -229,8 +229,12 @@ pub(crate) fn backend_call<'js>(
         return f.call((parsed_args,));
     }
 
-    let Some(handler) = commands.get(&name).cloned() else {
+    let Some(cmd) = commands.get(&name) else {
         return QuickJsRuntime::reject_now(&ctx, format!("backend.{name}: no such command registered"));
     };
+    if let Err(e) = crate::command_capabilities_ok(cmd, glyx_security::get()) {
+        return QuickJsRuntime::reject_now(&ctx, format!("backend.{name}: {e}"));
+    }
+    let handler = cmd.handler.clone();
     QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, async move { handler(args_json).await })
 }

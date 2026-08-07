@@ -11,5 +11,6 @@ quickjs = ["glyx-core/quickjs"]
 shell   = ["glyx-core/shell"]
 
 [dependencies]
-glyx-core  = { path = "../../crates/glyx-core", default-features = false }
-glyx-shell = { path = "../../crates/glyx-shell" }
+glyx-core   = { path = "../../crates/glyx-core", default-features = false }
+glyx-shell  = { path = "../../crates/glyx-shell" }
+env_logger  = { workspace = true }

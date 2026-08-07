@@ -447,13 +447,15 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             let ime_preedit_start = node.props.ime_preedit_start.map(|p| p as usize);
             let ime_preedit_end   = node.props.ime_preedit_end.map(|p| p as usize);
 
+            let line_height = node.props.line_height;
+
             // LabelKey::new() is allocation-free (hashes text, packs fields).
             // Derive it twice instead of cloning — cheaper than a String clone.
-            if ctx.label_cache.peek(&LabelKey::new(text, font_size, max_width, bold, italic)).is_none() {
-                let lbl = CachedLabel::new(ctx.text_sys, text, font_size, max_width, color, bold, italic);
-                ctx.label_cache.put(LabelKey::new(text, font_size, max_width, bold, italic), lbl);
+            if ctx.label_cache.peek(&LabelKey::new(text, font_size, max_width, bold, italic, line_height)).is_none() {
+                let lbl = CachedLabel::new(ctx.text_sys, text, font_size, max_width, color, bold, italic, line_height);
+                ctx.label_cache.put(LabelKey::new(text, font_size, max_width, bold, italic, line_height), lbl);
             }
-            let label = ctx.label_cache.get(&LabelKey::new(text, font_size, max_width, bold, italic)).unwrap();
+            let label = ctx.label_cache.get(&LabelKey::new(text, font_size, max_width, bold, italic, line_height)).unwrap();
 
             let bw = rw;
             let bh = rh;

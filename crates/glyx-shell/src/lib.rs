@@ -85,6 +85,14 @@ impl std::fmt::Debug for A11yUpdateFn {
 /// All fields use primitive Rust types — no winit types leak through.
 #[derive(Debug, Clone)]
 pub enum ShellEvent {
+    /// The pre-init splash window (see `ShellConfig::splash_window`) is open
+    /// and ready to be painted. Fired, at most once, before the real
+    /// `WindowReady` for the main window — deliberately NOT part of the
+    /// handle-addressable window system (no `window_handle`, never appears
+    /// in `CloseRequested`/`RedrawRequested`/etc.): it exists only long
+    /// enough for glyx-core to blit one frame into it via `softbuffer`, then
+    /// gets dropped (which closes it) once the real main window is shown.
+    SplashWindowReady { window: Arc<Window> },
     /// Window is ready; GPU context can now be created.
     ///
     /// `proxy` can be cloned and used from any thread to request new windows
@@ -227,6 +235,22 @@ pub struct ShellConfig {
     /// entry is used as the default ICU locale. Controlled by `locales` in
     /// `glyx.config.json` / `glyx.config.ts`. Defaults to `["en"]`.
     pub locales: Vec<String>,
+    /// When set, a small undecorated window is created and shown FIRST —
+    /// before the real main window, before GPU/backend selection, before
+    /// the JS engine boots — so something is visible the instant the app
+    /// launches instead of a blank window during that (potentially
+    /// several-hundred-millisecond) setup. Populated internally by
+    /// glyx-core from the app's `splash` config; not something external
+    /// callers set directly. `None` = no splash window (default, and the
+    /// behavior for every existing caller that predates this field).
+    pub splash_window: Option<ShellSplashWindow>,
+}
+
+/// Sizing for the pre-init splash window — see `ShellConfig::splash_window`.
+#[derive(Clone, Copy)]
+pub struct ShellSplashWindow {
+    pub width:  u32,
+    pub height: u32,
 }
 
 impl Default for ShellConfig {
@@ -246,6 +270,7 @@ impl Default for ShellConfig {
             canvas_protocol: "binary".into(),
             canvas_buffer_kb: None,
             locales:         vec!["en".to_string()],
+            splash_window:   None,
         }
     }
 }
@@ -418,6 +443,44 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // Only create the main window on the first resume.
         if !self.windows.is_empty() { return; }
+
+        // Pre-init splash window: created (and shown) FIRST, before any of
+        // the main window's GPU/backend/JS setup — see `ShellEvent::SplashWindowReady`'s
+        // doc comment. Deliberately NOT registered in `self.windows`/`window_arcs`:
+        // it's not part of the handle-addressable window system at all, so
+        // `window_event`'s `self.windows.get(&window_id) -> None => return`
+        // path safely no-ops any OS event delivered for it, and it never
+        // occupies a handle (handle 0 stays the main window, unaffected).
+        if let Some(sw) = self.config.splash_window {
+            let mut attrs = WindowAttributes::default()
+                .with_inner_size(PhysicalSize::new(sw.width, sw.height))
+                .with_decorations(false)
+                .with_resizable(false)
+                .with_visible(true)
+                // Keep the splash visually on top of the main window rather
+                // than hiding the main window until handoff: an invisible
+                // window doesn't reliably receive RedrawRequested on every
+                // platform (confirmed: it simply never fires on Windows),
+                // which would mean the main window's first real frame — and
+                // therefore the handoff itself — never happens. Showing the
+                // main window normally (see below) keeps its own redraw
+                // cycle working exactly as it always has; AlwaysOnTop is
+                // what actually hides its blank content from view instead.
+                // (Unsupported on iOS/Android/Web/Wayland per winit's docs —
+                // an accepted gap on those platforms, not attempted here.)
+                .with_window_level(winit::window::WindowLevel::AlwaysOnTop);
+            if let Some(monitor) = event_loop.primary_monitor() {
+                let ms = monitor.size();
+                let mp = monitor.position();
+                let x = mp.x + (ms.width  as i32 - sw.width  as i32) / 2;
+                let y = mp.y + (ms.height as i32 - sw.height as i32) / 2;
+                attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, y));
+            }
+            match event_loop.create_window(attrs) {
+                Ok(w) => (self.handler)(ShellEvent::SplashWindowReady { window: Arc::new(w) }),
+                Err(e) => log::error!("glyx-shell: failed to create splash window: {}", e),
+            }
+        }
 
         let handle = self.next_handle;
         self.next_handle += 1;

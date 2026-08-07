@@ -285,9 +285,12 @@ pub fn measure_text_callback(
     let style_str = args.get(3).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
     let bold   = style_str.contains("bold");
     let italic = style_str.contains("italic");
+    // Optional 5th arg: absolute line height override (same units as fontSize).
+    let lh = args.get(4).number_value(scope).unwrap_or(f64::NAN);
+    let line_height = if lh.is_finite() && lh > 0.0 { Some(lh as f32) } else { None };
 
-    let (w, h) = if bold || italic {
-        let layout = state.text_measure.borrow_mut().styled_label(&text, font_size, max_width, bold, italic);
+    let (w, h) = if bold || italic || line_height.is_some() {
+        let layout = state.text_measure.borrow_mut().styled_label(&text, font_size, max_width, bold, italic, line_height);
         (layout.width(), layout.height())
     } else {
         state.text_measure.borrow_mut().measure(&text, font_size, max_width)
@@ -327,13 +330,50 @@ pub fn text_char_at_x_callback(
     let mw        = args.get(2).number_value(scope).unwrap_or(0.0);
     let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
     let target_x  = args.get(3).number_value(scope).unwrap_or(0.0) as f32;
+    let style_str = args.get(4).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
+    let bold   = style_str.contains("bold");
+    let italic = style_str.contains("italic");
 
-    let idx = state.text_measure.borrow_mut().char_at_x(&text, font_size, max_width, target_x);
+    let idx = state.text_measure.borrow_mut().char_at_x_styled(&text, font_size, max_width, target_x, bold, italic);
     rv.set(v8::Number::new(scope, idx as f64).into());
 }
 
 // ── __glyx_text_pos_at ────────────────────────────────────────────────────────
 //
+// __glyx_text_cursor_x(text, fontSize, maxWidth, charIdx) -> number
+//
+// Inverse of __glyx_text_char_at_x: returns the X pixel offset of the cursor
+// sitting at character index `charIdx` in `text` shaped at `fontSize` /
+// `maxWidth`. Shapes `text` exactly once and reads the position directly off
+// that single layout, so callers building up cursor X positions across a
+// growing string (e.g. rich-text caret/selection math) get answers that are
+// always consistent with one real shaping pass, unlike re-shaping successive
+// substrings independently.
+
+pub fn text_cursor_x_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let text      = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
+    let font_size = args.get(1).number_value(scope).unwrap_or(16.0) as f32;
+    let mw        = args.get(2).number_value(scope).unwrap_or(0.0);
+    let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
+    let char_idx  = args.get(3).number_value(scope).unwrap_or(0.0).max(0.0) as usize;
+    let style_str = args.get(4).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
+    let bold   = style_str.contains("bold");
+    let italic = style_str.contains("italic");
+
+    let x = state.text_measure.borrow_mut().cursor_x_at_styled(&text, font_size, max_width, char_idx, bold, italic);
+    rv.set(v8::Number::new(scope, x as f64).into());
+}
+
 // 2-D caret hit-test for WRAPPED text: returns the character index nearest to
 // point (x, y) in `text` shaped at `fontSize` and wrapped to `maxWidth`.
 // Handles soft wraps and '\n' — used by multiline TextInput click/drag.

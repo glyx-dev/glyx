@@ -419,6 +419,27 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         let new_style = layout::to_taffy_style(&nt, &props);
                         let _ = state.layout.set_style(lid, new_style);
                         let _ = state.layout.mark_dirty(lid);
+
+                        // Text nodes also carry a `TextMeasureCtx` set once at
+                        // creation (see `build_subtree`) — `set_style` above never
+                        // touches it. Without refreshing it here, Taffy keeps
+                        // auto-sizing against the node's *original* text forever,
+                        // so a growing string (a counter passing single digits,
+                        // for example) gets painted into a box still sized for the
+                        // first render and silently wraps/clips.
+                        if nt == NodeType::Text {
+                            let font_size = props.font_size.unwrap_or(16.0);
+                            let max_height = props.number_of_lines
+                                .map(|n| n as f32 * font_size * 1.4);
+                            let ctx = TextMeasureCtx {
+                                text: props.text.clone().unwrap_or_default(),
+                                font_size,
+                                max_height,
+                                bold:   props.font_weight.as_deref() == Some("bold"),
+                                italic: props.font_style.as_deref()  == Some("italic"),
+                            };
+                            let _ = state.layout.set_text_ctx(lid, ctx);
+                        }
                     }
                 }
             }

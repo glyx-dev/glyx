@@ -625,7 +625,10 @@ fn glyx_home() -> Result<PathBuf> {
         }
         if dir.parent().is_none() { break; }
     }
-    Ok(std::env::current_dir()?)
+    anyhow::bail!(
+        "Not running from inside the glyx source workspace — this is expected \
+         for a published glyx-cli install and isn't an error by itself."
+    )
 }
 
 fn relpath(from_dir: &Path, to: &Path) -> String {

@@ -214,6 +214,22 @@ impl LayoutTree {
         self.tree.set_style(node, style).map_err(LayoutError::Taffy)
     }
 
+    /// Update the `TextMeasureCtx` for an existing Text leaf node.
+    ///
+    /// `add_text_node` only sets this once, at creation — `set_style` updates
+    /// layout properties (flex, padding, etc.) but never touches the stored
+    /// text content Taffy uses for auto-sizing. Without calling this whenever
+    /// a Text node's `text`/`fontSize`/weight/style props change, Taffy keeps
+    /// measuring the node's *original* text forever: the auto-computed width
+    /// stays frozen at whatever the first render needed, while painting still
+    /// draws the current (possibly longer) text into that stale-width box —
+    /// silently wrapping/clipping once the real text outgrows it. Internally
+    /// calls Taffy's own `mark_dirty`, so no separate call is needed for this
+    /// specific update.
+    pub fn set_text_ctx(&mut self, node: NodeId, ctx: TextMeasureCtx) -> Result<(), LayoutError> {
+        self.tree.set_node_context(node, Some(ctx)).map_err(LayoutError::Taffy)
+    }
+
     /// Mark a node dirty so Taffy recomputes it and its ancestors on the next
     /// `compute_with_measure` call.  Subtrees that were not marked dirty are
     /// skipped, making updates proportional to the number of changed nodes.
@@ -272,5 +288,60 @@ pub fn fixed_box(width: f32, height: f32) -> Style {
             height: length(height),
         },
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A deterministic stand-in for real text shaping: width = 10px/char,
+    /// fixed 20px line height. Good enough to prove the *context* (not the
+    /// real Parley measurement) actually gets re-read on update.
+    fn char_width_measure(
+        known_dimensions: Size<Option<f32>>,
+        _available_space: Size<AvailableSpace>,
+        _node_id: NodeId,
+        node_context: Option<&mut TextMeasureCtx>,
+        _style: &Style,
+    ) -> Size<f32> {
+        let Some(ctx) = node_context else { return Size::ZERO };
+        Size {
+            width:  known_dimensions.width.unwrap_or_else(|| ctx.text.chars().count() as f32 * 10.0),
+            height: known_dimensions.height.unwrap_or(20.0),
+        }
+    }
+
+    fn ctx(text: &str) -> TextMeasureCtx {
+        TextMeasureCtx { text: text.into(), font_size: 16.0, max_height: None, bold: false, italic: false }
+    }
+
+    /// Regression test for a real bug: `add_text_node` stores a Text node's
+    /// content in a `TextMeasureCtx` only once, at creation time. Before
+    /// `set_text_ctx` existed, there was no way to refresh that context when
+    /// a node's text changed later — Taffy kept auto-sizing against whatever
+    /// text the node was FIRST created with, even though painting always
+    /// drew the current, possibly-longer text into that stale-width box. In
+    /// a real app this showed up as `<Text>count: {n}</Text>` rendering fine
+    /// at single digits (same length as the initial render) and silently
+    /// wrapping the instant it reached double digits.
+    #[test]
+    fn set_text_ctx_updates_the_measured_width() {
+        let mut tree = LayoutTree::new();
+        let id = tree.add_text_node(Style::default(), ctx("hi"), None).unwrap();
+        tree.set_root(id);
+
+        let first = tree.compute_with_measure(800.0, 600.0, char_width_measure).unwrap();
+        let (_, first_layout) = first.iter().find(|(nid, _)| *nid == id).unwrap();
+        assert_eq!(first_layout.width, 20.0, "\"hi\" should measure as 2 chars * 10px");
+
+        tree.set_text_ctx(id, ctx("hello world")).unwrap();
+
+        let second = tree.compute_with_measure(800.0, 600.0, char_width_measure).unwrap();
+        let (_, second_layout) = second.iter().find(|(nid, _)| *nid == id).unwrap();
+        assert_eq!(
+            second_layout.width, 110.0,
+            "updated context should be re-measured as 11 chars * 10px, not frozen at the original 2-char width"
+        );
     }
 }

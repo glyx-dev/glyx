@@ -211,6 +211,20 @@ fn normalize_lexical(path: &std::path::Path) -> std::path::PathBuf {
     out
 }
 
+/// Strip a leading `\\?\` Windows verbatim-path prefix, if present.
+///
+/// `Path::canonicalize()` always adds this prefix on Windows; a plain
+/// `cwd.join(relative)` (used when the input to `match_candidates` isn't
+/// already absolute) never does. Comparing paths with mismatched prefix
+/// kinds via `Path::strip_prefix` always fails — even for the same real
+/// location — because the verbatim and non-verbatim forms produce different
+/// `Component::Prefix` kinds. Doing the comparison on plain strings with the
+/// prefix stripped from both sides sidesteps that mismatch entirely,
+/// regardless of which side (if either) happens to be verbatim.
+fn strip_verbatim_prefix(s: &str) -> &str {
+    s.strip_prefix(r"\\?\").unwrap_or(s)
+}
+
 /// Candidate strings a path is matched under (forward-slash form):
 /// 1. the absolute normalized path, and
 /// 2. its app-root-relative form when it lives under the working directory —
@@ -223,10 +237,16 @@ fn match_candidates(path: &str) -> Vec<String> {
         let cwd = std::env::current_dir().unwrap_or_default();
         normalize_lexical(&cwd.join(p))
     };
-    let mut out = vec![abs.to_string_lossy().replace('\\', "/")];
+    let abs_str = strip_verbatim_prefix(&abs.to_string_lossy()).replace('\\', "/");
+    let mut out = vec![abs_str.clone()];
     if let Ok(cwd) = std::env::current_dir() {
-        if let Ok(rel) = abs.strip_prefix(normalize_lexical(&cwd)) {
-            out.push(rel.to_string_lossy().replace('\\', "/"));
+        let cwd_lossy = normalize_lexical(&cwd).to_string_lossy().into_owned();
+        let cwd_str = strip_verbatim_prefix(&cwd_lossy).replace('\\', "/");
+        if let Some(rel) = abs_str.strip_prefix(&cwd_str) {
+            let rel = rel.trim_start_matches('/');
+            if !rel.is_empty() {
+                out.push(rel.to_string());
+            }
         }
     }
     out
@@ -706,6 +726,22 @@ mod tests {
         assert!(caps.can_read_path("./assets/logo.png"));
         assert!(!caps.can_read_path("secrets.txt"));
         assert!(!caps.can_read_path("data/assets/logo.png"));
+    }
+
+    /// Regression test for a real Windows bug: `Path::canonicalize()` always
+    /// returns a `\\?\`-verbatim-prefixed path on Windows, but
+    /// `std::env::current_dir()` never does — so computing the app-root-relative
+    /// candidate via `canonicalized.strip_prefix(current_dir())` silently always
+    /// failed on Windows, making every relative glob (`"assets/**"`) unreachable
+    /// in real usage even though it passed every other test here (those all call
+    /// `can_read_path` with a clean relative string directly, never through the
+    /// `canonicalize()` step every real caller — `resolve_and_check_read`,
+    /// `create_image_callback`, etc. — actually goes through).
+    #[test]
+    fn fs_relative_glob_matches_a_canonicalized_path() {
+        let caps = parse(r#"{ "fs": { "read": ["Cargo.toml"] } }"#);
+        let canonical = std::path::Path::new("Cargo.toml").canonicalize().unwrap();
+        assert!(caps.can_read_path(&canonical.to_string_lossy()));
     }
 
     #[test]

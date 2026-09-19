@@ -299,6 +299,17 @@ pub enum InputEvent {
     Scroll { delta_y: f32 },
     /// Absolute scroll position set by a scrollbar thumb drag.
     ScrollbarDrag { node_id: u32, scroll_y: f32 },
+    /// Absolute scroll position needed to bring a newly-focused node (Tab/
+    /// Shift+Tab, AT-driven focus, or focus survival after node removal)
+    /// into view within its nearest scrollable ancestor. Computed natively
+    /// in `layout::scroll_reveal_target` from Rust's own already-correct,
+    /// per-frame scroll-adjusted layout cache — deliberately NOT computed
+    /// in JS (an earlier attempt tried that, approximating the same
+    /// scroll-adjusted position from a React-state ref, which raced real
+    /// state updates and produced a scroll-position runaway). Routed
+    /// through the same JS-side handler as `ScrollbarDrag` (`onAbsoluteScroll`),
+    /// so no new scroll-clamping logic exists on the JS side either.
+    ScrollIntoView { node_id: u32, scroll_y: f32 },
     /// Window resized to new physical pixel dimensions.
     Resize { width: u32, height: u32 },
     /// An image failed to load (missing file, unreadable format).

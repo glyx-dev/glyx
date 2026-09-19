@@ -456,6 +456,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                                 max_height,
                                 bold:   props.font_weight.as_deref() == Some("bold"),
                                 italic: props.font_style.as_deref()  == Some("italic"),
+                                line_height: props.line_height,
                             };
                             let _ = state.layout.set_text_ctx(lid, ctx);
                         }
@@ -512,7 +513,32 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     }
                 }
                 if state.focused_node == Some(id) {
-                    state.focused_node = None;
+                    // Focus survival: rather than dropping focus to nowhere,
+                    // move it to whichever focusable node would come next in
+                    // the (now-current, post-removal) Tab order. Falls back
+                    // to `None` only when nothing focusable remains at all.
+                    state.focused_node = state.js_root.and_then(|root| {
+                        let mut order = focus_order(&state.js_nodes, root);
+                        let positions: std::collections::HashMap<u32, (f32, f32)> = order
+                            .iter()
+                            .filter_map(|&nid| {
+                                let node = state.js_nodes.get(&nid)?;
+                                let rl = state.resolved_rect(node.layout_id?)?;
+                                Some((nid, (rl.y, rl.x)))
+                            })
+                            .collect();
+                        sort_by_position(&mut order, &positions);
+                        next_focus(&order, None, false)
+                    });
+                    state.window.set_ime_allowed(state.focused_node.is_some());
+                    if let Some(new_focus) = state.focused_node {
+                        // Same event JS already handles for AT/Tab-driven
+                        // focus moves — keeps onFocus/styling in sync when
+                        // focus moves off a removed node, not just when a
+                        // human presses Tab.
+                        state.runtime.push_event(InputEvent::AccessibilityFocus { node_id: new_focus });
+                        reveal_focus_if_needed(state, new_focus);
+                    }
                 }
                 // Clean up all per-node state for the removed node.
                 state.dirty_nodes.remove(&id);

@@ -1659,6 +1659,11 @@ fn input_events_to_array<'js>(
                 obj.set("nodeId", *node_id as f64)?;
                 obj.set("scrollY", *scroll_y as f64)?;
             }
+            InputEvent::ScrollIntoView { node_id, scroll_y } => {
+                obj.set("type", "scrollIntoView")?;
+                obj.set("nodeId", *node_id as f64)?;
+                obj.set("scrollY", *scroll_y as f64)?;
+            }
             InputEvent::Resize { width, height } => {
                 obj.set("type", "resize")?;
                 obj.set("width", *width as f64)?;

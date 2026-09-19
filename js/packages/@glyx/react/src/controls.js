@@ -277,18 +277,16 @@ export function TextInput({
       const end = value.length;
       setAnchor(end);
       setFocus_(end);
-      // Tell the Rust-side focus registry — foundation for IME composition
-      // routing and (later) accessibility focus events.
-      if (typeof __glyx_setFocus !== 'undefined' && nodeIdRef.current != null) {
-        __glyx_setFocus(nodeIdRef.current);
-      }
+      // Native focus registry sync happens centrally in events.js's
+      // `setFocus()` (the caller of this handler), not here — see its
+      // comment for why: this used to call `__glyx_setFocus` directly too,
+      // which raced with Tab-driven focus moving to a DIFFERENT node
+      // afterward (this input's onBlur firing after Tab had already
+      // updated native focus, unconditionally nulling it back out).
     },
     onBlur: () => {
       setFocused(false);
       setPreedit('');
-      if (typeof __glyx_setFocus !== 'undefined') {
-        __glyx_setFocus(null);
-      }
     },
     // IME composition (CJK/etc). `text` is the in-progress candidate string
     // ("preedit") — displayed inline but NOT yet part of `value`.

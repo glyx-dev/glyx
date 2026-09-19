@@ -7,6 +7,7 @@ import {
   addWindowSizeListener, removeWindowSizeListener,
   addGlobalClickListener, removeGlobalClickListener,
   registerImageError, unregisterImageError,
+  registerFocusable, unregisterFocusable,
 } from './events.js';
 import { glyxWindow, clipboard, input } from './api.js';
 
@@ -86,9 +87,17 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
   const handlersRef  = useRef(null);
   const [pressed, setPressed] = useState(false);
   const [hovered, setHovered] = useState(false);
+  // Keyboard-focus visibility only — Tab/Shift+Tab (or AT-driven focus) land
+  // here via the same 'accessibilityFocus' event TextInput already consumes
+  // (see events.js), but until now Pressable never registered for it, so
+  // keyboard focus was invisible: the native focus registry moved, nothing
+  // on screen showed it. `registerInput` below is what wires that up.
+  const [focused, setFocused] = useState(false);
 
   // Always keep handlersRef up to date with the latest prop values.
   handlersRef.current = {
+    onFocus: () => setFocused(true),
+    onBlur:  () => setFocused(false),
     onPress: (e) => {
       // Move the Rust-side focus registry here — events.js's mouseButton
       // dispatch calls `onPress` DIRECTLY for a plain click (onPressIn/Out
@@ -124,6 +133,13 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
       onHoverOut: () => handlersRef.current.onHoverOut(),
     });
     registerDisabledNode(id, !!disabled);
+    // Keyboard-focus-visible only — NOT `registerInput` (that registry is
+    // also driven by mouse clicks, which would show a focus ring on every
+    // click; see events.js's `focusVisualRegistry` comment).
+    registerFocusable(id, {
+      onFocus: () => handlersRef.current.onFocus(),
+      onBlur:  () => handlersRef.current.onBlur(),
+    });
     // Let a caller (e.g. RichTextEditor) also learn the native node id,
     // without clobbering Pressable's own registration below (see the
     // _glyxOnMount destructure above — this used to be spread in via
@@ -151,6 +167,7 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
       if (nodeIdRef.current !== null) {
         unregisterPressable(nodeIdRef.current);
         unregisterDisabledNode(nodeIdRef.current);
+        unregisterFocusable(nodeIdRef.current);
       }
     };
   }, []);
@@ -166,13 +183,24 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
   //   style={({ pressed, hovered }) => ({ ... })}
   // Function styles handle their own feedback, so opacity feedback is skipped.
   const styleIsFn = typeof style === 'function';
-  const resolvedStyle = styleIsFn ? style({ pressed, hovered }) : style;
+  const resolvedStyle = styleIsFn ? style({ pressed, hovered, focused }) : style;
   const baseOpacity = resolvedStyle?.opacity ?? 1;
-  const mergedStyle = (!styleIsFn && feedback && pressed && !disabled)
+  const feedbackStyle = (!styleIsFn && feedback && pressed && !disabled)
     ? { ...resolvedStyle, opacity: baseOpacity * 0.65 }
     : (!styleIsFn && feedback && hovered && !disabled)
     ? { ...resolvedStyle, opacity: baseOpacity * 0.85 }
     : resolvedStyle;
+  // Default keyboard-focus ring. Only applied when the caller hasn't already
+  // taken over styling via a function `style` (those get `focused` above and
+  // are expected to render their own indicator) — a plain object `style`
+  // otherwise had no way at all to show Tab-driven focus. Deliberately
+  // overrides any border the element's own style already sets (not just
+  // filling in when unset) — most real buttons already have a border, and
+  // a ring that only shows up on borderless elements isn't a visible focus
+  // indicator at all.
+  const mergedStyle = (!styleIsFn && focused && !disabled)
+    ? { ...feedbackStyle, borderWidth: 2, borderColor: '#4C9AFF' }
+    : feedbackStyle;
 
   return React.createElement(
     'view',
@@ -234,6 +262,14 @@ export function ScrollView({
   const nodeIdRef    = useRef(null);
   const maxScrollRef = useRef(0);
   const [scrollY, setScrollY] = useState(0);
+  // Tracks the current scroll offset for `getScrollY()` below, updated
+  // SYNCHRONOUSLY at the point a new value is decided (inside onScroll/
+  // onAbsoluteScroll) rather than mirrored from `scrollY` at render time —
+  // see those callbacks' comments for why the render-time-mirror version of
+  // this caused a real bug (Tab-driven scroll-into-view compounding into a
+  // runaway when a second scroll request landed before React's previous
+  // state update had rendered).
+  const scrollYRef = useRef(0);
 
   // ── Compute max scroll ──────────────────────────────────────────────────────
   // Prefer the explicit `contentHeight` prop when provided (most reliable).
@@ -269,20 +305,28 @@ export function ScrollView({
 
   const onScroll = useCallback((deltaY) => {
     refreshMaxScroll();
-    setScrollY((prev) => {
-      const max = maxScrollRef.current;
-      return Math.min(max, Math.max(0, prev + deltaY));
-    });
+    // `scrollYRef.current` (not `scrollY`/the functional-updater `prev`) is
+    // the base here deliberately: a function passed to `setScrollY` doesn't
+    // run synchronously — React executes it later, at render time. Reading
+    // and writing the ref right here, synchronously, at the moment the
+    // scroll is decided, is what actually fixes the staleness (an earlier
+    // attempt updated the ref FROM INSIDE the functional updater, which has
+    // the exact same lazy-execution problem and didn't fix anything).
+    const next = Math.min(maxScrollRef.current, Math.max(0, scrollYRef.current + deltaY));
+    scrollYRef.current = next;
+    setScrollY(next);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onAbsoluteScroll = useCallback((y) => {
     refreshMaxScroll();
-    setScrollY(Math.min(maxScrollRef.current, Math.max(0, y)));
+    const next = Math.min(maxScrollRef.current, Math.max(0, y));
+    scrollYRef.current = next;
+    setScrollY(next);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onMount = useCallback((id) => {
     nodeIdRef.current = id;
-    registerScrollView(id, { onScroll, onAbsoluteScroll });
+    registerScrollView(id, { onScroll, onAbsoluteScroll, getScrollY: () => scrollYRef.current });
   }, [onScroll, onAbsoluteScroll]);
 
   useEffect(() => {
@@ -360,6 +404,10 @@ export function VirtualizedList({
   const nodeIdRef    = useRef(null);
   const maxScrollRef = useRef(0);
   const [scrollY, setScrollY] = useState(0);
+  // See ScrollView's identical comment — updated synchronously in
+  // onScroll/onAbsoluteScroll below, not mirrored from `scrollY` at render
+  // time (that version compounded into a scroll runaway).
+  const scrollYRef = useRef(0);
 
   const totalItems    = data ? data.length : 0;
   const totalContentH = totalItems * itemHeight;
@@ -374,18 +422,26 @@ export function VirtualizedList({
   const topSpacerH    = firstVisible * itemHeight;
   const bottomSpacerH = Math.max(0, (totalItems - lastVisible) * itemHeight);
 
-  // Stable handlers — never re-registered between renders.
+  // Stable handlers — never re-registered between renders. Base the delta
+  // on `scrollYRef.current`, not the functional-updater `prev` — see
+  // ScrollView's identical fix/comment: a function passed to `setScrollY`
+  // runs later (at render time), so updating the ref from inside it doesn't
+  // actually make `getScrollY()` synchronous.
   const onScroll = useCallback((deltaY) => {
-    setScrollY((prev) => Math.min(maxScrollRef.current, Math.max(0, prev + deltaY)));
+    const next = Math.min(maxScrollRef.current, Math.max(0, scrollYRef.current + deltaY));
+    scrollYRef.current = next;
+    setScrollY(next);
   }, []);
 
   const onAbsoluteScroll = useCallback((y) => {
-    setScrollY(Math.min(maxScrollRef.current, Math.max(0, y)));
+    const next = Math.min(maxScrollRef.current, Math.max(0, y));
+    scrollYRef.current = next;
+    setScrollY(next);
   }, []);
 
   const onMount = useCallback((id) => {
     nodeIdRef.current = id;
-    registerScrollView(id, { onScroll, onAbsoluteScroll });
+    registerScrollView(id, { onScroll, onAbsoluteScroll, getScrollY: () => scrollYRef.current });
   }, [onScroll, onAbsoluteScroll]);
 
   useEffect(() => {

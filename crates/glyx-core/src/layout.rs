@@ -331,6 +331,7 @@ pub(crate) fn rebuild_layout_from_scene(
                         max_height,
                         bold:   props.font_weight.as_deref() == Some("bold"),
                         italic: props.font_style.as_deref()  == Some("italic"),
+                        line_height: props.line_height,
                     };
                     layout.add_text_node(style, ctx, Some(format!("js-{}", id))).ok()?
                 }
@@ -435,9 +436,10 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
         }
     }
 
-    let layout   = &mut state.layout;
-    let text_sys = &mut state.text_sys;
-    let resolved = &mut state.resolved;
+    let layout      = &mut state.layout;
+    let text_sys    = &mut state.text_sys;
+    let label_cache = &mut state.label_cache;
+    let resolved    = &mut state.resolved;
 
     let result = layout.compute_with_measure(w, h, resolved, |known_dims, available, _id, ctx, _style| {
         use taffy::prelude::{AvailableSpace, Size};
@@ -459,7 +461,34 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
             },
         };
 
-        let (tw, th) = text_sys.measure_styled(&ctx.text, ctx.font_size, max_w, ctx.bold, ctx.italic);
+        // Shares `render.rs`'s label cache instead of calling
+        // `text_sys.measure_styled` (always reshapes, uncached). A single
+        // Taffy layout pass calls this measure function several times per
+        // text node with different candidate widths as flex resolution
+        // converges (measured on examples/bench-app: ~7x per node for a
+        // simple row layout) — most of those repeat an exact width already
+        // asked for earlier in the SAME pass, which this cache now catches
+        // (measured: 50-66% hit rate for a bounded set of live text nodes;
+        // correctly 0% for a synthetic worst case with thousands of
+        // simultaneously-live, all-unique strings — no cache size helps
+        // text that's genuinely never repeated, and growing the cache to
+        // fit that pathological case isn't worth it for typical apps).
+        // `LabelKey` deliberately excludes color (render-only), so this is
+        // safe to share as-is; matching `line_height` into the key is why
+        // `TextMeasureCtx` carries it now — otherwise a node with an
+        // explicit line height would key differently here than in
+        // render.rs and the two paths would never share a hit.
+        let key = LabelKey::new(&ctx.text, ctx.font_size, max_w, ctx.bold, ctx.italic, ctx.line_height);
+        if label_cache.peek(&key).is_none() {
+            let lbl = CachedLabel::new(
+                text_sys, &ctx.text, ctx.font_size, max_w,
+                [0, 0, 0, 255], // color is unused at measure time — draw-time only, not part of the key
+                ctx.bold, ctx.italic, ctx.line_height,
+            );
+            label_cache.put(key, lbl);
+        }
+        let label = label_cache.get(&LabelKey::new(&ctx.text, ctx.font_size, max_w, ctx.bold, ctx.italic, ctx.line_height)).unwrap();
+        let (tw, th) = (label.width as f32, label.text_height as f32);
         let th = if let Some(max_h) = ctx.max_height { th.min(max_h) } else { th };
 
         Size {
@@ -514,6 +543,122 @@ type ClipRect = Option<[f32; 4]>;
 /// for clip (scroll) nodes.  Node ids are a small counter, so the high bit
 /// never collides with a real id.
 pub(crate) const CONTENT_HEIGHT_KEY: u32 = 0x8000_0000;
+
+/// Nearest ancestor of `id` that clips/scrolls its children (`clip: true` or
+/// `overflow: hidden|scroll`), or `None` if `id` isn't inside one. Depth-bounded
+/// by `js_nodes.len()` — same cycle-guard pattern as `scene.rs`'s
+/// `outermost_scrolled_ancestor` (a parent-pointer cycle would otherwise spin
+/// this forever); unlike that function, this wants the NEAREST scrollable
+/// ancestor regardless of its current offset (matches `events.js`'s
+/// `findScrollTarget`, which this mirrors on the native side).
+fn nearest_scroll_container(
+    nodes: &std::collections::HashMap<u32, JsNode>,
+    id: u32,
+) -> Option<u32> {
+    let mut cur = id;
+    for _ in 0..nodes.len() {
+        let parent_id = nodes.get(&cur)?.parent?;
+        let parent = nodes.get(&parent_id)?;
+        let overflows = matches!(parent.props.overflow.as_deref(), Some("hidden" | "scroll"));
+        if parent.props.clip.unwrap_or(false) || overflows {
+            return Some(parent_id);
+        }
+        cur = parent_id;
+    }
+    None
+}
+
+/// Reveal margin (px): a just-visible-at-the-exact-edge item still reads as
+/// "cut off" to a user, so land it slightly inside the viewport instead of
+/// flush against it.
+const SCROLL_REVEAL_MARGIN: f32 = 8.0;
+
+/// Computes the scroll adjustment needed to bring `focus_id` into view
+/// inside its nearest scrollable ancestor, or `None` if it's already fully
+/// visible (or not inside a scrollable ancestor, or not laid out yet).
+/// Pure function over raw data so it's unit-testable without a full
+/// `PerWindowState`/`JsRuntime` — see `scroll_reveal_target` below for the
+/// thin wrapper that supplies those from real state, and the tests module
+/// for coverage.
+///
+/// Deliberately works in RAW (unscrolled) Taffy-rect space, not the
+/// scroll-adjusted hit-test cache `scroll_walk` publishes (the one
+/// `__glyx_getLayout` reads) — an earlier version of this function used
+/// that cache and could never actually fire: `scroll_walk` stores nodes
+/// currently outside the clip viewport as an off-screen sentinel rect
+/// (`[-9999, -9999, 0, 0]`), and stores PARTIALLY visible nodes intersected
+/// with the viewport — meaning a node needing a reveal either read as
+/// impossibly far away (sentinel) or as already exactly flush with the
+/// viewport edge (post-intersection), and the "already visible" check
+/// swallowed both cases. Raw rects don't have this problem: they're the
+/// same rects the scrollbar-drag hit-test already uses for exactly this
+/// reason (see `try_start_scrollbar_drag` in `lib.rs`).
+///
+/// Only `max_scroll` still comes from `scroll_walk`'s cache (the
+/// `CONTENT_HEIGHT_KEY` entry) — that computation (from raw child rects
+/// too) has no equivalent staleness problem and there's no reason to
+/// duplicate it.
+///
+/// Returns `Some((scroll_container_id, new_scroll_offset_y))` — the caller
+/// pushes this as `InputEvent::ScrollIntoView`, which JS applies via the
+/// exact same `onAbsoluteScroll` path `ScrollbarDrag` already uses, so no
+/// new scroll-clamping logic exists on the JS side.
+fn scroll_reveal_target_impl(
+    nodes: &std::collections::HashMap<u32, JsNode>,
+    resolved: &std::collections::HashMap<NodeId, ResolvedLayout>,
+    cache: &std::collections::HashMap<u32, [f32; 4]>,
+    focus_id: u32,
+) -> Option<(u32, f32)> {
+    let scroll_id = nearest_scroll_container(nodes, focus_id)?;
+    let container = nodes.get(&scroll_id)?;
+    let current = container.props.scroll_offset_y.unwrap_or(0.0);
+
+    let focus_node = nodes.get(&focus_id)?;
+    let focus_rl = resolved.get(&focus_node.layout_id?)?;
+    let container_rl = resolved.get(&container.layout_id?)?;
+
+    // Content-space position: raw focus position relative to the
+    // container's raw top. No intervening-ancestor scroll to account for
+    // here — `scroll_id` is the NEAREST scrollable ancestor, so by
+    // definition nothing between `focus_id` and it can itself be
+    // scrollable (a closer one would have been picked instead). Revealing
+    // through a chain of MULTIPLE nested scrollables (this container is
+    // itself scrolled inside an outer one) is out of scope here — see
+    // Work Item 12's nested-reveal follow-up.
+    let content_top    = focus_rl.y as f64 - container_rl.y as f64;
+    let content_bottom = content_top + focus_rl.height as f64;
+
+    let viewport_top    = current as f64;
+    let viewport_bottom = viewport_top + container_rl.height as f64;
+    let margin = SCROLL_REVEAL_MARGIN as f64;
+
+    let max_scroll = cache
+        .get(&(scroll_id | CONTENT_HEIGHT_KEY))
+        .map(|ch| (ch[3] as f64 - container_rl.height as f64).max(0.0))
+        .unwrap_or(f64::MAX);
+
+    let target = if content_top < viewport_top {
+        content_top - margin
+    } else if content_bottom > viewport_bottom {
+        content_bottom + margin - container_rl.height as f64
+    } else {
+        return None; // already fully visible
+    };
+    let new_offset = target.clamp(0.0, max_scroll) as f32;
+    // Sub-pixel/no-op guard: avoids pushing a scroll event (and the resulting
+    // JS re-render) for a correction too small to matter, and avoids ever
+    // firing when nothing actually changes (e.g. re-focusing the same node).
+    if (new_offset - current).abs() < 0.5 {
+        return None;
+    }
+    Some((scroll_id, new_offset))
+}
+
+pub(crate) fn scroll_reveal_target(state: &PerWindowState, focus_id: u32) -> Option<(u32, f32)> {
+    let layout_cache = state.runtime.layout_cache();
+    let cache = layout_cache.lock();
+    scroll_reveal_target_impl(&state.js_nodes, &state.resolved_by_id, &cache, focus_id)
+}
 
 fn scroll_walk(
     id:        u32,
@@ -794,4 +939,175 @@ fn parse_single_placement(s: &str) -> GridPlacement {
         return GridPlacement::from_line_index(n);
     }
     GridPlacement::Auto
+}
+
+#[cfg(test)]
+mod scroll_reveal_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn node_with_layout(parent: Option<u32>, children: &[u32], layout_id: u64) -> JsNode {
+        let mut n = JsNode::new(NodeType::View, NodeProps::default());
+        n.parent = parent;
+        n.children = children.iter().copied().collect();
+        n.layout_id = Some(NodeId::from(layout_id));
+        n
+    }
+
+    fn node_without_layout(parent: Option<u32>, children: &[u32]) -> JsNode {
+        let mut n = JsNode::new(NodeType::View, NodeProps::default());
+        n.parent = parent;
+        n.children = children.iter().copied().collect();
+        n
+    }
+
+    fn scroll_container(parent: Option<u32>, children: &[u32], offset: f32, layout_id: u64) -> JsNode {
+        let mut n = JsNode::new(
+            NodeType::View,
+            NodeProps { clip: Some(true), scroll_offset_y: Some(offset), ..NodeProps::default() },
+        );
+        n.parent = parent;
+        n.children = children.iter().copied().collect();
+        n.layout_id = Some(NodeId::from(layout_id));
+        n
+    }
+
+    fn rl(y: f32, height: f32) -> ResolvedLayout {
+        ResolvedLayout { x: 0.0, y, width: 400.0, height }
+    }
+
+    // Tree: 0 (root) -> 1 (scroll container, RAW y=0, height=300)
+    //         -> 2,3,4,5,6,7 (rows, RAW y=0,100,200,300,400,500, height 100 each)
+    // Content height = 600 (last row bottom - container top), matching a
+    // container that's exactly 2 rows taller than its own viewport.
+    fn sample(offset: f32) -> (
+        HashMap<u32, JsNode>,
+        HashMap<NodeId, ResolvedLayout>,
+        HashMap<u32, [f32; 4]>,
+    ) {
+        let mut nodes = HashMap::new();
+        nodes.insert(0, node_with_layout(None, &[1], 0));
+        nodes.insert(1, scroll_container(Some(0), &[2, 3, 4, 5, 6, 7], offset, 1));
+        for row_id in 2..=7u32 {
+            nodes.insert(row_id, node_with_layout(Some(1), &[], row_id as u64));
+        }
+
+        let mut resolved = HashMap::new();
+        resolved.insert(NodeId::from(0u64), rl(0.0, 900.0)); // root, irrelevant size
+        resolved.insert(NodeId::from(1u64), rl(0.0, 300.0)); // container: RAW y=0, height=300
+        for (i, row_id) in (2..=7u32).enumerate() {
+            resolved.insert(NodeId::from(row_id as u64), rl(i as f32 * 100.0, 100.0));
+        }
+
+        let mut cache = HashMap::new();
+        cache.insert(1 | CONTENT_HEIGHT_KEY, [0.0, 0.0, 0.0, 600.0]);
+        (nodes, resolved, cache)
+    }
+
+    #[test]
+    fn nearest_scroll_container_finds_the_immediate_clip_ancestor() {
+        let (nodes, ..) = sample(0.0);
+        assert_eq!(nearest_scroll_container(&nodes, 4), Some(1));
+    }
+
+    #[test]
+    fn nearest_scroll_container_returns_none_outside_any_scrollable_ancestor() {
+        let (nodes, ..) = sample(0.0);
+        assert_eq!(nearest_scroll_container(&nodes, 0), None);
+    }
+
+    #[test]
+    fn already_visible_node_needs_no_scroll() {
+        // Row id=4 (raw y=200..300) is fully inside the offset-0 viewport [0,300].
+        let (nodes, resolved, cache) = sample(0.0);
+        assert_eq!(scroll_reveal_target_impl(&nodes, &resolved, &cache, 4), None);
+    }
+
+    #[test]
+    fn fully_below_fold_node_at_offset_zero_still_reveals() {
+        // THE regression this fix targets: with the old clip-cache-based
+        // implementation, a node fully outside the viewport read as the
+        // off-screen sentinel rect and this returned None unconditionally.
+        // Row id=6 (raw y=400..500) is entirely below the offset-0 viewport
+        // [0,300] — a real Tab press reaching a deep list item on the first
+        // press, not a partial/edge case.
+        let (nodes, resolved, cache) = sample(0.0);
+        let (scroll_id, new_offset) = scroll_reveal_target_impl(&nodes, &resolved, &cache, 6).unwrap();
+        assert_eq!(scroll_id, 1);
+        // content_bottom(500) + margin(8) - container_height(300) = 208.
+        assert_eq!(new_offset, 208.0);
+    }
+
+    #[test]
+    fn below_fold_node_scrolls_down_with_reveal_margin() {
+        // Row id=4 (raw y=200..300) sits exactly flush with the viewport
+        // bottom at offset 0 — content_bottom(300) > viewport_bottom(300) is
+        // false, so this should NOT trigger (flush isn't "below"); row id=5
+        // (raw y=300..400) is genuinely below by 100px.
+        let (nodes, resolved, cache) = sample(0.0);
+        assert_eq!(scroll_reveal_target_impl(&nodes, &resolved, &cache, 4), None);
+        let (scroll_id, new_offset) = scroll_reveal_target_impl(&nodes, &resolved, &cache, 5).unwrap();
+        assert_eq!(scroll_id, 1);
+        // content_bottom(400) + margin(8) - container_height(300) = 108.
+        assert_eq!(new_offset, 108.0);
+    }
+
+    #[test]
+    fn above_fold_node_scrolls_up_with_reveal_margin() {
+        // Container scrolled to 350 (viewport [350,650]); row id=3 (raw
+        // y=100..200) sits entirely above it.
+        let (nodes, resolved, cache) = sample(350.0);
+        let (scroll_id, new_offset) = scroll_reveal_target_impl(&nodes, &resolved, &cache, 3).unwrap();
+        assert_eq!(scroll_id, 1);
+        // content_top(100) - margin(8) = 92.
+        assert_eq!(new_offset, 92.0);
+    }
+
+    #[test]
+    fn reveal_clamps_at_zero_even_if_the_raw_target_would_go_negative() {
+        // Row id=2 (raw y=0..100) is the very first row — revealing it with
+        // the margin subtracted would go negative; must clamp to 0.
+        let (nodes, resolved, cache) = sample(50.0);
+        let (_, new_offset) = scroll_reveal_target_impl(&nodes, &resolved, &cache, 2).unwrap();
+        assert_eq!(new_offset, 0.0);
+    }
+
+    #[test]
+    fn reveal_clamps_at_max_scroll_even_if_the_raw_target_would_overshoot() {
+        // max_scroll = content_h(600) - container_height(300) = 300. Row
+        // id=7 (raw y=500..600, the very last row) would compute a target
+        // past that; must clamp to 300, not overshoot.
+        let (nodes, resolved, cache) = sample(0.0);
+        let (_, new_offset) = scroll_reveal_target_impl(&nodes, &resolved, &cache, 7).unwrap();
+        assert_eq!(new_offset, 300.0);
+    }
+
+    #[test]
+    fn re_tabbing_to_an_already_revealed_node_is_a_no_op() {
+        // Row id=6 needed offset 208 (see the regression test above). Once
+        // the container is actually AT 208, re-focusing the same row must
+        // not fire again (it's fully visible at that offset) — this is what
+        // makes repeated Tab presses settle instead of drifting.
+        let (nodes, resolved, cache) = sample(208.0);
+        assert_eq!(scroll_reveal_target_impl(&nodes, &resolved, &cache, 6), None);
+    }
+
+    #[test]
+    fn no_op_when_focus_id_has_no_layout_yet() {
+        let (mut nodes, resolved, cache) = sample(0.0);
+        nodes.insert(99, node_without_layout(Some(1), &[]));
+        assert_eq!(scroll_reveal_target_impl(&nodes, &resolved, &cache, 99), None);
+    }
+
+    #[test]
+    fn no_op_when_focus_id_is_not_inside_any_scrollable_ancestor() {
+        let (nodes, resolved, cache) = sample(0.0);
+        assert_eq!(scroll_reveal_target_impl(&nodes, &resolved, &cache, 0), None);
+    }
+
+    #[test]
+    fn no_op_when_focus_id_does_not_exist() {
+        let (nodes, resolved, cache) = sample(0.0);
+        assert_eq!(scroll_reveal_target_impl(&nodes, &resolved, &cache, 999), None);
+    }
 }

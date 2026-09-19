@@ -295,12 +295,16 @@ pub(super) struct PerWindowState {
     /// Screen rect of the focused TextInput (captured during render) — the
     /// damage region for blink-only frames under software present.
     pub(super) cursor_node_rect: Option<(f64, f64, f64, f64)>,
-    /// Global keyboard-focus registry — the node id JS last reported as
-    /// focused via `__glyx_setFocus`, or `None`. Foundation for IME
-    /// composition routing (attach to this node's rect) and, later,
-    /// accessibility (expose focus to the AT). Not yet consumed by anything;
-    /// this is step 1 of that work — see [[accessibility-and-ime-plan]].
+    /// Global keyboard-focus registry — the currently focused node id, set
+    /// either by JS via `__glyx_setFocus` or natively by Tab/Shift+Tab
+    /// cycling (see `focus.rs`). Drives IME composition routing (attach to
+    /// this node's rect) and the accessibility tree's reported focus.
     pub(super) focused_node: Option<u32>,
+    /// Tracks Shift key state for Tab-cycling direction. Independent of
+    /// `DevModeState::shift_down`, which only exists under the `dev`
+    /// feature and is scoped to the dev-overlay shortcut — this one is
+    /// always compiled since focus navigation isn't dev-only.
+    pub(super) shift_down: bool,
     /// Push an accessibility tree update to this window's `accesskit_winit`
     /// adapter. `None` when built without the `a11y` feature. Cheap to call
     /// every frame — no-ops internally when no AT is actually running.

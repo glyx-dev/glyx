@@ -69,6 +69,11 @@ pub struct TextMeasureCtx {
     /// sibling text nodes (e.g. rich-text's per-span Text row) overlap.
     pub bold:       bool,
     pub italic:     bool,
+    /// Mirrors `NodeProps::line_height` — must match what `render.rs` uses
+    /// to build its `LabelKey`, or the measure and render paths key their
+    /// shared shaping cache differently and never share a hit for any node
+    /// that sets an explicit line height.
+    pub line_height: Option<f32>,
 }
 
 // ── LayoutTree ────────────────────────────────────────────────────────────────
@@ -317,7 +322,7 @@ mod tests {
     }
 
     fn ctx(text: &str) -> TextMeasureCtx {
-        TextMeasureCtx { text: text.into(), font_size: 16.0, max_height: None, bold: false, italic: false }
+        TextMeasureCtx { text: text.into(), font_size: 16.0, max_height: None, bold: false, italic: false, line_height: None }
     }
 
     /// Regression test for a real bug: `add_text_node` stores a Text node's

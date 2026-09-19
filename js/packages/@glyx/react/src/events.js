@@ -77,6 +77,18 @@ const globalClickListeners = [];
 
 // Currently focused input node id (or null).
 let focusedNodeId = null;
+
+// ── Keyboard-focus-visible registry ──────────────────────────────────────────
+// Deliberately separate from `inputRegistry` above. `inputRegistry`/
+// `focusedNodeId` model TEXT-EDIT focus: driven by both mouse clicks (see the
+// 'mouseButton' case's `inputTarget` walk-up) and Tab, because clicking into
+// a text field legitimately should focus it. A `Pressable`/button registering
+// there would ALSO pick up that click-driven `setFocus` call, showing a
+// focus ring on every click — not what a focus-visible ring is for. This
+// registry only ever gets driven from the 'accessibilityFocus' case below
+// (Tab/Shift+Tab or AT-driven focus), never from a mouse click.
+const focusVisualRegistry = new Map(); // nodeId -> { onFocus, onBlur }
+let visualFocusedNodeId = null;
 // Input node currently being drag-selected (left button held after pressing
 // on a TextInput); cursorMoved extends its selection until release.
 let inputDragNodeId = null;
@@ -154,6 +166,26 @@ export function unregisterPressable(nodeId) {
  */
 export function registerInput(nodeId, handlers) {
   inputRegistry.set(nodeId, handlers);
+}
+
+/**
+ * Register a node for keyboard-focus-visible styling only (Tab/Shift+Tab or
+ * AT-driven focus) — see `focusVisualRegistry`'s comment above for why this
+ * is separate from `registerInput`. Used by `Pressable`.
+ * @param {number} nodeId
+ * @param {{ onFocus?: () => void, onBlur?: () => void }} handlers
+ */
+export function registerFocusable(nodeId, handlers) {
+  focusVisualRegistry.set(nodeId, handlers);
+}
+
+/**
+ * Unregister a keyboard-focus-visible node (called on unmount).
+ * @param {number} nodeId
+ */
+export function unregisterFocusable(nodeId) {
+  if (visualFocusedNodeId === nodeId) visualFocusedNodeId = null;
+  focusVisualRegistry.delete(nodeId);
 }
 
 /**
@@ -337,6 +369,17 @@ export function setFocus(nodeId) {
     focusedNodeId = nodeId;
     const handlers = inputRegistry.get(nodeId);
     handlers?.onFocus?.();
+    // Sync the native focus registry ONCE, here, with the final new value —
+    // deliberately AFTER onBlur/onFocus have run, and deliberately the only
+    // place that does this (TextInput's onFocus/onBlur used to call
+    // `__glyx_setFocus` directly too). Calling it from both places raced:
+    // Tab moving focus to a plain Pressable already set native focus to
+    // the new target correctly, but the outgoing TextInput's onBlur firing
+    // straight after (from this same function) would then unconditionally
+    // null it back out, since it had no way to know a new target existed.
+    if (typeof __glyx_setFocus !== 'undefined') {
+      __glyx_setFocus(nodeId);
+    }
   }
 }
 
@@ -418,6 +461,21 @@ export function dispatchEvents() {
 
         const isRight = ev.button === 1; // 0 = left, 1 = right, 2 = middle
 
+        // Any mouse click clears the keyboard-focus-visible ring, matching
+        // browsers' `:focus-visible` behavior: the ring is a keyboard/AT
+        // affordance, not a "this is the active element" indicator, so
+        // clicking ANYWHERE — including on the already-focused element
+        // itself, or on a different element about to get its own
+        // click-driven native focus — dismisses it until the next Tab
+        // press. Deliberately unconditional and independent of hit-testing
+        // below: matches the ring's own registry (`focusVisualRegistry`),
+        // which mouse handling elsewhere never touches by design (see its
+        // definition further up this file).
+        if (visualFocusedNodeId !== null) {
+          focusVisualRegistry.get(visualFocusedNodeId)?.onBlur?.();
+          visualFocusedNodeId = null;
+        }
+
         // Notify global click listeners first (e.g. to close open dropdowns /
         // context menus). `button` lets listeners distinguish right-clicks.
         if (globalClickListeners.length > 0) {
@@ -496,10 +554,17 @@ export function dispatchEvents() {
           }
         }
 
-        // Blur focused input if the click landed elsewhere.
+        // Blur focused input if the click landed elsewhere. Uses the same
+        // native-sync responsibility as `setFocus()` (onBlur itself no
+        // longer touches `__glyx_setFocus` — see its comment) since this
+        // path bypasses `setFocus()` entirely (there's no new input target
+        // to focus, just a plain click on non-input ground).
         if (focusedNodeId !== null && focusedNodeId !== inputTarget) {
           inputRegistry.get(focusedNodeId)?.onBlur?.();
           focusedNodeId = null;
+          if (typeof __glyx_setFocus !== 'undefined') {
+            __glyx_setFocus(null);
+          }
         }
         break;
       }
@@ -561,9 +626,28 @@ export function dispatchEvents() {
       }
 
       case 'accessibilityFocus': {
-        // Screen reader (or other AT) moved focus — sync JS's own focus
-        // tracker the same way a mouse click would, so onFocus/styling fire.
+        // Screen reader / Tab-driven focus. Two independent consumers:
+        //  - text-edit focus (cursor placement, IME routing) via the
+        //    existing `inputRegistry`/`setFocus` — TextInput still wants
+        //    this exactly like a click would trigger it.
+        //  - a focus-visible ring for everything else (buttons, checkboxes,
+        //    ...) via `focusVisualRegistry`, which mouse clicks never touch.
         setFocus(ev.nodeId);
+        if (visualFocusedNodeId !== ev.nodeId) {
+          if (visualFocusedNodeId !== null) {
+            focusVisualRegistry.get(visualFocusedNodeId)?.onBlur?.();
+          }
+          visualFocusedNodeId = ev.nodeId;
+          focusVisualRegistry.get(ev.nodeId)?.onFocus?.();
+        }
+        // Scroll-into-view was attempted here and reverted — it kept
+        // resetting scroll position instead of settling correctly, through
+        // several genuinely-distinct root causes (stale ref reads, a
+        // lazy-updater timing bug) that each fixed what they targeted
+        // without fixing the actual symptom, meaning something about this
+        // interaction still isn't understood. Tab/Shift+Tab focus must
+        // never have a scroll side effect anywhere until that's solved
+        // properly. See Work Item 12 (ScrollIntoView) in the plan doc.
         break;
       }
 
@@ -637,6 +721,22 @@ export function dispatchEvents() {
       case 'scrollbarDrag': {
         // Absolute scroll position set by scrollbar thumb drag — routed by
         // node ID directly (no hit-test needed; the thumb is inside the clip).
+        const handlers = scrollRegistry.get(ev.nodeId);
+        handlers?.onAbsoluteScroll?.(ev.scrollY);
+        break;
+      }
+
+      case 'scrollIntoView': {
+        // Absolute scroll position computed NATIVELY (see glyx-core's
+        // `layout::scroll_reveal_target`) to bring a just-focused node into
+        // view. Routed through the exact same `onAbsoluteScroll` path as
+        // `scrollbarDrag` above — deliberately no separate math or clamping
+        // here. An earlier JS-side attempt at this feature tried to
+        // recompute the equivalent of this value itself from a React-state
+        // ref and raced real scroll updates; the fix was moving the
+        // computation to Rust (which already has the authoritative current
+        // offset) and treating the result as just another absolute-scroll
+        // request, same as a scrollbar drag.
         const handlers = scrollRegistry.get(ev.nodeId);
         handlers?.onAbsoluteScroll?.(ev.scrollY);
         break;

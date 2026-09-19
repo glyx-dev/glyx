@@ -446,13 +446,24 @@ fn find_or_build_runner(dev_mode: bool, engine: &str) -> Result<PathBuf> {
     //    stale wrong-engine binary cached under the same path.
     let cache_dir = glyx_runners_dir().join(engine).join(profile);
     let cached    = cache_dir.join(bin_name);
-    if cached.exists() { return Ok(cached); }
+    if cached.exists() {
+        // Notify-only: a version mismatch (or a cache from before this
+        // check existed) does NOT trigger an automatic rebuild here. This
+        // cache has no version awareness otherwise — nothing else will ever
+        // tell a user their cached runner predates the CLI they're running.
+        // Left as a manual `glyx runtime build` rather than auto-refreshing
+        // so `glyx dev`/`glyx build` never surprises someone with an
+        // unrequested rebuild.
+        check_cache_freshness(&cache_dir, engine, profile);
+        return Ok(cached);
+    }
 
     // 2. Download the prebuilt runner for this CLI version from GitHub
     //    Releases — the NORMAL path for users who installed the CLI binary
     //    and don't have the glyx source workspace.  Falls through to a
     //    source build (workspace devs) if unavailable.
     if download_runner(profile, engine, &cached).unwrap_or(false) {
+        write_version_stamp(&cache_dir);
         return Ok(cached);
     }
 
@@ -491,9 +502,47 @@ fn find_or_build_runner(dev_mode: bool, engine: &str) -> Result<PathBuf> {
         .with_context(|| format!("create cache dir {}", cache_dir.display()))?;
     std::fs::copy(&built, &cached)
         .with_context(|| format!("cache runner to {}", cached.display()))?;
+    write_version_stamp(&cache_dir);
 
     println!("✓ glyx-runner [{profile}, {engine}] cached at {}", cached.display());
     Ok(cached)
+}
+
+/// Records which CLI version produced a cached runner, so a later
+/// `find_or_build_runner` call can tell a user their cache predates the CLI
+/// they're now running — see `check_cache_freshness`. Best-effort: a failure
+/// to write this is not worth failing the whole command over.
+fn write_version_stamp(cache_dir: &Path) {
+    let _ = std::fs::write(cache_dir.join(".version"), env!("CARGO_PKG_VERSION"));
+}
+
+/// Compares a cached runner's stamped version against this CLI's own
+/// version and prints a one-line notice on mismatch — including when there's
+/// no stamp at all (a cache from before this check existed). Deliberately
+/// notify-only: never invalidates or rebuilds the cache itself, so `glyx
+/// dev`/`glyx build` never surprises a user with an unrequested rebuild —
+/// updating is a manual `glyx runtime build`, same as a user driving the
+/// decision themselves.
+fn check_cache_freshness(cache_dir: &Path, engine: &str, profile: &str) {
+    let current = env!("CARGO_PKG_VERSION");
+    let stamped = std::fs::read_to_string(cache_dir.join(".version")).ok();
+    if stamp_is_stale(stamped.as_deref(), current) {
+        let from = stamped.as_deref().map(str::trim).unwrap_or("an unknown (pre-versioning) build");
+        println!(
+            "Note: cached glyx-runner [{engine}/{profile}] was built by glyx-cli {from}, \
+             this is glyx-cli {current}. Run `glyx runtime build --force` to refresh it."
+        );
+    }
+}
+
+/// Exact-match comparison, not semver-range — the runner and the CLI are
+/// built together from the same workspace (not an independently-versioned
+/// dependency), so "produced by literally this CLI build" is the right
+/// question, matching how `download_runner` already keys release URLs off
+/// `CARGO_PKG_VERSION` verbatim. `None` (no stamp at all) is always stale —
+/// covers caches from before this check existed.
+fn stamp_is_stale(stamped: Option<&str>, current: &str) -> bool {
+    stamped.map(str::trim) != Some(current)
 }
 
 /// The release-artifact target triple for the running CLI, or None on
@@ -1270,5 +1319,49 @@ mod cli_tests {
     #[test]
     fn platform_to_rust_target_rejects_unknown_platform() {
         assert!(platform_to_rust_target("plan9").is_err());
+    }
+
+    #[test]
+    fn stamp_is_stale_matches_exact_current_version() {
+        assert!(!stamp_is_stale(Some("0.1.0"), "0.1.0"));
+    }
+
+    #[test]
+    fn stamp_is_stale_flags_a_different_version() {
+        assert!(stamp_is_stale(Some("0.0.9"), "0.1.0"));
+        // Not semver-range logic — even a "newer-looking" stamp than current
+        // still counts as stale (mismatch, not "compatible enough").
+        assert!(stamp_is_stale(Some("0.2.0"), "0.1.0"));
+    }
+
+    #[test]
+    fn stamp_is_stale_flags_a_missing_stamp() {
+        // No stamp at all — a cache from before this check existed.
+        assert!(stamp_is_stale(None, "0.1.0"));
+    }
+
+    #[test]
+    fn stamp_is_stale_tolerates_trailing_whitespace_from_the_stamp_file() {
+        // `write_version_stamp` writes without a trailing newline, but a
+        // stamp edited or written by another tool might have one.
+        assert!(!stamp_is_stale(Some("0.1.0\n"), "0.1.0"));
+    }
+
+    #[test]
+    fn write_and_check_version_stamp_round_trip() {
+        let dir = std::env::temp_dir().join(format!("glyx-cli-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // No stamp yet — freshness check must not panic, and (indirectly,
+        // since it only prints) must treat this as stale via stamp_is_stale.
+        let before = std::fs::read_to_string(dir.join(".version")).ok();
+        assert!(stamp_is_stale(before.as_deref(), env!("CARGO_PKG_VERSION")));
+
+        write_version_stamp(&dir);
+        let after = std::fs::read_to_string(dir.join(".version")).unwrap();
+        assert_eq!(after.trim(), env!("CARGO_PKG_VERSION"));
+        assert!(!stamp_is_stale(Some(&after), env!("CARGO_PKG_VERSION")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

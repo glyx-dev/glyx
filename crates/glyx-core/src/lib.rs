@@ -108,6 +108,7 @@ mod soft_present;
 mod d2d_present;
 #[cfg(feature = "a11y")]
 mod a11y;
+mod focus;
 
 use self::config::*;
 use self::state::*;
@@ -117,7 +118,8 @@ use self::dev_mode::*;
 use arboard;
 
 use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, reconcile_z_order, snapshot_resolved, tick_opacity_transitions, hit_test_solid, shrink_oversized_collections};
-use layout::{recompute_layout, update_scroll_positions};
+use focus::{focus_order, next_focus, sort_by_position};
+use layout::{recompute_layout, update_scroll_positions, scroll_reveal_target};
 
 // ── F1: Windows named-pipe DACL restricted to current user ───────────────────
 //
@@ -517,6 +519,16 @@ fn has_pressable_descendant_at(
         }
     }
     false
+}
+
+/// After focus moves to `id` (Tab/Shift+Tab, AT-driven focus, or focus
+/// survival on node removal), scroll it into view if it's outside its
+/// nearest scrollable ancestor's viewport. Shared by all three call sites
+/// so the behavior — and any future fix to it — stays in exactly one place.
+fn reveal_focus_if_needed(s: &PerWindowState, id: u32) {
+    if let Some((scroll_id, new_scroll_y)) = scroll_reveal_target(s, id) {
+        s.runtime.push_event(InputEvent::ScrollIntoView { node_id: scroll_id, scroll_y: new_scroll_y });
+    }
 }
 
 /// Try to start a scrollbar interaction at the current cursor position.
@@ -1456,6 +1468,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     last_trim_reserved_bytes: 0,
                     cursor_node_rect:      None,
                     focused_node:          None,
+                    shift_down:            false,
                     #[cfg(feature = "a11y")]
                     a11y_update,
                     #[cfg(feature = "a11y")]
@@ -1718,6 +1731,50 @@ pub fn run(mut config: AppConfig) -> bool {
                         return;
                     }
 
+                    match key.as_str() {
+                        "ShiftLeft" | "ShiftRight" => s.shift_down = pressed,
+                        "Tab" if pressed => {
+                            if let Some(root) = s.js_root {
+                                let mut order = focus_order(&s.js_nodes, root);
+                                // Reorder into visual (top-to-bottom, left-to-right)
+                                // order — the raw BFS order follows scene-graph
+                                // child-list order, which doesn't reliably match
+                                // on-screen layout (e.g. a toolbar row can sit
+                                // after a sibling list container there despite
+                                // rendering above it).
+                                let positions: std::collections::HashMap<u32, (f32, f32)> = order
+                                    .iter()
+                                    .filter_map(|&id| {
+                                        let node = s.js_nodes.get(&id)?;
+                                        let rl = s.resolved_rect(node.layout_id?)?;
+                                        Some((id, (rl.y, rl.x)))
+                                    })
+                                    .collect();
+                                sort_by_position(&mut order, &positions);
+                                let target = next_focus(&order, s.focused_node, s.shift_down);
+                                if target != s.focused_node {
+                                    s.focused_node = target;
+                                    s.window.set_ime_allowed(target.is_some());
+                                    // Reuses the same event JS already handles for
+                                    // AT-driven focus moves (see events.js's
+                                    // 'accessibilityFocus' case, which calls the JS
+                                    // focus tracker's `setFocus` so onFocus/styling
+                                    // fire) — Tab navigation needs identical JS-side
+                                    // behavior and shouldn't require the `a11y`
+                                    // feature to work.
+                                    if let Some(id) = target {
+                                        s.runtime.push_event(InputEvent::AccessibilityFocus { node_id: id });
+                                        reveal_focus_if_needed(s, id);
+                                    }
+                                    #[cfg(feature = "a11y")]
+                                    { s.a11y_dirty = true; }
+                                    (s.request_redraw)();
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+
                     #[cfg(feature = "dev")]
                     if let Some(dev) = s.dev_mode.as_mut() {
                         match key.as_str() {
@@ -1757,6 +1814,7 @@ pub fn run(mut config: AppConfig) -> bool {
                                 s.focused_node = Some(target);
                                 s.window.set_ime_allowed(true);
                                 s.runtime.push_event(InputEvent::AccessibilityFocus { node_id: target });
+                                reveal_focus_if_needed(s, target);
                                 // This path bypasses apply_scene_commands (which
                                 // marks a11y_dirty for SceneCommand-driven focus
                                 // changes), so the AT-driven focus move would

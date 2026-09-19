@@ -164,6 +164,11 @@ pub fn poll_events_callback(
                 set_num!("nodeId", node_id);
                 set_num!("scrollY", scroll_y);
             }
+            InputEvent::ScrollIntoView { node_id, scroll_y } => {
+                set_str!("type", "scrollIntoView");
+                set_num!("nodeId", node_id);
+                set_num!("scrollY", scroll_y);
+            }
             InputEvent::Resize { width, height } => {
                 set_str!("type", "resize");
                 set_num!("width", width);

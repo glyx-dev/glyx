@@ -324,6 +324,9 @@ pub(super) fn handle_dev_build_events(state: &mut PerWindowState) {
                 state.image_cache_misses = 0;
                 state.label_cache.clear();
                 state.resolved.clear();
+                state.resolved_by_id.clear();
+                state.z_order.clear();
+                state.z_order_dirty.clear();
                 state.layout = glyx_layout::LayoutTree::new();
                 state.runtime.layout_cache().lock().clear();
                 state.canvas_cmds.clear();

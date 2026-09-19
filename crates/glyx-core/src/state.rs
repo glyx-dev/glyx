@@ -227,6 +227,22 @@ pub(super) struct PerWindowState {
     pub(super) layout_dirty: bool,
     pub(super) layout_structure_dirty: bool,
     pub(super) resolved:     Vec<(NodeId, ResolvedLayout)>,
+    /// `layout_id → rect` overlay over `resolved`, rebuilt in the same layout
+    /// pass — replaces the old `resolved.iter().find()` linear scan.
+    ///
+    /// This is a `HashMap`, not a `Vec` indexed by the raw id: Taffy's
+    /// `NodeId` is a `slotmap` key, and `usize::from(NodeId)` decodes to
+    /// `(version << 32) | index` (see `slotmap::KeyData::as_ffi`, an opaque
+    /// FFI value with no documented guarantees about its numeric range other
+    /// than round-tripping). `version` starts at 1, so even the very first
+    /// node ever allocated produces an id north of 4 billion — indexing a
+    /// `Vec` by that tries to allocate tens of gigabytes and aborts the
+    /// process. (This was shipped once and caught by actually running the
+    /// app, not by the unit tests — none of them exercise a real
+    /// Taffy-backed layout pass end-to-end.) Do not go back to a raw-index
+    /// `Vec` here without a documented, version-stable way to recover a
+    /// small dense index from `NodeId`.
+    pub(super) resolved_by_id: std::collections::HashMap<NodeId, ResolvedLayout>,
     pub(super) js_nodes:     std::collections::HashMap<u32, JsNode>,
     pub(super) js_root:      Option<u32>,
     /// Active `opacity` transitions, keyed by node id — see `scene::tick_opacity_transitions`.
@@ -358,6 +374,16 @@ pub(super) struct PerWindowState {
     pub(super) descendant_cascade_nodes: std::collections::HashSet<u32>,
     pub(super) dirty_subtrees: std::collections::HashSet<u32>,
     pub(super) prev_resolved: std::collections::HashMap<u32, ResolvedLayout>,
+    /// `z_index`-sorted children per js node id. Built by
+    /// `scene::reconcile_z_order` ONLY when flagged dirty, so a clean frame
+    /// renders with zero sorting (previously every View/RepaintBoundary cloned
+    /// + sorted its children each frame). Keyed by the current js node ids —
+    /// entries for removed nodes are dropped on the next reconcile.
+    pub(super) z_order: std::collections::HashMap<u32, SmallVec<[u32; 4]>>,
+    /// Js node ids whose `z_order` entry is stale (child list membership or a
+    /// child's `z_index` changed since it was built). Drained by
+    /// `scene::reconcile_z_order`.
+    pub(super) z_order_dirty: std::collections::HashSet<u32>,
     pub(super) scene_cache:     std::collections::HashMap<u32, Scene>,
     pub(super) scene_cache_new: std::collections::HashMap<u32, Scene>,
     pub(super) boundary_scene_cache:     std::collections::HashMap<u32, Scene>,
@@ -367,11 +393,52 @@ pub(super) struct PerWindowState {
     pub(super) dev_mode: Option<DevModeState>,
 }
 
+impl PerWindowState {
+    /// Resolved-rect lookup by taffy layout id — replaces the old
+    /// `resolved.iter().find(|(nid, _)| *nid == id)` linear scan.
+    pub(super) fn resolved_rect(&self, layout_id: NodeId) -> Option<&ResolvedLayout> {
+        self.resolved_by_id.get(&layout_id)
+    }
+}
+
 pub(super) struct JsNode {
     pub(super) node_type: NodeType,
     pub(super) props:     NodeProps,
+    /// Pre-parsed `transform` prop — built once per prop change by scene
+    /// commands via `render_props` instead of re-parsing the string every
+    /// frame during render.
+    pub(super) transform: Option<peniko::kurbo::Affine>,
+    /// Pre-parsed `box_shadow` prop → (dx, dy, colour).
+    pub(super) box_shadow: Option<(f64, f64, peniko::Color)>,
+    /// Pre-parsed `background_gradient` prop → gradient endpoints.
+    pub(super) gradient: Option<(peniko::Color, peniko::Color)>,
     pub(super) children:  SmallVec<[u32; 4]>,
+    /// Parent JS id, maintained by `apply_scene_commands` on every
+    /// append/insert/remove/set-root. Lets damage analysis and dirty-subtree
+    /// building walk ancestors without rebuilding a child→parent map per frame.
+    pub(super) parent:    Option<u32>,
     pub(super) layout_id: Option<NodeId>,
+}
+
+impl JsNode {
+    /// Create a node with its render props pre-parsed (transform / box-shadow /
+    /// gradient) so the render pass never re-parses strings.
+    pub(super) fn new(node_type: NodeType, props: NodeProps) -> Self {
+        use crate::render_props::{parse_box_shadow, parse_gradient, parse_transform};
+        let transform   = props.transform.as_deref().and_then(parse_transform);
+        let box_shadow  = props.box_shadow.as_deref().and_then(parse_box_shadow);
+        let gradient    = props.background_gradient.as_deref().and_then(parse_gradient);
+        JsNode {
+            node_type,
+            props,
+            transform,
+            box_shadow,
+            gradient,
+            children:  SmallVec::new(),
+            parent:    None,
+            layout_id: None,
+        }
+    }
 }
 
 /// One in-progress `opacity` interpolation, driven entirely by Rust — see

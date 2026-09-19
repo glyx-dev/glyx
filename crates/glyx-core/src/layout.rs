@@ -437,8 +437,9 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
 
     let layout   = &mut state.layout;
     let text_sys = &mut state.text_sys;
+    let resolved = &mut state.resolved;
 
-    let result = layout.compute_with_measure(w, h, |known_dims, available, _id, ctx, _style| {
+    let result = layout.compute_with_measure(w, h, resolved, |known_dims, available, _id, ctx, _style| {
         use taffy::prelude::{AvailableSpace, Size};
 
         let Some(ctx) = ctx else {
@@ -468,12 +469,12 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
     });
 
     match result {
-        Ok(r) => {
-            log::debug!("Layout computed: {} nodes", r.len());
-            state.resolved = r;
+        Ok(()) => {
+            log::debug!("Layout computed: {} nodes", state.resolved.len());
+            rebuild_resolved_index(&state.resolved, &mut state.resolved_by_id);
             for (js_id, node) in &state.js_nodes {
                 if let Some(lid) = node.layout_id {
-                    if let Some((_, rl)) = state.resolved.iter().find(|(nid, _)| *nid == lid) {
+                    if let Some(rl) = state.resolved_rect(lid) {
                         state.runtime.update_layout(*js_id, rl.x, rl.y, rl.width, rl.height);
                     }
                 }
@@ -484,11 +485,25 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
     state.layout_dirty = false;
 }
 
+/// Rebuild the `resolved_by_id` overlay from a freshly computed `resolved`
+/// list. See `PerWindowState::resolved_by_id`'s doc comment for why this is
+/// a `HashMap` keyed by the real `NodeId`, not a `Vec` indexed by
+/// `usize::from(NodeId)` (that decodes to a slotmap `(version << 32) | idx`
+/// value, not a small dense index — a raw-index `Vec` here previously
+/// crashed the process trying to allocate ~86GB on the very first node).
+fn rebuild_resolved_index(
+    resolved: &[(NodeId, ResolvedLayout)],
+    index:    &mut std::collections::HashMap<NodeId, ResolvedLayout>,
+) {
+    index.clear();
+    index.extend(resolved.iter().copied());
+}
+
 pub(crate) fn update_scroll_positions(state: &PerWindowState) {
     if let Some(root_id) = state.js_root {
         let layout_cache = state.runtime.layout_cache();
         let mut cache = layout_cache.lock();
-        scroll_walk(root_id, &state.js_nodes, &state.resolved, 0.0, None, &mut cache);
+        scroll_walk(root_id, &state.js_nodes, &state.resolved_by_id, 0.0, None, &mut cache);
     }
 }
 
@@ -503,14 +518,14 @@ pub(crate) const CONTENT_HEIGHT_KEY: u32 = 0x8000_0000;
 fn scroll_walk(
     id:        u32,
     nodes:     &std::collections::HashMap<u32, JsNode>,
-    resolved:  &[(NodeId, ResolvedLayout)],
+    resolved:  &std::collections::HashMap<NodeId, ResolvedLayout>,
     scroll_y:  f64,
     clip_rect: ClipRect,
     cache:     &mut std::collections::HashMap<u32, [f32; 4]>,
 ) {
-    let Some(node)      = nodes.get(&id)                                      else { return };
-    let Some(layout_id) = node.layout_id                                      else { return };
-    let Some((_, rl))   = resolved.iter().find(|(nid, _)| *nid == layout_id) else { return };
+    let Some(node)      = nodes.get(&id)          else { return };
+    let Some(layout_id) = node.layout_id          else { return };
+    let Some(rl)        = resolved.get(&layout_id).copied() else { return };
 
     // Hidden nodes are invisible to both rendering and hit-testing.
     // Mark them off-screen and skip layout-cache updates for their subtree
@@ -572,9 +587,8 @@ fn scroll_walk(
                 .filter_map(|&cid| {
                     let cn   = nodes.get(&cid)?;
                     let clid = cn.layout_id?;
-                    resolved.iter()
-                        .find(|(nid, _)| *nid == clid)
-                        .map(|(_, crl)| (crl.y + crl.height) as f64)
+                    resolved.get(&clid).copied()
+                        .map(|crl| (crl.y + crl.height) as f64)
                 })
                 .fold(f64::NEG_INFINITY, f64::max);
 

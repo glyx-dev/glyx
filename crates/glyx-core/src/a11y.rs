@@ -137,7 +137,7 @@ pub(super) fn build_tree(state: &PerWindowState) -> Option<TreeUpdate> {
         }
 
         if let Some(layout_id) = node.layout_id {
-            if let Some((_, rl)) = state.resolved.iter().find(|(nid, _)| *nid == layout_id) {
+            if let Some(rl) = state.resolved_rect(layout_id) {
                 ax.set_bounds(AxRect {
                     x0: rl.x as f64,
                     y0: rl.y as f64,
@@ -206,12 +206,9 @@ mod tests {
     use std::collections::HashMap;
 
     fn node(node_type: NodeType, children: &[u32]) -> JsNode {
-        JsNode {
-            node_type,
-            props: NodeProps::default(),
-            children: children.iter().copied().collect(),
-            layout_id: None,
-        }
+        let mut n = JsNode::new(node_type, NodeProps::default());
+        n.children = children.iter().copied().collect();
+        n
     }
 
     fn node_with_role(role: &str) -> JsNode {

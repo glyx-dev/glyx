@@ -102,6 +102,7 @@ mod dev_mode;
 mod scene;
 mod layout;
 mod render;
+mod render_props;
 mod soft_present;
 #[cfg(target_os = "windows")]
 mod d2d_present;
@@ -115,7 +116,7 @@ use self::dev_mode::*;
 #[cfg(feature = "dev")]
 use arboard;
 
-use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, snapshot_resolved, tick_opacity_transitions};
+use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, reconcile_z_order, snapshot_resolved, tick_opacity_transitions, hit_test_solid, shrink_oversized_collections};
 use layout::{recompute_layout, update_scroll_positions};
 
 // ── F1: Windows named-pipe DACL restricted to current user ───────────────────
@@ -546,14 +547,12 @@ fn try_start_scrollbar_drag(s: &mut PerWindowState) -> Option<ScrollbarDragState
             let scroll_y = node.props.scroll_offset_y.unwrap_or(0.0) as f64;
             // Content height from raw Taffy child rects (scroll-independent).
             let Some(lid) = node.layout_id else { continue };
-            let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == lid) else { continue };
+            let Some(rl) = s.resolved_rect(lid) else { continue };
             let max_child_bottom: f64 = node.children.iter()
                 .filter_map(|&cid| {
                     let cn   = s.js_nodes.get(&cid)?;
                     let clid = cn.layout_id?;
-                    s.resolved.iter()
-                        .find(|(nid, _)| *nid == clid)
-                        .map(|(_, crl)| (crl.y + crl.height) as f64)
+                    s.resolved_rect(clid).map(|crl| (crl.y + crl.height) as f64)
                 })
                 .fold(f64::NEG_INFINITY, f64::max);
             if !max_child_bottom.is_finite() { continue; }
@@ -1430,6 +1429,9 @@ pub fn run(mut config: AppConfig) -> bool {
                     layout_dirty:           true,
                     layout_structure_dirty: true,
                     resolved:               Vec::new(),
+                    resolved_by_id:         std::collections::HashMap::new(),
+                    z_order:                std::collections::HashMap::new(),
+                    z_order_dirty:          std::collections::HashSet::new(),
                     js_nodes:     std::collections::HashMap::with_capacity(256),
                     js_root:      None,
                     opacity_transitions: std::collections::HashMap::new(),
@@ -1582,9 +1584,11 @@ pub fn run(mut config: AppConfig) -> bool {
                     let prev_y = s.cursor_y;
                     s.cursor_x = x as f32;
                     s.cursor_y = y as f32;
+                    let target = hit_test_solid(s, s.cursor_x, s.cursor_y);
                     s.runtime.push_event(InputEvent::CursorMoved {
                         x: s.cursor_x,
                         y: s.cursor_y,
+                        target,
                     });
 
                     // Scrollbar thumb drag
@@ -1656,8 +1660,9 @@ pub fn run(mut config: AppConfig) -> bool {
                                 drag_fn();
                                 // Still send MouseButton so onPressIn handlers fire, but
                                 // do NOT start a DragStart — the OS owns this drag now.
+                                let target = hit_test_solid(s, cx, cy);
                                 s.runtime.push_event(InputEvent::MouseButton {
-                                    x: cx, y: cy, button, pressed,
+                                    x: cx, y: cy, button, pressed, target,
                                 });
                                 return;
                             }
@@ -1678,8 +1683,9 @@ pub fn run(mut config: AppConfig) -> bool {
                         }
                     }
 
+                    let target = hit_test_solid(s, s.cursor_x, s.cursor_y);
                     s.runtime.push_event(InputEvent::MouseButton {
-                        x: s.cursor_x, y: s.cursor_y, button, pressed,
+                        x: s.cursor_x, y: s.cursor_y, button, pressed, target,
                     });
                     // Track left-button drag state (button == 0).
                     if button == 0 {
@@ -1763,11 +1769,13 @@ pub fn run(mut config: AppConfig) -> bool {
                         "click" => {
                             if let Some(node) = s.js_nodes.get(&target) {
                                 if let Some(layout_id) = node.layout_id {
-                                    if let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == layout_id) {
+                                    if let Some(rl) = s.resolved_rect(layout_id) {
                                         let cx = rl.x + rl.width  / 2.0;
                                         let cy = rl.y + rl.height / 2.0;
-                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: true });
-                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: false });
+                                        // AT-driven click already names its target explicitly —
+                                        // no need to hit-test a point we picked ourselves.
+                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: true, target: Some(target) });
+                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: false, target: Some(target) });
                                         (s.request_redraw)();
                                     }
                                 }
@@ -1895,6 +1903,20 @@ pub fn run(mut config: AppConfig) -> bool {
                 #[cfg(not(feature = "dev"))]
                 let _ = frame_tick_err;
 
+                // 3b. Drain jobs/microtasks scheduled *during* step 3's JS callback
+                // (e.g. React's `scheduleMicrotask` — `Promise.resolve().then(fn)` —
+                // used for passive-effect flushing, or any `.then()` chain that
+                // resolves synchronously mid-callback). V8 auto-runs microtasks at
+                // each callback boundary, so step 3 alone is enough there; QuickJS
+                // requires an explicit `execute_pending_job()` drain (step 1's
+                // `tick()` only covers jobs pending *before* this frame ran). Without
+                // this, a microtask scheduled mid-frame sits queued until some
+                // *other* trigger causes another frame — nothing does that when the
+                // app is otherwise idle, so QuickJS apps would stall (observed:
+                // frames only advanced while the mouse moved over the window, since
+                // CursorMoved incidentally requests a redraw that ran step 1 again).
+                s.runtime.tick();
+
                 // 4. Post-frame commands (React re-renders from step 3 events).
                 let post_commands = s.runtime.drain_scene_commands();
                 let post_changed  = apply_scene_commands(s, post_commands);
@@ -1967,6 +1989,8 @@ pub fn run(mut config: AppConfig) -> bool {
                 // Detect any position/size changes that cascaded out of layout and
                 // add them to dirty_nodes before building the dirty subtree set.
                 update_dirty_from_layout(s);
+                // Rebuild any stale z-sorted child lists before render touches them.
+                reconcile_z_order(s);
                 build_dirty_subtrees(s);
                 let layout_time_ms = layout_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -2040,6 +2064,7 @@ pub fn run(mut config: AppConfig) -> bool {
 
                     if should_trim {
                         s.renderer.trim_resources();
+                        shrink_oversized_collections(s);
                         if let Present::Gpu(gpu) = &s.gpu { gpu.poll(); }
                         let (_, _, reserved_after, _, _) = s.gpu.memory_counters();
                         s.last_trim_reserved_bytes = reserved_after;
@@ -2242,7 +2267,8 @@ pub fn run(mut config: AppConfig) -> bool {
                         nodes:             &s.js_nodes,
                         opacity_overrides: &opacity_overrides,
                         images:            &s.images,
-                        resolved:          &s.resolved,
+                        resolved_by_id:     &s.resolved_by_id,
+                        z_order:            &s.z_order,
                         frame:             &mut frame,
                         text_sys:          &mut s.text_sys,
                         label_cache:       &mut s.label_cache,
@@ -2934,6 +2960,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 for s in windows.values_mut() {
                     s.runtime.gc_hint();
                     s.renderer.trim_resources();
+                    shrink_oversized_collections(s);
                 }
                 extern "C" { fn mi_collect(force: bool); }
                 unsafe { mi_collect(true); }

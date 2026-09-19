@@ -1085,11 +1085,9 @@ export const ws = {
 // Drain this window's IPC inbox each frame and fire registered listeners.
 export function _pollIpc() {
   if (typeof __glyx_ipc_poll === 'undefined') return;
-  let raw;
-  try { raw = __glyx_ipc_poll(); } catch { return; }
-  if (!raw) return;
   let msgs;
-  try { msgs = JSON.parse(raw); } catch { return; }
+  try { msgs = __glyx_ipc_poll(); } catch { return; }
+  if (!msgs) return;
   for (const msg of msgs) {
     for (const cb of _ipcListeners) {
       try { cb(msg); } catch {}

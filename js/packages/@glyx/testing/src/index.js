@@ -149,6 +149,26 @@ export function installStubs() {
   };
   globalThis.__glyx_removeNode   = (id) => { _nodeTree.delete(id); };
   globalThis.__glyx_setRoot      = (id) => { globalThis.__glyx_rootId = id; };
+  // `hostConfig.js` batches append/insertBefore/update/remove/setRoot into
+  // one `__glyx_flushSceneOps(flatOps)` call per commit (see its "Scene-op
+  // batching" comment) instead of calling the individual bindings above
+  // directly. `flatOps` is ONE FLAT array — `[opcode, ...args, opcode, ...]`
+  // — not an array of per-op arrays. Replay each queued op through those
+  // same stubs so the simulated `_nodeTree` stays accurate under tests.
+  globalThis.__glyx_flushSceneOps = (ops) => {
+    let i = 0;
+    while (i < ops.length) {
+      switch (ops[i]) {
+        case 0: globalThis.__glyx_appendChild(ops[i + 1], ops[i + 2]); i += 3; break;
+        case 1: globalThis.__glyx_insertBefore(ops[i + 1], ops[i + 2], ops[i + 3]); i += 4; break;
+        case 2: globalThis.__glyx_updateNode(ops[i + 1], ops[i + 2]); i += 3; break;
+        case 3: globalThis.__glyx_removeNode(ops[i + 1]); i += 2; break;
+        case 4: globalThis.__glyx_setRoot(ops[i + 1]); i += 2; break;
+        default: i = ops.length; break; // unknown opcode — stop, don't misread the rest
+      }
+    }
+    return true;
+  };
   globalThis.__glyx_pollEvents   = () => [];
   globalThis.__glyx_getLayout    = () => ({ x: 0, y: 0, width: 0, height: 0 });
   globalThis.__glyx_getTime      = () => Date.now();
@@ -179,7 +199,7 @@ export function installStubs() {
   globalThis.__glyx_restart        = stub;
   globalThis.__glyx_window_create  = () => sp('0');
   globalThis.__glyx_ipc_send       = stub;
-  globalThis.__glyx_ipc_poll       = () => '[]';
+  globalThis.__glyx_ipc_poll       = () => [];
 
   // FS
   globalThis.__glyx_readFile       = () => sp('');

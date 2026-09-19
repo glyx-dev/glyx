@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   registerInput, unregisterInput,
   registerDraggable, unregisterDraggable,
@@ -245,9 +245,14 @@ export function TextInput({
   // Multiline auto-height: count rendered lines (explicit '\n' plus soft
   // wraps at the real field width) and size the box between minLines and
   // maxLines.  An explicit `height` prop opts out.
+  //
+  // Memoized: this used to run inline in the render body on EVERY render
+  // (even ones triggered by unrelated parent/context changes), re-measuring
+  // every line of text each time with no way to skip the work. Now it only
+  // recomputes when something it actually depends on changes.
   const lineH = realLineHeight(fontSize, lineHeight);
-  let autoHeight;
-  if (multiline && height == null) {
+  const autoHeight = useMemo(() => {
+    if (!(multiline && height == null)) return undefined;
     const lo = Math.max(1, minLines ?? 3);
     const hi = Math.max(lo, maxLines ?? 10);
     let lineCount = 0;
@@ -260,8 +265,8 @@ export function TextInput({
       lineCount = renderValue.split('\n').length;
     }
     const lines = Math.max(lo, Math.min(hi, Math.max(1, lineCount)));
-    autoHeight = Math.ceil(lines * lineH) + innerPadding * 2 + 4;
-  }
+    return Math.ceil(lines * lineH) + innerPadding * 2 + 4;
+  }, [multiline, height, renderValue, fontSize, innerW, minLines, maxLines, lineH, innerPadding]);
   const resolvedHeight = height ?? (multiline ? autoHeight : 44);
 
   // Keep handlersRef current so it always captures the latest state/props.

@@ -50,19 +50,9 @@ const disabledRegistry = new Map();
 // hit-testing; events pass through them to nodes underneath.
 const pointerEventsNoneRegistry = new Set();
 
-// Map from nodeId -> zIndex (integer).  Only nodes with an explicit zIndex
-// prop are stored here; absent = 0.  Used by findTopmostSolid to prefer
-// higher-z-index nodes over later-registered ones when both cover a point.
-const zIndexMap = new Map();
-
-// Ordered array of all solid (click-opaque) node ids, in creation order.
-// Later entries were rendered later (on top in z-order).
-// Every 'view' native node is solid by default.  Nodes with pointerEvents:'none'
-// are still in this list but are excluded at lookup time via pointerEventsNoneRegistry.
-const solidRegistry = [];
-
 // Map from childId → parentId, populated by hostConfig on every tree mutation.
-// Used by findTopmostSolid to determine ancestor relationships.
+// Used by isAncestorOf/findScrollTarget and the pressable-ancestor bubbling
+// walk (click/hover) to determine ancestor relationships.
 const parentMap = new Map();
 
 // Currently dragged node id (or null). Set on dragStart, cleared on dragEnd.
@@ -112,6 +102,10 @@ let shiftHeld = false;
 // Last cursor position seen this frame (updated by cursorMoved events).
 let cursorX = 0;
 let cursorY = 0;
+// Topmost solid node at the last cursor position — resolved NATIVELY at
+// input-event-construction time (glyx-core's `hit_test_solid`), not by JS
+// calling `findTopmostSolid` itself. See `findTopmostSolid`'s doc comment.
+let cursorTarget = null;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -253,24 +247,6 @@ export function registerPointerEventsNone(nodeId) {
 }
 
 /**
- * Register a view node as solid (click-opaque).
- * Called from hostConfig.createInstance for every 'view' native node.
- * @param {number} nodeId
- */
-export function registerSolid(nodeId) {
-  solidRegistry.push(nodeId);
-}
-
-/**
- * Unregister a solid node on unmount.
- * @param {number} nodeId
- */
-export function unregisterSolid(nodeId) {
-  const i = solidRegistry.indexOf(nodeId);
-  if (i !== -1) solidRegistry.splice(i, 1);
-}
-
-/**
  * Record that `childId` is a direct child of `parentId` in the native tree.
  * Called by hostConfig whenever a child is attached to a parent.
  * @param {number} childId
@@ -281,28 +257,11 @@ export function setNodeParent(childId, parentId) {
 }
 
 /**
- * Remove a node from parentMap and solidRegistry on tree detach.
- * Replaces separate unregisterSolid + parentMap.delete calls in hostConfig.
+ * Remove a node from parentMap on tree detach.
  * @param {number} nodeId
  */
 export function removeNodeFromTree(nodeId) {
   parentMap.delete(nodeId);
-  unregisterSolid(nodeId);
-  zIndexMap.delete(nodeId);
-}
-
-/**
- * Record the z-index for a node so hit-testing can prefer visually-higher
- * nodes over ones with a later solidRegistry index.
- * @param {number} nodeId
- * @param {number} zIndex
- */
-export function setNodeZIndex(nodeId, zIndex) {
-  if (zIndex !== 0) {
-    zIndexMap.set(nodeId, zIndex);
-  } else {
-    zIndexMap.delete(nodeId);
-  }
 }
 
 /**
@@ -429,63 +388,12 @@ function isAncestorOf(ancestorId, descendantId) {
   return false;
 }
 
-/**
- * Return the topmost solid (click-opaque) node covering (x, y), or null.
- *
- * React creates host instances in post-order (children before parents), so
- * solidRegistry is ordered: children have LOWER indices, parents HIGHER.
- *
- * Algorithm:
- *   1. Collect every solid node whose layout rect covers (x, y).
- *   2. Filter to "deepest" — remove any node that is an ancestor of another
- *      covering node (an ancestor is painted beneath its descendants).
- *   3. Among the remaining siblings/cousins, return the one with the highest
- *      solidRegistry index (later-registered sibling = painted on top).
- */
-function findTopmostSolid(x, y) {
-  const covering = [];
-  for (const id of solidRegistry) {
-    if (hitTest(id, x, y)) covering.push(id);
-  }
-  if (covering.length === 0) return null;
-  if (covering.length === 1) return covering[0];
-  // Keep only deepest nodes (remove ancestors of other covering nodes).
-  const deepest = covering.filter(
-    id => !covering.some(other => other !== id && isAncestorOf(id, other))
-  );
-  if (deepest.length === 1) return deepest[0];
-  // Among siblings, pick the visually topmost node.
-  // z-index takes priority over registration order: a node with a higher
-  // z-index beats one registered later (which is the common case when an
-  // absolutely-positioned overlay is declared before the content it covers
-  // in JSX but must receive clicks over it).
-  // The effective z-index is inherited from the ancestor chain: a leaf inside
-  // a zIndex:999 overlay layer must beat content re-rendered after the
-  // overlay mounted (e.g. toast items over a screen that re-rendered later).
-  const effectiveZ = (id) => {
-    let z = zIndexMap.get(id) ?? 0;
-    let p = parentMap.get(id);
-    while (p !== undefined) {
-      const pz = zIndexMap.get(p);
-      if (pz !== undefined && pz > z) z = pz;
-      p = parentMap.get(p);
-    }
-    return z;
-  };
-  let bestId = deepest[0];
-  let bestIdx = solidRegistry.lastIndexOf(deepest[0]);
-  let bestZ   = effectiveZ(deepest[0]);
-  for (let i = 1; i < deepest.length; i++) {
-    const z   = effectiveZ(deepest[i]);
-    const idx = solidRegistry.lastIndexOf(deepest[i]);
-    if (z > bestZ || (z === bestZ && idx > bestIdx)) {
-      bestId  = deepest[i];
-      bestIdx = idx;
-      bestZ   = z;
-    }
-  }
-  return bestId;
-}
+// The topmost-solid-node hit-test that used to live here (`findTopmostSolid`)
+// is now computed natively at input-event-construction time — see
+// `glyx-core`'s `hit_test_solid` (`scene.rs`) and the `cursorTarget`/
+// `ev.target` usage below. JS used to call `__glyx_getLayout` once per
+// candidate node on every click and every cursor move; that's now zero
+// additional native calls, since the result rides along on the input event.
 
 // ── Main dispatch ─────────────────────────────────────────────────────────────
 
@@ -517,10 +425,12 @@ export function dispatchEvents() {
           for (const fn of globalClickListeners) try { fn(gev); } catch {}
         }
 
-        // Find the topmost solid (click-opaque) node at this position.
+        // Topmost solid (click-opaque) node at this position, resolved
+        // NATIVELY at input-event-construction time (glyx-core's
+        // `hit_test_solid`), not by calling `findTopmostSolid` here.
         // A plain View absorbs the click even without a handler, preventing
         // fallthrough to pressables/inputs rendered beneath it in z-order.
-        const topmostId = findTopmostSolid(ev.x, ev.y);
+        const topmostId = ev.target;
         let inputTarget;
 
         if (topmostId !== null) {
@@ -692,6 +602,7 @@ export function dispatchEvents() {
         // so multiple cursor events per frame produce only one hit-test.
         cursorX = ev.x;
         cursorY = ev.y;
+        cursorTarget = ev.target;
         cursorMovedThisFrame = true;
         // Text drag-selection: while the left button is held on an input,
         // every cursor move extends the selection toward the pointer.
@@ -792,11 +703,12 @@ export function dispatchEvents() {
   // ── Hover state update ────────────────────────────────────────────────────
   // Run once per frame using the final cursor position.
   // Only fires onHoverIn/Out callbacks on actual enter/leave transitions.
-  // Uses findTopmostSolid so that views beneath a covering solid node never
-  // receive hover effects, and plain Views (not in pressableRegistry) are
-  // treated as hover-opaque (no effect fires on them).
+  // Uses the natively-resolved topmost solid node (`cursorTarget`, set by
+  // the 'cursorMoved' case above) so that views beneath a covering solid
+  // node never receive hover effects, and plain Views (not in
+  // pressableRegistry) are treated as hover-opaque (no effect fires on them).
   if (cursorMovedThisFrame) {
-    const topSolid = findTopmostSolid(cursorX, cursorY);
+    const topSolid = cursorTarget;
     // Walk up to find the nearest pressable ancestor (same bubbling logic as click).
     let hoverId = topSolid;
     while (hoverId !== undefined && !pressableRegistry.has(hoverId)) {

@@ -8,7 +8,50 @@
 // Only `supportsMutation: true` is enabled — no persistence, no hydration.
 
 import { DefaultEventPriority } from 'react-reconciler/constants';
-import { registerSolid, setNodeParent, removeNodeFromTree, setNodeZIndex } from './events.js';
+import { setNodeParent, removeNodeFromTree } from './events.js';
+
+// ── Scene-op batching ─────────────────────────────────────────────────────────
+//
+// `appendChild`/`insertBefore`/`commitUpdate`/`removeChild`/`setRoot` don't
+// need a synchronous return value (their native return is unused below), so
+// instead of one JS→native call per op, they're queued here and flushed once
+// per commit via `resetAfterCommit` through `__glyx_flushSceneOps`. Cuts N
+// interpreter-boundary crossings per commit down to 1.
+//
+// `createInstance`'s `__glyx_createNode` call is NOT batched — React needs
+// the new node's id back immediately (synchronously), so it stays a direct
+// call. Everything downstream of that id (append/update/etc) is safe to
+// defer: within one synchronous commit, a node is always created before
+// anything references its id, so queuing preserves the required ordering
+// even though creates and queued ops interleave in issue order.
+//
+// Encoding: ONE FLAT array (op, args, op, args, ...), not an array of
+// per-op arrays. A commit that removes ~8,000 nodes (e.g. bench-app's
+// full-render → virtualized switch) used to build ~8,000 separate small
+// array objects, each needing its own JS→native conversion on the native
+// side (`Array::iter::<Array>()`/nested `Array` reads) — real allocation +
+// marshalling cost that measurably hit QuickJS harder than V8 (see
+// CHANGELOG_PERF.md's teardown-gap comparison). A flat array is one
+// contiguous JS object; the native side reads it as one buffer with a
+// known per-opcode stride instead of unwrapping N nested arrays.
+const OP_APPEND        = 0; // op, parentId, childId
+const OP_INSERT_BEFORE = 1; // op, parentId, childId, beforeId
+const OP_UPDATE        = 2; // op, id, props
+const OP_REMOVE        = 3; // op, id
+const OP_SET_ROOT      = 4; // op, id
+
+let pendingOps = [];
+
+function queueOp(op, ...args) {
+  pendingOps.push(op, ...args);
+}
+
+function flushSceneOps() {
+  if (pendingOps.length === 0) return;
+  const ops = pendingOps;
+  pendingOps = [];
+  __glyx_flushSceneOps(ops);
+}
 
 // ── Instance creation ─────────────────────────────────────────────────────────
 
@@ -25,12 +68,6 @@ function createInstance(type, props) {
   // (Rust reads a plain number, not a nested object — see NodeProps::transition_ms).
   if (transition && typeof transition.duration === 'number') nodeProps.transitionMs = transition.duration;
   const id = __glyx_createNode(type, nodeProps);
-  // Every 'view' node is solid (click-opaque) by default.  Nodes with
-  // pointerEvents:'none' are still registered but excluded at lookup time.
-  if (type === 'view') {
-    registerSolid(id);
-    if (nodeProps.zIndex) setNodeZIndex(id, nodeProps.zIndex);
-  }
   // Fire the mount callback immediately so the component can register its ID
   // before any useEffect / useLayoutEffect runs.
   if (typeof _glyxOnMount === 'function') {
@@ -52,7 +89,7 @@ function createTextInstance(text) {
 // Called for each child during the initial tree build (before commit).
 function appendInitialChild(parentInstance, child) {
   if (child.id !== -1) {
-    __glyx_appendChild(parentInstance.id, child.id);
+    queueOp(OP_APPEND, parentInstance.id, child.id);
     setNodeParent(child.id, parentInstance.id);
   }
 }
@@ -61,7 +98,7 @@ function appendInitialChild(parentInstance, child) {
 
 function appendChild(parentInstance, child) {
   if (child.id !== -1) {
-    __glyx_appendChild(parentInstance.id, child.id);
+    queueOp(OP_APPEND, parentInstance.id, child.id);
     setNodeParent(child.id, parentInstance.id);
   }
 }
@@ -70,16 +107,16 @@ function appendChildToContainer(_container, child) {
   // The container is the virtual root (created by createContainer).
   // Explicitly set this child as the scene root so Rust knows what to render.
   if (child.id !== -1) {
-    __glyx_setRoot(child.id);
+    queueOp(OP_SET_ROOT, child.id);
   }
 }
 
 function insertBefore(parentInstance, child, beforeChild) {
   if (child.id !== -1) {
     if (beforeChild && beforeChild.id !== -1) {
-      __glyx_insertBefore(parentInstance.id, child.id, beforeChild.id);
+      queueOp(OP_INSERT_BEFORE, parentInstance.id, child.id, beforeChild.id);
     } else {
-      __glyx_appendChild(parentInstance.id, child.id);
+      queueOp(OP_APPEND, parentInstance.id, child.id);
     }
     setNodeParent(child.id, parentInstance.id);
   }
@@ -87,7 +124,7 @@ function insertBefore(parentInstance, child, beforeChild) {
 
 function insertInContainerBefore(_container, child, _beforeChild) {
   if (child.id !== -1) {
-    __glyx_setRoot(child.id);
+    queueOp(OP_SET_ROOT, child.id);
   }
 }
 
@@ -95,13 +132,13 @@ function insertInContainerBefore(_container, child, _beforeChild) {
 
 function removeChild(_parentInstance, child) {
   if (child.id !== -1) {
-    __glyx_removeNode(child.id);
+    queueOp(OP_REMOVE, child.id);
   }
 }
 
 function removeChildFromContainer(_container, child) {
   if (child.id !== -1) {
-    __glyx_removeNode(child.id);
+    queueOp(OP_REMOVE, child.id);
   }
 }
 
@@ -112,7 +149,7 @@ function clearContainer(_container) {
 // Called by React after it has finished with a deleted instance.
 function detachDeletedInstance(instance) {
   if (instance.id !== -1) {
-    __glyx_removeNode(instance.id);
+    queueOp(OP_REMOVE, instance.id);
     removeNodeFromTree(instance.id);
   }
 }
@@ -138,8 +175,7 @@ function commitUpdate(instance, updatePayload) {
   const nodeProps = { ...rest, ...style };
   if (glyxDraggable) nodeProps.draggable = true;
   if (transition && typeof transition.duration === 'number') nodeProps.transitionMs = transition.duration;
-  __glyx_updateNode(instance.id, nodeProps);
-  setNodeZIndex(instance.id, nodeProps.zIndex ?? 0);
+  queueOp(OP_UPDATE, instance.id, nodeProps);
 }
 
 function commitTextUpdate() {
@@ -168,7 +204,7 @@ function getPublicInstance(instance) { return instance; }
 // ── Commit lifecycle ──────────────────────────────────────────────────────────
 
 function prepareForCommit()  { return null; }
-function resetAfterCommit()  {}
+function resetAfterCommit()  { flushSceneOps(); }
 
 // ── Text content ──────────────────────────────────────────────────────────────
 

@@ -602,7 +602,11 @@ impl V8Runtime {
     // ── Scene commands ────────────────────────────────────────────────────────
 
     pub fn drain_scene_commands(&mut self) -> Vec<SceneCommand> {
+        let local = crate::bindings::take_frame_scene(self.state_ptr);
         let mut q = self.scene.lock();
+        if !local.is_empty() {
+            q.extend(local);
+        }
         q.drain(..).collect()
     }
 

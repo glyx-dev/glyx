@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use rquickjs::Ctx;
+use rquickjs::{Ctx, IntoJs, Value};
 use tokio::runtime::Handle;
 
 use crate::bindings::{validate_external_url, CompletionQueue, RedrawRequest, WindowController};
@@ -268,6 +268,15 @@ pub(crate) fn restart(window: &Option<WindowController>) {
 
 pub(crate) fn platform() -> &'static str {
     if cfg!(target_os = "windows") { "windows" } else if cfg!(target_os = "macos") { "macos" } else { "linux" }
+}
+
+pub(crate) fn get_env<'js>(ctx: Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
+    if glyx_security::get().can_get_env(&name) {
+        if let Ok(val) = std::env::var(&name) {
+            return val.into_js(&ctx);
+        }
+    }
+    Ok(Value::new_null(ctx))
 }
 
 pub(crate) fn collect_memory() {

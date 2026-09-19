@@ -123,17 +123,29 @@ pub fn poll_events_callback(
         }
 
         match ev {
-            InputEvent::MouseButton { x, y, button, pressed } => {
+            InputEvent::MouseButton { x, y, button, pressed, target } => {
                 set_str!("type", "mouseButton");
                 set_num!("x", x);
                 set_num!("y", y);
                 set_num!("button", button);
                 set_bool!("pressed", pressed);
+                let k = v8::String::new(scope, "target").unwrap();
+                let v: v8::Local<v8::Value> = match target {
+                    Some(id) => v8::Number::new(scope, id as f64).into(),
+                    None => v8::null(scope).into(),
+                };
+                obj.set(scope, k.into(), v);
             }
-            InputEvent::CursorMoved { x, y } => {
+            InputEvent::CursorMoved { x, y, target } => {
                 set_str!("type", "cursorMoved");
                 set_num!("x", x);
                 set_num!("y", y);
+                let k = v8::String::new(scope, "target").unwrap();
+                let v: v8::Local<v8::Value> = match target {
+                    Some(id) => v8::Number::new(scope, id as f64).into(),
+                    None => v8::null(scope).into(),
+                };
+                obj.set(scope, k.into(), v);
             }
             InputEvent::KeyInput { key, text, pressed } => {
                 set_str!("type", "keyInput");
@@ -534,8 +546,7 @@ pub fn create_node_callback(
     let node_type = parse_node_type(scope, args.get(0));
     let props = parse_props(scope, args.get(1));
 
-    state.scene.lock()
-        .push_back(SceneCommand::CreateNode { id, node_type, props });
+    state.frame_scene.borrow_mut().push(SceneCommand::CreateNode { id, node_type, props });
 
     rv.set(v8::Number::new(scope, id as f64).into());
 }
@@ -576,8 +587,7 @@ pub fn create_image_callback(
     let height = args.get(2).number_value(scope).filter(|v| *v > 0.0).map(|v| v as f32);
 
     let id = state.next_image_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state.scene.lock()
-        .push_back(SceneCommand::CreateImage { id, path, width, height });
+    state.frame_scene.borrow_mut().push(SceneCommand::CreateImage { id, path, width, height });
 
     rv.set(v8::Number::new(scope, id as f64).into());
 }
@@ -596,8 +606,7 @@ pub fn append_child_callback(
     let parent_id = args.get(0).number_value(scope).unwrap_or_default() as u32;
     let child_id  = args.get(1).number_value(scope).unwrap_or_default() as u32;
 
-    state.scene.lock()
-        .push_back(SceneCommand::AppendChild { parent_id, child_id });
+    state.frame_scene.borrow_mut().push(SceneCommand::AppendChild { parent_id, child_id });
 
     rv.set(v8::Boolean::new(scope, true).into());
 }
@@ -617,8 +626,7 @@ pub fn insert_before_callback(
     let child_id  = args.get(1).number_value(scope).unwrap_or_default() as u32;
     let before_id = args.get(2).number_value(scope).unwrap_or_default() as u32;
 
-    state.scene.lock()
-        .push_back(SceneCommand::InsertBefore { parent_id, child_id, before_id });
+    state.frame_scene.borrow_mut().push(SceneCommand::InsertBefore { parent_id, child_id, before_id });
 
     rv.set(v8::Boolean::new(scope, true).into());
 }
@@ -637,7 +645,7 @@ pub fn update_node_callback(
     let id    = args.get(0).number_value(scope).unwrap_or_default() as u32;
     let props = parse_props(scope, args.get(1));
 
-    state.scene.lock().push_back(SceneCommand::UpdateNode { id, props });
+    state.frame_scene.borrow_mut().push(SceneCommand::UpdateNode { id, props });
     rv.set(v8::Boolean::new(scope, true).into());
 }
 
@@ -653,7 +661,7 @@ pub fn remove_node_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let id = args.get(0).number_value(scope).unwrap_or_default() as u32;
-    state.scene.lock().push_back(SceneCommand::RemoveNode { id });
+    state.frame_scene.borrow_mut().push(SceneCommand::RemoveNode { id });
     rv.set(v8::Boolean::new(scope, true).into());
 }
 
@@ -669,7 +677,98 @@ pub fn set_root_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let id = args.get(0).number_value(scope).unwrap_or_default() as u32;
-    state.scene.lock().push_back(SceneCommand::SetRoot { id });
+    state.frame_scene.borrow_mut().push(SceneCommand::SetRoot { id });
+    rv.set(v8::Boolean::new(scope, true).into());
+}
+
+/// `__glyx_flushSceneOps(ops)` — sync. Batches append/insertBefore/update/
+/// remove/setRoot into ONE JS→native call per React commit instead of one
+/// call per op (`hostConfig.js`'s `resetAfterCommit` flush point).
+///
+/// `createNode` is deliberately NOT part of this batch — it must stay a
+/// synchronous, immediate call because React needs the new node's id back
+/// right away (`createInstance` returns `{id}` synchronously, and later
+/// host-config calls within the same commit reference that id). Every other
+/// op's return value is unused by JS today, so those are safe to defer.
+///
+/// `ops` is ONE FLAT array — `[opcode, ...args, opcode, ...args, ...]` — not
+/// an array of per-op arrays:
+///   0 append(parentId, childId) · 1 insertBefore(parentId, childId, beforeId)
+///   2 update(id, props)         · 3 remove(id)      · 4 setRoot(id)
+///
+/// Added after the FFI-overhead benchmark in `examples/bench-app` showed
+/// QuickJS's virtualized-list ratio (2.3x slower than V8) matched almost
+/// exactly its raw per-call native-crossing overhead ratio (also 2.3x) —
+/// i.e. the remaining QuickJS gap on small, frequent-update workloads was
+/// dominated by call COUNT, not by anything already fixed (JSON, locking).
+///
+/// Flattened (rather than an array of per-op arrays) after a follow-up
+/// measurement: fixing an unrelated O(n²) removal-loop bug (`scene.rs`)
+/// sped up V8's mass-teardown case (~8,000 removes in one commit) by ~64%
+/// but QuickJS's by only ~28% — the *remaining* QuickJS-specific cost was
+/// the per-op nested-array marshalling itself (`Array::iter::<Array>()`/
+/// `get_index` per sub-array), not the Rust-side algorithm. One flat array
+/// is a single JS allocation instead of N, and native reads it as one
+/// buffer with a known per-opcode stride instead of unwrapping N arrays.
+pub fn flush_scene_ops_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let Ok(ops) = v8::Local::<v8::Array>::try_from(args.get(0)) else {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    };
+    let len = ops.length();
+    let mut frame = state.frame_scene.borrow_mut();
+    let get_u32 = |scope: &mut v8::PinScope<'_, '_, v8::Context>, arr: v8::Local<v8::Array>, idx: u32| -> u32 {
+        arr.get_index(scope, idx).and_then(|v| v.number_value(scope)).unwrap_or_default() as u32
+    };
+    let mut i = 0u32;
+    while i < len {
+        let opcode = get_u32(scope, ops, i);
+        match opcode {
+            0 => {
+                let parent_id = get_u32(scope, ops, i + 1);
+                let child_id  = get_u32(scope, ops, i + 2);
+                frame.push(SceneCommand::AppendChild { parent_id, child_id });
+                i += 3;
+            }
+            1 => {
+                let parent_id = get_u32(scope, ops, i + 1);
+                let child_id  = get_u32(scope, ops, i + 2);
+                let before_id = get_u32(scope, ops, i + 3);
+                frame.push(SceneCommand::InsertBefore { parent_id, child_id, before_id });
+                i += 4;
+            }
+            2 => {
+                let id = get_u32(scope, ops, i + 1);
+                let props_val = ops.get_index(scope, i + 2).unwrap_or_else(|| v8::undefined(scope).into());
+                let props = parse_props(scope, props_val);
+                frame.push(SceneCommand::UpdateNode { id, props });
+                i += 3;
+            }
+            3 => {
+                let id = get_u32(scope, ops, i + 1);
+                frame.push(SceneCommand::RemoveNode { id });
+                i += 2;
+            }
+            4 => {
+                let id = get_u32(scope, ops, i + 1);
+                frame.push(SceneCommand::SetRoot { id });
+                i += 2;
+            }
+            // Unknown opcode — stop rather than risk misreading the rest of
+            // the buffer with a wrong stride.
+            _ => break,
+        }
+    }
     rv.set(v8::Boolean::new(scope, true).into());
 }
 
@@ -694,7 +793,7 @@ pub fn set_focus_callback(
     } else {
         Some(arg.number_value(scope).unwrap_or_default() as u32)
     };
-    state.scene.lock().push_back(SceneCommand::SetFocus { id });
+    state.frame_scene.borrow_mut().push(SceneCommand::SetFocus { id });
     rv.set(v8::Boolean::new(scope, true).into());
 }
 

@@ -470,9 +470,10 @@ pub fn ipc_send_callback(
     }
 }
 
-/// `__glyx_ipc_poll() -> string` â€" sync, returns JSON array of pending messages.
-///
-/// Drains this window's own IPC inbox.  Returns `"[]"` when empty.
+/// `__glyx_ipc_poll() -> Array<string>` â€" sync, drains this window's own IPC
+/// inbox into a real JS array of raw message strings (mirrors QuickJS's
+/// `quickjs_ipc::ipc_poll` â€" no `serde_json`/`JSON.parse` round trip on the
+/// array; each message is app-defined and handed to JS untouched).
 /// Called each frame from the JS frame callback alongside WS polling.
 pub fn ipc_poll_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -493,9 +494,12 @@ pub fn ipc_poll_callback(
             .unwrap_or_default()
     };
 
-    let json   = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
-    let v8_str = v8::String::new(scope, &json).unwrap();
-    rv.set(v8_str.into());
+    let array = v8::Array::new(scope, msgs.len() as i32);
+    for (i, msg) in msgs.iter().enumerate() {
+        let v8_str = v8::String::new(scope, msg).unwrap();
+        array.set_index(scope, i as u32, v8_str.into());
+    }
+    rv.set(array.into());
 }
 
 // â"€â"€ mDNS service discovery binding

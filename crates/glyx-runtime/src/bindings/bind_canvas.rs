@@ -19,7 +19,7 @@ pub fn canvas_update_callback(
         Ok(c)  => c,
         Err(e) => { log::warn!("canvas_update parse error: {e}"); return; }
     };
-    state.scene.lock().push_back(SceneCommand::CanvasUpdate { id, cmds, append: false });
+    state.frame_scene.borrow_mut().push(SceneCommand::CanvasUpdate { id, cmds, append: false });
 }
 
 /// `__glyx_canvas_flush(id, f32buf, floatCount, u8buf, strLen, append)` â€” sync.
@@ -76,7 +76,7 @@ pub fn canvas_flush_callback(
         };
         decode_canvas_binary(cmd_bytes, float_count, str_bytes)
     };
-    state.scene.lock().push_back(SceneCommand::CanvasUpdate { id, cmds, append });
+    state.frame_scene.borrow_mut().push(SceneCommand::CanvasUpdate { id, cmds, append });
 }
 
 /// `__glyx_canvas3d_update(id, sceneJson)` â€” sync.
@@ -102,7 +102,7 @@ pub fn canvas3d_update_callback(
         Ok(s)  => s,
         Err(e) => { log::warn!("canvas3d_update parse error: {e}"); return; }
     };
-    state.scene.lock().push_back(SceneCommand::Canvas3DUpdate { id, scene });
+    state.frame_scene.borrow_mut().push(SceneCommand::Canvas3DUpdate { id, scene });
 }
 
 /// `__glyx_webview_post_message(id, msg)` — sync.
@@ -125,7 +125,7 @@ pub fn webview_post_message_callback(
         .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
 
-    state.scene.lock().push_back(SceneCommand::WebviewPostMessage { id, msg });
+    state.frame_scene.borrow_mut().push(SceneCommand::WebviewPostMessage { id, msg });
 }
 
 /// `__glyx_webview_poll() → JSON`
@@ -198,7 +198,7 @@ pub fn canvas3d_load_gltf_callback(
     let _ = id; // used by canvas3d_update; here we just warm up gltf cache
     // The load itself is triggered by the renderer when it encounters Gltf geometry.
     // Push an info scene command with the path so glyx-core can pre-warm the cache.
-    state.scene.lock().push_back(SceneCommand::Canvas3DUpdate { id, scene });
+    state.frame_scene.borrow_mut().push(SceneCommand::Canvas3DUpdate { id, scene });
 }
 
 /// `__glyx_canvas3d_unload_gltf(path)` â€” drop a GLTF model from the LRU cache.
@@ -219,7 +219,7 @@ pub fn canvas3d_unload_gltf_callback(
         .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
 
-    state.scene.lock().push_back(SceneCommand::Canvas3DUnloadGltf { path });
+    state.frame_scene.borrow_mut().push(SceneCommand::Canvas3DUnloadGltf { path });
 }
 
 /// `__glyx_canvas3d_raycast(id, ndcX, ndcY) -> reqId` — sync, returns

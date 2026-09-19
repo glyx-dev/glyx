@@ -226,6 +226,11 @@ unsafe impl Send for Completion {}
 
 pub type CompletionQueue = Arc<Mutex<VecDeque<Completion>>>;
 pub type SceneQueue      = Arc<Mutex<VecDeque<SceneCommand>>>;
+/// Thread-local frame buffer for main-thread JS binding pushes (W2).
+/// Avoids a `Mutex` lock per command on the hot per-frame scene-graph
+/// push path; drained into `SceneQueue` once per frame by
+/// `drain_scene_commands`.
+pub(crate) type FrameBuffer = std::cell::RefCell<Vec<SceneCommand>>;
 pub type RedrawRequest   = Arc<dyn Fn() + Send + Sync>;
 /// Shared SQLite pool map  keyed by the integer handle returned to JS.
 /// Exposed so glyx-core can drain it on window close for graceful shutdown.
@@ -273,9 +278,15 @@ pub fn new_raycast_results() -> RaycastResults { Arc::new(Mutex::new(VecDeque::n
 #[derive(Debug, Clone)]
 pub enum InputEvent {
     /// Mouse/touch press or release at window-relative pixel coordinates.
-    MouseButton { x: f32, y: f32, button: u8, pressed: bool },
-    /// Cursor moved to pixel position.
-    CursorMoved { x: f32, y: f32 },
+    /// `target` is the topmost solid (click-opaque) node id at (x, y),
+    /// resolved natively at push time — see `glyx-core`'s `hit_test_solid`.
+    /// JS used to redo this same hit-test itself via `__glyx_getLayout`
+    /// called once per candidate node; now it's computed once, here, using
+    /// state JS doesn't have direct access to anyway (the full node tree),
+    /// and handed over pre-resolved.
+    MouseButton { x: f32, y: f32, button: u8, pressed: bool, target: Option<u32> },
+    /// Cursor moved to pixel position. `target` — see `MouseButton`.
+    CursorMoved { x: f32, y: f32, target: Option<u32> },
     /// Pointer drag started (left button down + first move).
     DragStart { x: f32, y: f32 },
     /// Pointer dragged  continuous move while left button held.
@@ -1298,6 +1309,25 @@ pub enum SceneCommand {
 #[cfg(feature = "v8")]
 pub type StatePtrUsize = usize;
 
+/// Take (empty) the V8 main-thread frame buffer owned by the heap-allocated
+/// `AsyncState`. Called by `V8Runtime::drain_scene_commands` so the buffer's
+/// contents can be merged into the shared `SceneQueue` under its single lock.
+///
+/// # Safety
+/// `state_ptr` is a raw pointer to the `Box<AsyncState>` created by
+/// `register_all` (which is leaked for the lifetime of the runtime). It is
+/// only dereferenced on the V8 thread, and only after `register_all` has
+/// stored it — both drains and binding callbacks are V8-thread-only, so there
+/// is no aliasing with a concurrent `RefCell` borrow.
+#[cfg(feature = "v8")]
+pub(crate) fn take_frame_scene(state_ptr: StatePtrUsize) -> Vec<SceneCommand> {
+    if state_ptr == 0 {
+        return Vec::new();
+    }
+    let state = unsafe { &mut *(state_ptr as *mut AsyncState) };
+    std::mem::take(state.frame_scene.get_mut())
+}
+
 #[cfg(feature = "v8")]
 pub fn register_all(
     scope:        &mut v8::PinScope<'_, '_, v8::Context>,
@@ -1335,6 +1365,7 @@ pub fn register_all(
         tokio,
         request_redraw: window.as_ref().map(|w| Arc::clone(&w.request_redraw)),
         scene,
+        frame_scene:  std::cell::RefCell::new(Vec::new()),
         events,
         layout_cache,
         next_id:    std::sync::atomic::AtomicU32::new(1),
@@ -1500,6 +1531,7 @@ pub fn register_all(
     register!("__glyx_updateNode",    update_node_callback);
     register!("__glyx_removeNode",  remove_node_callback);
     register!("__glyx_setRoot",     set_root_callback);
+    register!("__glyx_flushSceneOps", flush_scene_ops_callback);
     register!("__glyx_setFocus",    set_focus_callback);
     #[cfg(feature = "a11y")]
     register!("__glyx_hasA11y",     has_a11y_callback);
@@ -1741,6 +1773,14 @@ struct AsyncState {
     tokio:        Handle,
     request_redraw: Option<RedrawRequest>,
     scene:        SceneQueue,
+    /// Main-thread scene commands pushed by JS bindings (see `W2` in
+    /// `REVIEW_AND_PLAN.md`). Avoids a mutex lock + `VecDeque::push_back`
+    /// on the hot per-frame path; drained by `drain_scene_commands`
+    /// under the same single lock as `scene` each frame. Only bindings
+    /// running on the V8 thread touch this (single-threaded interior
+    /// mutability); worker-thread pushes (camera/video open) still go to
+    /// `scene`.
+    frame_scene:  FrameBuffer,
     events:       EventQueue,
     layout_cache: LayoutCache,
     next_id:      std::sync::atomic::AtomicU32,

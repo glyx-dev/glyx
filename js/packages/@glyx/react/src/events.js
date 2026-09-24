@@ -35,11 +35,13 @@ const scrollRegistry = new Map();
 // Draggable nodes (e.g. Slider thumb) register here.
 const dragRegistry = new Map();
 
-// Map from nodeId -> { onIncrement?, onDecrement?, onSetValue? }
-// Numeric controls (e.g. Slider) register here so a screen reader's
-// Increment/Decrement/SetValue actions (Narrator arrow keys on a focused
-// slider, etc.) can actually change the value — Rust has no concept of the
-// control's own min/max/step, so it just forwards the action here.
+// Map from nodeId -> { onIncrement?, onDecrement?, onSetValue?, onExpand?,
+// onCollapse? } Numeric controls (e.g. Slider) register here so a screen
+// reader's Increment/Decrement/SetValue actions (Narrator arrow keys on a
+// focused slider, etc.) can actually change the value — Rust has no concept
+// of the control's own min/max/step, so it just forwards the action here.
+// Disclosure controls (accordions, tree items) register onExpand/onCollapse
+// the same way for Action::Expand/Collapse.
 const a11yValueRegistry = new Map();
 
 // Map from nodeId -> true/false — prevents event dispatch to the node.
@@ -233,9 +235,11 @@ export function unregisterDraggable(nodeId) {
 }
 
 /**
- * Register a node's screen-reader value actions (Increment/Decrement/SetValue).
+ * Register a node's screen-reader value/state actions
+ * (Increment/Decrement/SetValue for numeric controls, Expand/Collapse for
+ * disclosure controls).
  * @param {number} nodeId
- * @param {{ onIncrement?: () => void, onDecrement?: () => void, onSetValue?: (v:number) => void }} handlers
+ * @param {{ onIncrement?: () => void, onDecrement?: () => void, onSetValue?: (v:number) => void, onExpand?: () => void, onCollapse?: () => void }} handlers
  */
 export function registerA11yValue(nodeId, handlers) {
   a11yValueRegistry.set(nodeId, handlers);
@@ -640,14 +644,6 @@ export function dispatchEvents() {
           visualFocusedNodeId = ev.nodeId;
           focusVisualRegistry.get(ev.nodeId)?.onFocus?.();
         }
-        // Scroll-into-view was attempted here and reverted — it kept
-        // resetting scroll position instead of settling correctly, through
-        // several genuinely-distinct root causes (stale ref reads, a
-        // lazy-updater timing bug) that each fixed what they targeted
-        // without fixing the actual symptom, meaning something about this
-        // interaction still isn't understood. Tab/Shift+Tab focus must
-        // never have a scroll side effect anywhere until that's solved
-        // properly. See Work Item 12 (ScrollIntoView) in the plan doc.
         break;
       }
 
@@ -657,6 +653,8 @@ export function dispatchEvents() {
         if (ev.action === 'increment') h.onIncrement?.();
         else if (ev.action === 'decrement') h.onDecrement?.();
         else if (ev.action === 'setValue' && ev.numericValue !== undefined) h.onSetValue?.(ev.numericValue);
+        else if (ev.action === 'expand') h.onExpand?.();
+        else if (ev.action === 'collapse') h.onCollapse?.();
         break;
       }
 

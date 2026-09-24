@@ -328,9 +328,10 @@ pub enum InputEvent {
     /// so React-side focus styling/onFocus stays in sync with an AT-driven
     /// focus change (as opposed to a mouse click, which JS already owns).
     AccessibilityFocus { node_id: u32 },
-    /// An assistive technology requested a value change on a node —
+    /// An assistive technology requested a value/state change on a node —
     /// Increment/Decrement/SetValue from a screen reader's slider/spinbutton
-    /// controls. `action` is "increment" / "decrement" / "setValue";
+    /// controls, or Expand/Collapse from a disclosure control. `action` is
+    /// "increment" / "decrement" / "setValue" / "expand" / "collapse";
     /// `numeric_value` is only set for "setValue".
     AccessibilityValueChange { node_id: u32, action: String, numeric_value: Option<f64> },
 }
@@ -891,6 +892,16 @@ pub struct NodeProps {
     pub numeric_value: Option<f64>,
     pub numeric_min:   Option<f64>,
     pub numeric_max:   Option<f64>,
+    /// Supplementary AT description beyond the label (accesskit's
+    /// `description` field) — e.g. "Deletes this note permanently" on a
+    /// delete button whose visible/label text is just "Delete".
+    pub accessibility_hint: Option<String>,
+    /// Expanded/collapsed state for disclosure-style controls (accordion
+    /// headers, tree items, comboboxes). `None` → the control doesn't
+    /// support Expand/Collapse at all (most roles); `Some(_)` advertises
+    /// both the current state and the `Action::Expand`/`Action::Collapse`
+    /// gestures to the AT.
+    pub expanded: Option<bool>,
 
     //  Text alignment 
     /// `"left"` | `"center"` (default). Controls horizontal text origin.
@@ -2292,6 +2303,8 @@ fn parse_props(
     props.numeric_value  = get_num_prop(scope, obj, "numericValue").map(|v| v as f64);
     props.numeric_min    = get_num_prop(scope, obj, "numericMin").map(|v| v as f64);
     props.numeric_max    = get_num_prop(scope, obj, "numericMax").map(|v| v as f64);
+    props.accessibility_hint = get_str_prop(scope, obj, "accessibilityHint");
+    props.expanded           = get_bool_prop(scope, obj, "expanded");
     props.text_align    = get_str_prop(scope, obj, "textAlign");
     props.border_width  = get_num_prop(scope, obj, "borderWidth");
     props.border_color  = get_color_prop(scope, obj, "borderColor");

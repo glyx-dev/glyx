@@ -544,16 +544,20 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
                         // action needed here beyond letting that happen.
                     }
                     accesskit_winit::WindowEvent::ActionRequested(req) => {
-                        // Focus/Click/Increment/Decrement/SetValue(numeric) are
-                        // wired — Expand/Collapse/ScrollIntoView/text-selection
-                        // actions are not (see glyx-core/src/a11y.rs's module
-                        // doc comment for the full scope-limit list).
+                        // Focus/Click/Increment/Decrement/SetValue(numeric)/
+                        // Expand/Collapse are wired — ScrollIntoView (as an
+                        // AT-requested action) and text-selection actions
+                        // are not (see glyx-core/src/a11y.rs's module doc
+                        // comment for the full scope-limit list and why
+                        // ScrollIntoView specifically doesn't need this path).
                         let action = match req.action {
                             accesskit::Action::Focus => Some("focus"),
                             accesskit::Action::Click => Some("click"),
                             accesskit::Action::Increment => Some("increment"),
                             accesskit::Action::Decrement => Some("decrement"),
                             accesskit::Action::SetValue => Some("setValue"),
+                            accesskit::Action::Expand => Some("expand"),
+                            accesskit::Action::Collapse => Some("collapse"),
                             _ => None,
                         };
                         if let Some(action) = action {

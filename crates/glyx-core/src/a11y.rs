@@ -7,8 +7,12 @@
 //! between them is a compile error, not a runtime surprise).
 //!
 //! Known scope limits: `Action::Focus`/`Click`/`Increment`/`Decrement`/
-//! `SetValue` (numeric only) are wired; `Expand`/`Collapse`,
-//! `ScrollIntoView`, and text-selection actions are not. Role coverage is
+//! `SetValue` (numeric only)/`Expand`/`Collapse` are wired; text-selection
+//! actions are not. `ScrollIntoView` as an AT-requested action isn't wired
+//! here either, but the equivalent behavior now happens automatically
+//! whenever `Action::Focus` moves focus (see `layout::scroll_reveal_target`,
+//! called from `lib.rs`'s `AccessibilityAction` handler) — no separate
+//! `ActionRequested::ScrollIntoView` case was needed. Role coverage is
 //! View/Text/Pressable/TextInput/CheckBox/RadioButton/Switch/Slider/ComboBox
 //! — see `infer_role` below for the full list.
 
@@ -127,6 +131,12 @@ pub(super) fn build_tree(state: &PerWindowState) -> Option<TreeUpdate> {
         if let Some(l) = label {
             ax.set_label(l);
         }
+        // Supplementary description beyond the label — e.g. a delete button
+        // labeled "Delete" whose `accessibilityHint` explains the
+        // consequence ("Deletes this note permanently").
+        if let Some(hint) = node.props.accessibility_hint.clone() {
+            ax.set_description(hint);
+        }
 
         let children: Vec<AxId> = node.children.iter()
             .filter(|&&c| seen.contains(&c))
@@ -168,6 +178,14 @@ pub(super) fn build_tree(state: &PerWindowState) -> Option<TreeUpdate> {
             ax.add_action(Action::Increment);
             ax.add_action(Action::Decrement);
             ax.add_action(Action::SetValue);
+        }
+        // Disclosure-style controls (accordion headers, tree items,
+        // comboboxes) — `expanded` being set at all (regardless of value)
+        // is what advertises the state AND the Expand/Collapse gestures;
+        // a control that never sets it doesn't support them.
+        if let Some(expanded) = node.props.expanded {
+            ax.set_expanded(expanded);
+            ax.add_action(if expanded { Action::Collapse } else { Action::Expand });
         }
 
         nodes.push((AxId(id as u64), ax));

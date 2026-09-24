@@ -1598,11 +1598,12 @@ pub fn run(mut config: AppConfig) -> bool {
                     s.cursor_x = x as f32;
                     s.cursor_y = y as f32;
                     let target = hit_test_solid(s, s.cursor_x, s.cursor_y);
-                    s.runtime.push_event(InputEvent::CursorMoved {
-                        x: s.cursor_x,
-                        y: s.cursor_y,
-                        target,
-                    });
+                    // Coalescing push (Work Item 10) — see
+                    // `JsRuntime::push_cursor_moved`'s doc comment. Collapses
+                    // multiple cursor moves arriving within one rendered
+                    // frame into a single queued event instead of one per
+                    // native motion notification.
+                    s.runtime.push_cursor_moved(s.cursor_x, s.cursor_y, target);
 
                     // Scrollbar thumb drag
                     if let Some(ref drag) = s.scrollbar_drag {
@@ -1839,13 +1840,14 @@ pub fn run(mut config: AppConfig) -> bool {
                                 }
                             }
                         }
-                        // Increment/Decrement/SetValue don't have a generic
-                        // scene-graph meaning (unlike click, which is just a
-                        // synthesized mouse event) — the actual step/range
-                        // logic lives in the JS control (e.g. Slider knows
-                        // its own min/max/step), so these are just forwarded
-                        // for JS's a11yValueRegistry to act on.
-                        "increment" | "decrement" | "setValue" => {
+                        // Increment/Decrement/SetValue/Expand/Collapse don't
+                        // have a generic scene-graph meaning (unlike click,
+                        // which is just a synthesized mouse event) — the
+                        // actual behavior lives in the JS control (e.g.
+                        // Slider knows its own step; an accordion knows what
+                        // "expanded" should render as), so these are just
+                        // forwarded for JS's a11yValueRegistry to act on.
+                        "increment" | "decrement" | "setValue" | "expand" | "collapse" => {
                             if s.js_nodes.contains_key(&target) {
                                 s.runtime.push_event(InputEvent::AccessibilityValueChange {
                                     node_id: target,

@@ -389,6 +389,17 @@ export function setFocus(nodeId) {
 
 // ── Hit-test helpers ──────────────────────────────────────────────────────────
 
+// The node's REAL top-left for element-relative coordinates (`locationX`,
+// text-input click/drag offsets). `__glyx_getLayout`'s `x/y` are clipped to
+// the node's clip ancestor — right for "is the pointer over it" hit tests
+// (hitTest below), wrong as an origin: for a node half-scrolled out of a
+// ScrollView the clipped `y` is the clip edge, so every offset measured from
+// it was short by the scrolled-away amount and clicks landed on the wrong
+// line. `boxX/boxY` are the unclipped box (identical when not clipped);
+// the `?? x/y` fallback keeps older runtimes / test stubs working.
+function boxOriginX(layout) { return layout.boxX ?? layout.x; }
+function boxOriginY(layout) { return layout.boxY ?? layout.y; }
+
 function hitTest(nodeId, px, py) {
   if (pointerEventsNoneRegistry.has(nodeId)) return false;
   const layout = __glyx_getLayout(nodeId);
@@ -510,8 +521,8 @@ export function dispatchEvents() {
               const layout = __glyx_getLayout(pressableTarget);
               const pev = {
                 x: ev.x, y: ev.y,
-                locationX: layout ? ev.x - layout.x : 0,
-                locationY: layout ? ev.y - layout.y : 0,
+                locationX: layout ? ev.x - boxOriginX(layout) : 0,
+                locationY: layout ? ev.y - boxOriginY(layout) : 0,
               };
               // Right-click → onRightPress (if present); otherwise left → onPress.
               if (isRight) ph.onRightPress?.(pev);
@@ -541,11 +552,11 @@ export function dispatchEvents() {
                 && Math.abs(ev.x - lastClickX) <= DOUBLE_CLICK_PX
                 && Math.abs(ev.y - lastClickY) <= DOUBLE_CLICK_PX;
               if (isDoubleClick && ih.onDoubleClickAt) {
-                ih.onDoubleClickAt(ev.x - layout.x, ev.y - layout.y);
+                ih.onDoubleClickAt(ev.x - boxOriginX(layout), ev.y - boxOriginY(layout));
                 // Don't chain into a triple-click as another double-click.
                 lastClickTime = 0;
               } else {
-                ih.onClickAt?.(ev.x - layout.x, ev.y - layout.y);
+                ih.onClickAt?.(ev.x - boxOriginX(layout), ev.y - boxOriginY(layout));
                 lastClickTime   = now;
                 lastClickX      = ev.x;
                 lastClickY      = ev.y;
@@ -647,6 +658,15 @@ export function dispatchEvents() {
         break;
       }
 
+      case 'accessibilityTextSelection': {
+        // Screen reader set the selection in a text field (moving by
+        // character/word/line, or selecting with its own commands). Offsets
+        // are already mapped from AccessKit run positions to characters of
+        // the field's value natively; the field applies them like a drag.
+        inputRegistry.get(ev.nodeId)?.onSetSelection?.(ev.anchor, ev.focus);
+        break;
+      }
+
       case 'accessibilityValueChange': {
         const h = a11yValueRegistry.get(ev.nodeId);
         if (!h) break;
@@ -692,7 +712,7 @@ export function dispatchEvents() {
           const ih = inputRegistry.get(inputDragNodeId);
           if (ih && ih.onDragAt) {
             const layout = __glyx_getLayout(inputDragNodeId);
-            if (layout) ih.onDragAt(ev.x - layout.x, ev.y - layout.y);
+            if (layout) ih.onDragAt(ev.x - boxOriginX(layout), ev.y - boxOriginY(layout));
           }
         }
         break;

@@ -149,10 +149,17 @@ struct TinySkiaShared {
     /// Reusable pixel buffer — avoids a fresh 8 MB allocation every frame.
     pixmap:      Option<tiny_skia::Pixmap>,
     /// sRGB-converted copies of `peniko::ImageData` bytes, keyed by the source
-    /// blob's pointer identity — see `linear_premul_to_srgb_premul` below.
-    /// Avoids redoing the per-pixel conversion every frame for an unchanged
-    /// image (same convention as `Direct2DImageCache`).
-    image_cache: lru::LruCache<usize, Vec<u8>>,
+    /// blob's unique id (`Blob::id`) — see `linear_premul_to_srgb_premul`
+    /// below. Avoids redoing the per-pixel conversion every frame for an
+    /// unchanged image (same convention as `Direct2DImageCache`).
+    ///
+    /// NOT keyed by the bytes' address: that was the key originally, and
+    /// allocators reuse freed addresses — a camera/video frame freed and the
+    /// next same-sized frame allocated at the same address hit the old entry,
+    /// showing stale frames interleaved with live ones (and frames from before
+    /// a camera stop reappearing after restart). `Blob::id` comes from a global
+    /// counter and is never reused.
+    image_cache: lru::LruCache<u64, Vec<u8>>,
 }
 
 /// `peniko::ImageData` bytes are linear-premultiplied (`glyx-core/src/scene.rs`'s
@@ -171,24 +178,42 @@ fn linear_to_srgb_u8(v: u8) -> u8 {
     (srgb * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
+/// `linear_to_srgb_u8` for every input byte — a `powf` per channel per pixel
+/// is far too slow for camera/video frames, which are converted every frame.
+fn srgb_lut() -> &'static [u8; 256] {
+    static LUT: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| std::array::from_fn(|i| linear_to_srgb_u8(i as u8)))
+}
+
 fn linear_premul_to_srgb_premul(bytes: &[u8]) -> Vec<u8> {
     let mut out = bytes.to_vec();
+    linear_premul_to_srgb_premul_in_place(&mut out, false);
+    out
+}
+
+/// Converts in place; `swap_rb` also turns BGRA into RGBA in the same pass.
+fn linear_premul_to_srgb_premul_in_place(out: &mut [u8], swap_rb: bool) {
+    let lut = srgb_lut();
     for px in out.chunks_exact_mut(4) {
+        if swap_rb { px.swap(0, 2); }
         let a = px[3];
         if a == 0 { continue; }
+        if a == 255 {
+            // Opaque (every camera/video pixel): no un/re-premultiply needed.
+            px[0] = lut[px[0] as usize];
+            px[1] = lut[px[1] as usize];
+            px[2] = lut[px[2] as usize];
+            continue;
+        }
         let inv = 255.0 / a as f32;
         let lr = (px[0] as f32 * inv).min(255.0) as u8;
         let lg = (px[1] as f32 * inv).min(255.0) as u8;
         let lb = (px[2] as f32 * inv).min(255.0) as u8;
-        let sr = linear_to_srgb_u8(lr);
-        let sg = linear_to_srgb_u8(lg);
-        let sb = linear_to_srgb_u8(lb);
         let a16 = a as u16;
-        px[0] = ((sr as u16 * a16 + 127) / 255) as u8;
-        px[1] = ((sg as u16 * a16 + 127) / 255) as u8;
-        px[2] = ((sb as u16 * a16 + 127) / 255) as u8;
+        px[0] = ((lut[lr as usize] as u16 * a16 + 127) / 255) as u8;
+        px[1] = ((lut[lg as usize] as u16 * a16 + 127) / 255) as u8;
+        px[2] = ((lut[lb as usize] as u16 * a16 + 127) / 255) as u8;
     }
-    out
 }
 
 // ── TinySkiaFrame ─────────────────────────────────────────────────────────────
@@ -565,35 +590,51 @@ impl TinySkiaFrame {
         if self.culled(x, y, w, h) { return; }
         let (iw, ih) = (image.width, image.height);
         if iw == 0 || ih == 0 { return; }
-        let rgba = self.srgb_bytes(image);
+        let rgba = self.srgb_bytes(image, true);
         self.blit_scaled(&rgba, iw, ih, x, y, w, h);
     }
 
     /// Convert `image`'s linear-premultiplied (and possibly BGRA) bytes to
-    /// sRGB-premultiplied RGBA, memoized per source blob in `shared.image_cache`
-    /// — see `linear_premul_to_srgb_premul` above.
-    fn srgb_bytes(&mut self, image: &peniko::ImageData) -> Vec<u8> {
+    /// sRGB-premultiplied RGBA — see `linear_premul_to_srgb_premul` above.
+    /// With `cache`, memoized per source blob in `shared.image_cache`; without
+    /// it (live camera/video frames, each shown once) converted fresh and not
+    /// stored, so a stream can't flood the cache with hundreds of frames.
+    fn srgb_bytes(&mut self, image: &peniko::ImageData, cache: bool) -> Vec<u8> {
         let bytes = image.data.data();
-        let key = bytes.as_ptr() as usize;
-        if let Some(cached) = self.shared.image_cache.get(&key) {
-            return cached.clone();
+        let key = image.data.id();
+        if cache {
+            if let Some(cached) = self.shared.image_cache.get(&key) {
+                return cached.clone();
+            }
         }
         let converted = match image.format {
             peniko::ImageFormat::Bgra8 => {
                 let mut rgba = bytes.to_vec();
-                for px in rgba.chunks_exact_mut(4) { px.swap(0, 2); }
-                linear_premul_to_srgb_premul(&rgba)
+                linear_premul_to_srgb_premul_in_place(&mut rgba, true);
+                rgba
             }
             _ => linear_premul_to_srgb_premul(bytes),
         };
-        self.shared.image_cache.put(key, converted.clone());
+        if cache {
+            self.shared.image_cache.put(key, converted.clone());
+        }
         converted
     }
 
     pub fn draw_image_with_transform(&mut self, image: &peniko::ImageData, transform: Affine) {
+        self.draw_image_transformed(image, transform, true);
+    }
+
+    /// Like `draw_image_with_transform`, for a live camera/video frame: each
+    /// frame is a new image shown once, so its converted bytes aren't cached.
+    pub fn draw_frame_image(&mut self, image: &peniko::ImageData, transform: Affine) {
+        self.draw_image_transformed(image, transform, false);
+    }
+
+    fn draw_image_transformed(&mut self, image: &peniko::ImageData, transform: Affine, cache: bool) {
         let (iw, ih) = (image.width, image.height);
         if iw == 0 || ih == 0 { return; }
-        let bytes = self.srgb_bytes(image);
+        let bytes = self.srgb_bytes(image, cache);
 
         // kurbo Affine [a,b,c,d,e,f]:  x'=ax+cy+e, y'=bx+dy+f
         // tiny-skia from_row(sx,ky,kx,sy,tx,ty): x'=sx*x+kx*y+tx, y'=ky*x+sy*y+ty
@@ -1055,4 +1096,91 @@ impl TinySkiaRenderer {
     }
 
     pub fn try_save_pipeline_cache(&self) {}
+}
+
+#[cfg(test)]
+mod image_cache_tests {
+    #[test]
+    fn lut_conversion_matches_the_exact_formula() {
+        let px: Vec<u8> = (0..=255u8).flat_map(|v| [v, 255 - v, v / 2, 255]).collect();
+        let fast = super::linear_premul_to_srgb_premul(&px);
+        for (i, v) in (0..=255u8).enumerate() {
+            assert_eq!(fast[i * 4], super::linear_to_srgb_u8(v));
+            assert_eq!(fast[i * 4 + 1], super::linear_to_srgb_u8(255 - v));
+            assert_eq!(fast[i * 4 + 3], 255);
+        }
+    }
+
+    use super::*;
+
+    /// Bytes read through a raw pointer, so a test can put DIFFERENT content
+    /// at the SAME address — exactly what allocator reuse does to back-to-back
+    /// same-sized camera/video frames.
+    struct RawBytes(*const u8, usize);
+    unsafe impl Send for RawBytes {}
+    unsafe impl Sync for RawBytes {}
+    impl AsRef<[u8]> for RawBytes {
+        fn as_ref(&self) -> &[u8] { unsafe { std::slice::from_raw_parts(self.0, self.1) } }
+    }
+
+    fn image(bytes: std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>, w: u32, h: u32) -> peniko::ImageData {
+        peniko::ImageData {
+            data: peniko::Blob::new(bytes),
+            format: peniko::ImageFormat::Rgba8,
+            alpha_type: peniko::ImageAlphaType::Alpha,
+            width: w, height: h,
+        }
+    }
+
+    fn fill(buf: &mut [u8], rgba: [u8; 4]) {
+        for px in buf.chunks_exact_mut(4) { px.copy_from_slice(&rgba); }
+    }
+
+    fn center_pixel(frame: &TinySkiaFrame) -> [u8; 4] {
+        let p = frame.pixmap.pixel(2, 2).expect("in bounds");
+        [p.red(), p.green(), p.blue(), p.alpha()]
+    }
+
+    #[test]
+    fn a_new_image_at_a_reused_address_is_not_served_from_the_cache() {
+        // Regression: the cache was keyed by the bytes' address. A frame freed
+        // and the next one allocated at the same address hit the old entry, so
+        // camera/video showed stale frames mixed with live ones.
+        let mut buf = vec![0u8; 4 * 4 * 4];
+        let ptr = buf.as_mut_ptr();
+        let mut r = TinySkiaRenderer::new_cpu_only(4, 4);
+        let mut frame = r.begin_frame();
+
+        fill(&mut buf, [255, 0, 0, 255]);
+        let red = image(std::sync::Arc::new(RawBytes(ptr, buf.len())), 4, 4);
+        frame.draw_image_with_transform(&red, Affine::IDENTITY);
+        let first = center_pixel(&frame);
+
+        // Same address, new content — a different image.
+        fill(&mut buf, [0, 255, 0, 255]);
+        let green = image(std::sync::Arc::new(RawBytes(ptr, buf.len())), 4, 4);
+        frame.draw_image_with_transform(&green, Affine::IDENTITY);
+        let second = center_pixel(&frame);
+
+        assert!(first[0] > first[1], "first draw should be red: {first:?}");
+        assert!(second[1] > second[0], "second draw must show the NEW (green) content, got {second:?}");
+    }
+
+    #[test]
+    fn live_frames_do_not_accumulate_in_the_image_cache() {
+        let mut r = TinySkiaRenderer::new_cpu_only(4, 4);
+        let mut frame = r.begin_frame();
+        for i in 0..20u8 {
+            let mut buf = vec![0u8; 4 * 4 * 4];
+            fill(&mut buf, [i, 0, 0, 255]);
+            frame.draw_frame_image(&image(std::sync::Arc::new(buf), 4, 4), Affine::IDENTITY);
+        }
+        assert_eq!(frame.shared.image_cache.len(), 0, "stream frames must bypass the cache");
+
+        // A regular image is still cached (reused across frames).
+        let still = image(std::sync::Arc::new(vec![9u8; 4 * 4 * 4]), 4, 4);
+        frame.draw_image_with_transform(&still, Affine::IDENTITY);
+        frame.draw_image_with_transform(&still, Affine::IDENTITY);
+        assert_eq!(frame.shared.image_cache.len(), 1);
+    }
 }

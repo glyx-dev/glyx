@@ -21,6 +21,21 @@ fn is_focusable(node: &JsNode) -> bool {
     node.props.show_cursor.is_some() || node.props.pressable == Some(true)
 }
 
+/// The editor Text node INSIDE a text field (TextInput: an outer `textbox`
+/// view wrapping a `text` node with `showCursor` set). The field is the one
+/// focus target — it's what JS registers as the input — so its inner text
+/// must not be a second Tab stop. It used to be one: every TextInput took two
+/// Tab presses, and landing on the inner stop didn't focus the field at all
+/// (nothing is registered for that id).
+fn is_editor_text_of_focusable_parent(
+    nodes: &std::collections::HashMap<u32, JsNode>,
+    node:  &JsNode,
+) -> bool {
+    matches!(node.node_type, NodeType::Text)
+        && node.props.show_cursor.is_some()
+        && node.parent.and_then(|p| nodes.get(&p)).is_some_and(is_focusable)
+}
+
 /// BFS from `root` over `nodes`, collecting focusable ids in document order
 /// — the natural default Tab order. Pure function taking raw data so it's
 /// unit-testable without a full `PerWindowState`.
@@ -35,7 +50,7 @@ pub(super) fn focus_order(
     seen.insert(root);
     while let Some(id) = queue.pop_front() {
         if let Some(node) = nodes.get(&id) {
-            if is_focusable(node) {
+            if is_focusable(node) && !is_editor_text_of_focusable_parent(nodes, node) {
                 order.push(id);
             }
             for &child in node.children.iter() {
@@ -144,6 +159,22 @@ mod tests {
         pressable.props.pressable = Some(true);
         nodes.insert(2, pressable);
         assert_eq!(focus_order(&nodes, 0), vec![1, 2]);
+    }
+
+    #[test]
+    fn a_text_fields_inner_editor_text_is_not_a_second_tab_stop() {
+        // TextInput: outer `textbox` view (1) wrapping the editor Text (2,
+        // showCursor set). Only the field itself is a Tab stop — the inner
+        // node used to be a second one that didn't even focus the field.
+        let mut nodes = HashMap::new();
+        nodes.insert(0, node(None, &[1, 3], None));
+        nodes.insert(1, node(Some(0), &[2], Some("textbox")));
+        let mut inner = JsNode::new(NodeType::Text, NodeProps::default());
+        inner.parent = Some(1);
+        inner.props.show_cursor = Some(false);
+        nodes.insert(2, inner);
+        nodes.insert(3, node(Some(0), &[], Some("button")));
+        assert_eq!(focus_order(&nodes, 0), vec![1, 3]);
     }
 
     #[test]

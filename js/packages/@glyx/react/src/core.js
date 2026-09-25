@@ -299,7 +299,10 @@ export function ScrollView({
     if (id == null || typeof __glyx_getLayout === 'undefined') return;
     const l = __glyx_getLayout(id);
     if (l && typeof l.contentHeight === 'number' && l.contentHeight > 0) {
-      maxScrollRef.current = Math.max(0, l.contentHeight - l.height);
+      // Unclipped viewport height: contentHeight is measured natively from
+      // unclipped rects, so a clipped `height` (this ScrollView half-scrolled
+      // out of an outer one) would let the max scroll overshoot.
+      maxScrollRef.current = Math.max(0, l.contentHeight - (l.boxHeight ?? l.height));
     }
   }, []);
 
@@ -608,45 +611,69 @@ export function SelectableText({
   const text = typeof children === 'string' ? children
              : Array.isArray(children) ? children.join('') : String(children ?? '');
 
-  const nodeIdRef   = useRef(null);
+  const viewNodeIdRef  = useRef(null);
+  const textNodeIdRef  = useRef(null);
   const dragAnchor  = useRef(null);
   const [selStart, setSelStart] = useState(null);
   const [selEnd,   setSelEnd]   = useState(null);
 
+  // The inner Text node's shaping/placement props — spread into the Text
+  // element below AND passed to the native hit-test, so a click resolves
+  // with exactly what was rendered (see glyx-runtime's `text_props`).
+  const textHitProps = { fontSize, textAlign };
+
   // Stale-closure refs so event callbacks always see current values.
   const isSelectableRef = useRef(isSelectable);
-  const textRef         = useRef({ text, fontSize, selStart, selEnd });
+  const textRef         = useRef({ text, textHitProps, selStart, selEnd });
   useEffect(() => {
     isSelectableRef.current = isSelectable;
-    textRef.current         = { text, fontSize, selStart, selEnd };
+    textRef.current         = { text, textHitProps, selStart, selEnd };
   });
 
-  // Convert window-absolute x → character index.
-  function charAtAbsX(absX) {
-    if (typeof __glyx_text_char_at_x === 'undefined') return 0;
-    const id = nodeIdRef.current;
-    if (id === null) return 0;
+  // Convert window-absolute (x, y) → character index.
+  //
+  // Measured from the inner TEXT node (where the glyphs render, not the
+  // wrapper View), using its UNCLIPPED box (`boxX/boxY`) so a SelectableText
+  // half-scrolled out of a ScrollView still maps clicks to the right line.
+  // One native call then shapes + places the text exactly like the renderer
+  // (wrap width, alignment, vertical centering), so drag-selection spans
+  // soft-wrapped lines and clicks on centered/right text hit the glyph drawn.
+  function charAtAbsXY(absX, absY) {
+    const id = textNodeIdRef.current;
+    if (id === null || typeof __glyx_getLayout === 'undefined') return 0;
     const layout = __glyx_getLayout(id);
-    const localX = Math.max(0, absX - (layout ? layout.x : 0));
-    const { text: t, fontSize: fs } = textRef.current;
-    return __glyx_text_char_at_x(t, fs, 1e6, localX) | 0;
+    if (!layout) return 0;
+    const { text: t, textHitProps: props } = textRef.current;
+    const localX = absX - (layout.boxX ?? layout.x);
+    const localY = absY - (layout.boxY ?? layout.y);
+    if (typeof __glyx_text_pos_at !== 'undefined') {
+      return __glyx_text_pos_at(t, localX, localY, {
+        ...props,
+        boxWidth:  layout.boxWidth  ?? layout.width,
+        boxHeight: layout.boxHeight ?? layout.height,
+      }) | 0;
+    }
+    // Fallback (older runtime): single-line x-only approximation.
+    return (typeof __glyx_text_char_at_x !== 'undefined')
+      ? __glyx_text_char_at_x(t, props.fontSize, 1e6, Math.max(0, localX)) | 0
+      : 0;
   }
 
   // Mount: register both drag and pressable handlers once.
-  const _veloxOnMount = useCallback((id) => {
-    nodeIdRef.current = id;
+  const _glyxOnMount = useCallback((id) => {
+    viewNodeIdRef.current = id;
 
     registerDraggable(id, {
-      onDragStart({ x }) {
+      onDragStart({ x, y }) {
         if (!isSelectableRef.current) return;
-        const idx = charAtAbsX(x);
+        const idx = charAtAbsXY(x, y);
         dragAnchor.current = idx;
         setSelStart(idx);
         setSelEnd(idx);
       },
-      onDragMove({ x }) {
+      onDragMove({ x, y }) {
         if (!isSelectableRef.current) return;
-        const idx    = charAtAbsX(x);
+        const idx    = charAtAbsXY(x, y);
         const anchor = dragAnchor.current ?? idx;
         setSelStart(Math.min(anchor, idx));
         setSelEnd(Math.max(anchor, idx));
@@ -655,15 +682,22 @@ export function SelectableText({
     });
 
     registerPressable(id, {
-      onPress({ x }) {
+      onPress({ x, y }) {
         if (!isSelectableRef.current) return;
-        const idx = charAtAbsX(x);
+        const idx = charAtAbsXY(x, y);
         setSelStart(idx);
         setSelEnd(idx);
       },
       onPressIn() {}, onPressOut() {}, onHoverIn() {}, onHoverOut() {},
     });
   }, []); // No deps — reads from refs at call time.
+
+  // Capture the inner TEXT node id too — hit-testing must measure the node
+  // that actually renders the glyphs (its resolved width is what render.rs
+  // uses for the alignment shift), not the wrapper View.
+  const _textOnMount = useCallback((id) => {
+    textNodeIdRef.current = id;
+  }, []);
 
   // Ctrl/Cmd+C: copy selected text to clipboard.
   useEffect(() => {
@@ -684,13 +718,13 @@ export function SelectableText({
 
   return React.createElement(
     View,
-    { _veloxOnMount, style, ...rest },
+    { _glyxOnMount, style, ...rest },
     React.createElement(
       Text,
       {
-        fontSize,
+        _glyxOnMount: _textOnMount,
+        ...textHitProps,
         color,
-        textAlign,
         numberOfLines,
         selectionStart: hasSelection ? selStart : undefined,
         selectionEnd:   hasSelection ? selEnd   : undefined,

@@ -316,6 +316,17 @@ pub(super) struct PerWindowState {
     /// nothing changed (e.g. a blink-only caret redraw).
     #[cfg(feature = "a11y")]
     pub(super) a11y_dirty: bool,
+    /// Per text field (keyed by the field's node id): the screen-reader text
+    /// run bookkeeping (`glyx_text::TextAccess`). Must persist across tree
+    /// updates so run node ids stay stable while text is edited, and so an
+    /// AT's `SetTextSelection` (which names run ids) can be mapped back.
+    /// Entries for fields that disappear are dropped on the next tree build.
+    #[cfg(feature = "a11y")]
+    pub(super) a11y_text: std::collections::HashMap<u32, glyx_text::TextAccess>,
+    /// Next AccessKit id for a text-run node. Starts at `a11y::RUN_ID_BASE`,
+    /// far above any scene node id, so run ids never collide with node ids.
+    #[cfg(feature = "a11y")]
+    pub(super) a11y_next_run_id: u64,
     /// Sender to the persistent blink-timer thread (spawned lazily on first
     /// focused TextInput). Sending a deadline schedules one redraw at that
     /// instant; newer deadlines received while waiting replace the pending one.

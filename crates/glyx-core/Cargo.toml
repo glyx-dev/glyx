@@ -28,7 +28,7 @@ websocket = ["glyx-runtime/websocket"]
 updater  = ["glyx-runtime/updater"]
 shell    = ["glyx-runtime/shell"]
 webview  = ["glyx-runtime/webview", "dep:glyx-cap-abi"]
-a11y     = ["glyx-shell/a11y", "glyx-runtime/a11y", "dep:accesskit"]
+a11y     = ["glyx-shell/a11y", "glyx-runtime/a11y", "dep:accesskit", "glyx-text/accesskit"]
 
 [dependencies]
 glyx-gpu      = { path = "../glyx-gpu" }

@@ -1473,6 +1473,10 @@ pub fn run(mut config: AppConfig) -> bool {
                     a11y_update,
                     #[cfg(feature = "a11y")]
                     a11y_dirty: true, // force the first-ever tree push
+                    #[cfg(feature = "a11y")]
+                    a11y_text: std::collections::HashMap::new(),
+                    #[cfg(feature = "a11y")]
+                    a11y_next_run_id: a11y::RUN_ID_BASE,
                     cursor_blink_tx:       None,
                     perf:          shared_perf,
                     rss_bytes:     {
@@ -1579,6 +1583,17 @@ pub fn run(mut config: AppConfig) -> bool {
 
             // ── Resize ────────────────────────────────────────────────────
             ShellEvent::Resized { window_handle, width, height } => {
+                // Minimizing reports a 0×0 size (Windows/winit). That's not a
+                // layout the app should ever run at: treating it as a resize
+                // clamped the surface to 1×1, re-laid out the whole tree for a
+                // 1px-wide window and told JS the window was 0 wide — multiline
+                // text reflowed to one word per line, and on restore that
+                // collapsed layout was briefly drawn before the real size
+                // arrived. Keep the last real size instead; restoring to the
+                // same size is then a no-op, so nothing stale is ever shown.
+                if width == 0 || height == 0 {
+                    return;
+                }
                 if let Some(s) = windows.get_mut(&window_handle) {
                     let prev_w = s.gpu.width();
                     let prev_h = s.gpu.height();
@@ -1807,7 +1822,7 @@ pub fn run(mut config: AppConfig) -> bool {
 
             // ── Accessibility action requests (screen reader, etc.) ──────
             #[cfg(feature = "a11y")]
-            ShellEvent::AccessibilityAction { window_handle, target, action, numeric_value } => {
+            ShellEvent::AccessibilityAction { window_handle, target, action, numeric_value, text_selection } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
                     match action.as_str() {
                         "focus" => {
@@ -1847,6 +1862,28 @@ pub fn run(mut config: AppConfig) -> bool {
                         // Slider knows its own step; an accordion knows what
                         // "expanded" should render as), so these are just
                         // forwarded for JS's a11yValueRegistry to act on.
+                        // Screen reader moved/extended the selection in a text
+                        // field. Positions name AccessKit text-run nodes, which
+                        // only the field that built them can map back — try
+                        // the target first (usually the field itself), then
+                        // every exposed field (the target can be a run node).
+                        "setTextSelection" => {
+                            if let Some(sel) = text_selection {
+                                let candidates: Vec<u32> = std::iter::once(target)
+                                    .chain(s.a11y_text.keys().copied().filter(|&f| f != target))
+                                    .collect();
+                                for field in candidates {
+                                    if let Some((anchor, focus)) = a11y::selection_from_access(s, field, &sel) {
+                                        s.runtime.push_event(InputEvent::AccessibilityTextSelection {
+                                            node_id: field, anchor, focus,
+                                        });
+                                        s.a11y_dirty = true;
+                                        (s.request_redraw)();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         "increment" | "decrement" | "setValue" | "expand" | "collapse" => {
                             if s.js_nodes.contains_key(&target) {
                                 s.runtime.push_event(InputEvent::AccessibilityValueChange {
@@ -2390,7 +2427,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 // gated rather than unconditional.
                 #[cfg(feature = "a11y")]
                 if s.a11y_dirty {
-                    if let Some(update) = a11y::build_tree(s) {
+                    if let Some(update) = a11y::build_tree(&mut *s) {
                         (s.a11y_update.0)(update);
                     }
                     s.a11y_dirty = false;

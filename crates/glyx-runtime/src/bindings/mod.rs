@@ -334,6 +334,12 @@ pub enum InputEvent {
     /// "increment" / "decrement" / "setValue" / "expand" / "collapse";
     /// `numeric_value` is only set for "setValue".
     AccessibilityValueChange { node_id: u32, action: String, numeric_value: Option<f64> },
+    /// An assistive technology set the text selection in a text field (e.g.
+    /// a screen reader user moving by character/word or selecting text with
+    /// its own commands). `node_id` is the field (TextInput's outer view);
+    /// `anchor`/`focus` are character offsets into the field's value,
+    /// already mapped from AccessKit's run-node positions natively.
+    AccessibilityTextSelection { node_id: u32, anchor: u32, focus: u32 },
 }
 
 /// Callbacks for window control operations.
@@ -902,6 +908,11 @@ pub struct NodeProps {
     /// both the current state and the `Action::Expand`/`Action::Collapse`
     /// gestures to the AT.
     pub expanded: Option<bool>,
+    /// Set on a Text node ONLY while it is displaying placeholder text (its
+    /// field is empty, so the text drawn is the placeholder, not a value).
+    /// Screen readers then get an empty value plus this as the placeholder,
+    /// instead of hearing the placeholder read as if it were typed content.
+    pub placeholder: Option<String>,
 
     //  Text alignment 
     /// `"left"` | `"center"` (default). Controls horizontal text origin.
@@ -1563,6 +1574,7 @@ pub fn register_all(
     register!("__glyx_text_char_at_x", text_char_at_x_callback);
     register!("__glyx_text_cursor_x",  text_cursor_x_callback);
     register!("__glyx_text_pos_at",    text_pos_at_callback);
+    register!("__glyx_text_caret_at",  text_caret_at_callback);
 
     register!("__glyx_getWindowSize", get_window_size_callback);
     register!("__glyx_getScreenSize", get_screen_size_callback);
@@ -2305,6 +2317,7 @@ fn parse_props(
     props.numeric_max    = get_num_prop(scope, obj, "numericMax").map(|v| v as f64);
     props.accessibility_hint = get_str_prop(scope, obj, "accessibilityHint");
     props.expanded           = get_bool_prop(scope, obj, "expanded");
+    props.placeholder        = get_str_prop(scope, obj, "placeholder");
     props.text_align    = get_str_prop(scope, obj, "textAlign");
     props.border_width  = get_num_prop(scope, obj, "borderWidth");
     props.border_color  = get_color_prop(scope, obj, "borderColor");

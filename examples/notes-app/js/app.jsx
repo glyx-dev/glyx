@@ -1464,9 +1464,15 @@ function AudioDemoScreen() {
           <Text fontSize={16} width={inner - 100} height={22} style={{ color: C.text }}>Audio Playback</Text>
         </View>
 
-        <Text fontSize={12} width={inner} height={18} style={{ color: C.dim }}>
-          Requires <Text fontSize={12} style={{ color: C.accent }}>audio: true</Text> + <Text fontSize={12} style={{ color: C.accent }}>dialog: true</Text> in glyx.config.json
-        </Text>
+        {/* A row of Text nodes, not nested <Text>: Text flattens its children
+            to ONE string, so a nested <Text> element rendered as "[object Object]". */}
+        <View style={{ flexDirection: 'row', gap: 4, alignItems: 'center' }} width={inner} height={18}>
+          <Text fontSize={12} style={{ color: C.dim }}>Requires</Text>
+          <Text fontSize={12} style={{ color: C.accent }}>audio: true</Text>
+          <Text fontSize={12} style={{ color: C.dim }}>+</Text>
+          <Text fontSize={12} style={{ color: C.accent }}>dialog: true</Text>
+          <Text fontSize={12} style={{ color: C.dim }}>in glyx.config.json</Text>
+        </View>
 
         {/* Transport controls */}
         <View style={{ flexDirection: 'row', gap: 8 }} width={inner} height={36}>

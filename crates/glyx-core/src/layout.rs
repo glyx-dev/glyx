@@ -544,6 +544,18 @@ type ClipRect = Option<[f32; 4]>;
 /// never collides with a real id.
 pub(crate) const CONTENT_HEIGHT_KEY: u32 = 0x8000_0000;
 
+/// High-bit key marker: `id | UNCLIPPED_KEY` stores the node's on-screen rect
+/// BEFORE intersection with its clip ancestor — `[x, y, w, h]`, scroll-adjusted
+/// but not clipped. The plain `id` entry is deliberately clipped (a node
+/// half-scrolled out of a ScrollView must only be clickable where visible),
+/// but that moves a clipped node's reported `x/y` to the clip edge, so any
+/// JS math measuring from the node's real origin (text hit-testing, caret
+/// placement) lands on the wrong line/character. Only present while clipping
+/// actually changed the rect; `__glyx_getLayout` falls back to the plain
+/// entry otherwise. Mirrored as a literal in both engines' `__glyx_getLayout`
+/// bindings (glyx-runtime can't depend on glyx-core).
+pub(crate) const UNCLIPPED_KEY: u32 = 0x4000_0000;
+
 /// Nearest ancestor of `id` that clips/scrolls its children (`clip: true` or
 /// `overflow: hidden|scroll`), or `None` if `id` isn't inside one. Depth-bounded
 /// by `js_nodes.len()` — same cycle-guard pattern as `scene.rs`'s
@@ -677,6 +689,7 @@ fn scroll_walk(
     // (children are also hidden).
     if node.props.hidden.unwrap_or(false) {
         cache.insert(id, [-9999.0, -9999.0, 0.0, 0.0]);
+        cache.remove(&(id | UNCLIPPED_KEY));
         let child_ids: SmallVec<[u32; 4]> = node.children.iter().copied().collect();
         for child_id in child_ids {
             scroll_walk(child_id, nodes, resolved, scroll_y, clip_rect, cache);
@@ -686,6 +699,7 @@ fn scroll_walk(
 
     let visible_x = rl.x;
     let visible_y = (rl.y as f64 - scroll_y) as f32;
+    let unclipped = [visible_x, visible_y, rl.width, rl.height];
 
     // If this node is inside a clipping ancestor, check whether it is at least
     // partially within the clip bounds.  A node that is fully outside the clip
@@ -697,6 +711,7 @@ fn scroll_walk(
             || node_right <= cx || visible_x >= cx + cw
         {
             cache.insert(id, [-9999.0, -9999.0, 0.0, 0.0]);
+            cache.insert(id | UNCLIPPED_KEY, unclipped);
             // Still recurse so children that might themselves be clipped containers
             // also get their cache entries invalidated.
             let child_ids: SmallVec<[u32; 4]> = node.children.iter().copied().collect();
@@ -711,14 +726,23 @@ fn scroll_walk(
     // out of a ScrollView must only be hit-testable where it is actually
     // visible — otherwise scrolled content invisibly covers fixed chrome
     // (headers, tab bars) and steals its clicks.
-    if let Some([cx, cy, cw, ch]) = clip_rect {
+    let clipped = if let Some([cx, cy, cw, ch]) = clip_rect {
         let ix = visible_x.max(cx);
         let iy = visible_y.max(cy);
         let iw = (visible_x + rl.width).min(cx + cw) - ix;
         let ih = (visible_y + rl.height).min(cy + ch) - iy;
-        cache.insert(id, [ix, iy, iw.max(0.0), ih.max(0.0)]);
+        [ix, iy, iw.max(0.0), ih.max(0.0)]
     } else {
-        cache.insert(id, [visible_x, visible_y, rl.width, rl.height]);
+        unclipped
+    };
+    cache.insert(id, clipped);
+    // The un-intersected rect, only when clipping actually changed it (most
+    // nodes: never) — see `UNCLIPPED_KEY`. Removed otherwise so an entry from
+    // an earlier, scrolled frame can't outlive the clipping that produced it.
+    if clipped != unclipped {
+        cache.insert(id | UNCLIPPED_KEY, unclipped);
+    } else {
+        cache.remove(&(id | UNCLIPPED_KEY));
     }
 
     let overflows = matches!(node.props.overflow.as_deref(), Some("hidden" | "scroll"));
@@ -1002,6 +1026,33 @@ mod scroll_reveal_tests {
         let mut cache = HashMap::new();
         cache.insert(1 | CONTENT_HEIGHT_KEY, [0.0, 0.0, 0.0, 600.0]);
         (nodes, resolved, cache)
+    }
+
+    #[test]
+    fn scroll_walk_publishes_the_unclipped_rect_only_while_clipping_changes_it() {
+        // 1 = clip container at (0,0) 100x100; 2 = child straddling its bottom
+        // edge (y 50..150); 3 = child fully inside.
+        let mut nodes = HashMap::new();
+        let mut container = node_with_layout(None, &[2, 3], 1);
+        container.props.clip = Some(true);
+        nodes.insert(1, container);
+        nodes.insert(2, node_with_layout(Some(1), &[], 2));
+        nodes.insert(3, node_with_layout(Some(1), &[], 3));
+        let mut resolved = HashMap::new();
+        resolved.insert(NodeId::from(1u64), ResolvedLayout { x: 0.0, y: 0.0, width: 100.0, height: 100.0 });
+        resolved.insert(NodeId::from(2u64), ResolvedLayout { x: 0.0, y: 50.0, width: 100.0, height: 100.0 });
+        resolved.insert(NodeId::from(3u64), ResolvedLayout { x: 0.0, y: 0.0, width: 100.0, height: 20.0 });
+
+        let mut cache = HashMap::new();
+        scroll_walk(1, &nodes, &resolved, 0.0, None, &mut cache);
+        assert_eq!(cache[&2], [0.0, 50.0, 100.0, 50.0], "plain entry is the visible part");
+        assert_eq!(cache[&(2 | UNCLIPPED_KEY)], [0.0, 50.0, 100.0, 100.0], "full box published");
+        assert!(!cache.contains_key(&(3 | UNCLIPPED_KEY)), "unclipped node needs no extra entry");
+
+        // Child 2 moves fully inside: its stale unclipped entry must go.
+        resolved.insert(NodeId::from(2u64), ResolvedLayout { x: 0.0, y: 20.0, width: 100.0, height: 30.0 });
+        scroll_walk(1, &nodes, &resolved, 0.0, None, &mut cache);
+        assert!(!cache.contains_key(&(2 | UNCLIPPED_KEY)));
     }
 
     #[test]

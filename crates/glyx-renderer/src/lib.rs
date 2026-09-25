@@ -618,6 +618,19 @@ impl AnyFrame {
         }
     }
 
+    /// Draw a live camera/video frame. Every frame is a new image shown once,
+    /// so the CPU backends convert it without storing it in their image cache
+    /// (which would otherwise fill with hundreds of stale frames). Vello
+    /// uploads images per scene anyway, so it takes the normal path.
+    pub fn draw_frame_image(&mut self, image: &ImageData, transform: Affine) {
+        match self {
+            AnyFrame::Vello(f)    => f.draw_image_with_transform(image, transform),
+            AnyFrame::TinySkia(f) => f.draw_frame_image(image, transform),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.draw_frame_image(image, transform),
+        }
+    }
+
     /// Borrow the inner Vello scene mutably.
     /// Always guard with `supports_caching()` before calling.
     pub fn scene_mut(&mut self) -> &mut Scene {

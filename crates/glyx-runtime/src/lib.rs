@@ -144,6 +144,7 @@ pub mod cap_loader;
 #[cfg(feature = "v8")]
 pub mod runtime;
 pub mod runtime_trait;
+pub mod text_props;
 // V8-only: QuickJS has no equivalent to V8 heap snapshots (see
 // memory/quickjs-plan-status.md) — a quickjs-only build has no use for this.
 #[cfg(feature = "v8")]

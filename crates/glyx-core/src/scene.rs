@@ -546,6 +546,18 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 state.prev_resolved.remove(&id);
                 state.scene_cache.remove(&id);
                 state.scene_cache_new.remove(&id);
+                // Layout-cache entries (the rect `__glyx_getLayout` reads, plus
+                // the high-bit content-height / unclipped-rect entries). Node
+                // ids are never reused, so without this every removed node's
+                // entries stayed forever — unbounded growth for anything that
+                // churns nodes (VirtualizedList row recycling, route changes).
+                {
+                    let lc = state.runtime.layout_cache();
+                    let mut lc = lc.lock();
+                    lc.remove(&id);
+                    lc.remove(&(id | crate::layout::CONTENT_HEIGHT_KEY));
+                    lc.remove(&(id | crate::layout::UNCLIPPED_KEY));
+                }
                 // If a scrollbar drag was active on this node, cancel it so the
                 // stale node_id is never used for scroll updates after removal.
                 if state.scrollbar_drag.as_ref().is_some_and(|d| d.node_id == id) {
@@ -769,9 +781,12 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                             match media.encoder_open(&output_path, w, h, fps) {
                                 Ok(enc) => {
                                     let mut ok = true;
-                                    for (_, _, ref data) in &buffered {
-                                        if media.encoder_write_rgba(&enc, data).is_err() { ok = false; break; }
+                                    // drain(): the calibration frames (~4-8 MB each) are
+                                    // freed as they're written, not held all recording long.
+                                    for (_, _, data) in buffered.drain(..) {
+                                        if media.encoder_write_rgba(&enc, &data).is_err() { ok = false; break; }
                                     }
+                                    buffered.shrink_to_fit();
                                     if ok {
                                         for (_, _, data) in frame_rx.iter() {
                                             if media.encoder_write_rgba(&enc, &data).is_err() { ok = false; break; }
@@ -829,9 +844,10 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         };
 
                         let mut stdin = child.stdin.take().unwrap();
-                        for (_, _, ref data) in &buffered {
-                            if stdin.write_all(data).is_err() { break; }
+                        for (_, _, data) in buffered.drain(..) {
+                            if stdin.write_all(&data).is_err() { break; }
                         }
+                        drop(buffered);
                         while let Ok((_, _, data)) = frame_rx.recv() {
                             if stdin.write_all(&data).is_err() { break; }
                         }

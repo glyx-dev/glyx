@@ -367,36 +367,27 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
 
         NodeType::Text => {
             let text       = node.props.text.as_deref().unwrap_or("Text");
-            let font_size  = node.props.font_size.unwrap_or(16.0);
             let color      = node.props.color.unwrap_or([255, 255, 255, 255]);
-            let bold   = node.props.font_weight.as_deref() == Some("bold");
-            let italic = node.props.font_style.as_deref()  == Some("italic");
             let underline = node.props.text_decoration_line.as_deref() == Some("underline");
-            // Single-line input text (marked by textScrollX) must NEVER wrap:
-            // it's shaped unbounded and panned left by text_scroll_x, with the
-            // container clipping the overflow.  Shaping at the node width made
-            // long input text wrap like a textarea and threw off caret math
-            // (measure_to_cursor walks wrapped lines).  1e6 matches the JS
-            // side's __glyx_measure_text(…, 1e6) caret measurements.
-            //
-            // For normal Text, +1px guards against Taffy rounding shaving a
-            // sub-pixel off the measured width and wrapping the last word.
-            let single_line = node.props.text_scroll_x.is_some();
-            let max_width = if single_line {
-                1e6_f32
-            } else {
-                (rw as f32).max(1.0) + 1.0
-            };
-            // CSS default is left; center/right are opt-in via `textAlign`.
-            let align = node.props.text_align.as_deref();
+            // Shaping + placement come from the SAME mapping the JS hit-test
+            // bindings use (`glyx_runtime::text_props`) — see glyx-text's
+            // `TextBox` for the rules themselves (single-line inputs shaped
+            // unbounded and panned by textScrollX, +1px wrap guard, alignment
+            // shift, vertical centering except for multiline editors). Keeping
+            // one copy is what makes a click land on the glyph drawn under it.
+            let tstyle = glyx_runtime::text_props::text_style(&node.props);
+            let tbox   = glyx_runtime::text_props::text_box(&node.props, rw as f32, rh as f32);
+            let font_size   = tstyle.font_size;
+            let bold        = tstyle.bold;
+            let italic      = tstyle.italic;
+            let line_height = tstyle.line_height;
+            let max_width   = tbox.wrap_width();
             let show_cursor     = node.props.show_cursor.unwrap_or(false);
             let cursor_position = node.props.cursor_position.map(|p| p as usize);
             let selection_start = node.props.selection_start.map(|p| p as usize);
             let selection_end   = node.props.selection_end.map(|p| p as usize);
             let ime_preedit_start = node.props.ime_preedit_start.map(|p| p as usize);
             let ime_preedit_end   = node.props.ime_preedit_end.map(|p| p as usize);
-
-            let line_height = node.props.line_height;
 
             // LabelKey::new() is allocation-free (hashes text, packs fields).
             // Derive it twice instead of cloning — cheaper than a String clone.
@@ -406,28 +397,9 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             }
             let label = ctx.label_cache.get(&LabelKey::new(text, font_size, max_width, bold, italic, line_height)).unwrap();
 
-            let bw = rw;
-            let bh = rh;
-            // text_scroll_x > 0 shifts text left (caret-follow for single-line inputs).
-            let scroll_x = node.props.text_scroll_x.unwrap_or(0.0) as f64;
-            let tx = match align {
-                Some("center") => rx + (bw - label.width).max(0.0) / 2.0,
-                Some("right")  => rx + (bw - label.width).max(0.0),
-                _              => rx,   // left (CSS default)
-            } - scroll_x;
-            // Vertically center the text's line box within the node box. `draw_text`
-            // treats ty as the layout top (glyphs at ty + baseline), so standard
-            // line-box centering is (bh - text_height)/2. For content-sized boxes
-            // (bh ≈ text_height) this is ~0, leaving text at the top as before.
-            // EXCEPTION: multiline editors (cursor without single-line panning)
-            // are always TOP-aligned — centering makes the text drift down as
-            // content shrinks below the box height (e.g. while deleting).
-            let multiline_editor = show_cursor && !single_line;
-            let ty = if multiline_editor {
-                ry
-            } else {
-                ry + (bh - label.text_height).max(0.0) / 2.0
-            };
+            let (dx, dy) = tbox.origin(label.width as f32, label.text_height as f32);
+            let tx = rx + dx as f64;
+            let ty = ry + dy as f64;
 
             let label_width = label.width;
             // Cursor/selection positioned using font metrics (not the line-box)
@@ -621,7 +593,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                             glyx_renderer::peniko::kurbo::Affine::new([sx, 0.0, 0.0, sy, rx, ry])
                         };
                         ctx.frame.push_layer(rx, ry, rw, rh);
-                        ctx.frame.draw_image_with_transform(img, transform);
+                        ctx.frame.draw_frame_image(img, transform);
                         ctx.frame.pop_layer();
                     } else {
                         ctx.frame.fill_rect(rx, ry, rw, rh,
@@ -642,7 +614,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                         let sy = rh / ih;
                         let transform = glyx_renderer::peniko::kurbo::Affine::new([sx, 0.0, 0.0, sy, rx, ry]);
                         ctx.frame.push_layer(rx, ry, rw, rh);
-                        ctx.frame.draw_image_with_transform(img, transform);
+                        ctx.frame.draw_frame_image(img, transform);
                         ctx.frame.pop_layer();
                     } else {
                         // No frame yet — draw a black placeholder.

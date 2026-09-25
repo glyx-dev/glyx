@@ -741,6 +741,13 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
                     obj.set("y", y)?;
                     obj.set("width", w)?;
                     obj.set("height", h)?;
+                    // Full unclipped box — see V8's `get_layout_callback` doc
+                    // comment (bind_core.rs) and glyx-core's UNCLIPPED_KEY.
+                    let [bx, by, bw, bh] = cache.get(&(id | 0x4000_0000)).copied().unwrap_or([x, y, w, h]);
+                    obj.set("boxX", bx)?;
+                    obj.set("boxY", by)?;
+                    obj.set("boxWidth", bw)?;
+                    obj.set("boxHeight", bh)?;
                     if let Some(&[_, _, _, ch]) = cache.get(&(id | 0x8000_0000)) {
                         obj.set("contentHeight", ch)?;
                     }
@@ -802,17 +809,34 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         })?;
         globals.set("__glyx_text_cursor_x", cursor_x_fn)?;
     }
+    // Text hit-testing — same `opts` contract as V8's `text_pos_at_callback`
+    // (see bind_core.rs): the Text node's own props + `boxWidth`/`boxHeight`,
+    // parsed by the regular prop parser and mapped through `text_props`
+    // exactly like render.rs, so both engines and the renderer agree.
     {
         let text_measure = Arc::clone(&reg.text_measure);
-        let pos_at_fn = Function::new(ctx.clone(), move |text: String, font_size: Opt<f64>, max_width: Opt<f64>, x: Opt<f64>, y: Opt<f64>| -> u32 {
-            let font_size = font_size.0.unwrap_or(16.0) as f32;
-            let mw = max_width.0.unwrap_or(0.0);
-            let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
+        let pos_at_fn = Function::new(ctx.clone(), move |text: String, x: Opt<f64>, y: Opt<f64>, opts: Opt<Value<'js>>| -> u32 {
+            let (style, bx) = text_geometry_from_opts(opts.0);
             let x = x.0.unwrap_or(0.0) as f32;
             let y = y.0.unwrap_or(0.0) as f32;
-            text_measure.lock().pos_at_point(&text, font_size, max_width, x, y) as u32
+            text_measure.lock().hit_test(&text, &style, &bx, x, y).offset as u32
         })?;
         globals.set("__glyx_text_pos_at", pos_at_fn)?;
+    }
+    {
+        let text_measure = Arc::clone(&reg.text_measure);
+        let caret_at_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>, text: String, offset: Opt<f64>, opts: Opt<Value<'js>>| -> rquickjs::Result<rquickjs::Value<'js>> {
+            let (style, bx) = text_geometry_from_opts(opts.0);
+            let offset = offset.0.unwrap_or(0.0).max(0.0) as usize;
+            let c = text_measure.lock()
+                .caret_rect(&text, &style, &bx, glyx_text::TextPosition::new(offset));
+            let obj = Object::new(ctx)?;
+            obj.set("x", c.x as f64)?;
+            obj.set("y", c.y as f64)?;
+            obj.set("height", c.height as f64)?;
+            Ok(obj.into_value())
+        })?;
+        globals.set("__glyx_text_caret_at", caret_at_fn)?;
     }
 
     // ── Window control (no-ops if `window` is None, e.g. in tests) ─────
@@ -1599,6 +1623,25 @@ fn props_from_value(v: rquickjs::Value) -> NodeProps {
     parse_props_value(v)
 }
 
+/// `__glyx_text_pos_at` / `__glyx_text_caret_at` opts → shaping + placement,
+/// via the same `text_props` mapping render.rs uses (mirrors V8's
+/// `text_geometry_from_opts` in bind_core.rs).
+fn text_geometry_from_opts(opts: Option<rquickjs::Value>) -> (glyx_text::TextStyle, glyx_text::TextBox) {
+    let Some(v) = opts else {
+        let props = NodeProps::default();
+        return (crate::text_props::text_style(&props), crate::text_props::text_box(&props, 0.0, 0.0));
+    };
+    let (w, h) = match v.as_object() {
+        Some(o) => {
+            let num = |k: &str| o.get::<_, Option<f64>>(k).ok().flatten().unwrap_or(0.0) as f32;
+            (num("boxWidth"), num("boxHeight"))
+        }
+        None => (0.0, 0.0),
+    };
+    let props = parse_props_value(v);
+    (crate::text_props::text_style(&props), crate::text_props::text_box(&props, w, h))
+}
+
 /// Build the JS array of `{type, ...fields}` event objects that `events.js`'s
 /// `dispatchEvents()` consumes — mirrors V8's `poll_events_callback`
 /// object-construction 1:1, but constructs `rquickjs::Object`s directly
@@ -1682,6 +1725,12 @@ fn input_events_to_array<'js>(
             InputEvent::AccessibilityFocus { node_id } => {
                 obj.set("type", "accessibilityFocus")?;
                 obj.set("nodeId", *node_id as f64)?;
+            }
+            InputEvent::AccessibilityTextSelection { node_id, anchor, focus } => {
+                obj.set("type", "accessibilityTextSelection")?;
+                obj.set("nodeId", *node_id as f64)?;
+                obj.set("anchor", *anchor as f64)?;
+                obj.set("focus", *focus as f64)?;
             }
             InputEvent::AccessibilityValueChange { node_id, action, numeric_value } => {
                 obj.set("type", "accessibilityValueChange")?;
@@ -2214,6 +2263,21 @@ mod tests {
     }
 
     #[test]
+    fn get_layout_box_is_the_unclipped_rect_when_clipping_changed_it() {
+        let (_tokio_rt, mut rt) = new_runtime();
+        // Unclipped node: box* equals the plain rect.
+        rt.update_layout(7, 10.0, 20.0, 30.0, 40.0);
+        let plain = rt.eval("(l => [l.boxX, l.boxY, l.boxWidth, l.boxHeight].join(','))(__glyx_getLayout(7))").unwrap();
+        assert_eq!(plain.trim_matches('"'), "10,20,30,40");
+        // Clipped node (top 15px scrolled out of view): plain rect is the
+        // visible part, box* is the full rect at its real scrolled origin.
+        rt.update_layout(8, 10.0, 100.0, 30.0, 25.0);
+        rt.layout_cache().lock().insert(8 | 0x4000_0000, [10.0, 85.0, 30.0, 40.0]);
+        let clipped = rt.eval("(l => [l.y, l.height, l.boxY, l.boxHeight].join(','))(__glyx_getLayout(8))").unwrap();
+        assert_eq!(clipped.trim_matches('"'), "100,25,85,40");
+    }
+
+    #[test]
     fn measure_text_returns_positive_dimensions() {
         let (_tokio_rt, mut rt) = new_runtime();
         let out = rt.eval("JSON.stringify(__glyx_measure_text('hello', 16))").expect("eval should succeed");
@@ -2225,8 +2289,25 @@ mod tests {
         let (_tokio_rt, mut rt) = new_runtime();
         let out = rt.eval("typeof __glyx_text_char_at_x('hello', 16, 1e6, 5)").expect("eval should succeed");
         assert!(out.contains("number"), "got: {out}");
-        let out = rt.eval("typeof __glyx_text_pos_at('hello', 16, 1e6, 5, 0)").expect("eval should succeed");
+        let out = rt.eval("typeof __glyx_text_pos_at('hello', 5, 0, { fontSize: 16, boxWidth: 200, boxHeight: 20 })").expect("eval should succeed");
         assert!(out.contains("number"), "got: {out}");
+    }
+
+    #[test]
+    fn text_caret_at_round_trips_through_pos_at_with_the_nodes_own_props() {
+        // The opts object carries the Text node's own props (textAlign here)
+        // — centered text must round-trip caret → click → same offset.
+        let (_tokio_rt, mut rt) = new_runtime();
+        let out = rt.eval(
+            "(() => { const o = { fontSize: 16, textAlign: 'center', boxWidth: 300, boxHeight: 60 };\
+               const r = [];\
+               for (const off of [0, 3, 7, 11]) {\
+                 const c = __glyx_text_caret_at('hello world', off, o);\
+                 r.push(__glyx_text_pos_at('hello world', c.x, c.y + c.height / 2, o));\
+               }\
+               return r.join(','); })()"
+        ).expect("eval should succeed");
+        assert_eq!(out.trim_matches('"'), "0,3,7,11");
     }
 
     #[test]

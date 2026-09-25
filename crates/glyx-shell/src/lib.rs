@@ -142,17 +142,23 @@ pub enum ShellEvent {
     /// An assistive technology (screen reader, etc.) requested an action on
     /// a node — e.g. VoiceOver/Narrator's user pressing Enter on a focused
     /// button, or Tab-focusing into a field. `target` is the glyx node id
-    /// (accesskit's `NodeId` is just our u32 id widened to u64).
+    /// (accesskit's `NodeId` is just our u32 id widened to u64), or
+    /// `u32::MAX` when the target isn't a scene node (a text-run node, whose
+    /// ids live above `u32::MAX` — only meaningful for "setTextSelection",
+    /// which is resolved from `text_selection` instead).
     /// `action` is one of "focus" / "click" / "increment" / "decrement" /
-    /// "setValue". `numeric_value` is only set for "setValue" (from
+    /// "setValue" / "expand" / "collapse" / "setTextSelection".
+    /// `numeric_value` is only set for "setValue" (from
     /// `ActionData::NumericValue` — string `ActionData::Value` isn't wired,
     /// only sliders/numeric controls are operable this way for now).
+    /// `text_selection` is only set for "setTextSelection".
     #[cfg(feature = "a11y")]
     AccessibilityAction {
         window_handle: u32,
         target: u32,
         action: String,
         numeric_value: Option<f64>,
+        text_selection: Option<accesskit::TextSelection>,
     },
 }
 
@@ -315,6 +321,8 @@ where
         #[cfg(feature = "a11y")]
         a11y_rx,
         #[cfg(feature = "a11y")]
+        a11y_last:         HashMap::new(),
+        #[cfg(feature = "a11y")]
         a11y_tx,
     };
 
@@ -390,9 +398,27 @@ struct ShellApp {
     /// the receiver end lives on `a11y_rx` above.
     #[cfg(feature = "a11y")]
     a11y_tx:           std::sync::mpsc::Sender<(u32, accesskit::TreeUpdate)>,
+    /// Last full tree pushed per window. `update_if_active` DROPS updates
+    /// while no assistive technology is attached, and glyx-core only pushes
+    /// when the scene changes — so a screen reader started over an idle app
+    /// would see an empty placeholder forever. Replayed on activation.
+    #[cfg(feature = "a11y")]
+    a11y_last:         HashMap<u32, accesskit::TreeUpdate>,
 }
 
 impl ShellApp {
+    #[cfg(feature = "a11y")]
+    fn drain_a11y(&mut self) {
+        while let Ok((handle, update)) = self.a11y_rx.try_recv() {
+            if update.tree.is_some() {
+                self.a11y_last.insert(handle, update.clone());
+            }
+            if let Some(adapter) = self.a11y_adapters.get_mut(&handle) {
+                adapter.update_if_active(move || update);
+            }
+        }
+    }
+
     fn open_window(&mut self, event_loop: &ActiveEventLoop, handle: u32, attrs: WindowAttributes) {
         // accesskit_winit requires the adapter to be created BEFORE the window
         // is ever shown, so under the `a11y` feature we force the window
@@ -538,18 +564,24 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
                 match window_event {
                     accesskit_winit::WindowEvent::InitialTreeRequested => {
                         // WinitActivationHandler::request_initial_tree always
-                        // returns None (see accesskit_winit source) — the
-                        // platform adapter shows a placeholder until glyx-core's
-                        // next per-frame tree push arrives via `a11y_rx`. No
-                        // action needed here beyond letting that happen.
+                        // returns None, so the adapter shows a placeholder
+                        // until the next push. Earlier pushes were dropped
+                        // (adapter inactive), so replay the latest tree now.
+                        self.drain_a11y();
+                        log::debug!("[a11y] initial tree requested for window {handle}: cached={}", self.a11y_last.contains_key(&handle));
+                        if let (Some(adapter), Some(update)) =
+                            (self.a11y_adapters.get_mut(&handle), self.a11y_last.get(&handle))
+                        {
+                            let update = update.clone();
+                            adapter.update_if_active(move || update);
+                        }
                     }
                     accesskit_winit::WindowEvent::ActionRequested(req) => {
                         // Focus/Click/Increment/Decrement/SetValue(numeric)/
-                        // Expand/Collapse are wired — ScrollIntoView (as an
-                        // AT-requested action) and text-selection actions
-                        // are not (see glyx-core/src/a11y.rs's module doc
-                        // comment for the full scope-limit list and why
-                        // ScrollIntoView specifically doesn't need this path).
+                        // Expand/Collapse/SetTextSelection are wired —
+                        // ScrollIntoView (as an AT-requested action) is not
+                        // (see glyx-core/src/a11y.rs's module doc comment for
+                        // why it doesn't need this path).
                         let action = match req.action {
                             accesskit::Action::Focus => Some("focus"),
                             accesskit::Action::Click => Some("click"),
@@ -558,18 +590,32 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
                             accesskit::Action::SetValue => Some("setValue"),
                             accesskit::Action::Expand => Some("expand"),
                             accesskit::Action::Collapse => Some("collapse"),
+                            accesskit::Action::SetTextSelection => Some("setTextSelection"),
                             _ => None,
                         };
+                        // AccessKit 0.24+ addresses nodes as (tree, node).
+                        // glyx publishes exactly one tree per window (the
+                        // root tree), so a request for any other tree isn't
+                        // ours to handle.
+                        if req.target_tree != accesskit::TreeId::ROOT {
+                            return;
+                        }
                         if let Some(action) = action {
-                            let numeric_value = match req.data {
-                                Some(accesskit::ActionData::NumericValue(v)) => Some(v),
-                                _ => None,
+                            let (numeric_value, text_selection) = match req.data {
+                                Some(accesskit::ActionData::NumericValue(v)) => (Some(v), None),
+                                Some(accesskit::ActionData::SetTextSelection(sel)) => (None, Some(sel)),
+                                _ => (None, None),
                             };
+                            // Scene node ids fit in u32; text-run ids (glyx-core's
+                            // a11y RUN_ID_BASE and up) don't — never truncate
+                            // one into a bogus scene id.
+                            let target = u32::try_from(req.target_node.0).unwrap_or(u32::MAX);
                             (self.handler)(ShellEvent::AccessibilityAction {
                                 window_handle: handle,
-                                target: req.target.0 as u32,
+                                target,
                                 action: action.to_string(),
                                 numeric_value,
+                                text_selection,
                             });
                         }
                     }
@@ -581,11 +627,7 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         #[cfg(feature = "a11y")]
-        while let Ok((handle, update)) = self.a11y_rx.try_recv() {
-            if let Some(adapter) = self.a11y_adapters.get_mut(&handle) {
-                adapter.update_if_active(move || update);
-            }
-        }
+        self.drain_a11y();
     }
 
     fn window_event(

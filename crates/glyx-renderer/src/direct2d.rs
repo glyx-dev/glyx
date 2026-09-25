@@ -157,18 +157,32 @@ fn linear_premul_to_srgb_premul(bytes: &[u8]) -> Vec<u8> {
 /// at `finish_frame_d2d`, same shape as the font cache.
 #[derive(Default)]
 struct Direct2DImageCache {
-    bitmaps: HashMap<usize, ID2D1Bitmap>,
+    /// Keyed by the source blob's unique id (`Blob::id`, never reused) — NOT
+    /// the bytes' address, which the allocator reuses for the next same-sized
+    /// camera/video frame and made stale frames reappear (see skia.rs's
+    /// `image_cache` for the full story). Live frames bypass this map entirely
+    /// (`create`), so it only ever holds real, reused images.
+    bitmaps: HashMap<u64, ID2D1Bitmap>,
 }
 
 impl Direct2DImageCache {
     fn new() -> Self { Self::default() }
 
     fn get_or_create(&mut self, rt: &ID2D1RenderTarget, image: &peniko::ImageData) -> Option<ID2D1Bitmap> {
-        let bytes = image.data.data();
-        let key = bytes.as_ptr() as usize;
+        let key = image.data.id();
         if let Some(bmp) = self.bitmaps.get(&key) {
             return Some(bmp.clone());
         }
+        let bmp = Self::create(rt, image)?;
+        self.bitmaps.insert(key, bmp.clone());
+        Some(bmp)
+    }
+
+    /// Build a bitmap for `image` without caching it — for live camera/video
+    /// frames, each shown once. Caching those grew this (unbounded) map by one
+    /// GPU bitmap per frame.
+    fn create(rt: &ID2D1RenderTarget, image: &peniko::ImageData) -> Option<ID2D1Bitmap> {
+        let bytes = image.data.data();
         let rgba: Vec<u8> = match image.format {
             peniko::ImageFormat::Bgra8 => {
                 let mut b = bytes.to_vec();
@@ -187,11 +201,9 @@ impl Direct2DImageCache {
         };
         let size = D2D_SIZE_U { width: image.width, height: image.height };
         let pitch = image.width * 4;
-        let bmp = unsafe {
-            rt.CreateBitmap(size, Some(rgba.as_ptr() as *const core::ffi::c_void), pitch, &props as *const _).ok()?
-        };
-        self.bitmaps.insert(key, bmp.clone());
-        Some(bmp)
+        unsafe {
+            rt.CreateBitmap(size, Some(rgba.as_ptr() as *const core::ffi::c_void), pitch, &props as *const _).ok()
+        }
     }
 }
 
@@ -606,6 +618,18 @@ impl Direct2DFrame {
     pub fn draw_image_with_transform(&mut self, image: &peniko::ImageData, transform: kurbo::Affine) {
         if image.width == 0 || image.height == 0 { return; }
         let Some(bitmap) = self.image_cache.get_or_create(&self.rt, image) else { return };
+        self.draw_bitmap_transformed(&bitmap, image, transform);
+    }
+
+    /// Like `draw_image_with_transform`, for a live camera/video frame: the
+    /// bitmap is built for this draw and dropped, not cached.
+    pub fn draw_frame_image(&mut self, image: &peniko::ImageData, transform: kurbo::Affine) {
+        if image.width == 0 || image.height == 0 { return; }
+        let Some(bitmap) = Direct2DImageCache::create(&self.rt, image) else { return };
+        self.draw_bitmap_transformed(&bitmap, image, transform);
+    }
+
+    fn draw_bitmap_transformed(&mut self, bitmap: &ID2D1Bitmap, image: &peniko::ImageData, transform: kurbo::Affine) {
         let [a, b, c, d, e, f] = transform.as_coeffs();
         let matrix = windows_numerics::Matrix3x2 {
             M11: a as f32, M12: b as f32,
@@ -616,7 +640,7 @@ impl Direct2DFrame {
         unsafe {
             self.rt.SetTransform(&matrix as *const _);
             self.rt.DrawBitmap(
-                &bitmap,
+                bitmap,
                 Some(&dest as *const _),
                 1.0,
                 D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,

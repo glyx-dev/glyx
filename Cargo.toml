@@ -134,8 +134,8 @@ muda                = "0.19"
 wry                 = "0.50"
 
 # Accessibility (accesskit surfaces to NSAccessibility / UIAutomation / AT-SPI)
-accesskit           = "0.19"
-accesskit_winit     = "0.27"
+accesskit           = "0.24"
+accesskit_winit     = "0.33"
 
 # QuickJS (mobile-required, desktop-optional lightweight engine — see
 # glyx_rough_docs/QUICKJS_PERFORMANCE_PLAN.md). Mutually exclusive with `v8`

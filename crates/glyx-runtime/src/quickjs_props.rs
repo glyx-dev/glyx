@@ -139,6 +139,7 @@ pub(crate) fn parse_props_value(props: Value<'_>) -> NodeProps {
     out.numeric_max   = get_num(&obj, "numericMax").map(|n| n as f64);
     out.accessibility_hint = get_str(&obj, "accessibilityHint");
     out.expanded           = get_bool(&obj, "expanded");
+    out.placeholder        = get_str(&obj, "placeholder");
     out.text_align    = get_str(&obj, "textAlign");
     out.border_width  = get_num(&obj, "borderWidth");
     out.border_color  = get_color(&obj, "borderColor");
@@ -296,6 +297,7 @@ mod tests {
             role: 'button', ariaLabel: 'Submit', checked: true,
             numericValue: 7.5, numericMin: 0, numericMax: 10,
             accessibilityHint: 'Deletes this note permanently', expanded: true,
+            placeholder: 'Search notes',
             textAlign: 'center', borderWidth: 2, borderColor: '#0000ff',
             clip: true, scrollOffsetY: 100, imageId: 42, resizeMode: 'cover',
             zIndex: -3, draggable: true, pressable: true, testID: 'submit-btn',
@@ -361,6 +363,7 @@ mod tests {
             numeric_max: Some(10.0),
             accessibility_hint: Some("Deletes this note permanently".to_string()),
             expanded: Some(true),
+            placeholder: Some("Search notes".to_string()),
             text_align: Some("center".to_string()),
             border_width: Some(2.0),
             border_color: Some([0, 0, 255, 255]),

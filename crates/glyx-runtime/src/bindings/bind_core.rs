@@ -71,7 +71,7 @@ pub fn js_log(
     }
 }
 
-// â”€â”€ __glyx_pollEvents â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// __glyx_pollEvents
 //
 // Returns a JS Array of event objects. Each object has a `type` string
 // plus type-specific fields:
@@ -188,6 +188,12 @@ pub fn poll_events_callback(
                 set_str!("type", "accessibilityFocus");
                 set_num!("nodeId", node_id);
             }
+            InputEvent::AccessibilityTextSelection { node_id, anchor, focus } => {
+                set_str!("type", "accessibilityTextSelection");
+                set_num!("nodeId", node_id);
+                set_num!("anchor", anchor);
+                set_num!("focus", focus);
+            }
             InputEvent::AccessibilityValueChange { node_id, action, numeric_value } => {
                 set_str!("type", "accessibilityValueChange");
                 set_num!("nodeId", node_id);
@@ -234,10 +240,19 @@ pub fn poll_events_callback(
     rv.set(array.into());
 }
 
-// â”€â”€ __glyx_getLayout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── __glyx_getLayout ──────────────────────────────────────────────────────────
 //
-// Returns `{ x, y, width, height }` for the given node id,
-// or `null` if the node has not been laid out yet.
+// Returns `{ x, y, width, height, boxX, boxY, boxWidth, boxHeight }` for the
+// given node id, or `null` if the node has not been laid out yet.
+//
+// `x/y/width/height` are the on-screen rect INTERSECTED with the node's clip
+// ancestor (what's actually visible/clickable — used for hit-testing). `box*`
+// is the node's full box, scroll-adjusted but NOT clipped: measure from these
+// when the math needs the node's real origin/size (text hit-testing, caret
+// placement) — for a node half-scrolled out of a ScrollView the clipped `y`
+// is the clip edge, not where its content starts. Identical when unclipped.
+// See glyx-core layout.rs UNCLIPPED_KEY (mirrored here as a literal).
+const UNCLIPPED_KEY: u32 = 0x4000_0000;
 
 pub fn get_layout_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -266,6 +281,11 @@ pub fn get_layout_callback(
         set_num!("y",      y);
         set_num!("width",  w);
         set_num!("height", h);
+        let [bx, by, bw, bh] = cache.get(&(id | UNCLIPPED_KEY)).copied().unwrap_or([x, y, w, h]);
+        set_num!("boxX",      bx);
+        set_num!("boxY",      by);
+        set_num!("boxWidth",  bw);
+        set_num!("boxHeight", bh);
         // Clip (scroll) nodes publish measured content height under the
         // high-bit key (see glyx-core layout.rs CONTENT_HEIGHT_KEY).
         if let Some(&[_, _, _, ch]) = cache.get(&(id | 0x8000_0000)) {
@@ -277,7 +297,7 @@ pub fn get_layout_callback(
     }
 }
 
-// â”€â”€ __glyx_measure_text â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// __glyx_measure_text
 //
 // Returns `{ width, height }` (logical px) for `text` shaped at `fontSize`,
 // wrapped to `maxWidth` (pass a large value like 1e6 for single-line). Used for
@@ -323,7 +343,7 @@ pub fn measure_text_callback(
     rv.set(obj.into());
 }
 
-// â”€â”€ __glyx_text_char_at_x â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// __glyx_text_char_at_x
 //
 // Returns the character index (0-based) nearest to `x` pixels from the left
 // edge of `text` shaped at `fontSize` / `maxWidth`. Used by SelectableText for
@@ -391,11 +411,39 @@ pub fn text_cursor_x_callback(
     rv.set(v8::Number::new(scope, x as f64).into());
 }
 
-// 2-D caret hit-test for WRAPPED text: returns the character index nearest to
-// point (x, y) in `text` shaped at `fontSize` and wrapped to `maxWidth`.
-// Handles soft wraps and '\n' — used by multiline TextInput click/drag.
+// ── Text hit-testing: __glyx_text_pos_at / __glyx_text_caret_at ──────────────
 //
-// Signature: __glyx_text_pos_at(text, fontSize, maxWidth, x, y) → number
+// `opts` is the Text node's OWN props object — the same keys passed to the
+// `text` host element (`fontSize`, `fontWeight`, `fontStyle`, `lineHeight`,
+// `textAlign`, `textScrollX`, `showCursor`) — plus `boxWidth`/`boxHeight`, the
+// node's box size. It's parsed by the regular prop parser and mapped through
+// `text_props` exactly like render.rs maps the node, so a hit-test resolves to
+// the glyph actually drawn: no JS-side alignment, centering, scroll or
+// wrap-width compensation (the previous positional signature needed callers
+// to replicate those rules, and each consumer got a different subset wrong).
+//
+// Coordinates are relative to the text box's top-left, in screen space.
+//
+//   __glyx_text_pos_at(text, x, y, opts)       → character offset
+//   __glyx_text_caret_at(text, offset, opts)   → { x, y, height } (box-relative)
+
+fn text_geometry_from_opts(
+    scope: &mut v8::ContextScope<'_, '_, v8::HandleScope<'_>>,
+    opts:  v8::Local<v8::Value>,
+) -> (glyx_text::TextStyle, glyx_text::TextBox) {
+    let props = parse_props(scope, opts);
+    let (w, h) = match opts.to_object(scope) {
+        Some(o) => (
+            get_num_prop(scope, o, "boxWidth").unwrap_or(0.0),
+            get_num_prop(scope, o, "boxHeight").unwrap_or(0.0),
+        ),
+        None => (0.0, 0.0),
+    };
+    (
+        crate::text_props::text_style(&props),
+        crate::text_props::text_box(&props, w, h),
+    )
+}
 
 pub fn text_pos_at_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -408,18 +456,42 @@ pub fn text_pos_at_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let text      = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
-    let font_size = args.get(1).number_value(scope).unwrap_or(16.0) as f32;
-    let mw        = args.get(2).number_value(scope).unwrap_or(0.0);
-    let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
-    let x         = args.get(3).number_value(scope).unwrap_or(0.0) as f32;
-    let y         = args.get(4).number_value(scope).unwrap_or(0.0) as f32;
+    let text = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
+    let x    = args.get(1).number_value(scope).unwrap_or(0.0) as f32;
+    let y    = args.get(2).number_value(scope).unwrap_or(0.0) as f32;
+    let (style, bx) = text_geometry_from_opts(scope, args.get(3));
 
-    let idx = state.text_measure.borrow_mut().pos_at_point(&text, font_size, max_width, x, y);
-    rv.set(v8::Number::new(scope, idx as f64).into());
+    let pos = state.text_measure.borrow_mut().hit_test(&text, &style, &bx, x, y);
+    rv.set(v8::Number::new(scope, pos.offset as f64).into());
 }
 
-// â”€â”€ Sync binding: __glyx_getEnv â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+pub fn text_caret_at_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let text   = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
+    let offset = args.get(1).number_value(scope).unwrap_or(0.0).max(0.0) as usize;
+    let (style, bx) = text_geometry_from_opts(scope, args.get(2));
+
+    let c = state.text_measure.borrow_mut()
+        .caret_rect(&text, &style, &bx, glyx_text::TextPosition::new(offset));
+    let obj = v8::Object::new(scope);
+    for (key, val) in [("x", c.x), ("y", c.y), ("height", c.height)] {
+        let k = v8::String::new(scope, key).unwrap();
+        let v = v8::Number::new(scope, val as f64);
+        obj.set(scope, k.into(), v.into());
+    }
+    rv.set(obj.into());
+}
+
+// Sync binding: __glyx_getEnv
 //
 // Returns the value of an environment variable as a string, or JS `null` if
 // the variable is absent OR the name is not in the `env.allow` capability list.
@@ -452,7 +524,7 @@ pub fn get_env_callback(
     }
 }
 
-// â”€â”€ Async binding: __glyx_readFile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Async binding: __glyx_readFile
 
 pub fn read_file_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -493,7 +565,7 @@ pub fn read_file_callback(
     });
 }
 
-// â”€â”€ Async binding: __glyx_readFileBytes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Async binding: __glyx_readFileBytes
 //
 // Reads a file as raw bytes and returns a base64-encoded string.
 // Used for binary files (images, PDFs, etc.) before uploading via fetch multipart.
@@ -534,7 +606,7 @@ pub fn read_file_bytes_callback(
     });
 }
 
-// â”€â”€ Scene graph bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Scene graph bindings
 
 pub fn create_node_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -818,7 +890,7 @@ pub fn has_a11y_callback(
     rv.set(v8::Boolean::new(scope, true).into());
 }
 
-// â”€â”€ Window control bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Window control bindings
 
 pub fn get_window_size_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,

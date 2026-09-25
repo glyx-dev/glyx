@@ -122,6 +122,15 @@ use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees
 use focus::{focus_order, next_focus, sort_by_position};
 use layout::{recompute_layout, update_scroll_positions, scroll_reveal_target};
 
+/// Named-pipe path for single-instance IPC. Pipe names MUST start with
+/// `\\.\pipe\` (two leading backslashes); a single one is an invalid path, so
+/// creating the pipe failed (os error 123) and single-instance + deep-link
+/// hand-off never worked on Windows.
+#[cfg(target_os = "windows")]
+fn windows_pipe_name(app_name: &str) -> String {
+    format!(r"\\.\pipe\glyx-{app_name}")
+}
+
 // ── F1: Windows named-pipe DACL restricted to current user ───────────────────
 //
 // Creates a SECURITY_DESCRIPTOR with a DACL that grants GENERIC_ALL only to
@@ -821,7 +830,7 @@ pub fn run(mut config: AppConfig) -> bool {
     // (Linux/macOS) instead of TCP.  Named IPC has no discoverable port and no
     // race window between reading the port file and connecting.
     //
-    //   Windows: \.\pipe\glyx-{app_name}
+    //   Windows: \\.\pipe\glyx-{app_name}
     //   Unix:    /tmp/.glyx-{app_name}.sock  (or $XDG_RUNTIME_DIR/... if set)
     //
     // The variable carries the IPC name so the async listener can be created
@@ -849,7 +858,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     .unwrap_or_else(|| "glyx-app".to_string());
 
                 #[cfg(target_os = "windows")]
-                let ipc_name = format!(r"\.\pipe\glyx-{}", app_name);
+                let ipc_name = windows_pipe_name(&app_name);
 
                 #[cfg(not(target_os = "windows"))]
                 let ipc_name = {
@@ -3217,6 +3226,12 @@ mod tests {
 
         let (cfg, _) = apply(r#"{ "window": { "startupMode": "fullscreen" } }"#);
         assert_eq!(cfg.startup_mode, glyx_shell::StartupMode::Fullscreen);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_pipe_names_use_the_pipe_namespace() {
+        assert_eq!(windows_pipe_name("notes-app"), r"\\.\pipe\glyx-notes-app");
     }
 
     #[test]

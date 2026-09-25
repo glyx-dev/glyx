@@ -12,6 +12,7 @@ use super::*;
 fn is_focusable(node: &JsNode) -> bool {
     if node.props.disabled == Some(true) { return false; }
     if node.props.pointer_events.as_deref() == Some("none") { return false; }
+    if let Some(f) = node.props.focusable { return f; }
     if let Some(role) = node.props.role.as_deref() {
         return matches!(
             role,
@@ -139,6 +140,16 @@ mod tests {
     fn focus_order_visits_focusable_nodes_in_document_order_and_skips_disabled() {
         let nodes = sample_tree();
         assert_eq!(focus_order(&nodes, 0), vec![1, 3]);
+    }
+
+    #[test]
+    fn focusable_prop_adds_and_removes_tab_stops() {
+        let mut chart = node(Some(0), &[], Some("figure"));
+        chart.props.focusable = Some(true);
+        assert!(is_focusable(&chart));
+        let mut button = node(Some(0), &[], Some("button"));
+        button.props.focusable = Some(false);
+        assert!(!is_focusable(&button));
     }
 
     #[test]

@@ -507,6 +507,34 @@ impl Direct2DFrame {
         unsafe { self.rt.FillGeometry(&geometry, &brush, None); }
     }
 
+    /// `fill_path` with any brush. Linear gradients are native D2D brushes;
+    /// other gradient kinds fall back to their first stop's colour.
+    pub fn fill_path_with_brush(&mut self, pts: &[f32], brush: &peniko::Brush) {
+        let grad = match brush {
+            peniko::Brush::Solid(c) => return self.fill_path(pts, *c),
+            peniko::Brush::Gradient(g) => g,
+            _ => return,
+        };
+        let Some(geometry) = self.build_path_geometry(pts, true) else { return };
+        match &grad.kind {
+            peniko::GradientKind::Linear(pos) => {
+                let Some(stops) = self.gradient_stops(grad) else { return };
+                let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                    startPoint: windows_numerics::Vector2 { X: pos.start.x as f32, Y: pos.start.y as f32 },
+                    endPoint:   windows_numerics::Vector2 { X: pos.end.x   as f32, Y: pos.end.y   as f32 },
+                };
+                let Ok(gb) = (unsafe { self.rt.CreateLinearGradientBrush(&props as *const _, None, &stops) }) else { return };
+                unsafe { self.rt.FillGeometry(&geometry, &gb, None); }
+            }
+            _ => {
+                if let Some(first) = grad.stops.first() {
+                    let Some(b) = self.solid_brush(first.color.to_alpha_color()) else { return };
+                    unsafe { self.rt.FillGeometry(&geometry, &b, None); }
+                }
+            }
+        }
+    }
+
     pub fn stroke_path(&mut self, pts: &[f32], width: f64, closed: bool, color: peniko::Color) {
         let Some(geometry) = self.build_path_geometry(pts, closed) else { return };
         let Some(brush) = self.solid_brush(color) else { return };

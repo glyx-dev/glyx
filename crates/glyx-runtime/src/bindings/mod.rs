@@ -908,6 +908,17 @@ pub struct NodeProps {
     /// both the current state and the `Action::Expand`/`Action::Collapse`
     /// gestures to the AT.
     pub expanded: Option<bool>,
+    /// Explicit keyboard focusability (`focusable` prop): `Some(true)` makes
+    /// any node a Tab stop (a chart, a custom widget), `Some(false)` removes
+    /// one. `None` → inferred from the role / pressability.
+    pub focusable: Option<bool>,
+    /// `accessibilityLiveRegion`: `"polite"` | `"assertive"` | `"off"`.
+    /// Screen readers announce changes to this node's label as they happen
+    /// (a chart announcing the point under keyboard navigation).
+    pub live_region: Option<String>,
+    /// `accessibilityRoleDescription`: what a screen reader calls the role,
+    /// e.g. `"line chart"` instead of the generic `"figure"`.
+    pub role_description: Option<String>,
     /// Set on a Text node ONLY while it is displaying placeholder text (its
     /// field is empty, so the text drawn is the placeholder, not a value).
     /// Screen readers then get an empty value plus this as the placeholder,
@@ -1143,11 +1154,18 @@ pub enum CanvasCmd {
     FillCircle { cx: f32, cy: f32, r: f32, color: [u8; 4] },
     StrokeCircle { cx: f32, cy: f32, r: f32, color: [u8; 4], #[serde(rename = "lineWidth")] line_width: f32 },
     StrokeLine { x0: f32, y0: f32, x1: f32, y1: f32, color: [u8; 4], #[serde(rename = "lineWidth")] line_width: f32 },
-    FillText   { text: String, x: f32, y: f32, #[serde(rename = "fontSize")] font_size: f32, color: [u8; 4] },
+    /// `y` is the TOP of the text box. `bold` from `ctx.fontWeight`.
+    FillText   { text: String, x: f32, y: f32, #[serde(rename = "fontSize")] font_size: f32, color: [u8; 4], #[serde(default)] bold: bool },
     /// Filled polygon from a flat `[x0,y0,x1,y1,€¦]` point list (auto-closed).
     FillPath   { points: Vec<f32>, color: [u8; 4] },
     /// Stroked polyline from a flat point list; `closed` joins last†’first.
     StrokePath { points: Vec<f32>, color: [u8; 4], #[serde(rename = "lineWidth")] line_width: f32, #[serde(default)] closed: bool },
+    /// Filled polygon painted with a linear gradient from `(x0,y0)` to
+    /// `(x1,y1)`; `stops` are `(offset 0..1, rgba)`, in order.
+    FillPathGradient { points: Vec<f32>, x0: f32, y0: f32, x1: f32, y1: f32, stops: Vec<(f32, [u8; 4])> },
+    /// Clip every following command to this rect until the matching `PopClip`.
+    PushClip   { x: f32, y: f32, w: f32, h: f32 },
+    PopClip,
 }
 
 //  Canvas 2D binary protocol 
@@ -1166,6 +1184,10 @@ mod canvas_op {
     pub const FILL_TEXT:     u32 = 6;
     pub const FILL_PATH:     u32 = 7;  // [op, pointCount, color, x0,y0,€¦]
     pub const STROKE_PATH:   u32 = 8;  // [op, pointCount, color, lineW, closed, x0,y0,€¦]
+    pub const FILL_PATH_GRAD: u32 = 9; // [op, pointCount, x0,y0,x1,y1, nStops, (off,color)×n, x0,y0,…]
+    pub const PUSH_CLIP:     u32 = 10; // [op, x, y, w, h]
+    pub const POP_CLIP:      u32 = 11; // [op]
+    pub const FILL_TEXT_BOLD: u32 = 12; // as FILL_TEXT, bold weight
 }
 
 /// Decode the binary command stream into `Vec<CanvasCmd>`.
@@ -1240,7 +1262,7 @@ pub(crate) fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_byt
                 });
                 i += 6;
             }
-            canvas_op::FILL_TEXT => {
+            canvas_op::FILL_TEXT | canvas_op::FILL_TEXT_BOLD => {
                 if i + 6 > slots { break; }
                 let off = f32_at(i + 4) as usize;
                 let len = f32_at(i + 5) as usize;
@@ -1253,7 +1275,7 @@ pub(crate) fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_byt
                     .to_string();
                 cmds.push(CanvasCmd::FillText {
                     text, x: f32_at(i), y: f32_at(i + 1), font_size: f32_at(i + 2),
-                    color: color_at(i + 3),
+                    color: color_at(i + 3), bold: op == canvas_op::FILL_TEXT_BOLD,
                 });
                 i += 6;
             }
@@ -1285,6 +1307,29 @@ pub(crate) fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_byt
                 });
                 i = start + npts;
             }
+            canvas_op::FILL_PATH_GRAD => {
+                // [count, x0,y0,x1,y1, nStops, (off,color)×n, points…]
+                if i + 6 > slots { break; }
+                let count  = f32_at(i) as usize;
+                let (x0, y0, x1, y1) = (f32_at(i + 1), f32_at(i + 2), f32_at(i + 3), f32_at(i + 4));
+                let nstops = f32_at(i + 5) as usize;
+                let stops_start = i + 6;
+                let stop_slots = match nstops.checked_mul(2) { Some(n) => n, None => break };
+                let start = match stops_start.checked_add(stop_slots) { Some(s) => s, None => break };
+                let npts = match count.checked_mul(2) { Some(n) => n, None => break };
+                if start.checked_add(npts).map_or(true, |end| end > slots) { break; }
+                let stops = (0..nstops)
+                    .map(|k| (f32_at(stops_start + k * 2), color_at(stops_start + k * 2 + 1)))
+                    .collect();
+                cmds.push(CanvasCmd::FillPathGradient { points: read_points(start, npts), x0, y0, x1, y1, stops });
+                i = start + npts;
+            }
+            canvas_op::PUSH_CLIP => {
+                if i + 4 > slots { break; }
+                cmds.push(CanvasCmd::PushClip { x: f32_at(i), y: f32_at(i + 1), w: f32_at(i + 2), h: f32_at(i + 3) });
+                i += 4;
+            }
+            canvas_op::POP_CLIP => cmds.push(CanvasCmd::PopClip),
             _ => break, // unknown opcode †’ corrupt/truncated stream
         }
     }
@@ -2339,6 +2384,9 @@ fn parse_props(
     props.numeric_max    = get_num_prop(scope, obj, "numericMax").map(|v| v as f64);
     props.accessibility_hint = get_str_prop(scope, obj, "accessibilityHint");
     props.expanded           = get_bool_prop(scope, obj, "expanded");
+    props.focusable          = get_bool_prop(scope, obj, "focusable");
+    props.live_region        = get_str_prop(scope, obj, "accessibilityLiveRegion");
+    props.role_description   = get_str_prop(scope, obj, "accessibilityRoleDescription");
     props.placeholder        = get_str_prop(scope, obj, "placeholder");
     props.text_align    = get_str_prop(scope, obj, "textAlign");
     props.border_width  = get_num_prop(scope, obj, "borderWidth");
@@ -2534,6 +2582,41 @@ mod tests {
     const RED: [u8; 4] = [255, 0, 0, 255];
 
     #[test]
+    fn binary_decodes_gradient_path_clip_and_bold_text() {
+        let strs = "Total".as_bytes();
+        let blue = [0, 0, 255, 128];
+        let cmds = Stream::new()
+            .f(canvas_op::PUSH_CLIP as f32).f(1.0).f(2.0).f(30.0).f(40.0)
+            .f(canvas_op::FILL_PATH_GRAD as f32)
+            .f(3.0)                                      // points
+            .f(0.0).f(0.0).f(0.0).f(10.0)                // x0 y0 x1 y1
+            .f(2.0).f(0.0).color(RED).f(1.0).color(blue) // 2 stops
+            .f(0.0).f(0.0).f(10.0).f(0.0).f(5.0).f(8.0)
+            .f(canvas_op::POP_CLIP as f32)
+            .f(canvas_op::FILL_TEXT_BOLD as f32).f(4.0).f(5.0).f(12.0).color(RED).f(0.0).f(5.0)
+            .decode(strs);
+        assert_eq!(cmds, vec![
+            CanvasCmd::PushClip { x: 1.0, y: 2.0, w: 30.0, h: 40.0 },
+            CanvasCmd::FillPathGradient {
+                points: vec![0.0, 0.0, 10.0, 0.0, 5.0, 8.0],
+                x0: 0.0, y0: 0.0, x1: 0.0, y1: 10.0,
+                stops: vec![(0.0, RED), (1.0, blue)],
+            },
+            CanvasCmd::PopClip,
+            CanvasCmd::FillText { text: "Total".into(), x: 4.0, y: 5.0, font_size: 12.0, color: RED, bold: true },
+        ]);
+    }
+
+    #[test]
+    fn binary_gradient_with_absurd_counts_stops_decoding_instead_of_panicking() {
+        let cmds = Stream::new()
+            .f(canvas_op::FILL_PATH_GRAD as f32)
+            .f(1.0e9).f(0.0).f(0.0).f(0.0).f(1.0).f(1.0e9)
+            .decode(&[]);
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
     fn binary_decodes_fill_rect() {
         let cmds = Stream::new()
             .f(canvas_op::FILL_RECT as f32)
@@ -2566,7 +2649,7 @@ mod tests {
             .f(5.0)  // length
             .decode(strs);
         assert_eq!(cmds, vec![CanvasCmd::FillText {
-            text: "world".into(), x: 5.0, y: 6.0, font_size: 14.0, color: RED,
+            text: "world".into(), x: 5.0, y: 6.0, font_size: 14.0, color: RED, bold: false,
         }]);
     }
 
@@ -2645,7 +2728,7 @@ mod tests {
             .f(0.0).f(0.0).f(14.0).color(RED).f(huge).f(huge)
             .decode(b"abc");
         assert_eq!(cmds, vec![CanvasCmd::FillText {
-            text: String::new(), x: 0.0, y: 0.0, font_size: 14.0, color: RED,
+            text: String::new(), x: 0.0, y: 0.0, font_size: 14.0, color: RED, bold: false,
         }]);
 
         // Path with a count that saturates (count*2 would overflow).
@@ -2667,7 +2750,7 @@ mod tests {
             .f(0.0).f(0.0).f(12.0).color(RED).f(100.0).f(5.0)
             .decode(b"short");
         assert_eq!(cmds, vec![CanvasCmd::FillText {
-            text: String::new(), x: 0.0, y: 0.0, font_size: 12.0, color: RED,
+            text: String::new(), x: 0.0, y: 0.0, font_size: 12.0, color: RED, bold: false,
         }]);
     }
 

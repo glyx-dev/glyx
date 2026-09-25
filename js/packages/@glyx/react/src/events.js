@@ -634,7 +634,14 @@ export function dispatchEvents() {
         if (focusedNodeId === null) break;
 
         const handlers = inputRegistry.get(focusedNodeId);
-        if (!handlers) break;
+        if (!handlers) {
+          // Not a text input: a focused control that handles keys itself
+          // (a chart's arrow-key navigation, say) via Pressable `onKeyDown`.
+          focusVisualRegistry.get(focusedNodeId)?.onKeyDown?.({
+            key: ev.key, ctrl: ctrlHeld, shift: shiftHeld,
+          });
+          break;
+        }
 
         handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld });
         break;
@@ -842,6 +849,22 @@ export function dispatchEvents() {
         pressableRegistry.get(newHoveredId)?.onHoverIn?.();
       }
       hoveredPressableId = newHoveredId;
+    }
+
+    // Continuous pointer tracking for the hovered pressable (charts'
+    // crosshair, sliders' hover preview…). Once per frame: cursor moves are
+    // already coalesced natively, so this never runs more than once a frame.
+    if (newHoveredId !== null) {
+      const h = pressableRegistry.get(newHoveredId);
+      if (h?.onPointerMove && typeof __glyx_getLayout !== 'undefined') {
+        const l = __glyx_getLayout(newHoveredId);
+        if (l) {
+          h.onPointerMove({
+            x: cursorX, y: cursorY,
+            locationX: cursorX - boxOriginX(l), locationY: cursorY - boxOriginY(l),
+          });
+        }
+      }
     }
   }
 }

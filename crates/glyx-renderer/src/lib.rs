@@ -494,6 +494,12 @@ impl FrameBuilder {
         self.scene.fill(vello::peniko::Fill::NonZero, Affine::IDENTITY, &Brush::Solid(color), None, &path);
     }
 
+    /// `fill_path` with any brush (a linear gradient for chart area fills).
+    pub fn fill_path_with_brush(&mut self, pts: &[f32], brush: &Brush) {
+        let Some(path) = bez_path(pts, true) else { return };
+        self.scene.fill(vello::peniko::Fill::NonZero, Affine::IDENTITY, brush, None, &path);
+    }
+
     /// Stroke a polyline from a flat point list; `closed` joins last→first.
     pub fn stroke_path(&mut self, pts: &[f32], width: f64, closed: bool, color: Color) {
         let Some(path) = bez_path(pts, closed) else { return };
@@ -750,6 +756,16 @@ impl AnyFrame {
             AnyFrame::TinySkia(f) => f.fill_path(pts, color),
             #[cfg(target_os = "windows")]
             AnyFrame::Direct2D(f) => f.fill_path(pts, color),
+        }
+    }
+
+    /// `fill_path` with any brush (a linear gradient for chart area fills).
+    pub fn fill_path_with_brush(&mut self, pts: &[f32], brush: &Brush) {
+        match self {
+            AnyFrame::Vello(f)    => f.fill_path_with_brush(pts, brush),
+            AnyFrame::TinySkia(f) => f.fill_path_with_brush(pts, brush),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.fill_path_with_brush(pts, brush),
         }
     }
 

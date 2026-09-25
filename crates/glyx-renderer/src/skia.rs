@@ -560,6 +560,22 @@ impl TinySkiaFrame {
                               self.xf, mask);
     }
 
+    /// `fill_path` with any brush (a linear gradient for chart area fills).
+    pub fn fill_path_with_brush(&mut self, pts: &[f32], brush: &peniko::Brush) {
+        let Some(path) = poly_path(pts, true) else { return };
+        let paint: tiny_skia::Paint<'static> = match brush {
+            peniko::Brush::Solid(c) => solid_paint(*c),
+            peniko::Brush::Gradient(g) => match gradient_shader(g) {
+                Some(shader) => tiny_skia::Paint { shader, anti_alias: true, ..Default::default() },
+                None => return,
+            },
+            _ => return,
+        };
+        self.ensure_mask();
+        let mask = self.current_mask.as_ref();
+        self.pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, self.xf, mask);
+    }
+
     pub fn stroke_path(&mut self, pts: &[f32], width: f64, closed: bool, color: peniko::Color) {
         let Some(path) = poly_path(pts, closed) else { return };
         let paint  = solid_paint(color);

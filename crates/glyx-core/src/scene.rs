@@ -247,9 +247,9 @@ fn rgba_premul_srgb_to_peniko(mut bytes: Vec<u8>, w: u32, h: u32) -> Option<peni
 
 /// Advance every active property transition and keyframe animation one
 /// frame, marking those nodes dirty so they actually re-render (values are
-/// changing with no new `SceneCommand` behind them). Finished animations are
-/// dropped (their node re-renders at its own style) unless they `fill:
-/// 'forwards'`, which stay but stop driving frames. Returns `true` if any transition is still
+/// changing with no new `SceneCommand` behind them). Finished animations
+/// settle (see `motion::Animation::tick`) rather than being dropped, so
+/// re-sending the same `animation` prop on a re-render doesn't replay them. Returns `true` if any transition is still
 /// running after this tick — the caller uses that to force a GPU render and
 /// schedule the next frame, since nothing else would otherwise wake the
 /// render loop mid-transition.
@@ -263,17 +263,11 @@ pub(crate) fn tick_transitions(state: &mut PerWindowState) -> bool {
         !finished
     });
     let mut running = false;
-    state.animations.retain(|&id, a| {
-        if a.settled { return true; }
-        dirty_nodes.insert(id);
-        if !a.finished(now) {
-            running = true;
-            return true;
-        }
-        // This frame draws the final state; forwards-fill keeps it after.
-        a.settled = true;
-        a.spec.fill_forwards
-    });
+    for (&id, a) in state.animations.iter_mut() {
+        let t = a.tick(now);
+        if t.dirty { dirty_nodes.insert(id); }
+        running |= t.running;
+    }
     running || !state.transitions.is_empty()
 }
 
@@ -283,7 +277,7 @@ pub(crate) fn tick_transitions(state: &mut PerWindowState) -> bool {
 fn sync_animation(state: &mut PerWindowState, id: u32, props: &NodeProps) {
     match motion::AnimSpec::from_props(props) {
         Some(spec) => {
-            if state.animations.get(&id).map_or(true, |a| a.spec != spec) {
+            if motion::needs_restart(state.animations.get(&id), &spec) {
                 state.animations.insert(id, motion::Animation { spec, start: Instant::now(), settled: false });
                 (state.request_redraw)();
             }

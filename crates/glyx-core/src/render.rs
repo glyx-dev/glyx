@@ -253,7 +253,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             }
 
             // ── Border ────────────────────────────────────────────────────
-            if let Some(bw) = node.props.border_width {
+            if let Some(bw) = node.props.border_width.filter(|w| *w > 0.0) {
                 let bc = eff_border.unwrap_or([80, 80, 120, 255]);
                 ctx.frame.stroke_rounded_rect(rx, ry, rw, rh, radius, bw as f64, apply_opacity(rgba_to_vello(bc), child_opacity));
             }
@@ -366,7 +366,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                         ctx.frame.pop_layer();
                     }
 
-                    if let Some(bw) = node.props.border_width {
+                    if let Some(bw) = node.props.border_width.filter(|w| *w > 0.0) {
                         let bc = eff_border.unwrap_or([80, 80, 120, 255]);
                         ctx.frame.stroke_rounded_rect(rx, ry, rw, rh, radius, bw as f64, apply_opacity(rgba_to_vello(bc), child_opacity));
                     }
@@ -557,20 +557,39 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             // Clip all canvas draw commands to the node's layout rect.
             ctx.frame.push_layer(rx, ry, rw, rh);
             if let Some(cmds) = ctx.canvas_cmds.get(&id) {
+                // Clip pushes still open, so a canvas with unbalanced
+                // pushClip/popClip can't leak clips into the rest of the frame.
+                let mut clip_depth = 0usize;
                 for cmd in cmds {
-                    // `fillText` needs the TextSystem to shape real glyphs, so it's
-                    // handled here (where ctx is available) rather than in the
-                    // frame-only `draw_canvas_cmd`. Everything else is frame-only.
-                    if let CanvasCmd::FillText { text, x, y, font_size, color } = cmd {
-                        let layout = ctx.text_sys.label(text, *font_size);
-                        ctx.frame.draw_text(
-                            &layout, rx + *x as f64, ry + *y as f64,
-                            apply_opacity(rgba_to_vello(*color), child_opacity),
-                        );
-                    } else {
-                        draw_canvas_cmd(ctx.frame, cmd, rx, ry);
+                    match cmd {
+                        // `fillText` needs the TextSystem to shape real glyphs, so
+                        // it's handled here (where ctx is available) rather than in
+                        // the frame-only `draw_canvas_cmd`.
+                        CanvasCmd::FillText { text, x, y, font_size, color, bold } => {
+                            let layout = if *bold {
+                                ctx.text_sys.styled_label(text, *font_size, f32::MAX, true, false, None)
+                            } else {
+                                ctx.text_sys.label(text, *font_size)
+                            };
+                            ctx.frame.draw_text(
+                                &layout, rx + *x as f64, ry + *y as f64,
+                                apply_opacity(rgba_to_vello(*color), child_opacity),
+                            );
+                        }
+                        CanvasCmd::PushClip { x, y, w, h } => {
+                            ctx.frame.push_layer(rx + *x as f64, ry + *y as f64, *w as f64, *h as f64);
+                            clip_depth += 1;
+                        }
+                        CanvasCmd::PopClip => {
+                            if clip_depth > 0 {
+                                ctx.frame.pop_layer();
+                                clip_depth -= 1;
+                            }
+                        }
+                        _ => draw_canvas_cmd(ctx.frame, cmd, rx, ry, child_opacity),
                     }
                 }
+                for _ in 0..clip_depth { ctx.frame.pop_layer(); }
             }
             ctx.frame.pop_layer();
         }
@@ -697,7 +716,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     }
 }
 
-fn draw_canvas_cmd(frame: &mut AnyFrame, cmd: &CanvasCmd, ox: f64, oy: f64) {
+fn draw_canvas_cmd(frame: &mut AnyFrame, cmd: &CanvasCmd, ox: f64, oy: f64, opacity: f32) {
     use CanvasCmd::*;
     match cmd {
         Clear => {
@@ -718,7 +737,7 @@ fn draw_canvas_cmd(frame: &mut AnyFrame, cmd: &CanvasCmd, ox: f64, oy: f64) {
         StrokeLine { x0, y0, x1, y1, color, line_width } => {
             frame.stroke_line(ox + *x0 as f64, oy + *y0 as f64, ox + *x1 as f64, oy + *y1 as f64, *line_width as f64, rgba_to_vello(*color));
         }
-        FillText { text, x, y, font_size, color } => {
+        FillText { text, x, y, font_size, color, .. } => {
             // Canvas text: draw a filled placeholder rect sized to the text.
             // Full Parley shaping requires a mutable TextSystem not available here.
             frame.fill_rect(ox + *x as f64, oy + *y as f64, *font_size as f64 * text.len() as f64 * 0.6, *font_size as f64 * 1.2, rgba_to_vello(*color));
@@ -731,6 +750,21 @@ fn draw_canvas_cmd(frame: &mut AnyFrame, cmd: &CanvasCmd, ox: f64, oy: f64) {
             let pts = offset_points(points, ox, oy);
             frame.stroke_path(&pts, *line_width as f64, *closed, rgba_to_vello(*color));
         }
+        FillPathGradient { points, x0, y0, x1, y1, stops } => {
+            let pts = offset_points(points, ox, oy);
+            let gradient = peniko::Gradient::new_linear(
+                peniko::kurbo::Point::new(ox + *x0 as f64, oy + *y0 as f64),
+                peniko::kurbo::Point::new(ox + *x1 as f64, oy + *y1 as f64),
+            ).with_stops(
+                stops.iter()
+                    .map(|(o, c)| (o.clamp(0.0, 1.0), apply_opacity(rgba_to_vello(*c), opacity)))
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            );
+            frame.fill_path_with_brush(&pts, &peniko::Brush::Gradient(gradient));
+        }
+        // Handled by the Canvas node's loop (they need clip bookkeeping).
+        PushClip { .. } | PopClip => {}
     }
 }
 

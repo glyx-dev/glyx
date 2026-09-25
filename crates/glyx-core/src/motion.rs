@@ -468,9 +468,28 @@ impl AnimSpec {
 pub(crate) struct Animation {
     pub spec:  AnimSpec,
     pub start: Instant,
-    /// A finished `fill: 'forwards'` animation that has drawn its final
-    /// frame: it keeps overriding, but no longer drives redraws.
+    /// Finished and has drawn its final frame; no longer drives redraws.
+    /// Kept (not removed) so an identical re-render doesn't replay it: with
+    /// `fill: 'forwards'` it keeps overriding with the last keyframe,
+    /// otherwise it's inert and the node shows its own style.
     pub settled: bool,
+}
+
+/// What one frame tick means for an animation.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Tick {
+    /// Its node must re-render this frame.
+    pub dirty:   bool,
+    /// It still needs future frames.
+    pub running: bool,
+}
+
+/// Whether props declaring `spec` must (re)start the animation: only when
+/// there's none yet or the spec changed. React re-sends identical props on
+/// every re-render (a live dashboard: every second), and those must not
+/// replay a finished entrance animation.
+pub(crate) fn needs_restart(existing: Option<&Animation>, spec: &AnimSpec) -> bool {
+    existing.map_or(true, |a| a.spec != *spec)
 }
 
 /// Interpolate one property across keyframe segments. `pick` reads the
@@ -498,6 +517,22 @@ fn sample_track<T: Clone>(
 }
 
 impl Animation {
+    /// Advance one frame. The frame it finishes on is still dirty (it draws
+    /// the end state); after that it's settled and costs nothing.
+    pub(crate) fn tick(&mut self, now: Instant) -> Tick {
+        if self.settled { return Tick { dirty: false, running: false }; }
+        if !self.finished(now) { return Tick { dirty: true, running: true }; }
+        self.settled = true;
+        Tick { dirty: true, running: false }
+    }
+
+    /// This frame's values, or `None` once it's settled without
+    /// `fill: 'forwards'` (the node then renders its own style).
+    pub(crate) fn overrides(&self, base: &Visual, now: Instant) -> Option<Overrides> {
+        if self.settled && !self.spec.fill_forwards { return None; }
+        Some(self.sample(base, now))
+    }
+
     /// Where in the keyframes (0..=1) the animation is, and whether it has
     /// run all its iterations.
     fn progress(&self, now: Instant) -> (f32, bool) {
@@ -628,6 +663,33 @@ mod tests {
         assert!(half.finished(t0 + Duration::from_millis(1600)));
         let end = half.sample(&vis(), t0 + Duration::from_millis(9000)).opacity.unwrap();
         assert!((end - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_finished_animation_settles_and_an_identical_rerender_does_not_replay_it() {
+        let json = r#"[[0,{"opacity":0}],[1,{"opacity":1}]]"#;
+        let (mut a, t0) = anim(json, 100, 1.0, false, false);
+        assert_eq!(a.tick(t0 + Duration::from_millis(50)), Tick { dirty: true, running: true });
+        // The frame it ends on still redraws (to show the node's own style)…
+        assert_eq!(a.tick(t0 + Duration::from_millis(150)), Tick { dirty: true, running: false });
+        // …then it's inert: no redraws, no overrides.
+        assert_eq!(a.tick(t0 + Duration::from_millis(200)), Tick { dirty: false, running: false });
+        assert!(a.overrides(&vis(), t0 + Duration::from_millis(200)).is_none());
+        // The regression: the same spec re-sent must NOT restart it…
+        assert!(!needs_restart(Some(&a), &a.spec.clone()));
+        // …a changed spec, or no animation yet, must.
+        let mut changed = a.spec.clone();
+        changed.duration_ms = 200;
+        assert!(needs_restart(Some(&a), &changed));
+        assert!(needs_restart(None, &a.spec));
+    }
+
+    #[test]
+    fn a_forwards_fill_keeps_its_last_frame_after_settling() {
+        let (mut a, t0) = anim(r#"[[0,{"opacity":0}],[1,{"opacity":0.4}]]"#, 100, 1.0, false, true);
+        a.tick(t0 + Duration::from_millis(150));
+        let ov = a.overrides(&vis(), t0 + Duration::from_millis(500)).expect("holds the end state");
+        assert!((ov.opacity.unwrap() - 0.4).abs() < 1e-4);
     }
 
     #[test]

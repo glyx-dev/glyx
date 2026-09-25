@@ -37,7 +37,8 @@ fn infer_role(node: &JsNode) -> Role {
             "radio"         => Role::RadioButton,
             "switch"        => Role::Switch,
             "link"          => Role::Link,
-            "image"         => Role::Image,
+            "image" | "img" => Role::Image,
+            "figure"        => Role::Figure,
             "heading"       => Role::Heading,
             "list"          => Role::List,
             "listitem"      => Role::ListItem,
@@ -63,11 +64,24 @@ fn infer_role(node: &JsNode) -> Role {
 /// Does this node accept keyboard focus? Explicit `role` implies it for the
 /// interactive roles; otherwise inferred the same way as `infer_role`.
 fn is_focusable(node: &JsNode) -> bool {
+    if let Some(f) = node.props.focusable { return f; }
     matches!(
         infer_role(node),
         Role::Button | Role::TextInput | Role::CheckBox | Role::RadioButton
             | Role::Switch | Role::Link | Role::ComboBox | Role::Slider
     )
+}
+
+/// `accessibilityLiveRegion` → AccessKit live setting. With a live setting
+/// the adapter raises a live-region change whenever the node's label
+/// changes, which is what makes a screen reader announce it.
+fn live_of(v: Option<&str>) -> Option<accesskit::Live> {
+    match v? {
+        "polite"    => Some(accesskit::Live::Polite),
+        "assertive" => Some(accesskit::Live::Assertive),
+        "off"       => Some(accesskit::Live::Off),
+        _           => None,
+    }
 }
 
 /// BFS from `root` over `nodes`' `children` lists, returning visitation
@@ -239,6 +253,12 @@ pub(super) fn build_tree(state: &mut PerWindowState) -> Option<TreeUpdate> {
         // consequence ("Deletes this note permanently").
         if let Some(hint) = node.props.accessibility_hint.clone() {
             ax.set_description(hint);
+        }
+        if let Some(desc) = node.props.role_description.clone() {
+            ax.set_role_description(desc);
+        }
+        if let Some(live) = live_of(node.props.live_region.as_deref()) {
+            ax.set_live(live);
         }
 
         let children: Vec<AxId> = node.children.iter()
@@ -432,6 +452,27 @@ mod tests {
         assert_eq!(infer_role(&pressable), Role::Button);
 
         assert_eq!(infer_role(&node(NodeType::View, &[])), Role::GenericContainer);
+    }
+
+    #[test]
+    fn focusable_prop_overrides_the_role() {
+        let mut fig = node_with_role("figure");
+        assert!(!is_focusable(&fig), "a plain figure isn't a Tab stop");
+        fig.props.focusable = Some(true);
+        assert!(is_focusable(&fig), "an interactive chart is");
+        let mut btn = node_with_role("button");
+        btn.props.focusable = Some(false);
+        assert!(!is_focusable(&btn));
+        assert_eq!(infer_role(&node_with_role("figure")), Role::Figure);
+    }
+
+    #[test]
+    fn live_region_values_map_to_accesskit() {
+        assert_eq!(live_of(Some("polite")), Some(accesskit::Live::Polite));
+        assert_eq!(live_of(Some("assertive")), Some(accesskit::Live::Assertive));
+        assert_eq!(live_of(Some("off")), Some(accesskit::Live::Off));
+        assert_eq!(live_of(Some("loud")), None);
+        assert_eq!(live_of(None), None);
     }
 
     #[test]

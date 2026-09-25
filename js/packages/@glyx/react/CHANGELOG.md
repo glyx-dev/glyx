@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### Added
+- Canvas 2D:
+  - `createLinearGradient()` / `addColorStop()` as a `fillStyle` for `fill()` and `fillRect()`.
+  - `pushClip(x, y, w, h)` / `popClip()`.
+  - `textAlign`, `textBaseline` and `fontWeight` for `fillText`.
+  - `measureText(text, fontSize)`, measured by the same text engine that draws it, and cached.
+- `Pressable`:
+  - `onPointerMove({ x, y, locationX, locationY })` fires continuously while the pointer is over it, once per frame.
+  - `onKeyDown({ key, ctrl, shift })` receives key presses while it has keyboard focus (from Tab or a click). Until now, keys only reached text inputs.
+- Accessibility props:
+  - `focusable` makes any node a Tab stop, or removes one.
+  - `accessibilityLiveRegion` (`'polite'` / `'assertive'`) announces label changes as they happen.
+  - `accessibilityRoleDescription` (e.g. `"line chart"`).
+  - A `figure` role.
 - `transition` can now animate more than opacity. `transition={{ duration, properties, easing }}`:
   - `properties` picks what animates: any of `'opacity'`, `'transform'`, `'backgroundColor'`, `'borderColor'`, `'borderRadius'` and `'boxShadow'`, or `'all'`. It defaults to `['opacity']`, so existing `transition={{ duration }}` code behaves exactly as before.
   - `easing` takes the CSS curves: `linear`, `ease`, `ease-in`, `ease-out` (the default) and `ease-in-out`, or `cubic-bezier(x1, y1, x2, y2)`.
@@ -15,6 +28,8 @@
 - `TextInput` accepts `textAlign` (`'left'` | `'center'` | `'right'`), applied to rendering and hit-testing alike.
 
 ### Fixed
+- A finished `animation` replayed every time its component re-rendered with the same settings. In a live dashboard, every chart re-faded every few seconds. Finished animations now stay finished until their settings change.
+- `borderWidth: 0` drew a 1-pixel hairline border instead of no border.
 - **`transform` now draws on every renderer.** It was silently ignored on the CPU renderer (`renderMode: "skia"`) and on Direct2D; only the GPU renderer applied it.
 - **Chained transforms apply in CSS order.** `translate(100, 0) rotate(45)` now moves the element and rotates it in place. Previously the rotation also rotated the offset. This only affects transforms with more than one function.
 - **Transforms accept CSS units:** `px`, `deg`, `rad`, `turn` and `grad`. A value like `rotate(180deg)` used to be dropped entirely, and `@glyx-dev/design`'s navigation chevron uses exactly that.

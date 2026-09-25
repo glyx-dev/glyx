@@ -8,6 +8,7 @@ import {
   addGlobalClickListener, removeGlobalClickListener,
   registerImageError, unregisterImageError,
   registerFocusable, unregisterFocusable,
+  setFocus,
 } from './events.js';
 import { glyxWindow, clipboard, input } from './api.js';
 
@@ -82,7 +83,7 @@ export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', 
 // always delegate to the latest closure values without needing re-registration
 // on every render.
 
-export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, disabled, feedback = true, style, _glyxOnMount: externalOnMount, ...props }) {
+export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, onPointerMove, onKeyDown, disabled, feedback = true, style, _glyxOnMount: externalOnMount, ...props }) {
   const nodeIdRef    = useRef(null);
   const handlersRef  = useRef(null);
   const [pressed, setPressed] = useState(false);
@@ -108,8 +109,11 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
       // so the accessibility tree's `focus` field falls back to the root —
       // which is why Narrator's highlight rect covered the whole window
       // instead of the actual control.
-      if (typeof __glyx_setFocus !== 'undefined' && nodeIdRef.current != null) {
-        __glyx_setFocus(nodeIdRef.current);
+      if (nodeIdRef.current != null) {
+        // A control that takes keys becomes the key target on click too, not
+        // only on Tab (setFocus also syncs the native focus registry).
+        if (onKeyDown) setFocus(nodeIdRef.current);
+        else if (typeof __glyx_setFocus !== 'undefined') __glyx_setFocus(nodeIdRef.current);
       }
       onPress?.(e);
     },
@@ -118,6 +122,8 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
     onPressOut: () => { setPressed(false); onPressOut?.(); },
     onHoverIn:  () => { setHovered(true);  onHoverIn?.(); },
     onHoverOut: () => { setHovered(false); onHoverOut?.(); },
+    onPointerMove: (e) => onPointerMove?.(e),
+    onKeyDown: (e) => onKeyDown?.(e),
   };
 
   // Called synchronously by createInstance the moment the native node exists.
@@ -131,6 +137,7 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
       onPressOut: () => handlersRef.current.onPressOut(),
       onHoverIn:  () => handlersRef.current.onHoverIn(),
       onHoverOut: () => handlersRef.current.onHoverOut(),
+      onPointerMove: (e) => handlersRef.current.onPointerMove(e),
     });
     registerDisabledNode(id, !!disabled);
     // Keyboard-focus-visible only — NOT `registerInput` (that registry is
@@ -139,6 +146,7 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
     registerFocusable(id, {
       onFocus: () => handlersRef.current.onFocus(),
       onBlur:  () => handlersRef.current.onBlur(),
+      onKeyDown: (e) => handlersRef.current.onKeyDown(e),
     });
     // Let a caller (e.g. RichTextEditor) also learn the native node id,
     // without clobbering Pressable's own registration below (see the

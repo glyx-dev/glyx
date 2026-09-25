@@ -2297,8 +2297,9 @@ pub fn run(mut config: AppConfig) -> bool {
                 // Keyframe animations layer over transitions (CSS precedence).
                 for (&id, anim) in &s.animations {
                     if let Some(node) = s.js_nodes.get(&id) {
-                        let ov = anim.sample(&motion::Visual::of(&node.props), now);
-                        motion_overrides.entry(id).or_default().overlay(ov);
+                        if let Some(ov) = anim.overrides(&motion::Visual::of(&node.props), now) {
+                            motion_overrides.entry(id).or_default().overlay(ov);
+                        }
                     }
                 }
 

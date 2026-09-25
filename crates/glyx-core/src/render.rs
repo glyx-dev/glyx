@@ -4,10 +4,10 @@ use crate::render_props::parse_scrollbar_color;
 
 pub(crate) struct RenderCtx<'a> {
     pub nodes: &'a std::collections::HashMap<u32, JsNode>,
-    /// Current interpolated opacity for nodes with an active `@glyx-dev/motion`
-    /// transition — read instead of `node.props.opacity` when present. See
-    /// `PerWindowState::opacity_transitions`'s docs.
-    pub opacity_overrides: &'a std::collections::HashMap<u32, f32>,
+    /// Current interpolated values for nodes with an active `@glyx-dev/motion`
+    /// transition — each present field is read instead of the node's own
+    /// prop. See `crate::motion`.
+    pub overrides: &'a std::collections::HashMap<u32, crate::motion::Overrides>,
     pub images: &'a std::collections::HashMap<u32, peniko::ImageData>,
     /// `layout_id → rect` index (see `PerWindowState::resolved_by_id`).
     pub resolved_by_id: &'a std::collections::HashMap<NodeId, ResolvedLayout>,
@@ -136,8 +136,15 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     let rw = rl.width  as f64;
     let rh = rl.height as f64;
 
-    let own_opacity = ctx.opacity_overrides.get(&id).copied()
+    // Animated values win over the node's props while a transition runs.
+    let ov = ctx.overrides.get(&id);
+    let own_opacity = ov.and_then(|o| o.opacity)
         .unwrap_or_else(|| node.props.opacity.unwrap_or(1.0));
+    let eff_radius    = ov.and_then(|o| o.radius).or(node.props.border_radius).unwrap_or(0.0) as f64;
+    let eff_bg        = ov.and_then(|o| o.background).or(node.props.background_color);
+    let eff_border    = ov.and_then(|o| o.border_color).or(node.props.border_color);
+    let eff_shadow    = ov.and_then(|o| o.shadow).or(node.box_shadow);
+    let eff_transform = ov.and_then(|o| o.transform).or(node.transform);
     let child_opacity = opacity * own_opacity;
 
     // ── Viewport culling ──────────────────────────────────────────────────────
@@ -156,7 +163,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     // their parent in normal flow (Glyx has no absolute positioning), so all
     // descendants are also off-screen.  Their cache entries are dropped and
     // repopulated lazily on scroll-in (the "tile rasterize on demand" path).
-    let has_transform = node.props.transform.is_some();
+    let has_transform = eff_transform.is_some();
     let off_screen = !has_transform
         && (ry + rh <= 0.0 || ry >= ctx.win_h || rx + rw <= 0.0 || rx >= ctx.win_w);
 
@@ -195,8 +202,11 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     // If the node has a transform, render node + children into a temporary
     // scene, then append it to the main scene with the computed Affine.
     // (The Affine itself is pre-parsed on the node — see `render_props`.)
-    let node_transform = node.transform;
+    let node_transform = eff_transform;
     let mut _transform_sub: Option<(Scene, peniko::kurbo::Affine)> = None;
+    // Non-Vello backends (TinySkia, Direct2D) apply it as a frame transform
+    // instead, popped at the end of this node.
+    let mut transform_pushed = false;
     if let Some(affine) = node_transform {
         // Center the transform on the element's bounding box
         // (equivalent to CSS transform-origin: center center)
@@ -208,15 +218,18 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
         if ctx.frame.supports_caching() {
             let parent = ctx.frame.replace_scene(Scene::new());
             _transform_sub = Some((parent, centered));
+        } else {
+            ctx.frame.push_transform(centered);
+            transform_pushed = true;
         }
     }
 
     match node.node_type {
         NodeType::View => {
-            let radius = node.props.border_radius.unwrap_or(0.0) as f64;
+            let radius = eff_radius;
 
             // ── Box shadow ────────────────────────────────────────────────
-            if let Some((sx, sy, sc)) = node.box_shadow {
+            if let Some((sx, sy, sc)) = eff_shadow {
                 ctx.frame.fill_rounded_rect(
                     rx + sx, ry + sy, rw, rh, radius,
                     apply_opacity(sc, child_opacity),
@@ -235,13 +248,13 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                 ]);
                 let brush = peniko::Brush::Gradient(gradient);
                 ctx.frame.fill_rounded_rect_with_brush(rx, ry, rw, rh, radius, &brush);
-            } else if let Some(bg) = node.props.background_color.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
+            } else if let Some(bg) = eff_bg.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
                 ctx.frame.fill_rounded_rect(rx, ry, rw, rh, radius, bg);
             }
 
             // ── Border ────────────────────────────────────────────────────
             if let Some(bw) = node.props.border_width {
-                let bc = node.props.border_color.unwrap_or([80, 80, 120, 255]);
+                let bc = eff_border.unwrap_or([80, 80, 120, 255]);
                 ctx.frame.stroke_rounded_rect(rx, ry, rw, rh, radius, bw as f64, apply_opacity(rgba_to_vello(bc), child_opacity));
             }
 
@@ -312,7 +325,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
         }
 
         NodeType::Image => {
-            let radius = node.props.border_radius.unwrap_or(0.0) as f64;
+            let radius = eff_radius;
             let resize_mode = node.props.image_resize_mode.as_deref().unwrap_or("stretch");
             if let Some(image_id) = node.props.image_id {
                 if let Some(image) = ctx.images.get(&image_id) {
@@ -354,7 +367,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                     }
 
                     if let Some(bw) = node.props.border_width {
-                        let bc = node.props.border_color.unwrap_or([80, 80, 120, 255]);
+                        let bc = eff_border.unwrap_or([80, 80, 120, 255]);
                         ctx.frame.stroke_rounded_rect(rx, ry, rw, rh, radius, bw as f64, apply_opacity(rgba_to_vello(bc), child_opacity));
                     }
                 } else {
@@ -537,8 +550,8 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
 
         NodeType::Canvas => {
             // Draw optional background.
-            if let Some(bg) = node.props.background_color.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
-                let radius = node.props.border_radius.unwrap_or(0.0) as f64;
+            if let Some(bg) = eff_bg.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
+                let radius = eff_radius;
                 ctx.frame.fill_rounded_rect(rx, ry, rw, rh, radius, bg);
             }
             // Clip all canvas draw commands to the node's layout rect.
@@ -565,7 +578,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
         NodeType::Canvas3D => {
             #[cfg(feature = "canvas3d")]
             {
-                if let Some(bg) = node.props.background_color.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
+                if let Some(bg) = eff_bg.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
                     ctx.frame.fill_rect(rx, ry, rw, rh, bg);
                 }
                 ctx.canvas3d_overlays.push((id, rx as f32, ry as f32, rw as f32, rh as f32));
@@ -669,6 +682,9 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     if let Some((parent, affine)) = _transform_sub.take() {
         let sub = ctx.frame.replace_scene(parent);
         ctx.frame.append_scene(&sub, Some(affine));
+    }
+    if transform_pushed {
+        ctx.frame.pop_transform();
     }
 
     // ── O4b: end capture — store fragment for next-frame replay ─────────

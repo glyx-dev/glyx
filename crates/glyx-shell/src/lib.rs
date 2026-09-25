@@ -231,6 +231,12 @@ pub struct ShellConfig {
     /// Optional explicit V8 heap cap in MB.  `None` = auto-calculated from bundle size.
     /// Controlled by `maxJsHeapMb` in `glyx.config.json`.
     pub max_js_heap_mb: Option<u32>,
+    /// Upper bound on frames per second for continuous redraws (animation,
+    /// video, drags). `None` = the monitor's refresh rate. Controlled by
+    /// `window.maxFps` in `glyx.config.json`; e.g. 60 halves animation cost
+    /// on a 120 Hz display. Currently applied on the CPU (softbuffer) present
+    /// path; GPU/Direct2D present at the display's vsync.
+    pub max_fps: Option<u32>,
     /// Canvas2D transport: `"binary"` (default) or `"json"`. Controlled by
     /// `canvas.protocol` in `glyx.config.json`.
     pub canvas_protocol: String,
@@ -273,6 +279,7 @@ impl Default for ShellConfig {
             background_color: [0x14, 0x14, 0x1A, 0xFF],
             render_mode:  RenderMode::Auto,
             max_js_heap_mb: None,
+            max_fps: None,
             canvas_protocol: "binary".into(),
             canvas_buffer_kb: None,
             locales:         vec!["en".to_string()],

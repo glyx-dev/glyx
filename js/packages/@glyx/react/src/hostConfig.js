@@ -53,6 +53,67 @@ function flushSceneOps() {
   __glyx_flushSceneOps(ops);
 }
 
+// ── Transitions (@glyx-dev/motion) ────────────────────────────────────────────
+
+// `transition={{ duration, properties, easing }}` → flat props, since Rust
+// reads plain values, not nested objects (see NodeProps::transition_ms).
+// `properties` defaults to opacity only; `'all'` animates every supported one.
+function applyTransition(nodeProps, transition) {
+  if (!transition || typeof transition.duration !== 'number') return;
+  nodeProps.transitionMs = transition.duration;
+  const { properties, easing } = transition;
+  if (Array.isArray(properties)) nodeProps.transitionProperty = properties.join(',');
+  else if (typeof properties === 'string') nodeProps.transitionProperty = properties;
+  if (typeof easing === 'string') nodeProps.transitionEasing = easing;
+}
+
+// Animatable keyframe properties (the same set `transition` animates).
+const KEYFRAME_PROPS = ['opacity', 'transform', 'backgroundColor', 'borderColor', 'borderRadius', 'boxShadow'];
+
+// Keyframe key → offset in 0..1: `from`/`to`, `'50%'`, or a percentage number.
+function keyframeOffset(key) {
+  if (key === 'from') return 0;
+  if (key === 'to') return 1;
+  const n = parseFloat(key);
+  return Number.isFinite(n) ? Math.min(Math.max(n / 100, 0), 1) : null;
+}
+
+// `animation={{ keyframes, duration, easing, iterations, direction, fill }}`
+// → flat props (Rust reads plain values; the stops travel as one JSON
+// string, parsed natively — see NodeProps::animation_keyframes).
+// `keyframes` is either an object keyed by offset (`{ 0: {...}, '50%': {...},
+// to: {...} }`) or an array of frames spaced evenly, each optionally with
+// its own `offset` (0..1).
+function applyAnimation(nodeProps, animation) {
+  if (!animation || typeof animation.duration !== 'number' || !animation.keyframes) return;
+  const pick = (frame) => {
+    const out = {};
+    for (const k of KEYFRAME_PROPS) if (frame && frame[k] !== undefined) out[k] = frame[k];
+    return out;
+  };
+  const { keyframes } = animation;
+  let stops;
+  if (Array.isArray(keyframes)) {
+    const last = Math.max(keyframes.length - 1, 1);
+    stops = keyframes.map((f, i) => [typeof f?.offset === 'number' ? f.offset : i / last, pick(f)]);
+  } else {
+    stops = Object.keys(keyframes)
+      .map((k) => [keyframeOffset(k), pick(keyframes[k])])
+      .filter(([o]) => o !== null)
+      // Integer-like keys enumerate first in JS objects (`100` before `from`).
+      .sort((a, b) => a[0] - b[0]);
+  }
+  if (stops.length === 0) return;
+  nodeProps.animationKeyframes = JSON.stringify(stops);
+  nodeProps.animationMs = animation.duration;
+  if (typeof animation.easing === 'string') nodeProps.animationEasing = animation.easing;
+  if (typeof animation.iterations === 'number') {
+    nodeProps.animationIterations = Number.isFinite(animation.iterations) ? animation.iterations : -1;
+  }
+  if (typeof animation.direction === 'string') nodeProps.animationDirection = animation.direction;
+  if (typeof animation.fill === 'string') nodeProps.animationFill = animation.fill;
+}
+
 // ── Instance creation ─────────────────────────────────────────────────────────
 
 function createInstance(type, props) {
@@ -61,12 +122,11 @@ function createInstance(type, props) {
   // backgroundColor, borderRadius, etc. directly (not nested under style).
   // Strip `_glyxOnMount` — a callback that components use to learn their
   // native node ID synchronously, without relying on ref forwarding.
-  const { children, style, ref: _ref, _glyxOnMount, glyxDraggable, transition, ...rest } = props;
+  const { children, style, ref: _ref, _glyxOnMount, glyxDraggable, transition, animation, ...rest } = props;
   const nodeProps = { ...rest, ...style };
   if (glyxDraggable) nodeProps.draggable = true;
-  // @glyx-dev/motion v1: `transition={{ duration: 200 }}` → flat `transitionMs`
-  // (Rust reads a plain number, not a nested object — see NodeProps::transition_ms).
-  if (transition && typeof transition.duration === 'number') nodeProps.transitionMs = transition.duration;
+  applyTransition(nodeProps, transition);
+  applyAnimation(nodeProps, animation);
   const id = __glyx_createNode(type, nodeProps);
   // Fire the mount callback immediately so the component can register its ID
   // before any useEffect / useLayoutEffect runs.
@@ -171,10 +231,11 @@ function prepareUpdate(_instance, _type, oldProps, newProps) {
 }
 
 function commitUpdate(instance, updatePayload) {
-  const { children, style, ref: _ref, _glyxOnMount, glyxDraggable, transition, ...rest } = updatePayload;
+  const { children, style, ref: _ref, _glyxOnMount, glyxDraggable, transition, animation, ...rest } = updatePayload;
   const nodeProps = { ...rest, ...style };
   if (glyxDraggable) nodeProps.draggable = true;
-  if (transition && typeof transition.duration === 'number') nodeProps.transitionMs = transition.duration;
+  applyTransition(nodeProps, transition);
+  applyAnimation(nodeProps, animation);
   queueOp(OP_UPDATE, instance.id, nodeProps);
 }
 
@@ -299,4 +360,4 @@ const HostConfig = {
 };
 
 export default HostConfig;
-export { prepareUpdate };
+export { prepareUpdate, applyTransition, applyAnimation };

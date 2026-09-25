@@ -658,6 +658,28 @@ impl AnyFrame {
         }
     }
 
+    /// Apply `affine` to everything drawn until the matching `pop_transform`.
+    /// Vello applies node transforms by compositing a sub-scene instead (see
+    /// `append_scene`), so this is a no-op there; callers use one path or the
+    /// other based on `supports_caching`.
+    pub fn push_transform(&mut self, affine: Affine) {
+        match self {
+            AnyFrame::Vello(_)    => {}
+            AnyFrame::TinySkia(f) => f.push_transform(affine),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.push_transform(affine),
+        }
+    }
+
+    pub fn pop_transform(&mut self) {
+        match self {
+            AnyFrame::Vello(_)    => {}
+            AnyFrame::TinySkia(f) => f.pop_transform(),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.pop_transform(),
+        }
+    }
+
     pub fn push_layer(&mut self, x: f64, y: f64, w: f64, h: f64) {
         match self {
             AnyFrame::Vello(f)    => f.push_layer(x, y, w, h),
@@ -852,5 +874,37 @@ impl AnyRenderer {
             #[cfg(target_os = "windows")]
             AnyRenderer::Direct2D(r) => r.try_save_pipeline_cache(),
         }
+    }
+}
+
+#[cfg(test)]
+mod scene_append_tests {
+    use super::*;
+    use vello::peniko::{Brush, Color, Fill};
+
+    /// `Encoding::FORCE_NEXT_TRANSFORM` (vello doesn't re-export `Encoding`).
+    const FORCE_NEXT_TRANSFORM: u32 = 1;
+
+    fn fill_unit_rect(scene: &mut Scene) {
+        let rect = kurbo::Rect::new(0.0, 0.0, 10.0, 10.0);
+        scene.fill(Fill::NonZero, Affine::IDENTITY, &Brush::Solid(Color::WHITE), None, &rect);
+    }
+
+    #[test]
+    fn appending_an_empty_scene_keeps_a_pending_forced_transform() {
+        // Regression (vendor/vello patch): after text, the encoding forces the
+        // next transform to be re-emitted. Appending an empty cached fragment
+        // (a leaf that draws nothing) used to clear that, so the next
+        // identity-transform fill was deduplicated and drew with the text's
+        // transform, displaced on screen.
+        let mut scene = Scene::new();
+        fill_unit_rect(&mut scene);
+        scene.encoding_mut().flags |= FORCE_NEXT_TRANSFORM; // as after a glyph run
+        scene.append(&Scene::new(), None);
+
+        let before = scene.encoding().transforms.len();
+        fill_unit_rect(&mut scene);
+        assert_eq!(scene.encoding().transforms.len(), before + 1,
+                   "the identity transform must be re-encoded after the append");
     }
 }

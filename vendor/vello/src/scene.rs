@@ -463,7 +463,19 @@ impl Scene {
     /// This is an O(N) operation.
     pub fn append(&mut self, other: &Self, transform: Option<Affine>) {
         let t = transform.as_ref().map(Transform::from_kurbo);
+        // glyx patch: `Encoding::append` REPLACES our flags with `other`'s.
+        // After a glyph run, the encoding sets FORCE_NEXT_TRANSFORM because
+        // the run's transform is applied at resolve time, so the next draw
+        // must re-emit its own even if it equals the last one in the stream.
+        // Appending a scene that encodes no transform (e.g. an empty cached
+        // fragment) cleared that flag, the next identity-transform draw was
+        // deduplicated away, and the GPU drew it with the glyph run's
+        // transform: displaced by the text's position. Keep our pending
+        // forces; at worst one redundant transform/style gets re-encoded.
+        let pending = self.encoding.flags
+            & (Encoding::FORCE_NEXT_TRANSFORM | Encoding::FORCE_NEXT_STYLE);
         self.encoding.append(&other.encoding, &t);
+        self.encoding.flags |= pending;
         #[cfg(feature = "bump_estimate")]
         self.estimator.append(&other.estimator, t.as_ref());
     }

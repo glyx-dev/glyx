@@ -20,10 +20,15 @@ pub(crate) struct SoftPresent {
     /// re-presented without re-rasterizing (softbuffer does not guarantee the
     /// swap buffer preserves contents between frames).
     last_frame: Vec<u32>,
+    /// For frame pacing (see `pace`).
+    window:       Arc<Window>,
+    last_present: Option<std::time::Instant>,
+    /// `window.maxFps` from config; `None` = monitor refresh rate.
+    max_fps:      Option<u32>,
 }
 
 impl SoftPresent {
-    pub fn new(window: Arc<Window>) -> Result<Self, String> {
+    pub fn new(window: Arc<Window>, max_fps: Option<u32>) -> Result<Self, String> {
         let size = window.inner_size();
         let context = softbuffer::Context::new(Arc::clone(&window))
             .map_err(|e| format!("softbuffer context: {e}"))?;
@@ -35,7 +40,10 @@ impl SoftPresent {
             .resize(NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap())
             .map_err(|e| format!("softbuffer resize: {e}"))?;
         log::info!("glyx-core: software present active ({w}x{h}, no wgpu).");
-        Ok(Self { _context: context, surface, width: w, height: h, last_frame: Vec::new() })
+        Ok(Self {
+            _context: context, surface, width: w, height: h, last_frame: Vec::new(),
+            window, last_present: None, max_fps,
+        })
     }
 
     pub fn width(&self)  -> u32 { self.width }
@@ -67,8 +75,32 @@ impl SoftPresent {
     /// line's worth of pixels rather than the whole window.  Requires a valid
     /// `last_frame` (pixels outside the damage region are refreshed from it,
     /// since the OS swap buffer's previous contents aren't guaranteed).
+    /// Keep back-to-back presents at most one per display refresh.
+    ///
+    /// The GPU and Direct2D paths present with vsync, which blocks until the
+    /// next refresh. softbuffer presents immediately, so a continuous redraw
+    /// (an animation, video, a drag) otherwise renders as fast as the CPU
+    /// allows, several times the refresh rate, with every extra frame thrown
+    /// away. A frame after idle never waits.
+    fn pace(&mut self) {
+        let hz = self.window.current_monitor()
+            .and_then(|m| m.refresh_rate_millihertz())
+            .map_or(60.0, |mhz| mhz as f64 / 1000.0)
+            .clamp(30.0, 500.0)
+            .min(self.max_fps.map_or(f64::INFINITY, f64::from));
+        let interval = std::time::Duration::from_secs_f64(1.0 / hz);
+        if let Some(last) = self.last_present {
+            let since = last.elapsed();
+            if since < interval {
+                std::thread::sleep(interval - since);
+            }
+        }
+        self.last_present = Some(std::time::Instant::now());
+    }
+
     pub fn present_rgba(&mut self, rgba: &[u8], w: u32, h: u32,
                         damage: Option<(u32, u32, u32, u32)>) {
+        self.pace();
         if w != self.width || h != self.height {
             // Stale frame from just before a resize — drop it; the next
             // redraw renders at the new size.
@@ -91,10 +123,7 @@ impl SoftPresent {
 
         match damage {
             None => {
-                for i in 0..total {
-                    let p = &rgba[i * 4..i * 4 + 4];
-                    buffer[i] = ((p[0] as u32) << 16) | ((p[1] as u32) << 8) | (p[2] as u32);
-                }
+                rgba_to_0rgb(&rgba[..total * 4], &mut buffer[..total]);
                 self.last_frame.clear();
                 self.last_frame.extend_from_slice(&buffer[..total]);
                 if let Err(e) = buffer.present() {
@@ -114,14 +143,9 @@ impl SoftPresent {
                 }
                 // Convert only the damaged rows/cols.
                 for row in dy..dy + dh {
-                    let base = row * w as usize;
-                    for col in dx..dx + dw {
-                        let i = base + col;
-                        let p = &rgba[i * 4..i * 4 + 4];
-                        let v = ((p[0] as u32) << 16) | ((p[1] as u32) << 8) | (p[2] as u32);
-                        buffer[i] = v;
-                        self.last_frame[i] = v;
-                    }
+                    let i = row * w as usize + dx;
+                    rgba_to_0rgb(&rgba[i * 4..(i + dw) * 4], &mut buffer[i..i + dw]);
+                    self.last_frame[i..i + dw].copy_from_slice(&buffer[i..i + dw]);
                 }
                 let rect = softbuffer::Rect {
                     x: dx as u32, y: dy as u32,
@@ -151,5 +175,25 @@ impl SoftPresent {
         if let Err(e) = buffer.present() {
             log::warn!("softbuffer present: {e}");
         }
+    }
+}
+
+/// RGBA8 bytes → softbuffer's 0x00RRGGBB, `dst.len()` pixels. Written as a
+/// straight zip over exact 4-byte chunks so it compiles to a tight,
+/// vectorizable loop (no per-pixel slicing or bounds checks).
+fn rgba_to_0rgb(src: &[u8], dst: &mut [u32]) {
+    for (d, p) in dst.iter_mut().zip(src.chunks_exact(4)) {
+        *d = ((p[0] as u32) << 16) | ((p[1] as u32) << 8) | (p[2] as u32);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn rgba_converts_to_0rgb() {
+        let src = [1u8, 2, 3, 255, 0xAA, 0xBB, 0xCC, 0x10];
+        let mut dst = [0u32; 2];
+        super::rgba_to_0rgb(&src, &mut dst);
+        assert_eq!(dst, [0x0001_0203, 0x00AA_BBCC]);
     }
 }

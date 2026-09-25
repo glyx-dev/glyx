@@ -46,35 +46,12 @@ pub(crate) fn parse_gradient(s: &str) -> Option<(peniko::Color, peniko::Color)> 
 
 /// Parse a transform string into a kurbo Affine.
 /// Supports `"translate(x, y)"`, `"rotate(deg)"`, `"scale(sx, sy)"` / `"scale(s)"`,
-/// and chaining: `"translate(10,20) rotate(45)"`.
+/// and chaining: `"translate(10,20) rotate(45)"`. Chains compose like CSS:
+/// the rightmost function applies first, so that example moves the element
+/// by (10,20) and rotates it in place, rather than rotating the offset.
 pub(crate) fn parse_transform(s: &str) -> Option<peniko::kurbo::Affine> {
-    use peniko::kurbo::Affine;
-    let mut result = Affine::IDENTITY;
-    let mut remaining = s.trim();
-    while !remaining.is_empty() {
-        let open = remaining.find('(')?;
-        let close = remaining[open..].find(')')?;
-        let func = &remaining[..open].trim().to_lowercase();
-        let args_str = &remaining[open + 1..open + close];
-        let args: Vec<f64> = args_str.split(',').filter_map(|p| p.trim().parse().ok()).collect();
-        let t = match func.as_str() {
-            "translate" if args.len() >= 1 => {
-                Some(Affine::translate((args[0], args.get(1).copied().unwrap_or(0.0))))
-            }
-            "rotate" if args.len() >= 1 => {
-                Some(Affine::rotate(args[0].to_radians()))
-            }
-            "scale" if args.len() >= 1 => {
-                let sx = args[0];
-                let sy = args.get(1).copied().unwrap_or(sx);
-                Some(Affine::scale_non_uniform(sx, sy))
-            }
-            _ => None,
-        }?;
-        result = t * result;
-        remaining = remaining[open + close + 1..].trim();
-    }
-    Some(result)
+    // One grammar for drawing and animating (see `motion::parse_ops`).
+    crate::motion::parse_ops(s).map(|ops| crate::motion::ops_affine(&ops))
 }
 
 /// `"#RGB"` / `"#RRGGBB"` / `"#RRGGBBAA"` scrollbar colour.

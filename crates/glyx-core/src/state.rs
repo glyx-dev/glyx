@@ -245,14 +245,15 @@ pub(super) struct PerWindowState {
     pub(super) resolved_by_id: std::collections::HashMap<NodeId, ResolvedLayout>,
     pub(super) js_nodes:     std::collections::HashMap<u32, JsNode>,
     pub(super) js_root:      Option<u32>,
-    /// Active `opacity` transitions, keyed by node id — see `scene::tick_opacity_transitions`.
-    /// `@glyx-dev/motion` v1: JS declares a `transition` prop once on a style
-    /// change; Rust owns the interpolation entirely from here, evaluated
-    /// fresh every frame with zero JS re-entry (the worklet-style
-    /// architecture from the QuickJS perf plan's §8a, scoped to `opacity`
-    /// for v1 — `transform`/other properties are a natural v1.1 follow-up
-    /// once this proves out).
-    pub(super) opacity_transitions: std::collections::HashMap<u32, OpacityTransition>,
+    /// Active property transitions, keyed by node id — see `crate::motion`
+    /// and `scene::tick_transitions`. JS declares a `transition` prop once;
+    /// Rust owns the interpolation from there, sampled fresh every frame with
+    /// zero JS re-entry (the worklet-style architecture from the QuickJS perf
+    /// plan's §8a).
+    pub(super) transitions: std::collections::HashMap<u32, crate::motion::Transition>,
+    /// Running keyframe animations (`animation` prop), keyed by node id —
+    /// see `crate::motion::Animation` and `scene::tick_transitions`.
+    pub(super) animations:  std::collections::HashMap<u32, crate::motion::Animation>,
     pub(super) images:       std::collections::HashMap<u32, peniko::ImageData>,
     pub(super) images_by_path: ByteBudgetImageCache,
     pub(super) image_cache_hits: u64,
@@ -389,6 +390,10 @@ pub(super) struct PerWindowState {
     pub(super) descendant_cascade_nodes: std::collections::HashSet<u32>,
     pub(super) dirty_subtrees: std::collections::HashSet<u32>,
     pub(super) prev_resolved: std::collections::HashMap<u32, ResolvedLayout>,
+    /// Screen bounds `(l, t, r, b)` each node was last drawn at, transforms
+    /// and shadows included (`scene::record_visual_bounds`). Lets partial
+    /// redraw erase where a moved/rotated node WAS, not just its layout box.
+    pub(super) prev_visual:   std::collections::HashMap<u32, (f64, f64, f64, f64)>,
     /// `z_index`-sorted children per js node id. Built by
     /// `scene::reconcile_z_order` ONLY when flagged dirty, so a clean frame
     /// renders with zero sorting (previously every View/RepaintBoundary cloned
@@ -456,27 +461,6 @@ impl JsNode {
     }
 }
 
-/// One in-progress `opacity` interpolation, driven entirely by Rust — see
-/// `PerWindowState::opacity_transitions`'s docs for the architecture.
-pub(super) struct OpacityTransition {
-    pub(super) from:        f32,
-    pub(super) to:          f32,
-    pub(super) start:       Instant,
-    pub(super) duration_ms: u32,
-}
-
-impl OpacityTransition {
-    /// Current eased value and whether the transition has finished.
-    /// Eases with a simple ease-out cubic — the common "settle in" curve
-    /// used by most CSS-transition defaults.
-    pub(super) fn sample(&self, now: Instant) -> (f32, bool) {
-        let elapsed_ms = now.saturating_duration_since(self.start).as_secs_f32() * 1000.0;
-        let t = (elapsed_ms / self.duration_ms.max(1) as f32).clamp(0.0, 1.0);
-        let eased = 1.0 - (1.0 - t).powi(3);
-        (self.from + (self.to - self.from) * eased, t >= 1.0)
-    }
-}
-
 /// State for an active scrollbar thumb drag.
 pub(super) struct ScrollbarDragState {
     pub(super) node_id: u32,
@@ -516,25 +500,3 @@ pub(super) struct DevModeState {
     pub(super) startup_v8_total_bytes: usize,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn opacity_transition_samples_start_mid_and_end() {
-        let start = Instant::now();
-        let tr = OpacityTransition { from: 0.0, to: 1.0, start, duration_ms: 1000 };
-
-        let (v0, done0) = tr.sample(start);
-        assert_eq!(v0, 0.0);
-        assert!(!done0);
-
-        let (v_end, done_end) = tr.sample(start + std::time::Duration::from_millis(2000));
-        assert_eq!(v_end, 1.0);
-        assert!(done_end);
-
-        let (v_mid, done_mid) = tr.sample(start + std::time::Duration::from_millis(500));
-        assert!(v_mid > 0.0 && v_mid < 1.0);
-        assert!(!done_mid);
-    }
-}

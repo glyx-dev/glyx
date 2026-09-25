@@ -245,6 +245,8 @@ impl Direct2DRenderer {
             .expect("ID2D1DeviceContext always implements ID2D1RenderTarget");
         unsafe {
             rt.BeginDraw();
+            // The render target's transform outlives a frame: start from identity.
+            rt.SetTransform(&d2d_matrix(kurbo::Affine::IDENTITY) as *const _);
             let color = to_d2d_color(self.background_color);
             rt.Clear(Some(&color as *const _));
         }
@@ -252,6 +254,8 @@ impl Direct2DRenderer {
             ctx, rt,
             font_cache: self.font_cache.take(),
             image_cache: std::mem::take(&mut self.image_cache),
+            xf:       kurbo::Affine::IDENTITY,
+            xf_stack: Vec::new(),
         }
     }
 
@@ -296,6 +300,21 @@ pub struct Direct2DFrame {
     font_cache: Option<Direct2DFontCache>,
     /// Same move-in/move-out pattern as `font_cache`.
     image_cache: Direct2DImageCache,
+    /// Current transform (node `transform` props, composed down the tree).
+    /// Mirrored into the render target's own transform, which applies to
+    /// every draw and layer clip; kept here so image draws that set their own
+    /// transform can compose with it and restore it.
+    xf:       kurbo::Affine,
+    xf_stack: Vec<kurbo::Affine>,
+}
+
+fn d2d_matrix(t: kurbo::Affine) -> windows_numerics::Matrix3x2 {
+    let [a, b, c, d, e, f] = t.as_coeffs();
+    windows_numerics::Matrix3x2 {
+        M11: a as f32, M12: b as f32,
+        M21: c as f32, M22: d as f32,
+        M31: e as f32, M32: f as f32,
+    }
 }
 
 /// Direct2D clamps `radiusX`/`radiusY` independently, per axis (`radiusX` to
@@ -313,6 +332,19 @@ fn clamp_radius(radius: f64, w: f64, h: f64) -> f32 {
 
 impl Direct2DFrame {
     pub fn supports_caching(&self) -> bool { false }
+
+    /// Apply `affine` to everything drawn until the matching `pop_transform`,
+    /// composed with any transform already in effect.
+    pub fn push_transform(&mut self, affine: kurbo::Affine) {
+        self.xf_stack.push(self.xf);
+        self.xf = self.xf * affine;
+        unsafe { self.rt.SetTransform(&d2d_matrix(self.xf) as *const _); }
+    }
+
+    pub fn pop_transform(&mut self) {
+        self.xf = self.xf_stack.pop().unwrap_or(kurbo::Affine::IDENTITY);
+        unsafe { self.rt.SetTransform(&d2d_matrix(self.xf) as *const _); }
+    }
 
     fn solid_brush(&self, color: peniko::Color) -> Option<ID2D1SolidColorBrush> {
         let d2color = to_d2d_color(color);
@@ -630,12 +662,7 @@ impl Direct2DFrame {
     }
 
     fn draw_bitmap_transformed(&mut self, bitmap: &ID2D1Bitmap, image: &peniko::ImageData, transform: kurbo::Affine) {
-        let [a, b, c, d, e, f] = transform.as_coeffs();
-        let matrix = windows_numerics::Matrix3x2 {
-            M11: a as f32, M12: b as f32,
-            M21: c as f32, M22: d as f32,
-            M31: e as f32, M32: f as f32,
-        };
+        let matrix = d2d_matrix(self.xf * transform);
         let dest = D2D_RECT_F { left: 0.0, top: 0.0, right: image.width as f32, bottom: image.height as f32 };
         unsafe {
             self.rt.SetTransform(&matrix as *const _);
@@ -646,9 +673,7 @@ impl Direct2DFrame {
                 D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
                 None,
             );
-            self.rt.SetTransform(&windows_numerics::Matrix3x2 {
-                M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: 0.0, M32: 0.0,
-            } as *const _);
+            self.rt.SetTransform(&d2d_matrix(self.xf) as *const _);
         }
     }
 

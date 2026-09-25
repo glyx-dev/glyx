@@ -5433,6 +5433,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "motion-demo"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "glyx-core",
+ "glyx-shell",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.7.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -24,6 +24,7 @@ members = [
     "examples/webview-demo",
     "examples/a11y-ime-demo",
     "examples/bench-app",
+    "examples/motion-demo",
     "crates/glyx-snapshot",
     "crates/glyx-media",
     "crates/glyx-cap-abi",

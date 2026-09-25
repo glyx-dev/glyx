@@ -245,22 +245,55 @@ fn rgba_premul_srgb_to_peniko(mut bytes: Vec<u8>, w: u32, h: u32) -> Option<peni
     })
 }
 
-/// Advance every active opacity transition one frame, marking transitioning
-/// nodes dirty so they actually re-render (opacity is changing with no new
-/// `SceneCommand` behind it). Returns `true` if any transition is still
+/// Advance every active property transition and keyframe animation one
+/// frame, marking those nodes dirty so they actually re-render (values are
+/// changing with no new `SceneCommand` behind them). Finished animations are
+/// dropped (their node re-renders at its own style) unless they `fill:
+/// 'forwards'`, which stay but stop driving frames. Returns `true` if any transition is still
 /// running after this tick — the caller uses that to force a GPU render and
 /// schedule the next frame, since nothing else would otherwise wake the
 /// render loop mid-transition.
-pub(crate) fn tick_opacity_transitions(state: &mut PerWindowState) -> bool {
-    if state.opacity_transitions.is_empty() { return false; }
+pub(crate) fn tick_transitions(state: &mut PerWindowState) -> bool {
+    if state.transitions.is_empty() && state.animations.is_empty() { return false; }
     let now = Instant::now();
     let dirty_nodes = &mut state.dirty_nodes;
-    state.opacity_transitions.retain(|&id, t| {
+    state.transitions.retain(|&id, t| {
         let (_, finished) = t.sample(now);
         dirty_nodes.insert(id);
         !finished
     });
-    !state.opacity_transitions.is_empty()
+    let mut running = false;
+    state.animations.retain(|&id, a| {
+        if a.settled { return true; }
+        dirty_nodes.insert(id);
+        if !a.finished(now) {
+            running = true;
+            return true;
+        }
+        // This frame draws the final state; forwards-fill keeps it after.
+        a.settled = true;
+        a.spec.fill_forwards
+    });
+    running || !state.transitions.is_empty()
+}
+
+/// Start, restart or stop node `id`'s keyframe animation to match `props`.
+/// Re-sent identical props (every React re-render) leave a running
+/// animation alone; a changed spec restarts it from the beginning.
+fn sync_animation(state: &mut PerWindowState, id: u32, props: &NodeProps) {
+    match motion::AnimSpec::from_props(props) {
+        Some(spec) => {
+            if state.animations.get(&id).map_or(true, |a| a.spec != spec) {
+                state.animations.insert(id, motion::Animation { spec, start: Instant::now(), settled: false });
+                (state.request_redraw)();
+            }
+        }
+        None => {
+            if state.animations.remove(&id).is_some() {
+                state.dirty_nodes.insert(id);
+            }
+        }
+    }
 }
 
 pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<SceneCommand>) -> bool {
@@ -283,6 +316,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
     for cmd in commands {
         match cmd {
             SceneCommand::CreateNode { id, node_type, props } => {
+                sync_animation(state, id, &props);
                 state.js_nodes.insert(id, JsNode::new(node_type, props));
                 if state.js_root.is_none() {
                     state.js_root = Some(id);
@@ -387,27 +421,35 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 if needs_cascade {
                     state.descendant_cascade_nodes.insert(id);
                 }
-                // `@glyx-dev/motion` v1: an opacity change with `transitionMs` set
-                // starts (or retargets) a Rust-owned interpolation instead of
-                // snapping. Must read the OLD effective opacity (mid-transition
-                // value if one was already running) before it's overwritten below.
-                if let (Some(old), Some(ms)) = (
-                    state.js_nodes.get(&id),
-                    props.transition_ms,
-                ) {
-                    let new_opacity = props.opacity.unwrap_or(1.0);
-                    let from = state.opacity_transitions.get(&id)
-                        .map(|t| t.sample(Instant::now()).0)
-                        .unwrap_or_else(|| old.props.opacity.unwrap_or(1.0));
-                    if (new_opacity - from).abs() > f32::EPSILON {
-                        state.opacity_transitions.insert(id, OpacityTransition {
-                            from, to: new_opacity, start: Instant::now(), duration_ms: ms,
-                        });
+                if state.js_nodes.contains_key(&id) {
+                    sync_animation(state, id, &props);
+                }
+                // `@glyx-dev/motion`: a change to a transitioned property starts
+                // (or retargets) a Rust-owned interpolation instead of snapping.
+                // `from` is what's on screen NOW — mid-flight values included —
+                // read before the old props are overwritten below.
+                if let (Some(old), Some(ms)) = (state.js_nodes.get(&id), props.transition_ms) {
+                    let (old_v, new_v) = (motion::Visual::of(&old.props), motion::Visual::of(&props));
+                    // Unrelated updates (text, layout, …) leave a running
+                    // transition alone — restarting its clock would stall it.
+                    if old_v != new_v {
+                        let now  = Instant::now();
+                        let from = match state.transitions.get(&id) {
+                            Some(t) => t.current(&old_v, now),
+                            None    => old_v,
+                        };
+                        let mask   = motion::property_mask(props.transition_property.as_deref());
+                        let easing = motion::Easing::parse(props.transition_easing.as_deref());
+                        match motion::Transition::between(&from, &new_v, mask, ms, easing, now) {
+                            Some(t) => { state.transitions.insert(id, t); }
+                            // Only non-transitioned properties changed: they snap.
+                            None    => { state.transitions.remove(&id); }
+                        }
                     }
                 } else {
                     // No transition declared (or first-ever props for this node) —
                     // any previously-running transition for this id is stale.
-                    state.opacity_transitions.remove(&id);
+                    state.transitions.remove(&id);
                 }
 
                 // A child's z_index changed → its parent's z-sorted child list is stale.
@@ -473,8 +515,10 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         state.images.remove(&image_id);
                     }
                 }
-                // Also clean up canvas data for this node.
+                // Also clean up canvas data and any running motion for this node.
                 state.canvas_cmds.remove(&id);
+                state.transitions.remove(&id);
+                state.animations.remove(&id);
                 #[cfg(feature = "canvas3d")]
                 {
                     state.canvas3d_scenes.remove(&id);
@@ -1101,9 +1145,13 @@ pub(crate) fn update_dirty_from_layout(state: &mut PerWindowState) -> bool {
 /// required.  Used by the software present path to redraw + push only the
 /// changed region (a hover repaints one button, a keystroke one line).
 ///
+/// Each dirty node contributes its VISUAL bounds (see `visual_bounds`: layout
+/// rect + shadow, mapped through its own and its ancestors' transforms, with
+/// mid-transition values from `overrides`) for this frame AND where it was
+/// drawn last frame (`prev_visual`, falling back to its previous layout
+/// rect), so a moving/rotating node erases its old pixels.
+///
 /// Full-frame bailout conditions (correctness over cleverness):
-/// - a dirty node has a `transform` (visual bounds ≠ layout bounds) or a
-///   `box_shadow` (draws outside its rect),
 /// - a dirty node is missing from the tree or has no resolved layout
 ///   (just removed / not yet laid out),
 /// - `dirty_nodes` is empty (callers treat that as "render everything").
@@ -1113,7 +1161,10 @@ pub(crate) fn update_dirty_from_layout(state: &mut PerWindowState) -> bool {
 /// Instead, the OUTERMOST ancestor with a non-zero `scroll_offset_y` is used
 /// as the damage contribution — its own rect is absolute-correct and clips
 /// its content, so it bounds the node's old and new visual positions.
-pub(crate) fn compute_frame_damage(state: &PerWindowState) -> Option<(f64, f64, f64, f64)> {
+pub(crate) fn compute_frame_damage(
+    state:     &PerWindowState,
+    overrides: &std::collections::HashMap<u32, crate::motion::Overrides>,
+) -> Option<(f64, f64, f64, f64)> {
     if state.dirty_nodes.is_empty() {
         return None;
     }
@@ -1134,23 +1185,26 @@ pub(crate) fn compute_frame_damage(state: &PerWindowState) -> Option<(f64, f64, 
         });
     }
 
+    let rect_of = |id: u32| -> Option<(f64, f64, f64, f64)> {
+        let rl = resolved.get(&state.js_nodes.get(&id)?.layout_id?)?;
+        Some((rl.x as f64, rl.y as f64, rl.width as f64, rl.height as f64))
+    };
+
     for &id in &state.dirty_nodes {
-        let Some(node) = state.js_nodes.get(&id) else { return None };
-        if node.props.transform.is_some() || node.props.box_shadow.is_some() {
-            return None;
-        }
+        if !state.js_nodes.contains_key(&id) { return None; }
 
         // Outermost scrolled ancestor bounds this node's visual position.
         // Walks the persistent `parent` pointers maintained by
         // `apply_scene_commands` — no per-frame child→parent map needed.
         let target = outermost_scrolled_ancestor(&state.js_nodes, id).unwrap_or(id);
-        let Some(tnode) = state.js_nodes.get(&target)     else { return None };
-        let Some(lid)   = tnode.layout_id                  else { return None };
-        let Some(rl)    = resolved.get(&lid)               else { return None };
-        add(&mut ltrb, rl.x as f64, rl.y as f64, rl.width as f64, rl.height as f64);
+        let (l, t, r, b) = visual_bounds(&state.js_nodes, &rect_of, overrides, target)?;
+        add(&mut ltrb, l, t, r - l, b - t);
 
-        // Include the PREVIOUS rect so moved/shrunk nodes erase their old
-        // pixels (prev_resolved is keyed by JS id and still holds last frame).
+        // Include where it was drawn LAST frame so moved/shrunk/rotated nodes
+        // erase their old pixels.
+        if let Some(&(pl, pt, pr, pb)) = state.prev_visual.get(&target) {
+            add(&mut ltrb, pl, pt, pr - pl, pb - pt);
+        }
         if let Some(prl) = state.prev_resolved.get(&target) {
             add(&mut ltrb, prl.x as f64, prl.y as f64,
                 prl.width as f64, prl.height as f64);
@@ -1158,6 +1212,71 @@ pub(crate) fn compute_frame_damage(state: &PerWindowState) -> Option<(f64, f64, 
     }
 
     ltrb.map(|(l, t, r, b)| (l, t, r - l, b - t))
+}
+
+/// Screen-space bounds `(l, t, r, b)` of what node `id` draws: its layout
+/// rect grown by its box shadow, then mapped through its own transform and
+/// every ancestor's (each centred on that node's own rect, as the renderer
+/// does). Transform/shadow values come from `overrides` while a transition
+/// runs. Descendants are assumed to lie inside the node's rect (normal flow),
+/// matching the rest of the damage analysis. `None` if a rect is unknown.
+pub(crate) fn visual_bounds(
+    nodes:     &std::collections::HashMap<u32, JsNode>,
+    rect_of:   &dyn Fn(u32) -> Option<(f64, f64, f64, f64)>,
+    overrides: &std::collections::HashMap<u32, crate::motion::Overrides>,
+    id:        u32,
+) -> Option<(f64, f64, f64, f64)> {
+    use peniko::kurbo::{Affine, Point};
+    let node = nodes.get(&id)?;
+    let (x, y, w, h) = rect_of(id)?;
+    let (mut l, mut t, mut r, mut b) = (x, y, x + w, y + h);
+
+    let ov = overrides.get(&id);
+    if let Some((dx, dy, _)) = ov.and_then(|o| o.shadow).or(node.box_shadow) {
+        l = l.min(x + dx); t = t.min(y + dy);
+        r = r.max(x + w + dx); b = b.max(y + h + dy);
+    }
+
+    let mut cur = Some(id);
+    for _ in 0..=nodes.len() {
+        let Some(cid) = cur else { break };
+        let Some(n) = nodes.get(&cid) else { break };
+        let affine = overrides.get(&cid).and_then(|o| o.transform).or(n.transform);
+        if let Some(a) = affine {
+            let (nx, ny, nw, nh) = rect_of(cid)?;
+            let c = (nx + nw / 2.0, ny + nh / 2.0);
+            let m = Affine::translate(c) * a * Affine::translate((-c.0, -c.1));
+            let pts = [Point::new(l, t), Point::new(r, t), Point::new(l, b), Point::new(r, b)].map(|p| m * p);
+            l = pts.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+            t = pts.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+            r = pts.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+            b = pts.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+        }
+        cur = n.parent;
+    }
+    Some((l, t, r, b))
+}
+
+/// Remember where each node drawn this frame actually landed on screen
+/// (`visual_bounds`), so next frame's damage can erase it. Call after the
+/// frame is rendered, before `dirty_nodes` is cleared.
+pub(crate) fn record_visual_bounds(
+    state:     &mut PerWindowState,
+    overrides: &std::collections::HashMap<u32, crate::motion::Overrides>,
+) {
+    let resolved = &state.resolved_by_id;
+    let nodes = &state.js_nodes;
+    let rect_of = |id: u32| -> Option<(f64, f64, f64, f64)> {
+        let rl = resolved.get(&nodes.get(&id)?.layout_id?)?;
+        Some((rl.x as f64, rl.y as f64, rl.width as f64, rl.height as f64))
+    };
+    for &id in &state.dirty_nodes {
+        match visual_bounds(nodes, &rect_of, overrides, id) {
+            Some(v) => { state.prev_visual.insert(id, v); }
+            None    => { state.prev_visual.remove(&id); }
+        }
+    }
+    state.prev_visual.retain(|id, _| nodes.contains_key(id));
 }
 
 /// Find the topmost solid (click-opaque) node covering window-relative
@@ -1642,6 +1761,59 @@ mod tests {
         let mut n = JsNode::new(NodeType::View, NodeProps { scroll_offset_y: scroll_y, ..NodeProps::default() });
         n.parent = parent;
         n
+    }
+
+    fn rects(list: &[(u32, (f64, f64, f64, f64))]) -> impl Fn(u32) -> Option<(f64, f64, f64, f64)> + '_ {
+        move |id| list.iter().find(|(i, _)| *i == id).map(|(_, r)| *r)
+    }
+
+    #[test]
+    fn visual_bounds_is_the_layout_rect_without_transform_or_shadow() {
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(1, node(None, None));
+        let r = [(1, (10.0, 20.0, 30.0, 40.0))];
+        let ov = std::collections::HashMap::new();
+        assert_eq!(visual_bounds(&nodes, &rects(&r), &ov, 1), Some((10.0, 20.0, 40.0, 60.0)));
+    }
+
+    #[test]
+    fn visual_bounds_follows_translate_rotate_and_shadow() {
+        let mut nodes = std::collections::HashMap::new();
+        let mut n = JsNode::new(NodeType::View, NodeProps {
+            transform: Some("translate(100, 0)".into()),
+            box_shadow: Some("5 5 0 #000000".into()),
+            ..NodeProps::default()
+        });
+        n.parent = None;
+        nodes.insert(1, n);
+        let r = [(1, (0.0, 0.0, 10.0, 10.0))];
+        let ov = std::collections::HashMap::new();
+        // Rect + shadow = (0,0)-(15,15), moved right by 100.
+        assert_eq!(visual_bounds(&nodes, &rects(&r), &ov, 1), Some((100.0, 0.0, 115.0, 15.0)));
+
+        // A 90° rotation about the centre of a 20x10 box swaps its extents.
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(2, JsNode::new(NodeType::View, NodeProps { transform: Some("rotate(90)".into()), ..NodeProps::default() }));
+        let r = [(2, (0.0, 0.0, 20.0, 10.0))];
+        let (l, t, rr, b) = visual_bounds(&nodes, &rects(&r), &ov, 2).unwrap();
+        assert!((l - 5.0).abs() < 1e-9 && (t + 5.0).abs() < 1e-9 && (rr - 15.0).abs() < 1e-9 && (b - 15.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn visual_bounds_applies_ancestor_transforms_and_live_overrides() {
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(1, JsNode::new(NodeType::View, NodeProps { transform: Some("translate(50, 0)".into()), ..NodeProps::default() }));
+        nodes.insert(2, node(Some(1), None));
+        let r = [(1, (0.0, 0.0, 100.0, 100.0)), (2, (10.0, 10.0, 10.0, 10.0))];
+        let mut ov = std::collections::HashMap::new();
+        // A child inside a translated parent lands where the parent moved it.
+        assert_eq!(visual_bounds(&nodes, &rects(&r), &ov, 2), Some((60.0, 10.0, 70.0, 20.0)));
+        // Mid-transition, the override (not the prop) decides.
+        ov.insert(1, crate::motion::Overrides {
+            transform: Some(peniko::kurbo::Affine::translate((20.0, 0.0))),
+            ..Default::default()
+        });
+        assert_eq!(visual_bounds(&nodes, &rects(&r), &ov, 2), Some((30.0, 10.0, 40.0, 20.0)));
     }
 
     #[test]

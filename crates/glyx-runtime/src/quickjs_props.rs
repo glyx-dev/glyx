@@ -187,6 +187,14 @@ pub(crate) fn parse_props_value(props: Value<'_>) -> NodeProps {
 
     out.opacity             = get_num(&obj, "opacity");
     out.transition_ms       = get_num(&obj, "transitionMs").map(|n| n as u32);
+    out.transition_property = get_str(&obj, "transitionProperty");
+    out.transition_easing   = get_str(&obj, "transitionEasing");
+    out.animation_keyframes  = get_str(&obj, "animationKeyframes");
+    out.animation_ms         = get_num(&obj, "animationMs").map(|n| n as u32);
+    out.animation_easing     = get_str(&obj, "animationEasing");
+    out.animation_iterations = get_num(&obj, "animationIterations");
+    out.animation_direction  = get_str(&obj, "animationDirection");
+    out.animation_fill       = get_str(&obj, "animationFill");
     out.box_shadow          = get_str(&obj, "boxShadow");
     out.background_gradient = get_str(&obj, "backgroundGradient");
 
@@ -311,6 +319,10 @@ mod tests {
             minWidth: 10, minHeight: '20', maxWidth: '30%', maxHeight: 40,
             overflow: 'hidden', hidden: false, disabled: true, pointerEvents: 'auto',
             opacity: 0.5, transitionMs: 250,
+            transitionProperty: 'opacity,transform', transitionEasing: 'ease-in-out',
+            animationKeyframes: '[[0,{\"opacity\":0}],[1,{\"opacity\":1}]]', animationMs: 800,
+            animationEasing: 'linear', animationIterations: -1,
+            animationDirection: 'alternate', animationFill: 'forwards',
             boxShadow: '2px 3px #000000', backgroundGradient: '#ff0000 #0000ff',
             position: 'absolute', top: 1, left: '2%', right: 3, bottom: '4',
             transform: 'translate(10,20) rotate(45)', boxSizing: 'border-box',
@@ -405,6 +417,14 @@ mod tests {
             pointer_events: Some("auto".to_string()),
             opacity: Some(0.5),
             transition_ms: Some(250),
+            transition_property: Some("opacity,transform".to_string()),
+            transition_easing: Some("ease-in-out".to_string()),
+            animation_keyframes: Some(r#"[[0,{"opacity":0}],[1,{"opacity":1}]]"#.to_string()),
+            animation_ms: Some(800),
+            animation_easing: Some("linear".to_string()),
+            animation_iterations: Some(-1.0),
+            animation_direction: Some("alternate".to_string()),
+            animation_fill: Some("forwards".to_string()),
             box_shadow: Some("2px 3px #000000".to_string()),
             background_gradient: Some("#ff0000 #0000ff".to_string()),
             position: Some("absolute".to_string()),

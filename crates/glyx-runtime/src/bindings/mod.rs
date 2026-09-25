@@ -1074,6 +1074,28 @@ pub struct NodeProps {
     /// snapping — driven by `glyx-core`'s render loop, not JS. `None` means
     /// opacity changes always snap immediately (existing behavior).
     pub transition_ms: Option<u32>,
+    /// Which properties `transition_ms` animates: comma-separated
+    /// (`"opacity,transform,backgroundColor,borderColor,borderRadius,boxShadow"`)
+    /// or `"all"`. `None` → opacity only (the original v1 behaviour).
+    pub transition_property: Option<String>,
+    /// CSS easing: `linear`, `ease`, `ease-in`, `ease-out`, `ease-in-out` or
+    /// `cubic-bezier(x1,y1,x2,y2)`. `None` → ease-out cubic.
+    pub transition_easing: Option<String>,
+    /// `@glyx-dev/motion` keyframe animation: JSON `[[offset, {props}], ...]`
+    /// with offsets in 0..=1 (built by `@glyx-dev/react` from the
+    /// `animation` prop). Animatable props as for transitions.
+    pub animation_keyframes: Option<String>,
+    /// Length of one iteration in ms.
+    pub animation_ms: Option<u32>,
+    /// Per-segment easing, as `transition_easing`. `None` → ease.
+    pub animation_easing: Option<String>,
+    /// Iteration count; negative = infinite. `None` → 1.
+    pub animation_iterations: Option<f32>,
+    /// `"normal"` | `"alternate"`.
+    pub animation_direction: Option<String>,
+    /// `"none"` (default: revert to the node's own style when done) |
+    /// `"forwards"` (hold the last keyframe).
+    pub animation_fill: Option<String>,
     /// Box shadow string: `"dx dy blur color"` (e.g. `"2 2 4 #00000044"`).
     pub box_shadow: Option<String>,
     /// Linear background gradient: `"startColor endColor"` (e.g. `"#ff0000 #0000ff"`).
@@ -2146,7 +2168,7 @@ fn parse_node_type(scope: &mut v8::PinScope<'_, '_, v8::Context>, value: v8::Loc
 /// Returns `None` if the string is not a valid hex colour. Engine-neutral —
 /// used by both the V8 `parse_props` (below) and QuickJS's JSON-based
 /// equivalent in `quickjs_runtime.rs`.
-pub(crate) fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
+pub fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
     let s = s.trim().trim_start_matches('#');
     match s.len() {
         3 => {
@@ -2370,6 +2392,14 @@ fn parse_props(
     //  Visual effects 
     props.opacity             = get_num_prop(scope, obj, "opacity");
     props.transition_ms       = get_num_prop(scope, obj, "transitionMs").map(|n| n as u32);
+    props.transition_property = get_str_prop(scope, obj, "transitionProperty");
+    props.transition_easing   = get_str_prop(scope, obj, "transitionEasing");
+    props.animation_keyframes  = get_str_prop(scope, obj, "animationKeyframes");
+    props.animation_ms         = get_num_prop(scope, obj, "animationMs").map(|n| n as u32);
+    props.animation_easing     = get_str_prop(scope, obj, "animationEasing");
+    props.animation_iterations = get_num_prop(scope, obj, "animationIterations");
+    props.animation_direction  = get_str_prop(scope, obj, "animationDirection");
+    props.animation_fill       = get_str_prop(scope, obj, "animationFill");
     props.box_shadow          = get_str_prop(scope, obj, "boxShadow");
     props.background_gradient = get_str_prop(scope, obj, "backgroundGradient");
 

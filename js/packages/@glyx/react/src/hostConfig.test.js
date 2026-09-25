@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import { prepareUpdate } from './hostConfig.js';
+import { prepareUpdate, applyTransition, applyAnimation } from './hostConfig.js';
 
 test('prepareUpdate returns null when no visual props changed', () => {
   const oldProps = { backgroundColor: 'red', children: 'a', ref: null };
@@ -32,4 +32,54 @@ test('prepareUpdate treats a transition prop change as a visual change', () => {
   const oldProps = { backgroundColor: 'red', transition: { duration: 200 } };
   const newProps = { backgroundColor: 'red', transition: { duration: 400 } };
   expect(prepareUpdate({}, 'view', oldProps, newProps)).toBe(newProps);
+});
+
+test('applyTransition flattens duration, properties and easing', () => {
+  const p = {};
+  applyTransition(p, { duration: 250, properties: ['opacity', 'transform'], easing: 'ease-in-out' });
+  expect(p).toEqual({ transitionMs: 250, transitionProperty: 'opacity,transform', transitionEasing: 'ease-in-out' });
+
+  const all = {};
+  applyTransition(all, { duration: 100, properties: 'all' });
+  expect(all).toEqual({ transitionMs: 100, transitionProperty: 'all' });
+});
+
+test('applyTransition keeps the v1 shape and ignores a missing duration', () => {
+  const v1 = {};
+  applyTransition(v1, { duration: 200 });
+  expect(v1).toEqual({ transitionMs: 200 });
+
+  const none = {};
+  applyTransition(none, { easing: 'linear' });
+  applyTransition(none, undefined);
+  expect(none).toEqual({});
+});
+
+test('applyAnimation flattens keyframes keyed by percent / from / to', () => {
+  const p = {};
+  applyAnimation(p, {
+    duration: 800, easing: 'linear', iterations: Infinity, direction: 'alternate', fill: 'forwards',
+    keyframes: { from: { opacity: 0, color: 'red' }, '50%': { transform: 'scale(1.2)' }, 100: { opacity: 1 } },
+  });
+  expect(JSON.parse(p.animationKeyframes)).toEqual([
+    [0, { opacity: 0 }],            // non-animatable keys dropped
+    [0.5, { transform: 'scale(1.2)' }],
+    [1, { opacity: 1 }],
+  ]);
+  expect(p).toMatchObject({
+    animationMs: 800, animationEasing: 'linear', animationIterations: -1,
+    animationDirection: 'alternate', animationFill: 'forwards',
+  });
+});
+
+test('applyAnimation spaces array keyframes evenly unless they carry an offset', () => {
+  const p = {};
+  applyAnimation(p, { duration: 300, keyframes: [{ opacity: 0 }, { opacity: 0.5, offset: 0.2 }, { opacity: 1 }] });
+  expect(JSON.parse(p.animationKeyframes)).toEqual([[0, { opacity: 0 }], [0.2, { opacity: 0.5 }], [1, { opacity: 1 }]]);
+  expect(p.animationIterations).toBeUndefined();
+
+  const none = {};
+  applyAnimation(none, { keyframes: [{ opacity: 0 }] }); // no duration
+  applyAnimation(none, undefined);
+  expect(none).toEqual({});
 });

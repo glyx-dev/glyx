@@ -103,6 +103,7 @@ mod scene;
 mod layout;
 mod render;
 mod render_props;
+mod motion;
 mod soft_present;
 #[cfg(target_os = "windows")]
 mod d2d_present;
@@ -117,7 +118,7 @@ use self::dev_mode::*;
 #[cfg(feature = "dev")]
 use arboard;
 
-use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, reconcile_z_order, snapshot_resolved, tick_opacity_transitions, hit_test_solid, shrink_oversized_collections};
+use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, reconcile_z_order, snapshot_resolved, tick_transitions, hit_test_solid, shrink_oversized_collections};
 use focus::{focus_order, next_focus, sort_by_position};
 use layout::{recompute_layout, update_scroll_positions, scroll_reveal_target};
 
@@ -970,6 +971,7 @@ pub fn run(mut config: AppConfig) -> bool {
     let window_bg = window.background_color;
     // Capture configured mode; Auto is resolved after GPU adapter is known.
     let render_mode_config = window.render_mode;
+    let max_fps = window.max_fps;
     // Canvas2D transport config — applied to each runtime after construction.
     let canvas_protocol  = window.canvas_protocol.clone();
     let canvas_buffer_kb = window.canvas_buffer_kb.unwrap_or(256) as usize;
@@ -1011,7 +1013,7 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Pre-init splash window — paint it immediately, before any
             // GPU/JS setup for the real main window even starts. ──────────
             ShellEvent::SplashWindowReady { window } => {
-                match soft_present::SoftPresent::new(Arc::clone(&window)) {
+                match soft_present::SoftPresent::new(Arc::clone(&window), max_fps) {
                     Ok(mut sp) => {
                         let (w, h) = (sp.width(), sp.height());
                         if let Some(splash) = &mut main_splash_state {
@@ -1076,7 +1078,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     .map(|v| v.trim() == "1").unwrap_or(false);
                 let (present, mut renderer) =
                     if matches!(backend_kind, BackendKind::TinySkia) && !no_soft {
-                        match soft_present::SoftPresent::new(Arc::clone(&window)) {
+                        match soft_present::SoftPresent::new(Arc::clone(&window), max_fps) {
                             Ok(sp) => {
                                 let size = window.inner_size();
                                 let r = AnyRenderer::TinySkia(
@@ -1446,7 +1448,8 @@ pub fn run(mut config: AppConfig) -> bool {
                     z_order_dirty:          std::collections::HashSet::new(),
                     js_nodes:     std::collections::HashMap::with_capacity(256),
                     js_root:      None,
-                    opacity_transitions: std::collections::HashMap::new(),
+                    transitions: std::collections::HashMap::new(),
+                    animations:  std::collections::HashMap::new(),
                     images:       std::collections::HashMap::with_capacity(32),
                     images_by_path: ByteBudgetImageCache::new(256 * 1024 * 1024),
                     image_cache_hits: 0,
@@ -1537,6 +1540,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     descendant_cascade_nodes: std::collections::HashSet::new(),
                     dirty_subtrees:           std::collections::HashSet::new(),
                     prev_resolved:   std::collections::HashMap::new(),
+                    prev_visual:     std::collections::HashMap::new(),
                     scene_cache:              std::collections::HashMap::new(),
                     scene_cache_new:          std::collections::HashMap::new(),
                     boundary_scene_cache:     std::collections::HashMap::new(),
@@ -2018,11 +2022,12 @@ pub fn run(mut config: AppConfig) -> bool {
                 let post_commands = s.runtime.drain_scene_commands();
                 let post_changed  = apply_scene_commands(s, post_commands);
 
-                // 4b. Advance any active opacity transitions (@glyx-dev/motion v1) —
+                // 4b. Advance any active property transitions and keyframe
+                // animations (@glyx-dev/motion) —
                 // Rust-owned interpolation, no JS re-entry. If any are still
                 // running after this tick, force this frame to render and
                 // schedule the next one (nothing else would wake the loop).
-                let transitions_active = tick_opacity_transitions(s);
+                let transitions_active = tick_transitions(s);
                 if transitions_active {
                     (s.request_redraw)();
                 }
@@ -2272,6 +2277,22 @@ pub fn run(mut config: AppConfig) -> bool {
                 // just maximized/resized, Resized only updated gpu, not the renderer.
                 s.renderer.notify_resize(s.gpu.width().max(1), s.gpu.height().max(1));
 
+                // Sample each active transition once, fresh every frame — this
+                // is the actual interpolation step. Shared by the damage
+                // analysis and the renderer so both see the same values.
+                let now = Instant::now();
+                let mut motion_overrides: std::collections::HashMap<u32, motion::Overrides> = s.transitions
+                    .iter()
+                    .map(|(&id, t)| (id, t.sample(now).0))
+                    .collect();
+                // Keyframe animations layer over transitions (CSS precedence).
+                for (&id, anim) in &s.animations {
+                    if let Some(node) = s.js_nodes.get(&id) {
+                        let ov = anim.sample(&motion::Visual::of(&node.props), now);
+                        motion_overrides.entry(id).or_default().overlay(ov);
+                    }
+                }
+
                 // ── Damage computation (soft present + TinySkia only) ─────────
                 // Redraw + push only the changed region.  Full frame when the
                 // splash is up, a dev-overlay refresh is due (overlay draws on
@@ -2300,7 +2321,7 @@ pub fn run(mut config: AppConfig) -> bool {
                             if s.dirty_nodes.is_empty() {
                                 Some(None)
                             } else {
-                                match scene::compute_frame_damage(s) {
+                                match scene::compute_frame_damage(s, &motion_overrides) {
                                     Some(d) => Some(Some(d)),
                                     None    => None, // bail → full
                                 }
@@ -2352,17 +2373,10 @@ pub fn run(mut config: AppConfig) -> bool {
                 #[cfg(feature = "webview")]
                 let mut webview_overlays: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
 
-                // Sample each active opacity transition's current value once,
-                // fresh every frame — this is the actual interpolation step.
-                let opacity_overrides: std::collections::HashMap<u32, f32> = s.opacity_transitions
-                    .iter()
-                    .map(|(&id, t)| (id, t.sample(Instant::now()).0))
-                    .collect();
-
                 if let Some(root_id) = s.js_root {
                     let mut render_ctx = RenderCtx {
                         nodes:             &s.js_nodes,
-                        opacity_overrides: &opacity_overrides,
+                        overrides:         &motion_overrides,
                         images:            &s.images,
                         resolved_by_id:     &s.resolved_by_id,
                         z_order:            &s.z_order,
@@ -2572,7 +2586,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     } else if s.gpu_was_upgraded && matches!(s.gpu, Present::Gpu(_)) {
                         let last = s.canvas3d_last_used.unwrap_or(frame_start);
                         if last.elapsed() >= IDLE_3D {
-                            match soft_present::SoftPresent::new(Arc::clone(&s.window)) {
+                            match soft_present::SoftPresent::new(Arc::clone(&s.window), max_fps) {
                                 Ok(sp) => {
                                     log::info!(
                                         "Canvas3D idle for 60 s — releasing wgpu, \
@@ -2920,7 +2934,8 @@ pub fn run(mut config: AppConfig) -> bool {
                     s.pipeline_cache_saved = true;
                 }
 
-                // Update prev_resolved snapshot and clear per-frame dirty sets.
+                // Update prev_resolved/prev_visual snapshots and clear per-frame dirty sets.
+                scene::record_visual_bounds(s, &motion_overrides);
                 snapshot_resolved(s);
                 s.dirty_nodes.clear();
                 s.dirty_subtrees.clear();
@@ -3202,6 +3217,16 @@ mod tests {
 
         let (cfg, _) = apply(r#"{ "window": { "startupMode": "fullscreen" } }"#);
         assert_eq!(cfg.startup_mode, glyx_shell::StartupMode::Fullscreen);
+    }
+
+    #[test]
+    fn config_max_fps_is_optional_and_clamped() {
+        let (cfg, _) = apply(r#"{ "window": { "maxFps": 60 } }"#);
+        assert_eq!(cfg.max_fps, Some(60));
+        let (cfg, _) = apply(r#"{ "window": { "maxFps": 1 } }"#);
+        assert_eq!(cfg.max_fps, Some(15));
+        let (cfg, _) = apply(r#"{ "window": {} }"#);
+        assert_eq!(cfg.max_fps, None);
     }
 
     #[test]

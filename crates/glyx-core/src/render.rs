@@ -396,6 +396,12 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             let line_height = tstyle.line_height;
             let max_width   = tbox.wrap_width();
             let show_cursor     = node.props.show_cursor.unwrap_or(false);
+            // numberOfLines={1} on display text: cut to the box with "…".
+            // (Editors and single-line inputs scroll instead.)
+            let ellipsized = if node.props.number_of_lines == Some(1) && !show_cursor && !tbox.single_line {
+                ctx.text_sys.ellipsize(text, font_size, bold, italic, rw as f32)
+            } else { None };
+            let text = ellipsized.as_deref().unwrap_or(text);
             let cursor_position = node.props.cursor_position.map(|p| p as usize);
             let selection_start = node.props.selection_start.map(|p| p as usize);
             let selection_end   = node.props.selection_end.map(|p| p as usize);

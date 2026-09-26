@@ -5,7 +5,7 @@
   "main": "src/index.js",
   "license": "MIT",
   "peerDependencies": {
-    "@glyx-dev/react": "*",
+    "@glyx-dev/react": "^0.1.0",
     "react": "*"
   }
 }

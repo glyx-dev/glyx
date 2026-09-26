@@ -39,8 +39,6 @@ function Explorer() {
   const [doc, setDoc] = useState(() => docFromPlainText(''));
   const [status, setStatus] = useState('Open a folder to begin');
   const saveTimer = useRef(null);
-  const paneW = Math.max(200, Math.round(width * 0.7) - 48);
-  const paneH = Math.max(200, height - 140);
 
   const openFolder = async () => {
     const p = await dialog.openFolder();
@@ -109,6 +107,7 @@ function Explorer() {
     await fs.deleteFile(selected);
     setSelected(null); setKind(null);
     setStatus('Deleted ' + basename(selected));
+    list(current);
   };
 
   const onChangeDoc = (d) => {
@@ -119,98 +118,149 @@ function Explorer() {
     }, 600);
   };
 
+  const shown = entries.filter((e) => e.isDir || kindOf(e.name) != null);
+  const look = (name, isDir) => {
+    if (isDir) return { icon: 'folder', color: C.warning };
+    const k = kindOf(name);
+    if (k === 'image') return { icon: 'image', color: C.success };
+    if (k === 'video') return { icon: 'play', color: C.error };
+    return { icon: 'file-text', color: C.primary };
+  };
+
+  // A row: a fixed-size icon slot that never shrinks (so a narrow pane can't
+  // squeeze the icon away) and a name that truncates with an ellipsis.
+  const row = ({ key, icon, color, name, active, muted, onPress }) => (
+    <Pressable
+      key={key}
+      onPress={onPress}
+      style={({ hovered, pressed }) => ({
+        flexDirection: 'row', alignItems: 'center', gap: 8,
+        paddingVertical: 7, paddingRight: 10, borderRadius: 6, marginBottom: 2,
+        backgroundColor: active || pressed ? C.surfaceRaised : hovered ? C.surfaceHover : 'transparent',
+      })}
+    >
+      <View style={{ width: 3, height: 16, borderRadius: 2, flexShrink: 0, backgroundColor: active ? C.primary : 'transparent' }} />
+      <View style={{ width: 18, height: 18, flexShrink: 0, alignItems: 'center', justifyContent: 'center' }}>
+        <Icon name={icon} size={16} color={color} />
+      </View>
+      <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, fontSize: 13, color: muted ? C.textMuted : C.text, fontWeight: active ? '600' : '400' }}>{name}</Text>
+    </Pressable>
+  );
+
   const left = (
     <View style={{ flex: 1, backgroundColor: C.surface }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, padding: 10, borderBottomWidth: 1, borderBottomColor: C.border }}>
-        <IconButton icon="folder" variant="primary" label="Open folder" onPress={openFolder} />
-        {current ? (
-          <IconButton icon="plus" variant="secondary" label="New file" onPress={newFile} />
-        ) : null}
-        {current && current !== root ? (
-          <IconButton icon="arrow-left" variant="ghost" label="Up" onPress={() => setCurrent(parentOf(current))} />
-        ) : null}
-        <Text style={{ color: C.textMuted, fontSize: 12, flex: 1 }}>{current || 'No folder'}</Text>
+      <View style={{ paddingHorizontal: 12, paddingTop: 10, paddingBottom: 10, gap: 4, borderBottomWidth: 1, borderBottomColor: C.border }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+          <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: C.text, fontSize: 14, fontWeight: '700' }}>{basename(current) || 'Files'}</Text>
+          <IconButton icon="plus" variant="ghost" size={28} label="New file" onPress={newFile} />
+          <IconButton icon="refresh-cw" variant="ghost" size={28} label="Refresh" onPress={() => list(current)} />
+          <IconButton icon="folder" variant="ghost" size={28} label="Open folder" onPress={openFolder} />
+        </View>
+        <Text numberOfLines={1} style={{ color: C.textMuted, fontSize: 11 }}>{current || ''}</Text>
       </View>
-      <ScrollView style={{ flex: 1, padding: 8 }}>
-        {entries.length === 0 ? (
-          <Empty icon="📁" title="No folder open" description="Use the folder button to pick a directory" action={openFolder} actionLabel="Open folder" />
-        ) : entries.filter((e) => e.isDir || kindOf(e.name) != null).map((e) => {
-          return (
-            <Pressable
-              key={e.name}
-              onPress={() => e.isDir ? list(current + '/' + e.name) : openFile(current + '/' + e.name)}
-              style={({ hovered, pressed }) => ({
-                flexDirection: 'row', alignItems: 'center', gap: 8, padding: 8, borderRadius: 6,
-                backgroundColor: pressed ? C.surfaceRaised : hovered ? C.surfaceHover || C.surfaceRaised : 'transparent',
-              })}
-            >
-              <Icon name={e.isDir ? 'folder' : 'file-text'} size={16} color={C.textMuted} />
-              <Text style={{ color: e.isDir ? C.primary : C.text, flex: 1 }}>{e.name}</Text>
-            </Pressable>
-          );
+      <ScrollView style={{ flex: 1, padding: 6 }}>
+        {current && current !== root
+          ? row({ key: '..', icon: 'arrow-left', color: C.textMuted, name: 'Up one level', muted: true, onPress: () => setCurrent(parentOf(current)) })
+          : null}
+        {shown.length === 0 ? (
+          <View style={{ padding: 14 }}>
+            <Text style={{ color: C.textMuted, fontSize: 12 }}>No images, videos or text files here.</Text>
+          </View>
+        ) : shown.map((e) => {
+          const path = current + '/' + e.name;
+          const { icon, color } = look(e.name, e.isDir);
+          return row({
+            key: e.name, icon, color, name: e.name,
+            active: !e.isDir && selected === path,
+            onPress: () => (e.isDir ? list(path) : openFile(path)),
+          });
         })}
       </ScrollView>
+      <View style={{ height: 30, justifyContent: 'center', paddingHorizontal: 12, borderTopWidth: 1, borderTopColor: C.border }}>
+        <Text numberOfLines={1} style={{ color: C.textMuted, fontSize: 11 }}>
+          {shown.length} item{shown.length === 1 ? '' : 's'}
+        </Text>
+      </View>
     </View>
   );
 
-  const right = (
-    <View style={{ flex: 1, backgroundColor: C.bg }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, padding: 10, borderBottomWidth: 1, borderBottomColor: C.border }}>
-        <Text style={{ color: C.text, flex: 1, fontSize: 13 }}>{selected ? basename(selected) : 'No file selected'}</Text>
-        {selected ? (
-          <>
-            {kind === 'text' ? <IconButton icon="save" variant="secondary" label="Save" onPress={save} /> : null}
-            <IconButton icon="trash" variant="danger" label="Delete" onPress={del} />
-          </>
-        ) : null}
-      </View>
-      <View style={{ flex: 1, padding: 12 }}>
-        {!selected ? (
-          <Empty icon="📁" title="Nothing open" description="Pick an image, video, or .txt/.md/.log file from the left" />
-        ) : kind === 'image' ? (
-          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-            <Image src={selected} resizeMode="contain" style={{ width: paneW, height: paneH }} />
+  // The right pane is a render function: SplitPane passes its real size, so
+  // the editor and previews follow the divider instead of the window.
+  const right = ({ width: pw, height: ph }) => {
+    const bodyW = Math.max(120, pw - 32);
+    const bodyH = Math.max(120, ph - 56 - 30 - 32);
+    const cur = selected ? look(selected, false) : null;
+    return (
+      <View style={{ flex: 1, backgroundColor: C.bg }}>
+        <View style={{ height: 56, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: C.border }}>
+          {cur ? (
+            <View style={{ width: 30, height: 30, borderRadius: 8, flexShrink: 0, backgroundColor: C.surface, alignItems: 'center', justifyContent: 'center' }}>
+              <Icon name={cur.icon} size={16} color={cur.color} />
+            </View>
+          ) : null}
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text numberOfLines={1} style={{ color: C.text, fontSize: 14, fontWeight: '600' }}>{selected ? basename(selected) : 'No file selected'}</Text>
+            {selected ? <Text numberOfLines={1} style={{ color: C.textMuted, fontSize: 11 }}>{extOf(selected).toUpperCase() + ' ' + kind}</Text> : null}
           </View>
-        ) : kind === 'video' ? (
-          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-            <Video src={selected} style={{ width: paneW, height: paneH }} />
-          </View>
-        ) : (
-          <RichTextEditor
-            key={selected}
-            value={doc}
-            onChange={onChangeDoc}
-            width={paneW}
-            height={paneH}
-            color={C.text}
-            placeholder="Start typing…"
-            autoFocus
-            style={{ backgroundColor: C.surface, borderRadius: 8, padding: 12 }}
-          >
-            <RichTextToolbar />
-          </RichTextEditor>
-        )}
+          {selected && kind === 'text' ? <IconButton icon="save" variant="ghost" size={30} label="Save" onPress={save} /> : null}
+          {selected ? <IconButton icon="trash" variant="ghost" size={30} label="Delete" onPress={del} /> : null}
+        </View>
+        <View style={{ flex: 1, padding: 16 }}>
+          {!selected ? (
+            <Empty icon="📄" title="Nothing open" description="Pick an image, video, or .txt/.md/.log file from the left" />
+          ) : kind === 'image' ? (
+            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: C.surface, borderRadius: 10 }}>
+              <Image src={selected} resizeMode="contain" style={{ width: bodyW - 24, height: bodyH - 24 }} />
+            </View>
+          ) : kind === 'video' ? (
+            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#000000', borderRadius: 10 }}>
+              <Video src={selected} style={{ width: bodyW, height: bodyH }} />
+            </View>
+          ) : (
+            <RichTextEditor
+              key={selected}
+              value={doc}
+              onChange={onChangeDoc}
+              width={bodyW}
+              height={bodyH}
+              color={C.text}
+              placeholder="Start typing…"
+              autoFocus
+              style={{ backgroundColor: C.surface, borderRadius: 10, padding: 14 }}
+            >
+              <RichTextToolbar />
+            </RichTextEditor>
+          )}
+        </View>
+        <View style={{ height: 30, justifyContent: 'center', paddingHorizontal: 16, borderTopWidth: 1, borderTopColor: C.border }}>
+          <Text numberOfLines={1} style={{ color: C.textMuted, fontSize: 11 }}>{status}</Text>
+        </View>
       </View>
-      <View style={{ padding: 8, borderTopWidth: 1, borderTopColor: C.border }}>
-        <Text style={{ color: C.textMuted, fontSize: 12 }}>{status}</Text>
-      </View>
-    </View>
-  );
+    );
+  };
 
   if (!root) {
     return (
       <View style={{ flex: 1, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-        <Text style={{ color: C.textMuted }}>Images, video, and rich-text notes</Text>
+        <View style={{ width: 64, height: 64, borderRadius: 16, backgroundColor: C.surface, alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name="folder" size={30} color={C.warning} />
+        </View>
+        <Text style={{ color: C.text, fontSize: 18, fontWeight: '700' }}>Files</Text>
+        <Text style={{ color: C.textMuted, fontSize: 13 }}>Browse images, video, and rich-text notes</Text>
         <Button label="Open folder" variant="primary" onPress={openFolder} />
       </View>
     );
   }
 
   return (
-    <SplitPane direction="horizontal" defaultSizes={[30, 70]} width={width} height={height - 40}>
-      {left}
-      {right}
-    </SplitPane>
+    <View style={{ flex: 1, backgroundColor: C.bg }}>
+      <SplitPane direction="horizontal" defaultSizes={[28, 72]} minSizes={[160, 280]}
+        dividerColor={C.border} dividerHoverColor={C.textMuted} dividerActiveColor={C.primary}
+        width={width} height={height}>
+        {left}
+        {right}
+      </SplitPane>
+    </View>
   );
 }
 

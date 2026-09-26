@@ -329,7 +329,7 @@ pub(crate) fn rebuild_layout_from_scene(
                         text: props.text.clone().unwrap_or_default(),
                         font_size,
                         max_height,
-                        bold:   props.font_weight.as_deref() == Some("bold"),
+                        bold:   glyx_runtime::text_props::is_bold(props.font_weight.as_deref()),
                         italic: props.font_style.as_deref()  == Some("italic"),
                         line_height: props.line_height,
                     };
@@ -489,7 +489,7 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
         }
         let label = label_cache.get(&LabelKey::new(&ctx.text, ctx.font_size, max_w, ctx.bold, ctx.italic, ctx.line_height)).unwrap();
         let (tw, th) = (label.width as f32, label.text_height as f32);
-        let th = if let Some(max_h) = ctx.max_height { th.min(max_h) } else { th };
+        let (tw, th) = limited_text_size(tw, th, max_w, ctx.max_height);
 
         Size {
             width:  known_dims.width.unwrap_or(tw),
@@ -1160,5 +1160,36 @@ mod scroll_reveal_tests {
     fn no_op_when_focus_id_does_not_exist() {
         let (nodes, resolved, cache) = sample(0.0);
         assert_eq!(scroll_reveal_target_impl(&nodes, &resolved, &cache, 999), None);
+    }
+}
+
+/// A Text's measured size after its line limit (`numberOfLines`).
+///
+/// Height is capped at the limit. Width is capped at the width offered: an
+/// unbreakable word would otherwise report its full width, push past its
+/// container and get clipped instead of cut with "…" (as in CSS, where
+/// `text-overflow` text has no min-content floor). Unlimited text keeps its
+/// natural width.
+fn limited_text_size(tw: f32, th: f32, max_w: f32, max_height: Option<f32>) -> (f32, f32) {
+    match max_height {
+        Some(max_h) => (tw.min(max_w), th.min(max_h)),
+        None => (tw, th),
+    }
+}
+
+#[cfg(test)]
+mod limited_text_tests {
+    use super::limited_text_size;
+
+    #[test]
+    fn line_limited_text_never_reports_more_width_than_offered() {
+        // "IMG_20240613_103915_888~3.jpg": one unbreakable word, 220px, in 150px.
+        assert_eq!(limited_text_size(220.0, 18.0, 150.0, Some(19.6)), (150.0, 18.0));
+        // Min-content probe: a truncating text can shrink to nothing.
+        assert_eq!(limited_text_size(220.0, 18.0, 0.0, Some(19.6)), (0.0, 18.0));
+        // Height is capped at the line limit.
+        assert_eq!(limited_text_size(100.0, 60.0, 150.0, Some(19.6)), (100.0, 19.6));
+        // Without a limit, text keeps its natural (overflowing) size.
+        assert_eq!(limited_text_size(220.0, 18.0, 150.0, None), (220.0, 18.0));
     }
 }

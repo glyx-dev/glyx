@@ -221,6 +221,9 @@ fn position_at_point(layout: &parley::Layout<()>, text: &str, x: f32, y: f32) ->
 pub struct TextSystem {
     font_cx:   FontContext,
     layout_cx: LayoutContext<()>,
+    /// `ellipsize` results by (text hash, size, width, bold, italic): the
+    /// renderer asks every frame, the answer only changes with the inputs.
+    ellipsis_cache: std::collections::HashMap<(u64, u32, u32, bool, bool), Option<String>>,
 }
 
 impl TextSystem {
@@ -323,6 +326,7 @@ impl TextSystem {
         Self {
             font_cx,
             layout_cx: LayoutContext::new(),
+            ellipsis_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -543,6 +547,45 @@ impl TextSystem {
     pub fn measure_styled(&mut self, text: &str, font_size: f32, max_width: f32, bold: bool, italic: bool) -> (f32, f32) {
         let layout = self.styled_label(text, font_size, max_width.max(1.0), bold, italic, None);
         (layout.inner.width(), layout.inner.height())
+    }
+
+    /// `numberOfLines={1}`: the text's first line cut to fit `max_width`,
+    /// ending in "…". `None` when it already fits (draw it unchanged).
+    ///
+    /// The cut is taken from ONE shaping of the whole line, at the last
+    /// character boundary whose x leaves room for the ellipsis, so kerning
+    /// and ligatures match what the untruncated text would draw.
+    pub fn ellipsize(&mut self, text: &str, font_size: f32, bold: bool, italic: bool, max_width: f32) -> Option<String> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        let key = (h.finish(), font_size.to_bits(), max_width.round() as u32, bold, italic);
+        if let Some(hit) = self.ellipsis_cache.get(&key) { return hit.clone(); }
+        let out = self.ellipsize_uncached(text, font_size, bold, italic, max_width.round());
+        if self.ellipsis_cache.len() >= 1024 { self.ellipsis_cache.clear(); }
+        self.ellipsis_cache.insert(key, out.clone());
+        out
+    }
+
+    fn ellipsize_uncached(&mut self, text: &str, font_size: f32, bold: bool, italic: bool, max_width: f32) -> Option<String> {
+        let line = text.split('\n').next().unwrap_or("");
+        let multi = line.len() < text.len();
+        if line.is_empty() && !multi { return None; }
+        let layout = self.styled_label(line, font_size, 1.0e6, bold, italic, None);
+        if !multi && layout.inner.width() <= max_width + 0.5 { return None; }
+        let (dots, _) = self.measure_styled("\u{2026}", font_size, 1.0e6, bold, italic);
+        let target = (max_width - dots).max(0.0);
+        let mut cut = 0;
+        for b in line.char_indices().map(|(i, _)| i).skip(1).chain(std::iter::once(line.len())) {
+            let x = if b == line.len() {
+                layout.inner.width()
+            } else {
+                Cursor::from_byte_index(&layout.inner, b, Affinity::Downstream).geometry(&layout.inner, 0.0).x0 as f32
+            };
+            if x > target { break; }
+            cut = b;
+        }
+        Some(format!("{}\u{2026}", line[..cut].trim_end()))
     }
 }
 
@@ -832,6 +875,23 @@ fn register_dir_filtered(font_cx: &mut FontContext, dir: &std::path::Path) -> us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ellipsize_cuts_to_fit_and_leaves_short_text_alone() {
+        let mut ts = TextSystem::new();
+        assert_eq!(ts.ellipsize("short", 14.0, false, false, 500.0), None);
+        let long = "a_rather_long_file_name_that_will_not_fit.png";
+        let out = ts.ellipsize(long, 14.0, false, false, 120.0).expect("cut");
+        assert!(out.ends_with('\u{2026}'));
+        let kept = out.trim_end_matches('\u{2026}');
+        assert!(!kept.is_empty() && long.starts_with(kept));
+        let (w, _) = ts.measure_styled(&out, 14.0, 1.0e6, false, false);
+        assert!(w <= 121.0, "ellipsized width {w} exceeds the box");
+        // Only the first line is kept, and it's marked as cut.
+        assert_eq!(ts.ellipsize("one\ntwo", 14.0, false, false, 500.0).as_deref(), Some("one\u{2026}"));
+        // Too narrow for any character: just the ellipsis.
+        assert_eq!(ts.ellipsize(long, 14.0, false, false, 2.0).as_deref(), Some("\u{2026}"));
+    }
 
     fn sys() -> TextSystem {
         TextSystem::new()

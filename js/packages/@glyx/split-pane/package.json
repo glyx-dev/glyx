@@ -6,7 +6,7 @@
   "description": "Resizable split-pane layouts with a draggable divider.",
   "peerDependencies": {
     "react": "^18.2.0",
-    "@glyx-dev/react": "0.1.0"
+    "@glyx-dev/react": "^0.1.0"
   },
   "scripts": {
     "test": "bun test"

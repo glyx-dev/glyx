@@ -22,6 +22,7 @@ mod cmd_test;
 mod cmd_generate;
 mod cmd_runtime;
 mod tools;
+mod updates;
 pub mod pm;
 
 use self::cmd_create::*;
@@ -332,6 +333,10 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
+    // "A newer glyx is available" — instant (reads the last cached result);
+    // any network refresh happens in the background.
+    updates::run(&glyx_dir(), env!("CARGO_PKG_VERSION"), glyx_source_checkout().is_some());
+
     // Detect package manager once; all subcommands use this value.
     let config_json = resolve_config_json().unwrap_or_default();
     let pm = pm::detect(cli.pm.as_deref(), &config_json)?;
@@ -355,9 +360,9 @@ fn run() -> Result<()> {
                     println!("No capabilities declared in glyx.config — nothing to build.");
                     return Ok(());
                 }
-                println!("Building {} cap DLL(s): {}", caps.len(), caps.join(", "));
-                cmd_build::build_cap_dlls(&caps, target.as_deref(), &dest)
-                    .context("cap DLL build failed")?;
+                println!("Staging {} capability module(s): {}", caps.len(), caps.join(", "));
+                cmd_build::stage_cap_dlls(&caps, target.as_deref(), &dest)
+                    .context("capability module staging failed")?;
                 write_caps_lock(&dest).context("failed to write glyx-caps.lock")?;
                 println!("Done. DLLs and glyx-caps.lock written to {}", dest.display());
                 Ok(())
@@ -446,16 +451,40 @@ fn find_or_build_runner(dev_mode: bool, engine: &str) -> Result<PathBuf> {
     //    stale wrong-engine binary cached under the same path.
     let cache_dir = glyx_runners_dir().join(engine).join(profile);
     let cached    = cache_dir.join(bin_name);
-    if cached.exists() {
-        // Notify-only: a version mismatch (or a cache from before this
-        // check existed) does NOT trigger an automatic rebuild here. This
-        // cache has no version awareness otherwise — nothing else will ever
-        // tell a user their cached runner predates the CLI they're running.
-        // Left as a manual `glyx runtime build` rather than auto-refreshing
-        // so `glyx dev`/`glyx build` never surprises someone with an
-        // unrequested rebuild.
-        check_cache_freshness(&cache_dir, engine, profile);
-        return Ok(cached);
+
+    // 0. Inside the glyx source workspace: always build from source. The
+    //    cache only knows the CLI version, not the source it was built from,
+    //    so after a native change it silently kept serving an old runner
+    //    (a whole day of native fixes never reached `glyx dev` examples).
+    //    Cargo is incremental — a no-op build takes about a second.
+    if let Some(home) = glyx_source_checkout() {
+        let built = build_runner_from_source(&home, dev_mode, engine)?;
+        return Ok(refresh_cache(&built, &cache_dir, &cached));
+    }
+
+    let stamp = std::fs::read_to_string(cache_dir.join(".version")).ok();
+    match cached_runner_action(cached.exists(), stamp.as_deref(), env!("CARGO_PKG_VERSION")) {
+        CachedRunner::Use => return Ok(cached),
+        CachedRunner::Replace => {
+            // The CLI was upgraded (or the cache predates version stamps):
+            // the runner is built together with the CLI, so fetch the one
+            // that matches — only this engine/profile, not all four.
+            println!("glyx {} needs a matching runner [{profile}, {engine}] — updating the cached one…",
+                     env!("CARGO_PKG_VERSION"));
+            match download_runner(profile, engine, &cached) {
+                Ok(true) => {
+                    write_version_stamp(&cache_dir);
+                    return Ok(cached);
+                }
+                // Offline, or an old instance still has the file open: keep
+                // working with what's there and say so.
+                _ => {
+                    check_cache_freshness(&cache_dir, engine, profile);
+                    return Ok(cached);
+                }
+            }
+        }
+        CachedRunner::Missing => {}
     }
 
     // 2. Download the prebuilt runner for this CLI version from GitHub
@@ -469,8 +498,25 @@ fn find_or_build_runner(dev_mode: bool, engine: &str) -> Result<PathBuf> {
 
     // 3. Build from source
     let home = glyx_home().context("Cannot locate glyx workspace — needed to build glyx-runner")?;
+    let built = build_runner_from_source(&home, dev_mode, engine)?;
+
+    // Cache it for future use
+    std::fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("create cache dir {}", cache_dir.display()))?;
+    std::fs::copy(&built, &cached)
+        .with_context(|| format!("cache runner to {}", cached.display()))?;
+    write_version_stamp(&cache_dir);
+
+    println!("✓ glyx-runner [{profile}, {engine}] cached at {}", cached.display());
+    Ok(cached)
+}
+
+/// `cargo build -p glyx-runner` with exactly the requested engine/profile
+/// features, returning the built binary's path.
+fn build_runner_from_source(home: &Path, dev_mode: bool, engine: &str) -> Result<PathBuf> {
+    let bin_name = runner_bin_name();
     let label = if dev_mode { "dev (with hot-reload)" } else { "prod (lean)" };
-    println!("Building glyx-runner [{label}, {engine}] from source (first-run, one-time cost)...");
+    println!("Building glyx-runner [{label}, {engine}] from source (no-op if up to date)...");
 
     // Always pass explicit features (both modes) so `engine` is honored
     // regardless of glyx-runner/Cargo.toml's own default feature set —
@@ -496,16 +542,60 @@ fn find_or_build_runner(dev_mode: bool, engine: &str) -> Result<PathBuf> {
     if !built.exists() {
         bail!("glyx-runner binary not found at {} after build", built.display());
     }
+    Ok(built)
+}
 
-    // Cache it for future use
-    std::fs::create_dir_all(&cache_dir)
-        .with_context(|| format!("create cache dir {}", cache_dir.display()))?;
-    std::fs::copy(&built, &cached)
-        .with_context(|| format!("cache runner to {}", cached.display()))?;
-    write_version_stamp(&cache_dir);
+/// Make the cached runner match a fresh source build, and return the path
+/// to run. The cache dir is preferred because capability DLLs live beside
+/// the cached runner. If the cached file is locked (an instance is still
+/// running — Windows locks running executables), run the fresh build
+/// directly rather than an out-of-date copy.
+fn refresh_cache(built: &Path, cache_dir: &Path, cached: &Path) -> PathBuf {
+    if !cache_needs_refresh(built, cached) {
+        return cached.to_path_buf();
+    }
+    let copied = std::fs::create_dir_all(cache_dir)
+        .and_then(|_| std::fs::copy(built, cached));
+    match copied {
+        Ok(_) => {
+            write_version_stamp(cache_dir);
+            cached.to_path_buf()
+        }
+        Err(e) => {
+            println!(
+                "Note: couldn't update the cached runner ({e}) — is an older instance still                  running? Using the fresh build at {} instead.",
+                built.display()
+            );
+            built.to_path_buf()
+        }
+    }
+}
 
-    println!("✓ glyx-runner [{profile}, {engine}] cached at {}", cached.display());
-    Ok(cached)
+/// The cache is stale when it's missing or differs in size or is older than
+/// the build — cheap metadata checks, no 70 MB byte comparison per launch.
+fn cache_needs_refresh(built: &Path, cached: &Path) -> bool {
+    let (Ok(b), Ok(c)) = (std::fs::metadata(built), std::fs::metadata(cached)) else { return true };
+    if b.len() != c.len() { return true; }
+    match (b.modified(), c.modified()) {
+        (Ok(bm), Ok(cm)) => bm > cm,
+        _ => true,
+    }
+}
+
+/// What to do with the cached runner for this CLI.
+#[derive(Debug, PartialEq)]
+enum CachedRunner {
+    /// Present and produced by this CLI version.
+    Use,
+    /// Present but from another CLI version (or unstamped): replace it.
+    Replace,
+    /// Not cached yet.
+    Missing,
+}
+
+fn cached_runner_action(exists: bool, stamp: Option<&str>, current: &str) -> CachedRunner {
+    if !exists { return CachedRunner::Missing; }
+    if stamp_is_stale(stamp, current) { CachedRunner::Replace } else { CachedRunner::Use }
 }
 
 /// Records which CLI version produced a cached runner, so a later
@@ -516,13 +606,10 @@ fn write_version_stamp(cache_dir: &Path) {
     let _ = std::fs::write(cache_dir.join(".version"), env!("CARGO_PKG_VERSION"));
 }
 
-/// Compares a cached runner's stamped version against this CLI's own
-/// version and prints a one-line notice on mismatch — including when there's
-/// no stamp at all (a cache from before this check existed). Deliberately
-/// notify-only: never invalidates or rebuilds the cache itself, so `glyx
-/// dev`/`glyx build` never surprises a user with an unrequested rebuild —
-/// updating is a manual `glyx runtime build`, same as a user driving the
-/// decision themselves.
+/// Prints a notice when the cached runner is from another CLI version and
+/// replacing it just failed (offline, or the file is locked by a running
+/// instance). A successful replace — the normal path after an upgrade — is
+/// handled by `find_or_build_runner` via `cached_runner_action`.
 fn check_cache_freshness(cache_dir: &Path, engine: &str, profile: &str) {
     let current = env!("CARGO_PKG_VERSION");
     let stamped = std::fs::read_to_string(cache_dir.join(".version")).ok();
@@ -530,7 +617,8 @@ fn check_cache_freshness(cache_dir: &Path, engine: &str, profile: &str) {
         let from = stamped.as_deref().map(str::trim).unwrap_or("an unknown (pre-versioning) build");
         println!(
             "Note: cached glyx-runner [{engine}/{profile}] was built by glyx-cli {from}, \
-             this is glyx-cli {current}. Run `glyx runtime build --force` to refresh it."
+             this is glyx-cli {current}, and updating it failed (offline?). It will be \
+             retried on the next run; `glyx runtime build --force` forces it."
         );
     }
 }
@@ -578,9 +666,11 @@ fn download_runner(profile: &str, engine: &str, dest: &std::path::Path) -> Resul
         format!("glyx-runner-{engine_prefix}{target}{suffix}")
     };
     let version = env!("CARGO_PKG_VERSION");
+    // Only this CLI's own release: the runner is built together with the
+    // CLI, and a `latest` fallback could pair it with a newer, mismatched
+    // runner (then stamped as matching).
     let upstream = [
         format!("https://github.com/glyx-dev/glyx/releases/download/v{version}/{artifact}"),
-        format!("https://github.com/glyx-dev/glyx/releases/latest/download/{artifact}"),
     ];
     // When self-hosting, every runner comes from the mirror base; otherwise
     // fall back to the upstream GitHub release URLs.
@@ -619,13 +709,17 @@ fn download_runner(profile: &str, engine: &str, dest: &std::path::Path) -> Resul
     Ok(false)
 }
 
-fn glyx_runners_dir() -> PathBuf {
-    // Cross-platform home directory
+/// `~/.glyx` — runners, capability modules and the update-check cache.
+fn glyx_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
-    home.join(".glyx").join("runners")
+    home.join(".glyx")
+}
+
+fn glyx_runners_dir() -> PathBuf {
+    glyx_dir().join("runners")
 }
 
 fn runner_bin_name() -> &'static str {
@@ -648,6 +742,21 @@ fn is_native_project() -> bool {
 }
 
 // ── Helper utilities ──────────────────────────────────────────────────────────
+
+/// The glyx SOURCE checkout this CLI runs from, if any — stricter than
+/// `glyx_home()`. That one accepts any `[workspace]` Cargo.toml mentioning
+/// `glyx-core`, which a user's own app workspace (depending on glyx-core,
+/// with the CLI installed under node_modules) also matches. Only a tree
+/// that actually contains the runner's source can build it, so only that
+/// switches `find_or_build_runner` to always-build-from-source; everyone
+/// else keeps the cache → download path.
+fn glyx_source_checkout() -> Option<PathBuf> {
+    glyx_home().ok().filter(|home| is_glyx_source_checkout(home))
+}
+
+fn is_glyx_source_checkout(dir: &Path) -> bool {
+    dir.join("crates").join("glyx-runner").join("Cargo.toml").is_file()
+}
 
 fn glyx_home() -> Result<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -1319,6 +1428,68 @@ mod cli_tests {
     #[test]
     fn platform_to_rust_target_rejects_unknown_platform() {
         assert!(platform_to_rust_target("plan9").is_err());
+    }
+
+    #[test]
+    fn a_runner_cached_by_another_cli_version_is_replaced() {
+        assert_eq!(cached_runner_action(false, None, "0.2.0"), CachedRunner::Missing);
+        assert_eq!(cached_runner_action(true, Some("0.2.0"), "0.2.0"), CachedRunner::Use);
+        assert_eq!(cached_runner_action(true, Some("0.2.0\n"), "0.2.0"), CachedRunner::Use);
+        // The regression: an upgraded CLI used to keep running the old runner.
+        assert_eq!(cached_runner_action(true, Some("0.1.0"), "0.2.0"), CachedRunner::Replace);
+        assert_eq!(cached_runner_action(true, None, "0.2.0"), CachedRunner::Replace, "unstamped cache");
+    }
+
+    #[test]
+    fn only_a_tree_with_the_runner_source_counts_as_a_source_checkout() {
+        let dir = std::env::temp_dir().join(format!("glyx-checkout-test-{}", std::process::id()));
+        // A user's own app workspace that depends on glyx-core.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[workspace]
+[dependencies]
+glyx-core = \"0.1\"
+").unwrap();
+        assert!(!is_glyx_source_checkout(&dir));
+        // The real source tree has the runner crate.
+        std::fs::create_dir_all(dir.join("crates/glyx-runner")).unwrap();
+        std::fs::write(dir.join("crates/glyx-runner/Cargo.toml"), "[package]
+name = \"glyx-runner\"
+").unwrap();
+        assert!(is_glyx_source_checkout(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        // This repo itself is one.
+        assert!(glyx_source_checkout().is_some());
+    }
+
+    #[test]
+    fn cached_runner_is_refreshed_when_missing_resized_or_older_than_the_build() {
+        let dir = std::env::temp_dir().join(format!("glyx-cache-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (built, cached) = (dir.join("built.exe"), dir.join("cached.exe"));
+        std::fs::write(&built, b"new runner").unwrap();
+        assert!(cache_needs_refresh(&built, &cached), "missing cache");
+
+        std::fs::write(&cached, b"old").unwrap();
+        assert!(cache_needs_refresh(&built, &cached), "different size");
+
+        // Same size, cache written after the build: up to date.
+        std::fs::write(&cached, b"new runner").unwrap();
+        let now = std::time::SystemTime::now();
+        std::fs::File::options().write(true).open(&built).unwrap()
+            .set_modified(now - std::time::Duration::from_secs(60)).unwrap();
+        std::fs::File::options().write(true).open(&cached).unwrap().set_modified(now).unwrap();
+        assert!(!cache_needs_refresh(&built, &cached));
+
+        // A newer build than the cache (a native change was rebuilt): refresh.
+        std::fs::File::options().write(true).open(&built).unwrap()
+            .set_modified(now + std::time::Duration::from_secs(60)).unwrap();
+        assert!(cache_needs_refresh(&built, &cached));
+
+        // refresh_cache copies it over and then serves the cache path.
+        let served = refresh_cache(&built, &dir, &cached);
+        assert_eq!(served, cached);
+        assert_eq!(std::fs::read(&cached).unwrap(), b"new runner");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

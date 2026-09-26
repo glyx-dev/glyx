@@ -104,6 +104,25 @@ fn skip_cap_verify() -> bool {
     false
 }
 
+/// Whether the app's config declares capability `cap_name`. Before security
+/// is initialized (tools, tests) nothing is known, so nothing is filtered.
+fn cap_declared(cap_name: &str) -> bool {
+    if !glyx_security::is_initialized() { return true; }
+    declared_in(glyx_security::get(), cap_name)
+}
+
+fn declared_in(caps: &glyx_security::Capabilities, cap_name: &str) -> bool {
+    match cap_name {
+        "audio"   => caps.audio,
+        "ai"      => caps.ai,
+        "camera"  => caps.camera,
+        "gamepad" => caps.gamepads || caps.hid,
+        "hid"     => caps.hid,
+        "webview" => caps.webview,
+        _         => false,
+    }
+}
+
 /// Verify the Ed25519 `.sig` sidecar for a cap DLL.
 ///
 /// The sidecar must be at `{dll_path}.sig` (64 raw bytes).
@@ -172,6 +191,15 @@ unsafe fn try_load_dynamic<Cap>(
     let ext = if cfg!(target_os = "windows") { ".dll" }
               else if cfg!(target_os = "macos") { ".dylib" }
               else { ".so" };
+
+    // Only load capabilities the app declared. JS apps share one runner
+    // directory, so it can hold another app's DLLs (a media player's audio
+    // cap next to a dashboard that never asked for audio). Those must be
+    // ignored, not loaded, and not reported as signature errors.
+    if !cap_declared(cap_name) {
+        log::debug!("[cap] '{cap_name}' not declared in glyx.config capabilities — not loading");
+        return None;
+    }
 
     let path = dir.join(format!("{lib_stem}{ext}"));
     if !path.exists() { return None; }
@@ -281,3 +309,18 @@ fn load_webview() -> Option<&'static WebviewCap> {
     unsafe { try_load_dynamic::<WebviewCap>("webview", "glyx_cap_webview", SYM_WEBVIEW) }
 }
 
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_declared_capabilities_are_loaded() {
+        let mut caps = glyx_security::Capabilities::default();
+        assert!(!super::declared_in(&caps, "audio"), "a leftover DLL must not load undeclared");
+        caps.audio = true;
+        assert!(super::declared_in(&caps, "audio"));
+        assert!(!super::declared_in(&caps, "camera"));
+        caps.hid = true;
+        assert!(super::declared_in(&caps, "gamepad"), "gamepad rides on hid");
+        assert!(!super::declared_in(&caps, "bogus"));
+    }
+}

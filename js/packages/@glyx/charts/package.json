@@ -6,7 +6,7 @@
   "description": "GPU-rendered charts for Glyx — built on Canvas 2D path primitives. No DOM, no SVG.",
   "peerDependencies": {
     "react": "^18.2.0",
-    "@glyx-dev/react": "0.1.0"
+    "@glyx-dev/react": "^0.1.0"
   },
   "scripts": {
     "test": "bun test"

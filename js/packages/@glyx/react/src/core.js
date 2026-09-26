@@ -35,13 +35,32 @@ export const View = ({ children, style, ...props }) =>
 export const RepaintBoundary = ({ children, style, ...props }) =>
   React.createElement('repaintBoundary', { style, ...props }, children);
 
-export function Text({ children, style, showCursor, ...props }) {
+/**
+ * How many lines a Text shows before it's cut with "…". Three spellings:
+ * the `numberOfLines` prop (React Native), `style.numberOfLines`, and the
+ * web's `style={{ whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}` (or
+ * `textOverflow: 'ellipsis'` alone), which mean one line. The prop wins.
+ * Only one line is truncated with an ellipsis today; more lines are clipped.
+ */
+export function textLineLimit(numberOfLines, style) {
+  if (numberOfLines != null) return numberOfLines;
+  if (!style) return undefined;
+  if (style.numberOfLines != null) return style.numberOfLines;
+  if (style.textOverflow === 'ellipsis') return 1;
+  return undefined;
+}
+
+export function Text({ children, style, showCursor, numberOfLines, ...props }) {
   // Flatten mixed children (strings + expressions) to a single string,
   // matching browser behaviour where <Text>= {val}</Text> just works.
   const text = Array.isArray(children)
     ? children.map(c => (c == null ? '' : String(c))).join('')
     : (children == null ? '' : String(children));
-  return React.createElement('text', { text, style, showCursor, ...props });
+  const lines = textLineLimit(numberOfLines, style);
+  return React.createElement('text', {
+    text, style, showCursor, ...props,
+    ...(lines != null ? { numberOfLines: lines } : null),
+  });
 }
 
 export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', onError, style, ...props }) {

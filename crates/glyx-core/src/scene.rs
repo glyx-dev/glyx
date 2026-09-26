@@ -490,7 +490,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                                 text: props.text.clone().unwrap_or_default(),
                                 font_size,
                                 max_height,
-                                bold:   props.font_weight.as_deref() == Some("bold"),
+                                bold:   glyx_runtime::text_props::is_bold(props.font_weight.as_deref()),
                                 italic: props.font_style.as_deref()  == Some("italic"),
                                 line_height: props.line_height,
                             };

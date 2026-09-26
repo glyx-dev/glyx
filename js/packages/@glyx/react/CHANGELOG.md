@@ -28,6 +28,8 @@
 - `TextInput` accepts `textAlign` (`'left'` | `'center'` | `'right'`), applied to rendering and hit-testing alike.
 
 ### Fixed
+- `Text` with `numberOfLines={1}` now ends in an ellipsis (…) when it doesn't fit, instead of wrapping. The limit can also be set in the style, as `numberOfLines`, or the web way with `textOverflow: 'ellipsis'` (usually alongside `whiteSpace: 'nowrap'`).
+- Numeric `fontWeight` values of 600 and up (`'600'`, `'700'`, `700`) now draw bold. Before, only `'bold'` did.
 - A finished `animation` replayed every time its component re-rendered with the same settings. In a live dashboard, every chart re-faded every few seconds. Finished animations now stay finished until their settings change.
 - `borderWidth: 0` drew a 1-pixel hairline border instead of no border.
 - **`transform` now draws on every renderer.** It was silently ignored on the CPU renderer (`renderMode: "skia"`) and on Direct2D; only the GPU renderer applied it.

@@ -10,11 +10,22 @@ use glyx_text::{TextAlign, TextBox, TextStyle};
 
 use crate::bindings::NodeProps;
 
+/// Whether a `fontWeight` prop draws bold: `"bold"`/`"bolder"` or a CSS
+/// numeric weight of 600 and up (`"600"`, `"700"`, …). One bold face is
+/// available, so this is the same threshold browsers use for synthesis.
+pub fn is_bold(weight: Option<&str>) -> bool {
+    match weight {
+        Some("bold") | Some("bolder") => true,
+        Some(w) => w.trim().parse::<f32>().map_or(false, |n| n >= 600.0),
+        None => false,
+    }
+}
+
 /// How the node's text is shaped (weight, style, size, line spacing).
 pub fn text_style(props: &NodeProps) -> TextStyle {
     TextStyle {
         font_size:   props.font_size.unwrap_or(16.0),
-        bold:        props.font_weight.as_deref() == Some("bold"),
+        bold:        is_bold(props.font_weight.as_deref()),
         italic:      props.font_style.as_deref() == Some("italic"),
         line_height: props.line_height,
     }
@@ -54,6 +65,13 @@ mod tests {
         assert!(s.bold && s.italic);
         assert_eq!(s.line_height, Some(30.0));
         assert_eq!(text_style(&NodeProps::default()).font_size, 16.0);
+    }
+
+    #[test]
+    fn numeric_font_weights_of_600_and_up_are_bold() {
+        for w in ["bold", "bolder", "600", "700", "900"] { assert!(is_bold(Some(w)), "{w}"); }
+        for w in ["normal", "400", "500", "lighter", "abc"] { assert!(!is_bold(Some(w)), "{w}"); }
+        assert!(!is_bold(None));
     }
 
     #[test]

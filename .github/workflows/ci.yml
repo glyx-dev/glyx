@@ -67,4 +67,6 @@ jobs:
         with:
           bun-version: latest
       - run: bun install --frozen-lockfile
-      - run: bun test js/packages
+      - run: bun test js/packages scripts
+      - name: Versions consistent (packages, crates, internal ranges)
+        run: bun scripts/release/check.mjs

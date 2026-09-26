@@ -28,6 +28,8 @@
 - `TextInput` accepts `textAlign` (`'left'` | `'center'` | `'right'`), applied to rendering and hit-testing alike.
 
 ### Fixed
+- Changing a `Text`'s `fontWeight`, `fontStyle`, `lineHeight` or `textScrollX` now re-measures it. Before, only a text or size change did, so restyling text in place kept its old width.
+- Single-line text (`textScrollX` set, as in inputs and rich-text spans) now counts trailing spaces in its width.
 - `Text` with `numberOfLines={1}` now ends in an ellipsis (…) when it doesn't fit, instead of wrapping. The limit can also be set in the style, as `numberOfLines`, or the web way with `textOverflow: 'ellipsis'` (usually alongside `whiteSpace: 'nowrap'`).
 - Numeric `fontWeight` values of 600 and up (`'600'`, `'700'`, `700`) now draw bold. Before, only `'bold'` did.
 - A finished `animation` replayed every time its component re-rendered with the same settings. In a live dashboard, every chart re-faded every few seconds. Finished animations now stay finished until their settings change.

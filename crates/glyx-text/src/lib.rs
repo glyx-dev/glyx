@@ -692,6 +692,11 @@ impl TextLayout {
         self.inner.width()
     }
 
+    /// Like [`width`](Self::width), but counting trailing whitespace.
+    pub fn full_width(&self) -> f32 {
+        self.inner.full_width()
+    }
+
     /// Full line-box height including leading.  Includes space above and below
     /// the visible glyphs.  **Do not use for vertical centering** — use
     /// `ascent()` instead.
@@ -875,6 +880,17 @@ fn register_dir_filtered(font_cx: &mut FontContext, dir: &std::path::Path) -> us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_width_counts_trailing_spaces_that_width_drops() {
+        // Rich-text lays out each styled span as its own single-line box:
+        // "Hello " must keep its space before a bold "world".
+        let mut ts = TextSystem::new();
+        let with = ts.styled_label("Hello ", 16.0, 1.0e6, false, false, None);
+        let without = ts.styled_label("Hello", 16.0, 1.0e6, false, false, None);
+        assert!((with.width() - without.width()).abs() < 0.5, "width() drops the trailing space");
+        assert!(with.full_width() > without.width() + 2.0, "full_width() keeps it");
+    }
 
     #[test]
     fn ellipsize_cuts_to_fit_and_leaves_short_text_alone() {

@@ -267,7 +267,9 @@ function measureSpan(text, span, defaultFontSize) {
   // cross the wrap threshold. Fix: append a non-whitespace sentinel,
   // measure both, subtract — the same trick `glyx-text`'s Rust
   // `measure_to_cursor` already uses for the identical reason.
-  if (/^\s+$/.test(text)) {
+  // Same for a span that merely ENDS in whitespace ("Hello " before a bold
+  // span): its trailing space is drawn, so clicks past it must count it.
+  if (/\s$/.test(text)) {
     const withSentinel = __glyx_measure_text(text + 'x', fs, 999999, style).width;
     const sentinelOnly = __glyx_measure_text('x', fs, 999999, style).width;
     return Math.max(0, withSentinel - sentinelOnly);

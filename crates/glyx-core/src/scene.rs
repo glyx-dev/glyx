@@ -493,6 +493,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                                 bold:   glyx_runtime::text_props::is_bold(props.font_weight.as_deref()),
                                 italic: props.font_style.as_deref()  == Some("italic"),
                                 line_height: props.line_height,
+                                single_line: props.text_scroll_x.is_some(),
                             };
                             let _ = state.layout.set_text_ctx(lid, ctx);
                         }

@@ -394,6 +394,8 @@ struct CachedLabel {
     layout: TextLayout,
     /// Pre-computed advance width for horizontal centering.
     width:       f64,
+    /// Width including trailing whitespace (single-line spans measure by it).
+    full_width:  f64,
     /// Parley's full line-box height including all wrapped lines.
     /// Used to detect whether the layout box was auto-sized to the text —
     /// in which case we top-align rather than center-align vertically.
@@ -411,6 +413,7 @@ impl CachedLabel {
     fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4], bold: bool, italic: bool, line_height: Option<f32>) -> Self {
         let layout      = ts.styled_label(text, font_size, max_width, bold, italic, line_height);
         let width       = layout.width() as f64;
+        let full_width  = layout.full_width() as f64;
         let text_height = layout.height() as f64;
         // For an empty string Parley produces no glyph runs, so ascent() = 0.
         // Shape a reference "M" at the same size to get the real font ascent.
@@ -425,6 +428,7 @@ impl CachedLabel {
         Self {
             layout,
             width,
+            full_width,
             text_height,
             cursor_top:    cursor_top_raw    as f64,
             cursor_height: cursor_height_raw as f64,

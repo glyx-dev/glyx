@@ -332,6 +332,7 @@ pub(crate) fn rebuild_layout_from_scene(
                         bold:   glyx_runtime::text_props::is_bold(props.font_weight.as_deref()),
                         italic: props.font_style.as_deref()  == Some("italic"),
                         line_height: props.line_height,
+                        single_line: props.text_scroll_x.is_some(),
                     };
                     layout.add_text_node(style, ctx, Some(format!("js-{}", id))).ok()?
                 }
@@ -373,7 +374,7 @@ pub(crate) fn layout_props_changed(new: &NodeProps, old: &NodeProps) -> bool {
     new.padding_right != old.padding_right || new.padding_top != old.padding_top ||
     new.padding_bottom != old.padding_bottom ||
     new.gap != old.gap ||
-    new.text != old.text || new.font_size != old.font_size || new.number_of_lines != old.number_of_lines ||
+    new.text != old.text || new.font_size != old.font_size || new.number_of_lines != old.number_of_lines || new.font_weight != old.font_weight || new.font_style != old.font_style || new.line_height != old.line_height || new.text_scroll_x.is_some() != old.text_scroll_x.is_some() ||
     new.margin != old.margin || new.margin_left != old.margin_left ||
     new.margin_right != old.margin_right || new.margin_top != old.margin_top ||
     new.margin_bottom != old.margin_bottom ||
@@ -488,7 +489,9 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
             label_cache.put(key, lbl);
         }
         let label = label_cache.get(&LabelKey::new(&ctx.text, ctx.font_size, max_w, ctx.bold, ctx.italic, ctx.line_height)).unwrap();
-        let (tw, th) = (label.width as f32, label.text_height as f32);
+        // A single-line span keeps its trailing space ("Hello " + bold "world").
+        let tw = if ctx.single_line { label.full_width } else { label.width } as f32;
+        let th = label.text_height as f32;
         let (tw, th) = limited_text_size(tw, th, max_w, ctx.max_height);
 
         Size {
@@ -1191,5 +1194,31 @@ mod limited_text_tests {
         assert_eq!(limited_text_size(100.0, 60.0, 150.0, Some(19.6)), (100.0, 19.6));
         // Without a limit, text keeps its natural (overflowing) size.
         assert_eq!(limited_text_size(220.0, 18.0, 150.0, None), (220.0, 18.0));
+    }
+}
+
+#[cfg(test)]
+mod text_remeasure_tests {
+    use super::layout_props_changed;
+    use glyx_runtime::bindings::NodeProps;
+
+    #[test]
+    fn restyling_text_in_place_remeasures_it() {
+        // Rich-text bolds a span by updating the existing Text node. Its
+        // width changes, so layout must see it (the phantom gap / overlap
+        // after bolding part of a word).
+        let base = NodeProps { text: Some("thing".into()), ..NodeProps::default() };
+        let bold = NodeProps { font_weight: Some("bold".into()), ..base.clone() };
+        let italic = NodeProps { font_style: Some("italic".into()), ..base.clone() };
+        let lh = NodeProps { line_height: Some(24.0), ..base.clone() };
+        let single = NodeProps { text_scroll_x: Some(0.0), ..base.clone() };
+        assert!(layout_props_changed(&bold, &base));
+        assert!(layout_props_changed(&base, &bold));
+        assert!(layout_props_changed(&italic, &base));
+        assert!(layout_props_changed(&lh, &base));
+        assert!(layout_props_changed(&single, &base));
+        // Scrolling a single-line input isn't a size change.
+        let scrolled = NodeProps { text_scroll_x: Some(40.0), ..base.clone() };
+        assert!(!layout_props_changed(&scrolled, &single));
     }
 }

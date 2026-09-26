@@ -75,6 +75,13 @@ fn gradient_shader(grad: &peniko::Gradient) -> Option<tiny_skia::Shader<'static>
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
 /// Bézier rounded-rectangle path.  Falls back to an axis-aligned rect when radius ≤ 0.
+/// kurbo `[a,b,c,d,e,f]` (x'=ax+cy+e, y'=bx+dy+f) to tiny-skia
+/// `from_row(sx,ky,kx,sy,tx,ty)` (x'=sx*x+kx*y+tx, y'=ky*x+sy*y+ty).
+fn to_ts_transform(t: Affine) -> tiny_skia::Transform {
+    let [a, b, c, d, e, f] = t.as_coeffs();
+    tiny_skia::Transform::from_row(a as f32, b as f32, c as f32, d as f32, e as f32, f as f32)
+}
+
 fn rrect_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny_skia::Path> {
     // Guard degenerate dimensions — tiny-skia warns and discards empty/line paths.
     if w <= 0.0 || h <= 0.0 { return None; }
@@ -149,10 +156,17 @@ struct TinySkiaShared {
     /// Reusable pixel buffer — avoids a fresh 8 MB allocation every frame.
     pixmap:      Option<tiny_skia::Pixmap>,
     /// sRGB-converted copies of `peniko::ImageData` bytes, keyed by the source
-    /// blob's pointer identity — see `linear_premul_to_srgb_premul` below.
-    /// Avoids redoing the per-pixel conversion every frame for an unchanged
-    /// image (same convention as `Direct2DImageCache`).
-    image_cache: lru::LruCache<usize, Vec<u8>>,
+    /// blob's unique id (`Blob::id`) — see `linear_premul_to_srgb_premul`
+    /// below. Avoids redoing the per-pixel conversion every frame for an
+    /// unchanged image (same convention as `Direct2DImageCache`).
+    ///
+    /// NOT keyed by the bytes' address: that was the key originally, and
+    /// allocators reuse freed addresses — a camera/video frame freed and the
+    /// next same-sized frame allocated at the same address hit the old entry,
+    /// showing stale frames interleaved with live ones (and frames from before
+    /// a camera stop reappearing after restart). `Blob::id` comes from a global
+    /// counter and is never reused.
+    image_cache: lru::LruCache<u64, Vec<u8>>,
 }
 
 /// `peniko::ImageData` bytes are linear-premultiplied (`glyx-core/src/scene.rs`'s
@@ -171,25 +185,44 @@ fn linear_to_srgb_u8(v: u8) -> u8 {
     (srgb * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
+/// `linear_to_srgb_u8` for every input byte — a `powf` per channel per pixel
+/// is far too slow for camera/video frames, which are converted every frame.
+fn srgb_lut() -> &'static [u8; 256] {
+    static LUT: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| std::array::from_fn(|i| linear_to_srgb_u8(i as u8)))
+}
+
 fn linear_premul_to_srgb_premul(bytes: &[u8]) -> Vec<u8> {
     let mut out = bytes.to_vec();
+    linear_premul_to_srgb_premul_in_place(&mut out, false);
+    out
+}
+
+/// Converts in place; `swap_rb` also turns BGRA into RGBA in the same pass.
+fn linear_premul_to_srgb_premul_in_place(out: &mut [u8], swap_rb: bool) {
+    let lut = srgb_lut();
     for px in out.chunks_exact_mut(4) {
+        if swap_rb { px.swap(0, 2); }
         let a = px[3];
         if a == 0 { continue; }
+        if a == 255 {
+            // Opaque (every camera/video pixel): no un/re-premultiply needed.
+            px[0] = lut[px[0] as usize];
+            px[1] = lut[px[1] as usize];
+            px[2] = lut[px[2] as usize];
+            continue;
+        }
         let inv = 255.0 / a as f32;
         let lr = (px[0] as f32 * inv).min(255.0) as u8;
         let lg = (px[1] as f32 * inv).min(255.0) as u8;
         let lb = (px[2] as f32 * inv).min(255.0) as u8;
-        let sr = linear_to_srgb_u8(lr);
-        let sg = linear_to_srgb_u8(lg);
-        let sb = linear_to_srgb_u8(lb);
         let a16 = a as u16;
-        px[0] = ((sr as u16 * a16 + 127) / 255) as u8;
-        px[1] = ((sg as u16 * a16 + 127) / 255) as u8;
-        px[2] = ((sb as u16 * a16 + 127) / 255) as u8;
+        px[0] = ((lut[lr as usize] as u16 * a16 + 127) / 255) as u8;
+        px[1] = ((lut[lg as usize] as u16 * a16 + 127) / 255) as u8;
+        px[2] = ((lut[lb as usize] as u16 * a16 + 127) / 255) as u8;
     }
-    out
 }
+
 
 // ── TinySkiaFrame ─────────────────────────────────────────────────────────────
 
@@ -200,9 +233,19 @@ pub struct TinySkiaFrame {
     clip_stack:   Vec<Option<tiny_skia::Mask>>,
     /// Active clip mask (`None` = no clip).
     current_mask: Option<tiny_skia::Mask>,
+    /// Partial redraw: the damage rect whose clip mask hasn't been built yet.
+    /// Most draws lie inside the damage and need no mask at all (see
+    /// `needs_mask`), so the full-window mask is only allocated and filled
+    /// when some draw actually needs it (`ensure_mask`).
+    pending_base: Option<tiny_skia::Rect>,
     /// Damage region for partial redraw (`None` = full frame).  Draws are
     /// clipped to this rect via the base mask AND bbox-culled for speed.
     damage:       Option<tiny_skia::Rect>,
+    /// Current transform (node `transform` props, composed down the tree),
+    /// applied to every draw and clip. Identity keeps tiny-skia's fast paths.
+    xf:           tiny_skia::Transform,
+    /// Saved transforms, see `push_transform` / `pop_transform`.
+    xf_stack:     Vec<tiny_skia::Transform>,
     /// Persistent state moved from TinySkiaRenderer for the frame duration.
     shared:       TinySkiaShared,
 }
@@ -247,11 +290,8 @@ impl TinySkiaFrame {
 
         let q = bg.to_rgba8();
         let bg_color = tiny_skia::Color::from_rgba8(q.r, q.g, q.b, q.a);
-        let base_mask = match damage_rect {
-            None => {
-                pixmap.fill(bg_color);
-                None
-            }
+        match damage_rect {
+            None => pixmap.fill(bg_color),
             Some(d) => {
                 // Clear only the damaged region to the background color.
                 let paint = tiny_skia::Paint {
@@ -261,22 +301,17 @@ impl TinySkiaFrame {
                     ..Default::default()
                 };
                 pixmap.fill_rect(d, &paint, tiny_skia::Transform::identity(), None);
-                // Base clip mask = damage rect; push_clip_path intersects
-                // nested layers with it, so no draw can escape the region.
-                tiny_skia::Mask::new(width, height).map(|mut m| {
-                    let p = tiny_skia::PathBuilder::from_rect(d);
-                    m.fill_path(&p, tiny_skia::FillRule::Winding, true,
-                                tiny_skia::Transform::identity());
-                    m
-                })
             }
-        };
+        }
 
         Some(Self {
             pixmap,
             clip_stack:   Vec::new(),
-            current_mask: base_mask,
+            current_mask: None,
+            pending_base: damage_rect,
             damage:       damage_rect,
+            xf:           tiny_skia::Transform::identity(),
+            xf_stack:     Vec::new(),
             shared,
         })
     }
@@ -294,11 +329,108 @@ impl TinySkiaFrame {
     /// avoids the rasterization work).
     #[inline]
     fn culled(&self, x: f64, y: f64, w: f64, h: f64) -> bool {
-        match self.damage {
-            Some(d) => (x + w) as f32 <= d.left()  || x as f32 >= d.right()
-                    || (y + h) as f32 <= d.top()   || y as f32 >= d.bottom(),
-            None => false,
+        let Some(d) = self.damage else { return false };
+        let (l, t, r, b) = self.screen_bbox(x, y, w, h);
+        r <= d.left() || l >= d.right() || b <= d.top() || t >= d.bottom()
+    }
+
+    /// Screen-space bbox `(l, t, r, b)` of a local-space box under the
+    /// current transform.
+    #[inline]
+    fn screen_bbox(&self, x: f64, y: f64, w: f64, h: f64) -> (f32, f32, f32, f32) {
+        if self.xf.is_identity() {
+            return (x as f32, y as f32, (x + w) as f32, (y + h) as f32);
         }
+        // A rotated/moved draw can land somewhere its local box doesn't.
+        let mut pts = [
+            tiny_skia::Point::from_xy(x as f32, y as f32),
+            tiny_skia::Point::from_xy((x + w) as f32, y as f32),
+            tiny_skia::Point::from_xy(x as f32, (y + h) as f32),
+            tiny_skia::Point::from_xy((x + w) as f32, (y + h) as f32),
+        ];
+        self.xf.map_points(&mut pts);
+        let (mut l, mut t, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in pts { l = l.min(p.x); t = t.min(p.y); r = r.max(p.x); b = b.max(p.y); }
+        (l, t, r, b)
+    }
+
+    /// Whether a draw with local bbox `(x, y, w, h)` needs the clip mask. During a
+    /// partial redraw the base mask is just the damage rect; when no clip
+    /// layer is pushed on top and the draw lies entirely inside the damage,
+    /// that mask can't change a pixel, so skip it: tiny-skia's masked
+    /// pipeline is several times slower per pixel than the unmasked one.
+    #[inline]
+    fn needs_mask(&self, x: f64, y: f64, w: f64, h: f64) -> bool {
+        if let Some(d) = self.damage {
+            if self.clip_stack.is_empty() {
+                let (l, t, r, b) = self.screen_bbox(x, y, w, h);
+                // 1px slack for anti-aliased edges.
+                if l - 1.0 >= d.left() && t - 1.0 >= d.top()
+                    && r + 1.0 <= d.right() && b + 1.0 <= d.bottom() {
+                    return false;
+                }
+            }
+        }
+        self.current_mask.is_some() || self.pending_base.is_some()
+    }
+
+    /// Build the deferred damage-rect clip mask (see `pending_base`). Every
+    /// draw that passes `current_mask` without a `needs_mask` check, and
+    /// every clip push, calls this first.
+    fn ensure_mask(&mut self) {
+        let Some(d) = self.pending_base.take() else { return };
+        self.current_mask = tiny_skia::Mask::new(self.pixmap.width(), self.pixmap.height()).map(|mut m| {
+            let p = tiny_skia::PathBuilder::from_rect(d);
+            m.fill_path(&p, tiny_skia::FillRule::Winding, true, tiny_skia::Transform::identity());
+            m
+        });
+    }
+
+    /// `needs_mask`, materializing the deferred mask when it's needed.
+    fn mask_needed(&mut self, x: f64, y: f64, w: f64, h: f64) -> bool {
+        let needed = self.needs_mask(x, y, w, h);
+        if needed { self.ensure_mask(); }
+        needed
+    }
+
+    /// With a damage rect, the part of a filled (rounded) rect that matters is
+    /// its intersection with the damage. tiny-skia rasterizes a shape over its
+    /// whole bbox before applying the clip mask, so a full-window background
+    /// costs a full-window fill even when 5% of the window changed. Returns
+    /// that intersection when filling it alone is pixel-identical: no
+    /// transform, and the intersection avoids the rounded corners (it lies in
+    /// the rect's straight-edged horizontal or vertical band). `None` → draw
+    /// the shape normally.
+    fn damage_clipped_fill(&self, x: f64, y: f64, w: f64, h: f64, radius: f64)
+        -> Option<tiny_skia::Rect>
+    {
+        let d = self.damage?;
+        if !self.xf.is_identity() { return None; }
+        let (x, y, r, b) = (x as f32, y as f32, (x + w) as f32, (y + h) as f32);
+        let (il, it) = (x.max(d.left()), y.max(d.top()));
+        let (ir, ib) = (r.min(d.right()), b.min(d.bottom()));
+        if ir <= il || ib <= it { return None; }
+        // Not worth it (and not needed) when the shape is already inside.
+        if il == x && it == y && ir == r && ib == b { return None; }
+        let rad = (radius as f32).min((r - x) * 0.5).min((b - y) * 0.5).max(0.0);
+        let in_h_band = il >= x + rad && ir <= r - rad;
+        let in_v_band = it >= y + rad && ib <= b - rad;
+        if rad > 0.0 && !in_h_band && !in_v_band { return None; }
+        tiny_skia::Rect::from_ltrb(il, it, ir, ib)
+    }
+
+    // ── Transforms ────────────────────────────────────────────────────────────
+
+    /// Apply `affine` to everything drawn until the matching `pop_transform`,
+    /// composed with any transform already in effect (a transformed node
+    /// inside a transformed node gets both).
+    pub fn push_transform(&mut self, affine: Affine) {
+        self.xf_stack.push(self.xf);
+        self.xf = self.xf.pre_concat(to_ts_transform(affine));
+    }
+
+    pub fn pop_transform(&mut self) {
+        self.xf = self.xf_stack.pop().unwrap_or_default();
     }
 
     // ── Primitives ────────────────────────────────────────────────────────────
@@ -306,12 +438,19 @@ impl TinySkiaFrame {
     pub fn fill_rounded_rect(&mut self, x: f64, y: f64, w: f64, h: f64,
                               radius: f64, color: peniko::Color) {
         if self.culled(x, y, w, h) { return; }
+        if let Some(rect) = self.damage_clipped_fill(x, y, w, h, radius) {
+            let paint = solid_paint(color);
+            // The rect IS inside the damage, so only a pushed clip layer matters.
+            let mask = if self.clip_stack.is_empty() { None } else { self.current_mask.as_ref() };
+            self.pixmap.fill_rect(rect, &paint, self.xf, mask);
+            return;
+        }
         let Some(path) = rrect_path(x as f32, y as f32, w as f32, h as f32, radius as f32)
             else { return };
         let paint = solid_paint(color);
-        let mask  = self.current_mask.as_ref();
+        let mask  = if self.mask_needed(x, y, w, h) { self.current_mask.as_ref() } else { None };
         self.pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding,
-                              tiny_skia::Transform::identity(), mask);
+                              self.xf, mask);
     }
 
     pub fn fill_rounded_rect_with_brush(&mut self, x: f64, y: f64, w: f64, h: f64,
@@ -331,17 +470,24 @@ impl TinySkiaFrame {
             },
             _ => return,
         };
-        let mask = self.current_mask.as_ref();
+        let mask = if self.mask_needed(x, y, w, h) { self.current_mask.as_ref() } else { None };
         self.pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding,
-                              tiny_skia::Transform::identity(), mask);
+                              self.xf, mask);
     }
 
     pub fn fill_rect(&mut self, x: f64, y: f64, w: f64, h: f64, color: peniko::Color) {
         if self.culled(x, y, w, h) { return; }
         let paint = solid_paint(color);
-        let mask  = self.current_mask.as_ref();
-        if let Some(rect) = tiny_skia::Rect::from_xywh(x as f32, y as f32, w as f32, h as f32) {
-            self.pixmap.fill_rect(rect, &paint, tiny_skia::Transform::identity(), mask);
+        // A damage-clipped rect is inside the damage by construction, so only
+        // a pushed clip layer can still matter.
+        let (rect, needs) = match self.damage_clipped_fill(x, y, w, h, 0.0) {
+            Some(r) => (Some(r), !self.clip_stack.is_empty()),
+            None    => (tiny_skia::Rect::from_xywh(x as f32, y as f32, w as f32, h as f32),
+                        self.mask_needed(x, y, w, h)),
+        };
+        let mask = if needs { self.current_mask.as_ref() } else { None };
+        if let Some(rect) = rect {
+            self.pixmap.fill_rect(rect, &paint, self.xf, mask);
         }
     }
 
@@ -353,9 +499,9 @@ impl TinySkiaFrame {
             else { return };
         let paint  = solid_paint(color);
         let stroke = tiny_skia::Stroke { width: sw as f32, ..Default::default() };
-        let mask   = self.current_mask.as_ref();
+        let mask   = if self.mask_needed(x - sw, y - sw, w + sw * 2.0, h + sw * 2.0) { self.current_mask.as_ref() } else { None };
         self.pixmap.stroke_path(&path, &paint, &stroke,
-                                tiny_skia::Transform::identity(), mask);
+                                self.xf, mask);
     }
 
     pub fn fill_circle(&mut self, cx: f64, cy: f64, r: f64, color: peniko::Color) {
@@ -363,9 +509,9 @@ impl TinySkiaFrame {
         let Some(path) = tiny_skia::PathBuilder::from_circle(cx as f32, cy as f32, r as f32)
             else { return };
         let paint = solid_paint(color);
-        let mask  = self.current_mask.as_ref();
+        let mask  = if self.mask_needed(cx - r, cy - r, r * 2.0, r * 2.0) { self.current_mask.as_ref() } else { None };
         self.pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding,
-                              tiny_skia::Transform::identity(), mask);
+                              self.xf, mask);
     }
 
     pub fn stroke_circle(&mut self, cx: f64, cy: f64, r: f64, width: f64, color: peniko::Color) {
@@ -375,9 +521,10 @@ impl TinySkiaFrame {
             else { return };
         let paint  = solid_paint(color);
         let stroke = tiny_skia::Stroke { width: width as f32, ..Default::default() };
+        self.ensure_mask();
         let mask   = self.current_mask.as_ref();
         self.pixmap.stroke_path(&path, &paint, &stroke,
-                                tiny_skia::Transform::identity(), mask);
+                                self.xf, mask);
     }
 
     pub fn stroke_line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64,
@@ -398,17 +545,35 @@ impl TinySkiaFrame {
             line_cap: tiny_skia::LineCap::Round,
             ..Default::default()
         };
+        self.ensure_mask();
         let mask = self.current_mask.as_ref();
         self.pixmap.stroke_path(&path, &paint, &stroke,
-                                tiny_skia::Transform::identity(), mask);
+                                self.xf, mask);
     }
 
     pub fn fill_path(&mut self, pts: &[f32], color: peniko::Color) {
         let Some(path) = poly_path(pts, true) else { return };
         let paint = solid_paint(color);
+        self.ensure_mask();
         let mask  = self.current_mask.as_ref();
         self.pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding,
-                              tiny_skia::Transform::identity(), mask);
+                              self.xf, mask);
+    }
+
+    /// `fill_path` with any brush (a linear gradient for chart area fills).
+    pub fn fill_path_with_brush(&mut self, pts: &[f32], brush: &peniko::Brush) {
+        let Some(path) = poly_path(pts, true) else { return };
+        let paint: tiny_skia::Paint<'static> = match brush {
+            peniko::Brush::Solid(c) => solid_paint(*c),
+            peniko::Brush::Gradient(g) => match gradient_shader(g) {
+                Some(shader) => tiny_skia::Paint { shader, anti_alias: true, ..Default::default() },
+                None => return,
+            },
+            _ => return,
+        };
+        self.ensure_mask();
+        let mask = self.current_mask.as_ref();
+        self.pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, self.xf, mask);
     }
 
     pub fn stroke_path(&mut self, pts: &[f32], width: f64, closed: bool, color: peniko::Color) {
@@ -420,9 +585,10 @@ impl TinySkiaFrame {
             line_join: tiny_skia::LineJoin::Round,
             ..Default::default()
         };
+        self.ensure_mask();
         let mask = self.current_mask.as_ref();
         self.pixmap.stroke_path(&path, &paint, &stroke,
-                                tiny_skia::Transform::identity(), mask);
+                                self.xf, mask);
     }
 
     // ── Text ──────────────────────────────────────────────────────────────────
@@ -442,6 +608,10 @@ impl TinySkiaFrame {
 
         let q   = color.to_rgba8();
         let (cr, cg, cb) = (q.r, q.g, q.b);
+        let xf  = self.xf;
+        // Same slack as the cull above.
+        let text_mask_needed = self.mask_needed(x - 2.0, y - 2.0,
+            layout.width() as f64 + 4.0, layout.height() as f64 + 4.0);
 
         for line in layout.inner.lines() {
             for item in line.items() {
@@ -484,7 +654,7 @@ impl TinySkiaFrame {
 
                     // Check cache.  The cache stores the raw alpha mask — no
                     // color in the key, colorized cheaply at draw time.
-                    let mask = self.current_mask.as_ref();
+                    let mask = if text_mask_needed { self.current_mask.as_ref() } else { None };
                     if let Some(cached) = self.shared.glyph_cache.get(&key) {
                         let draw_x = bx + cached.left;
                         let draw_y = by - cached.top;
@@ -505,7 +675,7 @@ impl TinySkiaFrame {
                             self.pixmap.draw_pixmap(
                                 draw_x, draw_y, glyph_pm,
                                 &tiny_skia::PixmapPaint::default(),
-                                tiny_skia::Transform::identity(),
+                                xf,
                                 mask,
                             );
                         }
@@ -539,7 +709,7 @@ impl TinySkiaFrame {
                         self.pixmap.draw_pixmap(
                             draw_x, draw_y, glyph_pm,
                             &tiny_skia::PixmapPaint::default(),
-                            tiny_skia::Transform::identity(),
+                            xf,
                             mask,
                         );
                     }
@@ -565,42 +735,58 @@ impl TinySkiaFrame {
         if self.culled(x, y, w, h) { return; }
         let (iw, ih) = (image.width, image.height);
         if iw == 0 || ih == 0 { return; }
-        let rgba = self.srgb_bytes(image);
+        let rgba = self.srgb_bytes(image, true);
         self.blit_scaled(&rgba, iw, ih, x, y, w, h);
     }
 
     /// Convert `image`'s linear-premultiplied (and possibly BGRA) bytes to
-    /// sRGB-premultiplied RGBA, memoized per source blob in `shared.image_cache`
-    /// — see `linear_premul_to_srgb_premul` above.
-    fn srgb_bytes(&mut self, image: &peniko::ImageData) -> Vec<u8> {
+    /// sRGB-premultiplied RGBA — see `linear_premul_to_srgb_premul` above.
+    /// With `cache`, memoized per source blob in `shared.image_cache`; without
+    /// it (live camera/video frames, each shown once) converted fresh and not
+    /// stored, so a stream can't flood the cache with hundreds of frames.
+    fn srgb_bytes(&mut self, image: &peniko::ImageData, cache: bool) -> Vec<u8> {
         let bytes = image.data.data();
-        let key = bytes.as_ptr() as usize;
-        if let Some(cached) = self.shared.image_cache.get(&key) {
-            return cached.clone();
+        let key = image.data.id();
+        if cache {
+            if let Some(cached) = self.shared.image_cache.get(&key) {
+                return cached.clone();
+            }
         }
         let converted = match image.format {
             peniko::ImageFormat::Bgra8 => {
                 let mut rgba = bytes.to_vec();
-                for px in rgba.chunks_exact_mut(4) { px.swap(0, 2); }
-                linear_premul_to_srgb_premul(&rgba)
+                linear_premul_to_srgb_premul_in_place(&mut rgba, true);
+                rgba
             }
             _ => linear_premul_to_srgb_premul(bytes),
         };
-        self.shared.image_cache.put(key, converted.clone());
+        if cache {
+            self.shared.image_cache.put(key, converted.clone());
+        }
         converted
     }
 
     pub fn draw_image_with_transform(&mut self, image: &peniko::ImageData, transform: Affine) {
+        self.draw_image_transformed(image, transform, true);
+    }
+
+    /// Like `draw_image_with_transform`, for a live camera/video frame: each
+    /// frame is a new image shown once, so its converted bytes aren't cached.
+    pub fn draw_frame_image(&mut self, image: &peniko::ImageData, transform: Affine) {
+        self.draw_image_transformed(image, transform, false);
+    }
+
+    fn draw_image_transformed(&mut self, image: &peniko::ImageData, transform: Affine, cache: bool) {
         let (iw, ih) = (image.width, image.height);
         if iw == 0 || ih == 0 { return; }
-        let bytes = self.srgb_bytes(image);
+        let bytes = self.srgb_bytes(image, cache);
 
         // kurbo Affine [a,b,c,d,e,f]:  x'=ax+cy+e, y'=bx+dy+f
         // tiny-skia from_row(sx,ky,kx,sy,tx,ty): x'=sx*x+kx*y+tx, y'=ky*x+sy*y+ty
         let [a, b, c, d, e, f] = transform.as_coeffs();
-        let ts = tiny_skia::Transform::from_row(
+        let ts = self.xf.pre_concat(tiny_skia::Transform::from_row(
             a as f32, b as f32, c as f32, d as f32, e as f32, f as f32,
-        );
+        ));
 
         let apply = |src: &[u8], pixmap: &mut tiny_skia::Pixmap,
                      mask: Option<&tiny_skia::Mask>| {
@@ -624,6 +810,7 @@ impl TinySkiaFrame {
         // `bytes` is already RGBA + sRGB-converted by `srgb_bytes` above —
         // the BGRA swap (if any) already happened there, doing it again here
         // would undo it.
+        self.ensure_mask();
         let mask = self.current_mask.as_ref();
         apply(&bytes, &mut self.pixmap, mask);
     }
@@ -642,6 +829,7 @@ impl TinySkiaFrame {
             blend_mode: tiny_skia::BlendMode::SourceOver,
             quality:    tiny_skia::FilterQuality::Bilinear,
         };
+        self.ensure_mask();
         let mask = self.current_mask.as_ref();
 
         if iw == dw && ih == dh {
@@ -650,7 +838,7 @@ impl TinySkiaFrame {
                 x as i32, y as i32,
                 src_pm,
                 &paint,
-                tiny_skia::Transform::identity(),
+                self.xf,
                 mask,
             );
         } else {
@@ -683,7 +871,7 @@ impl TinySkiaFrame {
                 x as i32, y as i32,
                 tmp.as_ref(),
                 &paint,
-                tiny_skia::Transform::identity(),
+                self.xf,
                 mask,
             );
         }
@@ -692,20 +880,20 @@ impl TinySkiaFrame {
     // ── Layers / clipping ─────────────────────────────────────────────────────
 
     fn push_clip_path(&mut self, path: &tiny_skia::Path) {
+        self.ensure_mask();
         let saved = self.current_mask.take();
         let new_mask = match saved.as_ref() {
             Some(parent) => {
                 let mut m = parent.clone();
-                m.intersect_path(path, tiny_skia::FillRule::Winding, true,
-                                 tiny_skia::Transform::identity());
+                m.intersect_path(path, tiny_skia::FillRule::Winding, true, self.xf);
                 Some(m)
             }
             None => {
                 let w = self.pixmap.width();
                 let h = self.pixmap.height();
+                let xf = self.xf;
                 tiny_skia::Mask::new(w, h).map(|mut m| {
-                    m.fill_path(path, tiny_skia::FillRule::Winding, true,
-                                tiny_skia::Transform::identity());
+                    m.fill_path(path, tiny_skia::FillRule::Winding, true, xf);
                     m
                 })
             }
@@ -1055,4 +1243,177 @@ impl TinySkiaRenderer {
     }
 
     pub fn try_save_pipeline_cache(&self) {}
+}
+
+#[cfg(test)]
+mod image_cache_tests {
+    #[test]
+    fn lut_conversion_matches_the_exact_formula() {
+        let px: Vec<u8> = (0..=255u8).flat_map(|v| [v, 255 - v, v / 2, 255]).collect();
+        let fast = super::linear_premul_to_srgb_premul(&px);
+        for (i, v) in (0..=255u8).enumerate() {
+            assert_eq!(fast[i * 4], super::linear_to_srgb_u8(v));
+            assert_eq!(fast[i * 4 + 1], super::linear_to_srgb_u8(255 - v));
+            assert_eq!(fast[i * 4 + 3], 255);
+        }
+    }
+
+    use super::*;
+
+    /// Bytes read through a raw pointer, so a test can put DIFFERENT content
+    /// at the SAME address — exactly what allocator reuse does to back-to-back
+    /// same-sized camera/video frames.
+    struct RawBytes(*const u8, usize);
+    unsafe impl Send for RawBytes {}
+    unsafe impl Sync for RawBytes {}
+    impl AsRef<[u8]> for RawBytes {
+        fn as_ref(&self) -> &[u8] { unsafe { std::slice::from_raw_parts(self.0, self.1) } }
+    }
+
+    fn image(bytes: std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>, w: u32, h: u32) -> peniko::ImageData {
+        peniko::ImageData {
+            data: peniko::Blob::new(bytes),
+            format: peniko::ImageFormat::Rgba8,
+            alpha_type: peniko::ImageAlphaType::Alpha,
+            width: w, height: h,
+        }
+    }
+
+    fn fill(buf: &mut [u8], rgba: [u8; 4]) {
+        for px in buf.chunks_exact_mut(4) { px.copy_from_slice(&rgba); }
+    }
+
+    fn center_pixel(frame: &TinySkiaFrame) -> [u8; 4] {
+        let p = frame.pixmap.pixel(2, 2).expect("in bounds");
+        [p.red(), p.green(), p.blue(), p.alpha()]
+    }
+
+    #[test]
+    fn a_new_image_at_a_reused_address_is_not_served_from_the_cache() {
+        // Regression: the cache was keyed by the bytes' address. A frame freed
+        // and the next one allocated at the same address hit the old entry, so
+        // camera/video showed stale frames mixed with live ones.
+        let mut buf = vec![0u8; 4 * 4 * 4];
+        let ptr = buf.as_mut_ptr();
+        let mut r = TinySkiaRenderer::new_cpu_only(4, 4);
+        let mut frame = r.begin_frame();
+
+        fill(&mut buf, [255, 0, 0, 255]);
+        let red = image(std::sync::Arc::new(RawBytes(ptr, buf.len())), 4, 4);
+        frame.draw_image_with_transform(&red, Affine::IDENTITY);
+        let first = center_pixel(&frame);
+
+        // Same address, new content — a different image.
+        fill(&mut buf, [0, 255, 0, 255]);
+        let green = image(std::sync::Arc::new(RawBytes(ptr, buf.len())), 4, 4);
+        frame.draw_image_with_transform(&green, Affine::IDENTITY);
+        let second = center_pixel(&frame);
+
+        assert!(first[0] > first[1], "first draw should be red: {first:?}");
+        assert!(second[1] > second[0], "second draw must show the NEW (green) content, got {second:?}");
+    }
+
+    #[test]
+    fn live_frames_do_not_accumulate_in_the_image_cache() {
+        let mut r = TinySkiaRenderer::new_cpu_only(4, 4);
+        let mut frame = r.begin_frame();
+        for i in 0..20u8 {
+            let mut buf = vec![0u8; 4 * 4 * 4];
+            fill(&mut buf, [i, 0, 0, 255]);
+            frame.draw_frame_image(&image(std::sync::Arc::new(buf), 4, 4), Affine::IDENTITY);
+        }
+        assert_eq!(frame.shared.image_cache.len(), 0, "stream frames must bypass the cache");
+
+        // A regular image is still cached (reused across frames).
+        let still = image(std::sync::Arc::new(vec![9u8; 4 * 4 * 4]), 4, 4);
+        frame.draw_image_with_transform(&still, Affine::IDENTITY);
+        frame.draw_image_with_transform(&still, Affine::IDENTITY);
+        assert_eq!(frame.shared.image_cache.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod transform_tests {
+    use super::*;
+
+    const RED: peniko::Color = peniko::Color::from_rgba8(255, 0, 0, 255);
+
+    fn px(frame: &TinySkiaFrame, x: u32, y: u32) -> [u8; 4] {
+        let p = frame.pixmap.pixel(x, y).expect("in bounds");
+        [p.red(), p.green(), p.blue(), p.alpha()]
+    }
+
+    fn is_red(p: [u8; 4]) -> bool { p[0] > 200 && p[1] < 50 && p[2] < 50 }
+
+    #[test]
+    fn pushed_transform_moves_draws_and_pop_restores() {
+        let mut r = TinySkiaRenderer::new_cpu_only(64, 16);
+        let mut frame = r.begin_frame();
+        frame.push_transform(Affine::translate((40.0, 0.0)));
+        frame.fill_rect(0.0, 0.0, 10.0, 10.0, RED);
+        frame.pop_transform();
+        assert!(is_red(px(&frame, 45, 5)), "drawn at the translated position");
+        assert!(!is_red(px(&frame, 5, 5)), "not at the untransformed position");
+
+        frame.fill_rect(0.0, 0.0, 10.0, 10.0, RED);
+        assert!(is_red(px(&frame, 5, 5)), "identity again after pop");
+    }
+
+    #[test]
+    fn nested_transforms_compose() {
+        let mut r = TinySkiaRenderer::new_cpu_only(64, 64);
+        let mut frame = r.begin_frame();
+        frame.push_transform(Affine::translate((20.0, 0.0)));
+        frame.push_transform(Affine::translate((0.0, 30.0)));
+        frame.fill_rect(0.0, 0.0, 8.0, 8.0, RED);
+        frame.pop_transform();
+        frame.pop_transform();
+        assert!(is_red(px(&frame, 24, 34)));
+    }
+
+    #[test]
+    fn clips_follow_the_transform() {
+        let mut r = TinySkiaRenderer::new_cpu_only(64, 16);
+        let mut frame = r.begin_frame();
+        frame.push_transform(Affine::translate((40.0, 0.0)));
+        frame.push_layer(0.0, 0.0, 10.0, 10.0);
+        // Wider than the clip: only the clipped (moved) part may show.
+        frame.fill_rect(0.0, 0.0, 20.0, 10.0, RED);
+        frame.pop_layer();
+        frame.pop_transform();
+        assert!(is_red(px(&frame, 45, 5)), "inside the moved clip");
+        assert!(!is_red(px(&frame, 55, 5)), "clipped by the moved clip rect");
+    }
+
+    #[test]
+    fn partial_redraw_never_touches_pixels_outside_the_damage() {
+        // The damage clip mask is built lazily; draws straddling the damage
+        // edge must still be clipped to it (a fill, a stroke, and text-free
+        // path draws that don't check bounds).
+        let mut r = TinySkiaRenderer::new_cpu_only(64, 16);
+        let seed = r.begin_frame();
+        r.finish_frame_soft(seed, |_, _, _, _| {});
+        let mut frame = r.begin_frame_damaged(Some((20.0, 0.0, 20.0, 16.0)));
+        frame.fill_rounded_rect(0.0, 0.0, 64.0, 16.0, 4.0, RED);
+        frame.stroke_line(0.0, 8.0, 64.0, 8.0, 3.0, RED);
+        frame.fill_path(&[0.0, 0.0, 64.0, 0.0, 64.0, 16.0], RED);
+        assert!(is_red(px(&frame, 30, 8)), "inside the damage is drawn");
+        for x in [5, 15, 45, 60] {
+            assert!(!is_red(px(&frame, x, 8)), "x={x} is outside the damage and must be untouched");
+        }
+    }
+
+    #[test]
+    fn partial_redraw_culls_on_the_transformed_bounds() {
+        let mut r = TinySkiaRenderer::new_cpu_only(64, 16);
+        let seed = r.begin_frame(); // seeds the pooled pixmap so damage is honoured
+        r.finish_frame_soft(seed, |_, _, _, _| {});
+        let mut frame = r.begin_frame_damaged(Some((40.0, 0.0, 20.0, 16.0)));
+        assert!(frame.damage().is_some());
+        // Untransformed box (0..10) is outside the damage; the moved one isn't.
+        frame.push_transform(Affine::translate((40.0, 0.0)));
+        frame.fill_rect(0.0, 0.0, 10.0, 10.0, RED);
+        frame.pop_transform();
+        assert!(is_red(px(&frame, 45, 5)), "must not be culled by its untransformed box");
+    }
 }

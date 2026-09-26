@@ -34,7 +34,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use rquickjs::{Ctx, Object, Value};
+use rquickjs::{Array, Ctx, Object, Value};
 use tokio::runtime::Handle;
 
 use crate::bindings::{CompletionQueue, IpcBus, RedrawRequest, WindowController};
@@ -202,15 +202,24 @@ pub(crate) fn ipc_send(ipc_bus: &IpcBus, target: u32, msg: String) {
     }
 }
 
-/// `__glyx_ipc_poll() -> string` — sync, JSON array of pending messages.
-pub(crate) fn ipc_poll(ipc_bus: &IpcBus, my_handle: u32) -> String {
+/// `__glyx_ipc_poll() -> Array<string>` — sync, drains this window's inbox
+/// into a real JS array of raw message strings. Each message is app-defined
+/// (often itself a JSON string the app will `JSON.parse` — see `ipc.send`'s
+/// docs) so it is handed to JS untouched; no serialise/parse round trip on
+/// the array itself (previously `serde_json::to_string(&msgs)` +
+/// `JSON.parse` in `_pollIpc`).
+pub(crate) fn ipc_poll<'js>(
+    ctx: &Ctx<'js>, ipc_bus: &IpcBus, my_handle: u32,
+) -> rquickjs::Result<Array<'js>> {
     let msgs: Vec<String> = {
         let guard = ipc_bus.lock();
         guard.get(&my_handle).map(|inbox| inbox.lock().drain(..).collect()).unwrap_or_default()
     };
-    if msgs.is_empty() { return "[]".to_string(); }
-    let items: Vec<String> = msgs.iter().map(|m| serde_json::to_string(m).unwrap_or_else(|_| "\"\"".into())).collect();
-    format!("[{}]", items.join(","))
+    let array = Array::new(ctx.clone())?;
+    for (i, msg) in msgs.into_iter().enumerate() {
+        array.set(i, msg)?;
+    }
+    Ok(array)
 }
 
 /// `__glyx_backend_call(name, argsJson) -> Promise<string>` — checks the

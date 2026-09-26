@@ -47,6 +47,13 @@ export interface WindowConfig {
   /** V8 heap cap in MB (16–512). Default: auto from bundle size. */
   maxJsHeapMb?: number;
   /**
+   * Frame-rate ceiling (15–500) for continuous redraws: animations, video,
+   * drags. Default: the monitor's refresh rate. `60` halves animation CPU on
+   * a 120 Hz display. Applies to the CPU renderer; GPU and Direct2D follow
+   * the display's vsync.
+   */
+  maxFps?: number;
+  /**
    * When true, `glyxWindow.create({ title })` for a title that is already
    * open focuses the existing window and returns its handle instead of
    * opening a twin.  Per-call `allowDuplicate: true` bypasses this, and an

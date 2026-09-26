@@ -102,11 +102,14 @@ mod dev_mode;
 mod scene;
 mod layout;
 mod render;
+mod render_props;
+mod motion;
 mod soft_present;
 #[cfg(target_os = "windows")]
 mod d2d_present;
 #[cfg(feature = "a11y")]
 mod a11y;
+mod focus;
 
 use self::config::*;
 use self::state::*;
@@ -115,8 +118,18 @@ use self::dev_mode::*;
 #[cfg(feature = "dev")]
 use arboard;
 
-use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, snapshot_resolved, tick_opacity_transitions};
-use layout::{recompute_layout, update_scroll_positions};
+use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, reconcile_z_order, snapshot_resolved, tick_transitions, hit_test_solid, shrink_oversized_collections};
+use focus::{focus_order, next_focus, sort_by_position};
+use layout::{recompute_layout, update_scroll_positions, scroll_reveal_target};
+
+/// Named-pipe path for single-instance IPC. Pipe names MUST start with
+/// `\\.\pipe\` (two leading backslashes); a single one is an invalid path, so
+/// creating the pipe failed (os error 123) and single-instance + deep-link
+/// hand-off never worked on Windows.
+#[cfg(target_os = "windows")]
+fn windows_pipe_name(app_name: &str) -> String {
+    format!(r"\\.\pipe\glyx-{app_name}")
+}
 
 // ── F1: Windows named-pipe DACL restricted to current user ───────────────────
 //
@@ -381,6 +394,8 @@ struct CachedLabel {
     layout: TextLayout,
     /// Pre-computed advance width for horizontal centering.
     width:       f64,
+    /// Width including trailing whitespace (single-line spans measure by it).
+    full_width:  f64,
     /// Parley's full line-box height including all wrapped lines.
     /// Used to detect whether the layout box was auto-sized to the text —
     /// in which case we top-align rather than center-align vertically.
@@ -398,6 +413,7 @@ impl CachedLabel {
     fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4], bold: bool, italic: bool, line_height: Option<f32>) -> Self {
         let layout      = ts.styled_label(text, font_size, max_width, bold, italic, line_height);
         let width       = layout.width() as f64;
+        let full_width  = layout.full_width() as f64;
         let text_height = layout.height() as f64;
         // For an empty string Parley produces no glyph runs, so ascent() = 0.
         // Shape a reference "M" at the same size to get the real font ascent.
@@ -412,6 +428,7 @@ impl CachedLabel {
         Self {
             layout,
             width,
+            full_width,
             text_height,
             cursor_top:    cursor_top_raw    as f64,
             cursor_height: cursor_height_raw as f64,
@@ -518,6 +535,16 @@ fn has_pressable_descendant_at(
     false
 }
 
+/// After focus moves to `id` (Tab/Shift+Tab, AT-driven focus, or focus
+/// survival on node removal), scroll it into view if it's outside its
+/// nearest scrollable ancestor's viewport. Shared by all three call sites
+/// so the behavior — and any future fix to it — stays in exactly one place.
+fn reveal_focus_if_needed(s: &PerWindowState, id: u32) {
+    if let Some((scroll_id, new_scroll_y)) = scroll_reveal_target(s, id) {
+        s.runtime.push_event(InputEvent::ScrollIntoView { node_id: scroll_id, scroll_y: new_scroll_y });
+    }
+}
+
 /// Try to start a scrollbar interaction at the current cursor position.
 /// Thumb hit → drag from the current scroll position.  Track hit → JUMP the
 /// scroll so the thumb centers on the click, then drag from there (standard
@@ -546,14 +573,12 @@ fn try_start_scrollbar_drag(s: &mut PerWindowState) -> Option<ScrollbarDragState
             let scroll_y = node.props.scroll_offset_y.unwrap_or(0.0) as f64;
             // Content height from raw Taffy child rects (scroll-independent).
             let Some(lid) = node.layout_id else { continue };
-            let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == lid) else { continue };
+            let Some(rl) = s.resolved_rect(lid) else { continue };
             let max_child_bottom: f64 = node.children.iter()
                 .filter_map(|&cid| {
                     let cn   = s.js_nodes.get(&cid)?;
                     let clid = cn.layout_id?;
-                    s.resolved.iter()
-                        .find(|(nid, _)| *nid == clid)
-                        .map(|(_, crl)| (crl.y + crl.height) as f64)
+                    s.resolved_rect(clid).map(|crl| (crl.y + crl.height) as f64)
                 })
                 .fold(f64::NEG_INFINITY, f64::max);
             if !max_child_bottom.is_finite() { continue; }
@@ -809,7 +834,7 @@ pub fn run(mut config: AppConfig) -> bool {
     // (Linux/macOS) instead of TCP.  Named IPC has no discoverable port and no
     // race window between reading the port file and connecting.
     //
-    //   Windows: \.\pipe\glyx-{app_name}
+    //   Windows: \\.\pipe\glyx-{app_name}
     //   Unix:    /tmp/.glyx-{app_name}.sock  (or $XDG_RUNTIME_DIR/... if set)
     //
     // The variable carries the IPC name so the async listener can be created
@@ -837,7 +862,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     .unwrap_or_else(|| "glyx-app".to_string());
 
                 #[cfg(target_os = "windows")]
-                let ipc_name = format!(r"\.\pipe\glyx-{}", app_name);
+                let ipc_name = windows_pipe_name(&app_name);
 
                 #[cfg(not(target_os = "windows"))]
                 let ipc_name = {
@@ -959,6 +984,7 @@ pub fn run(mut config: AppConfig) -> bool {
     let window_bg = window.background_color;
     // Capture configured mode; Auto is resolved after GPU adapter is known.
     let render_mode_config = window.render_mode;
+    let max_fps = window.max_fps;
     // Canvas2D transport config — applied to each runtime after construction.
     let canvas_protocol  = window.canvas_protocol.clone();
     let canvas_buffer_kb = window.canvas_buffer_kb.unwrap_or(256) as usize;
@@ -1000,7 +1026,7 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Pre-init splash window — paint it immediately, before any
             // GPU/JS setup for the real main window even starts. ──────────
             ShellEvent::SplashWindowReady { window } => {
-                match soft_present::SoftPresent::new(Arc::clone(&window)) {
+                match soft_present::SoftPresent::new(Arc::clone(&window), max_fps) {
                     Ok(mut sp) => {
                         let (w, h) = (sp.width(), sp.height());
                         if let Some(splash) = &mut main_splash_state {
@@ -1065,7 +1091,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     .map(|v| v.trim() == "1").unwrap_or(false);
                 let (present, mut renderer) =
                     if matches!(backend_kind, BackendKind::TinySkia) && !no_soft {
-                        match soft_present::SoftPresent::new(Arc::clone(&window)) {
+                        match soft_present::SoftPresent::new(Arc::clone(&window), max_fps) {
                             Ok(sp) => {
                                 let size = window.inner_size();
                                 let r = AnyRenderer::TinySkia(
@@ -1430,9 +1456,13 @@ pub fn run(mut config: AppConfig) -> bool {
                     layout_dirty:           true,
                     layout_structure_dirty: true,
                     resolved:               Vec::new(),
+                    resolved_by_id:         std::collections::HashMap::new(),
+                    z_order:                std::collections::HashMap::new(),
+                    z_order_dirty:          std::collections::HashSet::new(),
                     js_nodes:     std::collections::HashMap::with_capacity(256),
                     js_root:      None,
-                    opacity_transitions: std::collections::HashMap::new(),
+                    transitions: std::collections::HashMap::new(),
+                    animations:  std::collections::HashMap::new(),
                     images:       std::collections::HashMap::with_capacity(32),
                     images_by_path: ByteBudgetImageCache::new(256 * 1024 * 1024),
                     image_cache_hits: 0,
@@ -1454,10 +1484,15 @@ pub fn run(mut config: AppConfig) -> bool {
                     last_trim_reserved_bytes: 0,
                     cursor_node_rect:      None,
                     focused_node:          None,
+                    shift_down:            false,
                     #[cfg(feature = "a11y")]
                     a11y_update,
                     #[cfg(feature = "a11y")]
                     a11y_dirty: true, // force the first-ever tree push
+                    #[cfg(feature = "a11y")]
+                    a11y_text: std::collections::HashMap::new(),
+                    #[cfg(feature = "a11y")]
+                    a11y_next_run_id: a11y::RUN_ID_BASE,
                     cursor_blink_tx:       None,
                     perf:          shared_perf,
                     rss_bytes:     {
@@ -1518,6 +1553,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     descendant_cascade_nodes: std::collections::HashSet::new(),
                     dirty_subtrees:           std::collections::HashSet::new(),
                     prev_resolved:   std::collections::HashMap::new(),
+                    prev_visual:     std::collections::HashMap::new(),
                     scene_cache:              std::collections::HashMap::new(),
                     scene_cache_new:          std::collections::HashMap::new(),
                     boundary_scene_cache:     std::collections::HashMap::new(),
@@ -1564,6 +1600,17 @@ pub fn run(mut config: AppConfig) -> bool {
 
             // ── Resize ────────────────────────────────────────────────────
             ShellEvent::Resized { window_handle, width, height } => {
+                // Minimizing reports a 0×0 size (Windows/winit). That's not a
+                // layout the app should ever run at: treating it as a resize
+                // clamped the surface to 1×1, re-laid out the whole tree for a
+                // 1px-wide window and told JS the window was 0 wide — multiline
+                // text reflowed to one word per line, and on restore that
+                // collapsed layout was briefly drawn before the real size
+                // arrived. Keep the last real size instead; restoring to the
+                // same size is then a no-op, so nothing stale is ever shown.
+                if width == 0 || height == 0 {
+                    return;
+                }
                 if let Some(s) = windows.get_mut(&window_handle) {
                     let prev_w = s.gpu.width();
                     let prev_h = s.gpu.height();
@@ -1582,10 +1629,13 @@ pub fn run(mut config: AppConfig) -> bool {
                     let prev_y = s.cursor_y;
                     s.cursor_x = x as f32;
                     s.cursor_y = y as f32;
-                    s.runtime.push_event(InputEvent::CursorMoved {
-                        x: s.cursor_x,
-                        y: s.cursor_y,
-                    });
+                    let target = hit_test_solid(s, s.cursor_x, s.cursor_y);
+                    // Coalescing push (Work Item 10) — see
+                    // `JsRuntime::push_cursor_moved`'s doc comment. Collapses
+                    // multiple cursor moves arriving within one rendered
+                    // frame into a single queued event instead of one per
+                    // native motion notification.
+                    s.runtime.push_cursor_moved(s.cursor_x, s.cursor_y, target);
 
                     // Scrollbar thumb drag
                     if let Some(ref drag) = s.scrollbar_drag {
@@ -1656,8 +1706,9 @@ pub fn run(mut config: AppConfig) -> bool {
                                 drag_fn();
                                 // Still send MouseButton so onPressIn handlers fire, but
                                 // do NOT start a DragStart — the OS owns this drag now.
+                                let target = hit_test_solid(s, cx, cy);
                                 s.runtime.push_event(InputEvent::MouseButton {
-                                    x: cx, y: cy, button, pressed,
+                                    x: cx, y: cy, button, pressed, target,
                                 });
                                 return;
                             }
@@ -1678,8 +1729,9 @@ pub fn run(mut config: AppConfig) -> bool {
                         }
                     }
 
+                    let target = hit_test_solid(s, s.cursor_x, s.cursor_y);
                     s.runtime.push_event(InputEvent::MouseButton {
-                        x: s.cursor_x, y: s.cursor_y, button, pressed,
+                        x: s.cursor_x, y: s.cursor_y, button, pressed, target,
                     });
                     // Track left-button drag state (button == 0).
                     if button == 0 {
@@ -1710,6 +1762,50 @@ pub fn run(mut config: AppConfig) -> bool {
                     if key.as_str() == "Escape" && pressed && !s.decorations && s.js_root.is_none() {
                         (s.quit_fn)();
                         return;
+                    }
+
+                    match key.as_str() {
+                        "ShiftLeft" | "ShiftRight" => s.shift_down = pressed,
+                        "Tab" if pressed => {
+                            if let Some(root) = s.js_root {
+                                let mut order = focus_order(&s.js_nodes, root);
+                                // Reorder into visual (top-to-bottom, left-to-right)
+                                // order — the raw BFS order follows scene-graph
+                                // child-list order, which doesn't reliably match
+                                // on-screen layout (e.g. a toolbar row can sit
+                                // after a sibling list container there despite
+                                // rendering above it).
+                                let positions: std::collections::HashMap<u32, (f32, f32)> = order
+                                    .iter()
+                                    .filter_map(|&id| {
+                                        let node = s.js_nodes.get(&id)?;
+                                        let rl = s.resolved_rect(node.layout_id?)?;
+                                        Some((id, (rl.y, rl.x)))
+                                    })
+                                    .collect();
+                                sort_by_position(&mut order, &positions);
+                                let target = next_focus(&order, s.focused_node, s.shift_down);
+                                if target != s.focused_node {
+                                    s.focused_node = target;
+                                    s.window.set_ime_allowed(target.is_some());
+                                    // Reuses the same event JS already handles for
+                                    // AT-driven focus moves (see events.js's
+                                    // 'accessibilityFocus' case, which calls the JS
+                                    // focus tracker's `setFocus` so onFocus/styling
+                                    // fire) — Tab navigation needs identical JS-side
+                                    // behavior and shouldn't require the `a11y`
+                                    // feature to work.
+                                    if let Some(id) = target {
+                                        s.runtime.push_event(InputEvent::AccessibilityFocus { node_id: id });
+                                        reveal_focus_if_needed(s, id);
+                                    }
+                                    #[cfg(feature = "a11y")]
+                                    { s.a11y_dirty = true; }
+                                    (s.request_redraw)();
+                                }
+                            }
+                        }
+                        _ => {}
                     }
 
                     #[cfg(feature = "dev")]
@@ -1743,7 +1839,7 @@ pub fn run(mut config: AppConfig) -> bool {
 
             // ── Accessibility action requests (screen reader, etc.) ──────
             #[cfg(feature = "a11y")]
-            ShellEvent::AccessibilityAction { window_handle, target, action, numeric_value } => {
+            ShellEvent::AccessibilityAction { window_handle, target, action, numeric_value, text_selection } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
                     match action.as_str() {
                         "focus" => {
@@ -1751,6 +1847,7 @@ pub fn run(mut config: AppConfig) -> bool {
                                 s.focused_node = Some(target);
                                 s.window.set_ime_allowed(true);
                                 s.runtime.push_event(InputEvent::AccessibilityFocus { node_id: target });
+                                reveal_focus_if_needed(s, target);
                                 // This path bypasses apply_scene_commands (which
                                 // marks a11y_dirty for SceneCommand-driven focus
                                 // changes), so the AT-driven focus move would
@@ -1763,23 +1860,48 @@ pub fn run(mut config: AppConfig) -> bool {
                         "click" => {
                             if let Some(node) = s.js_nodes.get(&target) {
                                 if let Some(layout_id) = node.layout_id {
-                                    if let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == layout_id) {
+                                    if let Some(rl) = s.resolved_rect(layout_id) {
                                         let cx = rl.x + rl.width  / 2.0;
                                         let cy = rl.y + rl.height / 2.0;
-                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: true });
-                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: false });
+                                        // AT-driven click already names its target explicitly —
+                                        // no need to hit-test a point we picked ourselves.
+                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: true, target: Some(target) });
+                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: false, target: Some(target) });
                                         (s.request_redraw)();
                                     }
                                 }
                             }
                         }
-                        // Increment/Decrement/SetValue don't have a generic
-                        // scene-graph meaning (unlike click, which is just a
-                        // synthesized mouse event) — the actual step/range
-                        // logic lives in the JS control (e.g. Slider knows
-                        // its own min/max/step), so these are just forwarded
-                        // for JS's a11yValueRegistry to act on.
-                        "increment" | "decrement" | "setValue" => {
+                        // Increment/Decrement/SetValue/Expand/Collapse don't
+                        // have a generic scene-graph meaning (unlike click,
+                        // which is just a synthesized mouse event) — the
+                        // actual behavior lives in the JS control (e.g.
+                        // Slider knows its own step; an accordion knows what
+                        // "expanded" should render as), so these are just
+                        // forwarded for JS's a11yValueRegistry to act on.
+                        // Screen reader moved/extended the selection in a text
+                        // field. Positions name AccessKit text-run nodes, which
+                        // only the field that built them can map back — try
+                        // the target first (usually the field itself), then
+                        // every exposed field (the target can be a run node).
+                        "setTextSelection" => {
+                            if let Some(sel) = text_selection {
+                                let candidates: Vec<u32> = std::iter::once(target)
+                                    .chain(s.a11y_text.keys().copied().filter(|&f| f != target))
+                                    .collect();
+                                for field in candidates {
+                                    if let Some((anchor, focus)) = a11y::selection_from_access(s, field, &sel) {
+                                        s.runtime.push_event(InputEvent::AccessibilityTextSelection {
+                                            node_id: field, anchor, focus,
+                                        });
+                                        s.a11y_dirty = true;
+                                        (s.request_redraw)();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        "increment" | "decrement" | "setValue" | "expand" | "collapse" => {
                             if s.js_nodes.contains_key(&target) {
                                 s.runtime.push_event(InputEvent::AccessibilityValueChange {
                                     node_id: target,
@@ -1895,15 +2017,30 @@ pub fn run(mut config: AppConfig) -> bool {
                 #[cfg(not(feature = "dev"))]
                 let _ = frame_tick_err;
 
+                // 3b. Drain jobs/microtasks scheduled *during* step 3's JS callback
+                // (e.g. React's `scheduleMicrotask` — `Promise.resolve().then(fn)` —
+                // used for passive-effect flushing, or any `.then()` chain that
+                // resolves synchronously mid-callback). V8 auto-runs microtasks at
+                // each callback boundary, so step 3 alone is enough there; QuickJS
+                // requires an explicit `execute_pending_job()` drain (step 1's
+                // `tick()` only covers jobs pending *before* this frame ran). Without
+                // this, a microtask scheduled mid-frame sits queued until some
+                // *other* trigger causes another frame — nothing does that when the
+                // app is otherwise idle, so QuickJS apps would stall (observed:
+                // frames only advanced while the mouse moved over the window, since
+                // CursorMoved incidentally requests a redraw that ran step 1 again).
+                s.runtime.tick();
+
                 // 4. Post-frame commands (React re-renders from step 3 events).
                 let post_commands = s.runtime.drain_scene_commands();
                 let post_changed  = apply_scene_commands(s, post_commands);
 
-                // 4b. Advance any active opacity transitions (@glyx-dev/motion v1) —
+                // 4b. Advance any active property transitions and keyframe
+                // animations (@glyx-dev/motion) —
                 // Rust-owned interpolation, no JS re-entry. If any are still
                 // running after this tick, force this frame to render and
                 // schedule the next one (nothing else would wake the loop).
-                let transitions_active = tick_opacity_transitions(s);
+                let transitions_active = tick_transitions(s);
                 if transitions_active {
                     (s.request_redraw)();
                 }
@@ -1967,6 +2104,8 @@ pub fn run(mut config: AppConfig) -> bool {
                 // Detect any position/size changes that cascaded out of layout and
                 // add them to dirty_nodes before building the dirty subtree set.
                 update_dirty_from_layout(s);
+                // Rebuild any stale z-sorted child lists before render touches them.
+                reconcile_z_order(s);
                 build_dirty_subtrees(s);
                 let layout_time_ms = layout_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -2040,6 +2179,7 @@ pub fn run(mut config: AppConfig) -> bool {
 
                     if should_trim {
                         s.renderer.trim_resources();
+                        shrink_oversized_collections(s);
                         if let Present::Gpu(gpu) = &s.gpu { gpu.poll(); }
                         let (_, _, reserved_after, _, _) = s.gpu.memory_counters();
                         s.last_trim_reserved_bytes = reserved_after;
@@ -2150,6 +2290,23 @@ pub fn run(mut config: AppConfig) -> bool {
                 // just maximized/resized, Resized only updated gpu, not the renderer.
                 s.renderer.notify_resize(s.gpu.width().max(1), s.gpu.height().max(1));
 
+                // Sample each active transition once, fresh every frame — this
+                // is the actual interpolation step. Shared by the damage
+                // analysis and the renderer so both see the same values.
+                let now = Instant::now();
+                let mut motion_overrides: std::collections::HashMap<u32, motion::Overrides> = s.transitions
+                    .iter()
+                    .map(|(&id, t)| (id, t.sample(now).0))
+                    .collect();
+                // Keyframe animations layer over transitions (CSS precedence).
+                for (&id, anim) in &s.animations {
+                    if let Some(node) = s.js_nodes.get(&id) {
+                        if let Some(ov) = anim.overrides(&motion::Visual::of(&node.props), now) {
+                            motion_overrides.entry(id).or_default().overlay(ov);
+                        }
+                    }
+                }
+
                 // ── Damage computation (soft present + TinySkia only) ─────────
                 // Redraw + push only the changed region.  Full frame when the
                 // splash is up, a dev-overlay refresh is due (overlay draws on
@@ -2178,7 +2335,7 @@ pub fn run(mut config: AppConfig) -> bool {
                             if s.dirty_nodes.is_empty() {
                                 Some(None)
                             } else {
-                                match scene::compute_frame_damage(s) {
+                                match scene::compute_frame_damage(s, &motion_overrides) {
                                     Some(d) => Some(Some(d)),
                                     None    => None, // bail → full
                                 }
@@ -2230,19 +2387,13 @@ pub fn run(mut config: AppConfig) -> bool {
                 #[cfg(feature = "webview")]
                 let mut webview_overlays: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
 
-                // Sample each active opacity transition's current value once,
-                // fresh every frame — this is the actual interpolation step.
-                let opacity_overrides: std::collections::HashMap<u32, f32> = s.opacity_transitions
-                    .iter()
-                    .map(|(&id, t)| (id, t.sample(Instant::now()).0))
-                    .collect();
-
                 if let Some(root_id) = s.js_root {
                     let mut render_ctx = RenderCtx {
                         nodes:             &s.js_nodes,
-                        opacity_overrides: &opacity_overrides,
+                        overrides:         &motion_overrides,
                         images:            &s.images,
-                        resolved:          &s.resolved,
+                        resolved_by_id:     &s.resolved_by_id,
+                        z_order:            &s.z_order,
                         frame:             &mut frame,
                         text_sys:          &mut s.text_sys,
                         label_cache:       &mut s.label_cache,
@@ -2304,7 +2455,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 // gated rather than unconditional.
                 #[cfg(feature = "a11y")]
                 if s.a11y_dirty {
-                    if let Some(update) = a11y::build_tree(s) {
+                    if let Some(update) = a11y::build_tree(&mut *s) {
                         (s.a11y_update.0)(update);
                     }
                     s.a11y_dirty = false;
@@ -2449,7 +2600,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     } else if s.gpu_was_upgraded && matches!(s.gpu, Present::Gpu(_)) {
                         let last = s.canvas3d_last_used.unwrap_or(frame_start);
                         if last.elapsed() >= IDLE_3D {
-                            match soft_present::SoftPresent::new(Arc::clone(&s.window)) {
+                            match soft_present::SoftPresent::new(Arc::clone(&s.window), max_fps) {
                                 Ok(sp) => {
                                     log::info!(
                                         "Canvas3D idle for 60 s — releasing wgpu, \
@@ -2797,7 +2948,8 @@ pub fn run(mut config: AppConfig) -> bool {
                     s.pipeline_cache_saved = true;
                 }
 
-                // Update prev_resolved snapshot and clear per-frame dirty sets.
+                // Update prev_resolved/prev_visual snapshots and clear per-frame dirty sets.
+                scene::record_visual_bounds(s, &motion_overrides);
                 snapshot_resolved(s);
                 s.dirty_nodes.clear();
                 s.dirty_subtrees.clear();
@@ -2934,6 +3086,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 for s in windows.values_mut() {
                     s.runtime.gc_hint();
                     s.renderer.trim_resources();
+                    shrink_oversized_collections(s);
                 }
                 extern "C" { fn mi_collect(force: bool); }
                 unsafe { mi_collect(true); }
@@ -3078,6 +3231,22 @@ mod tests {
 
         let (cfg, _) = apply(r#"{ "window": { "startupMode": "fullscreen" } }"#);
         assert_eq!(cfg.startup_mode, glyx_shell::StartupMode::Fullscreen);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_pipe_names_use_the_pipe_namespace() {
+        assert_eq!(windows_pipe_name("notes-app"), r"\\.\pipe\glyx-notes-app");
+    }
+
+    #[test]
+    fn config_max_fps_is_optional_and_clamped() {
+        let (cfg, _) = apply(r#"{ "window": { "maxFps": 60 } }"#);
+        assert_eq!(cfg.max_fps, Some(60));
+        let (cfg, _) = apply(r#"{ "window": { "maxFps": 1 } }"#);
+        assert_eq!(cfg.max_fps, Some(15));
+        let (cfg, _) = apply(r#"{ "window": {} }"#);
+        assert_eq!(cfg.max_fps, None);
     }
 
     #[test]

@@ -59,10 +59,14 @@ export function createKeychain(namespace, { service = 'glyx' } = {}) {
      * @returns {Promise<*>}
      */
     async get(key) {
-      // credentials.get already does one JSON.parse (unwrapping the Rust JSON envelope).
-      // Since set() stored JSON.stringify(value), credentials.get returns the original value.
-      const raw = await credentials.get(_key(key), { service });
-      return raw;
+      // credentials.get's JSON.parse only unwraps the native binding's JSON
+      // ENVELOPE, returning the stored string exactly as set() wrote it —
+      // which is `JSON.stringify(value)`. Decode that too, or callers get the
+      // JSON text back (`'"abc"'` with quotes, objects as strings). A value
+      // not written by this package (plain, non-JSON text) is returned as-is.
+      const stored = await credentials.get(_key(key), { service });
+      if (stored === null) return null;
+      try { return JSON.parse(stored); } catch { return stored; }
     },
 
     /**

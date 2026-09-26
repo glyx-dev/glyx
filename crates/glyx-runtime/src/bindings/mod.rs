@@ -226,6 +226,11 @@ unsafe impl Send for Completion {}
 
 pub type CompletionQueue = Arc<Mutex<VecDeque<Completion>>>;
 pub type SceneQueue      = Arc<Mutex<VecDeque<SceneCommand>>>;
+/// Thread-local frame buffer for main-thread JS binding pushes (W2).
+/// Avoids a `Mutex` lock per command on the hot per-frame scene-graph
+/// push path; drained into `SceneQueue` once per frame by
+/// `drain_scene_commands`.
+pub(crate) type FrameBuffer = std::cell::RefCell<Vec<SceneCommand>>;
 pub type RedrawRequest   = Arc<dyn Fn() + Send + Sync>;
 /// Shared SQLite pool map  keyed by the integer handle returned to JS.
 /// Exposed so glyx-core can drain it on window close for graceful shutdown.
@@ -273,9 +278,15 @@ pub fn new_raycast_results() -> RaycastResults { Arc::new(Mutex::new(VecDeque::n
 #[derive(Debug, Clone)]
 pub enum InputEvent {
     /// Mouse/touch press or release at window-relative pixel coordinates.
-    MouseButton { x: f32, y: f32, button: u8, pressed: bool },
-    /// Cursor moved to pixel position.
-    CursorMoved { x: f32, y: f32 },
+    /// `target` is the topmost solid (click-opaque) node id at (x, y),
+    /// resolved natively at push time — see `glyx-core`'s `hit_test_solid`.
+    /// JS used to redo this same hit-test itself via `__glyx_getLayout`
+    /// called once per candidate node; now it's computed once, here, using
+    /// state JS doesn't have direct access to anyway (the full node tree),
+    /// and handed over pre-resolved.
+    MouseButton { x: f32, y: f32, button: u8, pressed: bool, target: Option<u32> },
+    /// Cursor moved to pixel position. `target` — see `MouseButton`.
+    CursorMoved { x: f32, y: f32, target: Option<u32> },
     /// Pointer drag started (left button down + first move).
     DragStart { x: f32, y: f32 },
     /// Pointer dragged  continuous move while left button held.
@@ -288,6 +299,17 @@ pub enum InputEvent {
     Scroll { delta_y: f32 },
     /// Absolute scroll position set by a scrollbar thumb drag.
     ScrollbarDrag { node_id: u32, scroll_y: f32 },
+    /// Absolute scroll position needed to bring a newly-focused node (Tab/
+    /// Shift+Tab, AT-driven focus, or focus survival after node removal)
+    /// into view within its nearest scrollable ancestor. Computed natively
+    /// in `layout::scroll_reveal_target` from Rust's own already-correct,
+    /// per-frame scroll-adjusted layout cache — deliberately NOT computed
+    /// in JS (an earlier attempt tried that, approximating the same
+    /// scroll-adjusted position from a React-state ref, which raced real
+    /// state updates and produced a scroll-position runaway). Routed
+    /// through the same JS-side handler as `ScrollbarDrag` (`onAbsoluteScroll`),
+    /// so no new scroll-clamping logic exists on the JS side either.
+    ScrollIntoView { node_id: u32, scroll_y: f32 },
     /// Window resized to new physical pixel dimensions.
     Resize { width: u32, height: u32 },
     /// An image failed to load (missing file, unreadable format).
@@ -306,11 +328,18 @@ pub enum InputEvent {
     /// so React-side focus styling/onFocus stays in sync with an AT-driven
     /// focus change (as opposed to a mouse click, which JS already owns).
     AccessibilityFocus { node_id: u32 },
-    /// An assistive technology requested a value change on a node —
+    /// An assistive technology requested a value/state change on a node —
     /// Increment/Decrement/SetValue from a screen reader's slider/spinbutton
-    /// controls. `action` is "increment" / "decrement" / "setValue";
+    /// controls, or Expand/Collapse from a disclosure control. `action` is
+    /// "increment" / "decrement" / "setValue" / "expand" / "collapse";
     /// `numeric_value` is only set for "setValue".
     AccessibilityValueChange { node_id: u32, action: String, numeric_value: Option<f64> },
+    /// An assistive technology set the text selection in a text field (e.g.
+    /// a screen reader user moving by character/word or selecting text with
+    /// its own commands). `node_id` is the field (TextInput's outer view);
+    /// `anchor`/`focus` are character offsets into the field's value,
+    /// already mapped from AccessKit's run-node positions natively.
+    AccessibilityTextSelection { node_id: u32, anchor: u32, focus: u32 },
 }
 
 /// Callbacks for window control operations.
@@ -869,6 +898,32 @@ pub struct NodeProps {
     pub numeric_value: Option<f64>,
     pub numeric_min:   Option<f64>,
     pub numeric_max:   Option<f64>,
+    /// Supplementary AT description beyond the label (accesskit's
+    /// `description` field) — e.g. "Deletes this note permanently" on a
+    /// delete button whose visible/label text is just "Delete".
+    pub accessibility_hint: Option<String>,
+    /// Expanded/collapsed state for disclosure-style controls (accordion
+    /// headers, tree items, comboboxes). `None` → the control doesn't
+    /// support Expand/Collapse at all (most roles); `Some(_)` advertises
+    /// both the current state and the `Action::Expand`/`Action::Collapse`
+    /// gestures to the AT.
+    pub expanded: Option<bool>,
+    /// Explicit keyboard focusability (`focusable` prop): `Some(true)` makes
+    /// any node a Tab stop (a chart, a custom widget), `Some(false)` removes
+    /// one. `None` → inferred from the role / pressability.
+    pub focusable: Option<bool>,
+    /// `accessibilityLiveRegion`: `"polite"` | `"assertive"` | `"off"`.
+    /// Screen readers announce changes to this node's label as they happen
+    /// (a chart announcing the point under keyboard navigation).
+    pub live_region: Option<String>,
+    /// `accessibilityRoleDescription`: what a screen reader calls the role,
+    /// e.g. `"line chart"` instead of the generic `"figure"`.
+    pub role_description: Option<String>,
+    /// Set on a Text node ONLY while it is displaying placeholder text (its
+    /// field is empty, so the text drawn is the placeholder, not a value).
+    /// Screen readers then get an empty value plus this as the placeholder,
+    /// instead of hearing the placeholder read as if it were typed content.
+    pub placeholder: Option<String>,
 
     //  Text alignment 
     /// `"left"` | `"center"` (default). Controls horizontal text origin.
@@ -1030,6 +1085,28 @@ pub struct NodeProps {
     /// snapping — driven by `glyx-core`'s render loop, not JS. `None` means
     /// opacity changes always snap immediately (existing behavior).
     pub transition_ms: Option<u32>,
+    /// Which properties `transition_ms` animates: comma-separated
+    /// (`"opacity,transform,backgroundColor,borderColor,borderRadius,boxShadow"`)
+    /// or `"all"`. `None` → opacity only (the original v1 behaviour).
+    pub transition_property: Option<String>,
+    /// CSS easing: `linear`, `ease`, `ease-in`, `ease-out`, `ease-in-out` or
+    /// `cubic-bezier(x1,y1,x2,y2)`. `None` → ease-out cubic.
+    pub transition_easing: Option<String>,
+    /// `@glyx-dev/motion` keyframe animation: JSON `[[offset, {props}], ...]`
+    /// with offsets in 0..=1 (built by `@glyx-dev/react` from the
+    /// `animation` prop). Animatable props as for transitions.
+    pub animation_keyframes: Option<String>,
+    /// Length of one iteration in ms.
+    pub animation_ms: Option<u32>,
+    /// Per-segment easing, as `transition_easing`. `None` → ease.
+    pub animation_easing: Option<String>,
+    /// Iteration count; negative = infinite. `None` → 1.
+    pub animation_iterations: Option<f32>,
+    /// `"normal"` | `"alternate"`.
+    pub animation_direction: Option<String>,
+    /// `"none"` (default: revert to the node's own style when done) |
+    /// `"forwards"` (hold the last keyframe).
+    pub animation_fill: Option<String>,
     /// Box shadow string: `"dx dy blur color"` (e.g. `"2 2 4 #00000044"`).
     pub box_shadow: Option<String>,
     /// Linear background gradient: `"startColor endColor"` (e.g. `"#ff0000 #0000ff"`).
@@ -1077,11 +1154,18 @@ pub enum CanvasCmd {
     FillCircle { cx: f32, cy: f32, r: f32, color: [u8; 4] },
     StrokeCircle { cx: f32, cy: f32, r: f32, color: [u8; 4], #[serde(rename = "lineWidth")] line_width: f32 },
     StrokeLine { x0: f32, y0: f32, x1: f32, y1: f32, color: [u8; 4], #[serde(rename = "lineWidth")] line_width: f32 },
-    FillText   { text: String, x: f32, y: f32, #[serde(rename = "fontSize")] font_size: f32, color: [u8; 4] },
+    /// `y` is the TOP of the text box. `bold` from `ctx.fontWeight`.
+    FillText   { text: String, x: f32, y: f32, #[serde(rename = "fontSize")] font_size: f32, color: [u8; 4], #[serde(default)] bold: bool },
     /// Filled polygon from a flat `[x0,y0,x1,y1,€¦]` point list (auto-closed).
     FillPath   { points: Vec<f32>, color: [u8; 4] },
     /// Stroked polyline from a flat point list; `closed` joins last†’first.
     StrokePath { points: Vec<f32>, color: [u8; 4], #[serde(rename = "lineWidth")] line_width: f32, #[serde(default)] closed: bool },
+    /// Filled polygon painted with a linear gradient from `(x0,y0)` to
+    /// `(x1,y1)`; `stops` are `(offset 0..1, rgba)`, in order.
+    FillPathGradient { points: Vec<f32>, x0: f32, y0: f32, x1: f32, y1: f32, stops: Vec<(f32, [u8; 4])> },
+    /// Clip every following command to this rect until the matching `PopClip`.
+    PushClip   { x: f32, y: f32, w: f32, h: f32 },
+    PopClip,
 }
 
 //  Canvas 2D binary protocol 
@@ -1100,6 +1184,10 @@ mod canvas_op {
     pub const FILL_TEXT:     u32 = 6;
     pub const FILL_PATH:     u32 = 7;  // [op, pointCount, color, x0,y0,€¦]
     pub const STROKE_PATH:   u32 = 8;  // [op, pointCount, color, lineW, closed, x0,y0,€¦]
+    pub const FILL_PATH_GRAD: u32 = 9; // [op, pointCount, x0,y0,x1,y1, nStops, (off,color)×n, x0,y0,…]
+    pub const PUSH_CLIP:     u32 = 10; // [op, x, y, w, h]
+    pub const POP_CLIP:      u32 = 11; // [op]
+    pub const FILL_TEXT_BOLD: u32 = 12; // as FILL_TEXT, bold weight
 }
 
 /// Decode the binary command stream into `Vec<CanvasCmd>`.
@@ -1174,7 +1262,7 @@ pub(crate) fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_byt
                 });
                 i += 6;
             }
-            canvas_op::FILL_TEXT => {
+            canvas_op::FILL_TEXT | canvas_op::FILL_TEXT_BOLD => {
                 if i + 6 > slots { break; }
                 let off = f32_at(i + 4) as usize;
                 let len = f32_at(i + 5) as usize;
@@ -1187,7 +1275,7 @@ pub(crate) fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_byt
                     .to_string();
                 cmds.push(CanvasCmd::FillText {
                     text, x: f32_at(i), y: f32_at(i + 1), font_size: f32_at(i + 2),
-                    color: color_at(i + 3),
+                    color: color_at(i + 3), bold: op == canvas_op::FILL_TEXT_BOLD,
                 });
                 i += 6;
             }
@@ -1219,6 +1307,29 @@ pub(crate) fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_byt
                 });
                 i = start + npts;
             }
+            canvas_op::FILL_PATH_GRAD => {
+                // [count, x0,y0,x1,y1, nStops, (off,color)×n, points…]
+                if i + 6 > slots { break; }
+                let count  = f32_at(i) as usize;
+                let (x0, y0, x1, y1) = (f32_at(i + 1), f32_at(i + 2), f32_at(i + 3), f32_at(i + 4));
+                let nstops = f32_at(i + 5) as usize;
+                let stops_start = i + 6;
+                let stop_slots = match nstops.checked_mul(2) { Some(n) => n, None => break };
+                let start = match stops_start.checked_add(stop_slots) { Some(s) => s, None => break };
+                let npts = match count.checked_mul(2) { Some(n) => n, None => break };
+                if start.checked_add(npts).map_or(true, |end| end > slots) { break; }
+                let stops = (0..nstops)
+                    .map(|k| (f32_at(stops_start + k * 2), color_at(stops_start + k * 2 + 1)))
+                    .collect();
+                cmds.push(CanvasCmd::FillPathGradient { points: read_points(start, npts), x0, y0, x1, y1, stops });
+                i = start + npts;
+            }
+            canvas_op::PUSH_CLIP => {
+                if i + 4 > slots { break; }
+                cmds.push(CanvasCmd::PushClip { x: f32_at(i), y: f32_at(i + 1), w: f32_at(i + 2), h: f32_at(i + 3) });
+                i += 4;
+            }
+            canvas_op::POP_CLIP => cmds.push(CanvasCmd::PopClip),
             _ => break, // unknown opcode †’ corrupt/truncated stream
         }
     }
@@ -1298,6 +1409,25 @@ pub enum SceneCommand {
 #[cfg(feature = "v8")]
 pub type StatePtrUsize = usize;
 
+/// Take (empty) the V8 main-thread frame buffer owned by the heap-allocated
+/// `AsyncState`. Called by `V8Runtime::drain_scene_commands` so the buffer's
+/// contents can be merged into the shared `SceneQueue` under its single lock.
+///
+/// # Safety
+/// `state_ptr` is a raw pointer to the `Box<AsyncState>` created by
+/// `register_all` (which is leaked for the lifetime of the runtime). It is
+/// only dereferenced on the V8 thread, and only after `register_all` has
+/// stored it — both drains and binding callbacks are V8-thread-only, so there
+/// is no aliasing with a concurrent `RefCell` borrow.
+#[cfg(feature = "v8")]
+pub(crate) fn take_frame_scene(state_ptr: StatePtrUsize) -> Vec<SceneCommand> {
+    if state_ptr == 0 {
+        return Vec::new();
+    }
+    let state = unsafe { &mut *(state_ptr as *mut AsyncState) };
+    std::mem::take(state.frame_scene.get_mut())
+}
+
 #[cfg(feature = "v8")]
 pub fn register_all(
     scope:        &mut v8::PinScope<'_, '_, v8::Context>,
@@ -1335,6 +1465,7 @@ pub fn register_all(
         tokio,
         request_redraw: window.as_ref().map(|w| Arc::clone(&w.request_redraw)),
         scene,
+        frame_scene:  std::cell::RefCell::new(Vec::new()),
         events,
         layout_cache,
         next_id:    std::sync::atomic::AtomicU32::new(1),
@@ -1500,6 +1631,7 @@ pub fn register_all(
     register!("__glyx_updateNode",    update_node_callback);
     register!("__glyx_removeNode",  remove_node_callback);
     register!("__glyx_setRoot",     set_root_callback);
+    register!("__glyx_flushSceneOps", flush_scene_ops_callback);
     register!("__glyx_setFocus",    set_focus_callback);
     #[cfg(feature = "a11y")]
     register!("__glyx_hasA11y",     has_a11y_callback);
@@ -1509,6 +1641,7 @@ pub fn register_all(
     register!("__glyx_text_char_at_x", text_char_at_x_callback);
     register!("__glyx_text_cursor_x",  text_cursor_x_callback);
     register!("__glyx_text_pos_at",    text_pos_at_callback);
+    register!("__glyx_text_caret_at",  text_caret_at_callback);
 
     register!("__glyx_getWindowSize", get_window_size_callback);
     register!("__glyx_getScreenSize", get_screen_size_callback);
@@ -1741,6 +1874,14 @@ struct AsyncState {
     tokio:        Handle,
     request_redraw: Option<RedrawRequest>,
     scene:        SceneQueue,
+    /// Main-thread scene commands pushed by JS bindings (see `W2` in
+    /// `REVIEW_AND_PLAN.md`). Avoids a mutex lock + `VecDeque::push_back`
+    /// on the hot per-frame path; drained by `drain_scene_commands`
+    /// under the same single lock as `scene` each frame. Only bindings
+    /// running on the V8 thread touch this (single-threaded interior
+    /// mutability); worker-thread pushes (camera/video open) still go to
+    /// `scene`.
+    frame_scene:  FrameBuffer,
     events:       EventQueue,
     layout_cache: LayoutCache,
     next_id:      std::sync::atomic::AtomicU32,
@@ -2072,7 +2213,7 @@ fn parse_node_type(scope: &mut v8::PinScope<'_, '_, v8::Context>, value: v8::Loc
 /// Returns `None` if the string is not a valid hex colour. Engine-neutral —
 /// used by both the V8 `parse_props` (below) and QuickJS's JSON-based
 /// equivalent in `quickjs_runtime.rs`.
-pub(crate) fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
+pub fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
     let s = s.trim().trim_start_matches('#');
     match s.len() {
         3 => {
@@ -2241,6 +2382,12 @@ fn parse_props(
     props.numeric_value  = get_num_prop(scope, obj, "numericValue").map(|v| v as f64);
     props.numeric_min    = get_num_prop(scope, obj, "numericMin").map(|v| v as f64);
     props.numeric_max    = get_num_prop(scope, obj, "numericMax").map(|v| v as f64);
+    props.accessibility_hint = get_str_prop(scope, obj, "accessibilityHint");
+    props.expanded           = get_bool_prop(scope, obj, "expanded");
+    props.focusable          = get_bool_prop(scope, obj, "focusable");
+    props.live_region        = get_str_prop(scope, obj, "accessibilityLiveRegion");
+    props.role_description   = get_str_prop(scope, obj, "accessibilityRoleDescription");
+    props.placeholder        = get_str_prop(scope, obj, "placeholder");
     props.text_align    = get_str_prop(scope, obj, "textAlign");
     props.border_width  = get_num_prop(scope, obj, "borderWidth");
     props.border_color  = get_color_prop(scope, obj, "borderColor");
@@ -2293,6 +2440,14 @@ fn parse_props(
     //  Visual effects 
     props.opacity             = get_num_prop(scope, obj, "opacity");
     props.transition_ms       = get_num_prop(scope, obj, "transitionMs").map(|n| n as u32);
+    props.transition_property = get_str_prop(scope, obj, "transitionProperty");
+    props.transition_easing   = get_str_prop(scope, obj, "transitionEasing");
+    props.animation_keyframes  = get_str_prop(scope, obj, "animationKeyframes");
+    props.animation_ms         = get_num_prop(scope, obj, "animationMs").map(|n| n as u32);
+    props.animation_easing     = get_str_prop(scope, obj, "animationEasing");
+    props.animation_iterations = get_num_prop(scope, obj, "animationIterations");
+    props.animation_direction  = get_str_prop(scope, obj, "animationDirection");
+    props.animation_fill       = get_str_prop(scope, obj, "animationFill");
     props.box_shadow          = get_str_prop(scope, obj, "boxShadow");
     props.background_gradient = get_str_prop(scope, obj, "backgroundGradient");
 
@@ -2427,6 +2582,41 @@ mod tests {
     const RED: [u8; 4] = [255, 0, 0, 255];
 
     #[test]
+    fn binary_decodes_gradient_path_clip_and_bold_text() {
+        let strs = "Total".as_bytes();
+        let blue = [0, 0, 255, 128];
+        let cmds = Stream::new()
+            .f(canvas_op::PUSH_CLIP as f32).f(1.0).f(2.0).f(30.0).f(40.0)
+            .f(canvas_op::FILL_PATH_GRAD as f32)
+            .f(3.0)                                      // points
+            .f(0.0).f(0.0).f(0.0).f(10.0)                // x0 y0 x1 y1
+            .f(2.0).f(0.0).color(RED).f(1.0).color(blue) // 2 stops
+            .f(0.0).f(0.0).f(10.0).f(0.0).f(5.0).f(8.0)
+            .f(canvas_op::POP_CLIP as f32)
+            .f(canvas_op::FILL_TEXT_BOLD as f32).f(4.0).f(5.0).f(12.0).color(RED).f(0.0).f(5.0)
+            .decode(strs);
+        assert_eq!(cmds, vec![
+            CanvasCmd::PushClip { x: 1.0, y: 2.0, w: 30.0, h: 40.0 },
+            CanvasCmd::FillPathGradient {
+                points: vec![0.0, 0.0, 10.0, 0.0, 5.0, 8.0],
+                x0: 0.0, y0: 0.0, x1: 0.0, y1: 10.0,
+                stops: vec![(0.0, RED), (1.0, blue)],
+            },
+            CanvasCmd::PopClip,
+            CanvasCmd::FillText { text: "Total".into(), x: 4.0, y: 5.0, font_size: 12.0, color: RED, bold: true },
+        ]);
+    }
+
+    #[test]
+    fn binary_gradient_with_absurd_counts_stops_decoding_instead_of_panicking() {
+        let cmds = Stream::new()
+            .f(canvas_op::FILL_PATH_GRAD as f32)
+            .f(1.0e9).f(0.0).f(0.0).f(0.0).f(1.0).f(1.0e9)
+            .decode(&[]);
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
     fn binary_decodes_fill_rect() {
         let cmds = Stream::new()
             .f(canvas_op::FILL_RECT as f32)
@@ -2459,7 +2649,7 @@ mod tests {
             .f(5.0)  // length
             .decode(strs);
         assert_eq!(cmds, vec![CanvasCmd::FillText {
-            text: "world".into(), x: 5.0, y: 6.0, font_size: 14.0, color: RED,
+            text: "world".into(), x: 5.0, y: 6.0, font_size: 14.0, color: RED, bold: false,
         }]);
     }
 
@@ -2538,7 +2728,7 @@ mod tests {
             .f(0.0).f(0.0).f(14.0).color(RED).f(huge).f(huge)
             .decode(b"abc");
         assert_eq!(cmds, vec![CanvasCmd::FillText {
-            text: String::new(), x: 0.0, y: 0.0, font_size: 14.0, color: RED,
+            text: String::new(), x: 0.0, y: 0.0, font_size: 14.0, color: RED, bold: false,
         }]);
 
         // Path with a count that saturates (count*2 would overflow).
@@ -2560,7 +2750,7 @@ mod tests {
             .f(0.0).f(0.0).f(12.0).color(RED).f(100.0).f(5.0)
             .decode(b"short");
         assert_eq!(cmds, vec![CanvasCmd::FillText {
-            text: String::new(), x: 0.0, y: 0.0, font_size: 12.0, color: RED,
+            text: String::new(), x: 0.0, y: 0.0, font_size: 12.0, color: RED, bold: false,
         }]);
     }
 

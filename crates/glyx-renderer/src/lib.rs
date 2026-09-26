@@ -494,6 +494,12 @@ impl FrameBuilder {
         self.scene.fill(vello::peniko::Fill::NonZero, Affine::IDENTITY, &Brush::Solid(color), None, &path);
     }
 
+    /// `fill_path` with any brush (a linear gradient for chart area fills).
+    pub fn fill_path_with_brush(&mut self, pts: &[f32], brush: &Brush) {
+        let Some(path) = bez_path(pts, true) else { return };
+        self.scene.fill(vello::peniko::Fill::NonZero, Affine::IDENTITY, brush, None, &path);
+    }
+
     /// Stroke a polyline from a flat point list; `closed` joins last→first.
     pub fn stroke_path(&mut self, pts: &[f32], width: f64, closed: bool, color: Color) {
         let Some(path) = bez_path(pts, closed) else { return };
@@ -618,6 +624,19 @@ impl AnyFrame {
         }
     }
 
+    /// Draw a live camera/video frame. Every frame is a new image shown once,
+    /// so the CPU backends convert it without storing it in their image cache
+    /// (which would otherwise fill with hundreds of stale frames). Vello
+    /// uploads images per scene anyway, so it takes the normal path.
+    pub fn draw_frame_image(&mut self, image: &ImageData, transform: Affine) {
+        match self {
+            AnyFrame::Vello(f)    => f.draw_image_with_transform(image, transform),
+            AnyFrame::TinySkia(f) => f.draw_frame_image(image, transform),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.draw_frame_image(image, transform),
+        }
+    }
+
     /// Borrow the inner Vello scene mutably.
     /// Always guard with `supports_caching()` before calling.
     pub fn scene_mut(&mut self) -> &mut Scene {
@@ -642,6 +661,28 @@ impl AnyFrame {
         match self {
             AnyFrame::Vello(f) => f.append_scene(other, transform),
             _ => panic!("append_scene called on non-Vello backend"),
+        }
+    }
+
+    /// Apply `affine` to everything drawn until the matching `pop_transform`.
+    /// Vello applies node transforms by compositing a sub-scene instead (see
+    /// `append_scene`), so this is a no-op there; callers use one path or the
+    /// other based on `supports_caching`.
+    pub fn push_transform(&mut self, affine: Affine) {
+        match self {
+            AnyFrame::Vello(_)    => {}
+            AnyFrame::TinySkia(f) => f.push_transform(affine),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.push_transform(affine),
+        }
+    }
+
+    pub fn pop_transform(&mut self) {
+        match self {
+            AnyFrame::Vello(_)    => {}
+            AnyFrame::TinySkia(f) => f.pop_transform(),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.pop_transform(),
         }
     }
 
@@ -715,6 +756,16 @@ impl AnyFrame {
             AnyFrame::TinySkia(f) => f.fill_path(pts, color),
             #[cfg(target_os = "windows")]
             AnyFrame::Direct2D(f) => f.fill_path(pts, color),
+        }
+    }
+
+    /// `fill_path` with any brush (a linear gradient for chart area fills).
+    pub fn fill_path_with_brush(&mut self, pts: &[f32], brush: &Brush) {
+        match self {
+            AnyFrame::Vello(f)    => f.fill_path_with_brush(pts, brush),
+            AnyFrame::TinySkia(f) => f.fill_path_with_brush(pts, brush),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.fill_path_with_brush(pts, brush),
         }
     }
 
@@ -839,5 +890,37 @@ impl AnyRenderer {
             #[cfg(target_os = "windows")]
             AnyRenderer::Direct2D(r) => r.try_save_pipeline_cache(),
         }
+    }
+}
+
+#[cfg(test)]
+mod scene_append_tests {
+    use super::*;
+    use vello::peniko::{Brush, Color, Fill};
+
+    /// `Encoding::FORCE_NEXT_TRANSFORM` (vello doesn't re-export `Encoding`).
+    const FORCE_NEXT_TRANSFORM: u32 = 1;
+
+    fn fill_unit_rect(scene: &mut Scene) {
+        let rect = kurbo::Rect::new(0.0, 0.0, 10.0, 10.0);
+        scene.fill(Fill::NonZero, Affine::IDENTITY, &Brush::Solid(Color::WHITE), None, &rect);
+    }
+
+    #[test]
+    fn appending_an_empty_scene_keeps_a_pending_forced_transform() {
+        // Regression (vendor/vello patch): after text, the encoding forces the
+        // next transform to be re-emitted. Appending an empty cached fragment
+        // (a leaf that draws nothing) used to clear that, so the next
+        // identity-transform fill was deduplicated and drew with the text's
+        // transform, displaced on screen.
+        let mut scene = Scene::new();
+        fill_unit_rect(&mut scene);
+        scene.encoding_mut().flags |= FORCE_NEXT_TRANSFORM; // as after a glyph run
+        scene.append(&Scene::new(), None);
+
+        let before = scene.encoding().transforms.len();
+        fill_unit_rect(&mut scene);
+        assert_eq!(scene.encoding().transforms.len(), before + 1,
+                   "the identity transform must be re-encoded after the append");
     }
 }

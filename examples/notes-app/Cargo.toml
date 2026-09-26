@@ -12,6 +12,13 @@ v8      = ["glyx-core/v8"]
 quickjs = ["glyx-core/quickjs"]
 
 [dependencies]
-glyx-core  = { path = "../../crates/glyx-core", default-features = false }
+# `default-features = false` keeps the JS engine choice (v8/quickjs above)
+# exclusive — glyx-core's defaults include `v8`. That also drops every other
+# default capability, so the ones this reference app demos are re-enabled
+# explicitly; without them its Network/Camera/Audio/Microphone/AI/3D screens
+# fail with "binding is not available" / "... is not defined".
+glyx-core  = { path = "../../crates/glyx-core", default-features = false, features = [
+    "camera", "canvas3d", "audio", "gamepad", "hid", "ai", "fetch", "websocket", "updater",
+] }
 glyx-shell = { path = "../../crates/glyx-shell" }
 env_logger  = { workspace = true }

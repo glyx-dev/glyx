@@ -267,7 +267,9 @@ function measureSpan(text, span, defaultFontSize) {
   // cross the wrap threshold. Fix: append a non-whitespace sentinel,
   // measure both, subtract — the same trick `glyx-text`'s Rust
   // `measure_to_cursor` already uses for the identical reason.
-  if (/^\s+$/.test(text)) {
+  // Same for a span that merely ENDS in whitespace ("Hello " before a bold
+  // span): its trailing space is drawn, so clicks past it must count it.
+  if (/\s$/.test(text)) {
     const withSentinel = __glyx_measure_text(text + 'x', fs, 999999, style).width;
     const sentinelOnly = __glyx_measure_text('x', fs, 999999, style).width;
     return Math.max(0, withSentinel - sentinelOnly);
@@ -836,7 +838,9 @@ export function RichTextEditor({
   // renders, so the click-Y guard below never triggered for a real
   // scrollbar drag.
   const measuredH = (nodeIdRef.current != null && typeof __glyx_getLayout !== 'undefined')
-    ? __glyx_getLayout(nodeIdRef.current)?.height
+    // Full (unclipped) height: click Y arrives relative to the editor's
+    // unclipped origin (events.js boxOriginY), so the bound must share it.
+    ? (l => l && (l.boxHeight ?? l.height))(__glyx_getLayout(nodeIdRef.current))
     : null;
   const effectiveHeight = (typeof measuredH === 'number' && measuredH > 0)
     ? measuredH
@@ -963,7 +967,10 @@ export function RichTextEditor({
     const id = scrollContainerIdRef.current;
     if (id == null || typeof __glyx_getLayout === 'undefined') return 0;
     const l = __glyx_getLayout(id);
-    const max = (l && typeof l.contentHeight === 'number') ? Math.max(0, l.contentHeight - l.height) : 0;
+    // contentHeight is measured natively from UNCLIPPED rects, so subtract
+    // the unclipped viewport height too (the plain `height` shrinks when an
+    // outer ScrollView clips this editor, letting the max overshoot).
+    const max = (l && typeof l.contentHeight === 'number') ? Math.max(0, l.contentHeight - (l.boxHeight ?? l.height)) : 0;
     return Math.min(max, Math.max(0, y));
   }, []);
 
@@ -1011,7 +1018,7 @@ export function RichTextEditor({
     }
     const caretTop    = item.y + Math.min(li, item.lines.length - 1) * LINE_H;
     const caretBottom = caretTop + LINE_H;
-    const viewH = l.height;
+    const viewH = l.boxHeight ?? l.height; // own viewport, not the clipped part
     let sy = scrollYRef.current;
     if (caretBottom - sy > viewH) sy = caretBottom - viewH;
     if (caretTop - sy < 0) sy = caretTop;
@@ -1038,10 +1045,12 @@ export function RichTextEditor({
     scrollbarTrackIdRef.current = id;
     const updateFromX = (x) => {
       const layout = typeof __glyx_getLayout !== 'undefined' ? __glyx_getLayout(id) : null;
-      if (!layout || layout.width <= 0) return;
+      const trackW = layout ? (layout.boxWidth ?? layout.width) : 0;
+      if (!layout || trackW <= 0) return;
       const li = layoutInfoRef.current;
       const maxScroll = Math.max(0, li.maxContentWidth - li.contentWidth);
-      const frac = Math.max(0, Math.min(1, (x - layout.x) / layout.width));
+      // Track origin/width from the unclipped box — see events.js boxOriginX.
+      const frac = Math.max(0, Math.min(1, (x - (layout.boxX ?? layout.x)) / trackW));
       setScrollXBoth(clampScrollX(frac * maxScroll));
     };
     registerDraggable(id, {

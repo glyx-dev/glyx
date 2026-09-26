@@ -9,3 +9,10 @@ peniko    = { workspace = true }
 log       = { workspace = true }
 thiserror = { workspace = true }
 memmap2   = "0.9"
+accesskit = { workspace = true, optional = true }
+
+[features]
+# Screen-reader text exposure: AccessKit `TextRun` nodes + text-selection
+# conversion, built on Parley's own AccessKit support. Enabled by glyx-core's
+# `a11y` feature; off otherwise so non-a11y builds don't link AccessKit.
+accesskit = ["dep:accesskit", "parley/accesskit"]

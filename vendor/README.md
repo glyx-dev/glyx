@@ -12,7 +12,7 @@ published to crates.io; the workspace `[patch.crates-io]` table in the root
 |---|---|
 | **Upstream** | <https://github.com/linebender/vello> |
 | **License** | Apache-2.0 OR MIT (files unchanged; see `vendor/vello/LICENSE-APACHE` and `vendor/vello/LICENSE-MIT`) |
-| **Patch** | Added `ResourcePool::trim()` → `WgpuEngine::trim_pool()` → `Renderer::trim_resources()`. Caps the GPU buffer pool to 4 buffers per size-class (`MAX_POOL_BUFS_PER_CLASS = 4`) so the pool stays bounded instead of growing without limit across frames. Called on focus-loss and occlusion. |
+| **Patch** | Added `ResourcePool::trim()` → `WgpuEngine::trim_pool()` → `Renderer::trim_resources()`. Caps the GPU buffer pool to 4 buffers per size-class (`MAX_POOL_BUFS_PER_CLASS = 4`) so the pool stays bounded instead of growing without limit across frames. Called on focus-loss and occlusion.<br><br>Also: `Scene::append` keeps the target scene's pending `FORCE_NEXT_TRANSFORM` / `FORCE_NEXT_STYLE` flags. Upstream `vello_encoding` 0.9's `Encoding::append` overwrites them with the appended scene's. After text, appending a scene that encodes no transform (an empty cached fragment) made the next identity-transform draw inherit the text's transform, so it was drawn displaced. Candidate for an upstream fix. |
 
 ---
 

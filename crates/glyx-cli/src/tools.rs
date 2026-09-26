@@ -61,3 +61,9 @@ pub(crate) mod paths {
 pub(crate) fn runner_mirror_path(artifact: &str) -> String {
     format!("runners/{artifact}")
 }
+
+/// Mirror path for a signed capability module or its `.sig`
+/// (`caps/glyx_cap_audio-windows.dll`).
+pub(crate) fn cap_mirror_path(asset: &str) -> String {
+    format!("caps/{asset}")
+}

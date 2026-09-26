@@ -24,6 +24,7 @@ members = [
     "examples/webview-demo",
     "examples/a11y-ime-demo",
     "examples/bench-app",
+    "examples/motion-demo",
     "crates/glyx-snapshot",
     "crates/glyx-media",
     "crates/glyx-cap-abi",
@@ -134,8 +135,8 @@ muda                = "0.19"
 wry                 = "0.50"
 
 # Accessibility (accesskit surfaces to NSAccessibility / UIAutomation / AT-SPI)
-accesskit           = "0.19"
-accesskit_winit     = "0.27"
+accesskit           = "0.24"
+accesskit_winit     = "0.33"
 
 # QuickJS (mobile-required, desktop-optional lightweight engine — see
 # glyx_rough_docs/QUICKJS_PERFORMANCE_PLAN.md). Mutually exclusive with `v8`

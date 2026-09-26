@@ -1,5 +1,12 @@
-import React, { useState, useCallback, useRef } from 'react';
-import { View, Text, Pressable, VirtualizedList, render } from '@glyx-dev/react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { View, Text, Pressable, VirtualizedList, render, perf } from '@glyx-dev/react';
+
+// Runs all four benchmarks sequentially on startup and logs machine-readable
+// [bench] lines — for engine-comparison runs (V8 vs QuickJS) without having
+// to click through the UI by hand. Leaves the window open afterward so the
+// final results stay visible; does NOT quit. The buttons below still work
+// for a manual re-run.
+const AUTORUN = true;
 
 function Button({ title, onPress }) {
   return (
@@ -23,6 +30,39 @@ function runComputeBench() {
   }
   const t1 = Date.now();
   return { ms: t1 - t0, result: count };
+}
+
+// ── FFI-crossing-overhead benchmark: calls an existing trivial native
+// binding (__glyx_platform — returns a static string, does no real work)
+// many times in a tight loop. Isolates the raw per-call JS↔native crossing
+// cost from everything else (no DOM, no layout, no reconciler) — added to
+// find out whether the virtualized list-stress benchmark's regression (its
+// V8/QuickJS ratio got WORSE after the JSON-removal work, even though its
+// absolute time improved) comes from QuickJS paying disproportionately more
+// per native call, or from something else entirely (JS-side Promise/
+// microtask overhead, GC, etc).
+function runFfiOverheadBench() {
+  const N = 200000;
+  const hasBinding = typeof __glyx_platform === 'function';
+  const t0 = Date.now();
+  if (hasBinding) {
+    for (let i = 0; i < N; i++) __glyx_platform();
+  }
+  const t1 = Date.now();
+  return { ms: t1 - t0, calls: N, ran: hasBinding };
+}
+
+// Snapshot the engine's own frame-level perf counters (see @glyx-dev/react's
+// `perf` API) right after a benchmark phase, so we can see whether time went
+// into JS execution, layout, or elsewhere — instead of only ever comparing
+// wall-clock totals between engines.
+function logPerfSnapshot(label) {
+  const snap = perf.snapshot ? perf.snapshot() : null;
+  if (!snap) {
+    console.log(`[bench] perf snapshot (${label}): unavailable`);
+    return;
+  }
+  console.log(`[bench] perf snapshot (${label}): jsTime=${snap.jsTime}ms layoutTime=${snap.layoutTime}ms gpuTime=${snap.gpuTime}ms frameTime=${snap.frameTime}ms frameTimeP99=${snap.frameTimeP99}ms nodeCount=${snap.nodeCount}`);
 }
 
 function buildRows(n, seed) {
@@ -54,40 +94,99 @@ async function runListStress({ virtualized, rowsPerIter, iters, setRows, setActi
 
 function App() {
   const [computeResult, setComputeResult] = useState(null);
+  const [ffiResult, setFfiResult] = useState(null);
   const [fullResult, setFullResult] = useState(null);
   const [virtResult, setVirtResult] = useState(null);
   const [rows, setRows] = useState([]);
   const [activeMode, setActiveMode] = useState('full');
   const busyRef = useRef(false);
 
-  const onCompute = useCallback(() => {
+  // Shared by the button handlers AND the autorun sequence below — both
+  // paths funnel through these so there's exactly one implementation of
+  // "run this benchmark and report it" (avoids the two callers drifting).
+  const runCompute = useCallback(() => {
     setComputeResult('running');
-    setTimeout(() => {
-      const r = runComputeBench();
-      setComputeResult(r);
-      console.log(`[bench] compute: ${r.ms}ms (primes below 300000 = ${r.result})`);
-    }, 16);
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        const r = runComputeBench();
+        setComputeResult(r);
+        console.log(`[bench] compute: ${r.ms}ms (primes below 300000 = ${r.result})`);
+        logPerfSnapshot('compute');
+        resolve(r);
+      }, 16);
+    });
   }, []);
 
-  const onListStressFull = useCallback(async () => {
-    if (busyRef.current) return;
+  const runFfi = useCallback(() => {
+    setFfiResult('running');
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        const r = runFfiOverheadBench();
+        setFfiResult(r);
+        console.log(`[bench] ffi-overhead: ${r.ms}ms for ${r.calls} no-op native calls (ran=${r.ran})`);
+        logPerfSnapshot('ffi-overhead');
+        resolve(r);
+      }, 16);
+    });
+  }, []);
+
+  const runFull = useCallback(async () => {
+    if (busyRef.current) return null;
     busyRef.current = true;
     setFullResult('running');
     const r = await runListStress({ virtualized: false, rowsPerIter: 4000, iters: 10, setRows, setActiveMode });
     setFullResult(r);
     console.log(`[bench] list-stress (full render): ${r.ms}ms for ${r.iters} builds+renders of ${r.rows} rows`);
+    logPerfSnapshot('full render');
     busyRef.current = false;
+    return r;
   }, []);
 
-  const onListStressVirtualized = useCallback(async () => {
-    if (busyRef.current) return;
+  const runVirtualized = useCallback(async () => {
+    if (busyRef.current) return null;
     busyRef.current = true;
     setVirtResult('running');
     const r = await runListStress({ virtualized: true, rowsPerIter: 4000, iters: 10, setRows, setActiveMode });
     setVirtResult(r);
     console.log(`[bench] list-stress (virtualized): ${r.ms}ms for ${r.iters} builds+renders of ${r.rows} rows`);
+    logPerfSnapshot('virtualized');
     busyRef.current = false;
+    return r;
   }, []);
+
+  const onCompute = useCallback(() => { runCompute(); }, [runCompute]);
+  const onFfi = useCallback(() => { runFfi(); }, [runFfi]);
+  const onListStressFull = runFull;
+  const onListStressVirtualized = runVirtualized;
+
+  // Unattended engine-comparison run: all four benchmarks back to back,
+  // each awaited so they never overlap, then a done marker. Does not quit —
+  // leaves the window open with the final results on screen.
+  useEffect(() => {
+    if (!AUTORUN) return;
+    console.log('[bench] autorun effect fired');
+    let cancelled = false;
+    (async () => {
+      try {
+        console.log('[bench] starting compute');
+        await runCompute();
+        if (cancelled) return;
+        console.log('[bench] starting ffi-overhead');
+        await runFfi();
+        if (cancelled) return;
+        console.log('[bench] starting full render');
+        await runFull();
+        if (cancelled) return;
+        console.log('[bench] starting virtualized');
+        await runVirtualized();
+        if (cancelled) return;
+        console.log('[bench] all done');
+      } catch (e) {
+        console.log('[bench] AUTORUN THREW: ' + (e && e.stack || e));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [runCompute, runFfi, runFull, runVirtualized]);
 
   const rowItem = (row) => (
     <View key={row.id} style={{ height: 20, flexDirection: 'row', paddingHorizontal: 4 }}>
@@ -106,6 +205,13 @@ function App() {
         {computeResult === null ? 'not run'
           : computeResult === 'running' ? 'running...'
           : `${computeResult.ms} ms (primes: ${computeResult.result})`}
+      </Text>
+
+      <Button title="Run FFI-overhead benchmark" onPress={onFfi} />
+      <Text style={{ color: '#a8a8b8', marginTop: 4, marginBottom: 12 }}>
+        {ffiResult === null ? 'not run'
+          : ffiResult === 'running' ? 'running...'
+          : `${ffiResult.ms} ms (${ffiResult.calls} no-op native calls)`}
       </Text>
 
       <Button title="Run list-stress (full render, unvirtualized)" onPress={onListStressFull} />

@@ -38,14 +38,21 @@ jobs:
       # only reachable via --workspace — it's not a dependency of glyx-core/
       # glyx-runner, so release.yml never needs these two.
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libv4l-dev libusb-1.0-0-dev libudev-dev libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libv4l-dev libusb-1.0-0-dev libudev-dev libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev libxdo-dev libdbus-1-dev
       # Zero-warnings bar (see CONTRIBUTING.md). RUSTFLAGS="-D warnings" is not
       # used because it would also deny warnings inside vendored path deps
       # (vendor/vello); instead, fail on any warning whose
       # source location is in our own crates/.
+      # Two invocations, not one: `examples/calculator` defaults to the QuickJS
+      # engine while every other member defaults to V8, and a single
+      # `--workspace` build unifies features across members — enabling both
+      # engines at once, which glyx-runtime rejects with a compile_error!
+      # (they're mutually exclusive). Checking calculator on its own keeps
+      # each build to exactly one engine.
       - name: cargo check (zero warnings in crates/)
         run: |
-          cargo check --workspace --message-format short 2>&1 | tee check.log
+          cargo check --workspace --exclude calculator --message-format short 2>&1 | tee check.log
+          cargo check -p calculator --message-format short 2>&1 | tee -a check.log
           if grep -E "^crates[/\\].*warning" check.log; then
             echo "::error::warnings found in workspace crates"; exit 1
           fi
@@ -60,4 +67,6 @@ jobs:
         with:
           bun-version: latest
       - run: bun install --frozen-lockfile
-      - run: bun test js/packages
+      - run: bun test js/packages scripts
+      - name: Versions consistent (packages, crates, internal ranges)
+        run: bun scripts/release/check.mjs

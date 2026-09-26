@@ -78,15 +78,17 @@ pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm, icupkg: Option<PathBuf>) 
         // JS-only apps share one cached runner binary, so capability DLLs
         // (audio/ai/camera/gamepad/hid) and the media DLL (FFmpeg) must be
         // staged beside it for cap_loader::load_caps() to find them at startup.
-        // The dev runner is a debug build, so we skip Ed25519 sig verification
-        // for these locally built DLLs.
+        // Modules built from the glyx source are unsigned, so only then is
+        // Ed25519 verification skipped; downloaded release modules are
+        // signed and verified normally.
         let mut skip_cap_verify = false;
         if let Some(runner_dir) = runner.parent() {
             let caps = super::read_capabilities_from_config();
             if !caps.is_empty() {
-                match super::cmd_build::build_cap_dlls(&caps, None, runner_dir) {
-                    Ok(()) => { skip_cap_verify = true; }
-                    Err(e) => log::warn!("[glyx] capability DLL staging skipped: {e}"),
+                match super::cmd_build::stage_cap_dlls(&caps, None, runner_dir) {
+                    Ok(super::cmd_build::CapSource::BuiltLocally) => { skip_cap_verify = true; }
+                    Ok(super::cmd_build::CapSource::DownloadedSigned) => {}
+                    Err(e) => log::warn!("[glyx] capability module staging failed: {e:#}"),
                 }
             }
             if let Err(e) = super::copy_media_dll_if_needed(runner_dir) {

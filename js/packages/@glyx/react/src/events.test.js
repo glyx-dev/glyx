@@ -1,0 +1,64 @@
+import { test, expect } from 'bun:test';
+import {
+  dispatchEvents, registerInput, unregisterInput,
+  registerPressable, unregisterPressable, registerFocusable, unregisterFocusable, setFocus,
+} from './events.js';
+
+// Feed one frame's worth of native events through the real dispatcher.
+function dispatch(events) {
+  const prev = globalThis.__glyx_pollEvents;
+  globalThis.__glyx_pollEvents = () => events;
+  try { dispatchEvents(); } finally { globalThis.__glyx_pollEvents = prev; }
+}
+
+test('a screen-reader text selection reaches the field it targets', () => {
+  const calls = [];
+  registerInput(501, { onSetSelection: (a, f) => calls.push([a, f]) });
+  registerInput(502, { onSetSelection: () => calls.push('wrong field') });
+  try {
+    dispatch([{ type: 'accessibilityTextSelection', nodeId: 501, anchor: 7, focus: 2 }]);
+    // Direction preserved (anchor 7, focus 2 = a leftward selection).
+    expect(calls).toEqual([[7, 2]]);
+  } finally {
+    unregisterInput(501);
+    unregisterInput(502);
+  }
+});
+
+test('a screen-reader text selection for an unknown field is ignored', () => {
+  expect(() =>
+    dispatch([{ type: 'accessibilityTextSelection', nodeId: 999, anchor: 0, focus: 1 }])
+  ).not.toThrow();
+});
+
+test('the hovered pressable gets onPointerMove with element-local coordinates', () => {
+  const moves = [];
+  registerPressable(601, { onPointerMove: (e) => moves.push(e) });
+  const prevLayout = globalThis.__glyx_getLayout;
+  globalThis.__glyx_getLayout = (id) => (id === 601 ? { x: 100, y: 50, width: 200, height: 80 } : null);
+  try {
+    dispatch([{ type: 'cursorMoved', x: 130, y: 70, target: 601 }]);
+    dispatch([{ type: 'cursorMoved', x: 150, y: 90, target: 601 }]);
+    expect(moves.map((m) => [m.locationX, m.locationY])).toEqual([[30, 20], [50, 40]]);
+    expect(moves[1].x).toBe(150);
+  } finally {
+    dispatch([{ type: 'cursorMoved', x: 0, y: 0, target: undefined }]);
+    globalThis.__glyx_getLayout = prevLayout;
+    unregisterPressable(601);
+  }
+});
+
+test('keys reach a focused non-text control through onKeyDown', () => {
+  const keys = [];
+  registerFocusable(602, { onKeyDown: (e) => keys.push(e.key) });
+  try {
+    setFocus(602);
+    dispatch([{ type: 'keyInput', key: 'ArrowRight', pressed: true }]);
+    dispatch([{ type: 'keyInput', key: 'ArrowRight', pressed: false }]); // releases ignored
+    dispatch([{ type: 'keyInput', key: 'Home', pressed: true }]);
+    expect(keys).toEqual(['ArrowRight', 'Home']);
+  } finally {
+    setFocus(null);
+    unregisterFocusable(602);
+  }
+});

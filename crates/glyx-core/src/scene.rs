@@ -1,6 +1,7 @@
 use super::*;
 use smallvec::SmallVec;
 use crate::layout::layout_props_changed;
+use crate::render_props::{parse_box_shadow, parse_gradient, parse_transform};
 
 /// Locate the ffmpeg binary.
 /// Priority: `FFMPEG_PATH` env var → ffmpeg-sidecar (dev) → common install locations → PATH.
@@ -244,22 +245,49 @@ fn rgba_premul_srgb_to_peniko(mut bytes: Vec<u8>, w: u32, h: u32) -> Option<peni
     })
 }
 
-/// Advance every active opacity transition one frame, marking transitioning
-/// nodes dirty so they actually re-render (opacity is changing with no new
-/// `SceneCommand` behind it). Returns `true` if any transition is still
+/// Advance every active property transition and keyframe animation one
+/// frame, marking those nodes dirty so they actually re-render (values are
+/// changing with no new `SceneCommand` behind them). Finished animations
+/// settle (see `motion::Animation::tick`) rather than being dropped, so
+/// re-sending the same `animation` prop on a re-render doesn't replay them. Returns `true` if any transition is still
 /// running after this tick — the caller uses that to force a GPU render and
 /// schedule the next frame, since nothing else would otherwise wake the
 /// render loop mid-transition.
-pub(crate) fn tick_opacity_transitions(state: &mut PerWindowState) -> bool {
-    if state.opacity_transitions.is_empty() { return false; }
+pub(crate) fn tick_transitions(state: &mut PerWindowState) -> bool {
+    if state.transitions.is_empty() && state.animations.is_empty() { return false; }
     let now = Instant::now();
     let dirty_nodes = &mut state.dirty_nodes;
-    state.opacity_transitions.retain(|&id, t| {
+    state.transitions.retain(|&id, t| {
         let (_, finished) = t.sample(now);
         dirty_nodes.insert(id);
         !finished
     });
-    !state.opacity_transitions.is_empty()
+    let mut running = false;
+    for (&id, a) in state.animations.iter_mut() {
+        let t = a.tick(now);
+        if t.dirty { dirty_nodes.insert(id); }
+        running |= t.running;
+    }
+    running || !state.transitions.is_empty()
+}
+
+/// Start, restart or stop node `id`'s keyframe animation to match `props`.
+/// Re-sent identical props (every React re-render) leave a running
+/// animation alone; a changed spec restarts it from the beginning.
+fn sync_animation(state: &mut PerWindowState, id: u32, props: &NodeProps) {
+    match motion::AnimSpec::from_props(props) {
+        Some(spec) => {
+            if motion::needs_restart(state.animations.get(&id), &spec) {
+                state.animations.insert(id, motion::Animation { spec, start: Instant::now(), settled: false });
+                (state.request_redraw)();
+            }
+        }
+        None => {
+            if state.animations.remove(&id).is_some() {
+                state.dirty_nodes.insert(id);
+            }
+        }
+    }
 }
 
 pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<SceneCommand>) -> bool {
@@ -282,12 +310,8 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
     for cmd in commands {
         match cmd {
             SceneCommand::CreateNode { id, node_type, props } => {
-                state.js_nodes.insert(id, JsNode {
-                    node_type,
-                    props,
-                    children:  SmallVec::new(),
-                    layout_id: None,
-                });
+                sync_animation(state, id, &props);
+                state.js_nodes.insert(id, JsNode::new(node_type, props));
                 if state.js_root.is_none() {
                     state.js_root = Some(id);
                 }
@@ -344,7 +368,11 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         parent.children.push(child_id);
                     }
                 }
+                if let Some(child) = state.js_nodes.get_mut(&child_id) {
+                    child.parent = Some(parent_id);
+                }
                 state.dirty_nodes.insert(parent_id);
+                state.z_order_dirty.insert(parent_id);
                 layout_changed   = true;
                 structure_changed = true;
             }
@@ -357,7 +385,11 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         parent.children.push(child_id);
                     }
                 }
+                if let Some(child) = state.js_nodes.get_mut(&child_id) {
+                    child.parent = Some(parent_id);
+                }
                 state.dirty_nodes.insert(parent_id);
+                state.z_order_dirty.insert(parent_id);
                 layout_changed   = true;
                 structure_changed = true;
             }
@@ -383,31 +415,54 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 if needs_cascade {
                     state.descendant_cascade_nodes.insert(id);
                 }
-                // `@glyx-dev/motion` v1: an opacity change with `transitionMs` set
-                // starts (or retargets) a Rust-owned interpolation instead of
-                // snapping. Must read the OLD effective opacity (mid-transition
-                // value if one was already running) before it's overwritten below.
-                if let (Some(old), Some(ms)) = (
-                    state.js_nodes.get(&id),
-                    props.transition_ms,
-                ) {
-                    let new_opacity = props.opacity.unwrap_or(1.0);
-                    let from = state.opacity_transitions.get(&id)
-                        .map(|t| t.sample(Instant::now()).0)
-                        .unwrap_or_else(|| old.props.opacity.unwrap_or(1.0));
-                    if (new_opacity - from).abs() > f32::EPSILON {
-                        state.opacity_transitions.insert(id, OpacityTransition {
-                            from, to: new_opacity, start: Instant::now(), duration_ms: ms,
-                        });
+                if state.js_nodes.contains_key(&id) {
+                    sync_animation(state, id, &props);
+                }
+                // `@glyx-dev/motion`: a change to a transitioned property starts
+                // (or retargets) a Rust-owned interpolation instead of snapping.
+                // `from` is what's on screen NOW — mid-flight values included —
+                // read before the old props are overwritten below.
+                if let (Some(old), Some(ms)) = (state.js_nodes.get(&id), props.transition_ms) {
+                    let (old_v, new_v) = (motion::Visual::of(&old.props), motion::Visual::of(&props));
+                    // Unrelated updates (text, layout, …) leave a running
+                    // transition alone — restarting its clock would stall it.
+                    if old_v != new_v {
+                        let now  = Instant::now();
+                        let from = match state.transitions.get(&id) {
+                            Some(t) => t.current(&old_v, now),
+                            None    => old_v,
+                        };
+                        let mask   = motion::property_mask(props.transition_property.as_deref());
+                        let easing = motion::Easing::parse(props.transition_easing.as_deref());
+                        match motion::Transition::between(&from, &new_v, mask, ms, easing, now) {
+                            Some(t) => { state.transitions.insert(id, t); }
+                            // Only non-transitioned properties changed: they snap.
+                            None    => { state.transitions.remove(&id); }
+                        }
                     }
                 } else {
                     // No transition declared (or first-ever props for this node) —
                     // any previously-running transition for this id is stale.
-                    state.opacity_transitions.remove(&id);
+                    state.transitions.remove(&id);
+                }
+
+                // A child's z_index changed → its parent's z-sorted child list is stale.
+                // (Structural changes are already flagged by AppendChild/InsertBefore.)
+                if let Some(node) = state.js_nodes.get(&id) {
+                    if node.props.z_index != props.z_index {
+                        if let Some(pid) = node.parent {
+                            state.z_order_dirty.insert(pid);
+                        }
+                    }
                 }
 
                 if let Some(node) = state.js_nodes.get_mut(&id) {
                     node.props = props.clone();
+                    // Keep the pre-parsed render props in sync (see JsNode::new) —
+                    // render never re-parses these strings.
+                    node.transform  = props.transform.as_deref().and_then(parse_transform);
+                    node.box_shadow = props.box_shadow.as_deref().and_then(parse_box_shadow);
+                    node.gradient   = props.background_gradient.as_deref().and_then(parse_gradient);
                 }
                 // Any UpdateNode is a visual change — mark dirty regardless of layout impact.
                 state.dirty_nodes.insert(id);
@@ -435,8 +490,10 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                                 text: props.text.clone().unwrap_or_default(),
                                 font_size,
                                 max_height,
-                                bold:   props.font_weight.as_deref() == Some("bold"),
+                                bold:   glyx_runtime::text_props::is_bold(props.font_weight.as_deref()),
                                 italic: props.font_style.as_deref()  == Some("italic"),
+                                line_height: props.line_height,
+                                single_line: props.text_scroll_x.is_some(),
                             };
                             let _ = state.layout.set_text_ctx(lid, ctx);
                         }
@@ -453,8 +510,10 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         state.images.remove(&image_id);
                     }
                 }
-                // Also clean up canvas data for this node.
+                // Also clean up canvas data and any running motion for this node.
                 state.canvas_cmds.remove(&id);
+                state.transitions.remove(&id);
+                state.animations.remove(&id);
                 #[cfg(feature = "canvas3d")]
                 {
                     state.canvas3d_scenes.remove(&id);
@@ -477,9 +536,48 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     state.webview_last_bounds.remove(&id);
                     state.webview_hidden.remove(&id);
                 }
+                // Clear parent pointers on direct children before dropping the
+                // node, so ancestor walks never chase a dead id. Also grab the
+                // removed node's OWN parent before it's gone — see below.
+                let (orphan_children, removed_parent): (SmallVec<[u32; 4]>, Option<u32>) = state.js_nodes
+                    .get(&id)
+                    .map(|n| (n.children.clone(), n.parent))
+                    .unwrap_or_default();
                 state.js_nodes.remove(&id);
+                for cid in orphan_children {
+                    if let Some(child) = state.js_nodes.get_mut(&cid) {
+                        if child.parent == Some(id) {
+                            child.parent = None;
+                        }
+                    }
+                }
                 if state.focused_node == Some(id) {
-                    state.focused_node = None;
+                    // Focus survival: rather than dropping focus to nowhere,
+                    // move it to whichever focusable node would come next in
+                    // the (now-current, post-removal) Tab order. Falls back
+                    // to `None` only when nothing focusable remains at all.
+                    state.focused_node = state.js_root.and_then(|root| {
+                        let mut order = focus_order(&state.js_nodes, root);
+                        let positions: std::collections::HashMap<u32, (f32, f32)> = order
+                            .iter()
+                            .filter_map(|&nid| {
+                                let node = state.js_nodes.get(&nid)?;
+                                let rl = state.resolved_rect(node.layout_id?)?;
+                                Some((nid, (rl.y, rl.x)))
+                            })
+                            .collect();
+                        sort_by_position(&mut order, &positions);
+                        next_focus(&order, None, false)
+                    });
+                    state.window.set_ime_allowed(state.focused_node.is_some());
+                    if let Some(new_focus) = state.focused_node {
+                        // Same event JS already handles for AT/Tab-driven
+                        // focus moves — keeps onFocus/styling in sync when
+                        // focus moves off a removed node, not just when a
+                        // human presses Tab.
+                        state.runtime.push_event(InputEvent::AccessibilityFocus { node_id: new_focus });
+                        reveal_focus_if_needed(state, new_focus);
+                    }
                 }
                 // Clean up all per-node state for the removed node.
                 state.dirty_nodes.remove(&id);
@@ -487,30 +585,51 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 state.prev_resolved.remove(&id);
                 state.scene_cache.remove(&id);
                 state.scene_cache_new.remove(&id);
+                // Layout-cache entries (the rect `__glyx_getLayout` reads, plus
+                // the high-bit content-height / unclipped-rect entries). Node
+                // ids are never reused, so without this every removed node's
+                // entries stayed forever — unbounded growth for anything that
+                // churns nodes (VirtualizedList row recycling, route changes).
+                {
+                    let lc = state.runtime.layout_cache();
+                    let mut lc = lc.lock();
+                    lc.remove(&id);
+                    lc.remove(&(id | crate::layout::CONTENT_HEIGHT_KEY));
+                    lc.remove(&(id | crate::layout::UNCLIPPED_KEY));
+                }
                 // If a scrollbar drag was active on this node, cancel it so the
                 // stale node_id is never used for scroll updates after removal.
                 if state.scrollbar_drag.as_ref().is_some_and(|d| d.node_id == id) {
                     state.scrollbar_drag = None;
                 }
-                // Unlink from any parent's children list so stale ghost IDs don't
-                // accumulate in the renderer's traversal.  O(n × avg_children) but
-                // n < 1000 in practice so this is negligible.
-                let mut dirtied_parents: SmallVec<[u32; 2]> = SmallVec::new();
-                for (&parent_id, node) in state.js_nodes.iter_mut() {
-                    let before = node.children.len();
-                    node.children.retain(|c| *c != id);
-                    if node.children.len() != before {
-                        dirtied_parents.push(parent_id);
+                // Unlink from the parent's children list so stale ghost IDs don't
+                // accumulate in the renderer's traversal. O(1) via the removed
+                // node's own `parent` pointer (maintained by every Append/Insert/
+                // SetRoot) instead of scanning every remaining node to find who
+                // references `id` — that O(n × remaining_nodes) scan was the
+                // dominant cost (several seconds) when a commit removes ~8,000
+                // nodes at once (e.g. `bench-app`'s full-render → virtualized
+                // mode switch), found by timing `recompute_layout` around it and
+                // seeing the time sink sit entirely between commands, not inside
+                // layout itself.
+                if let Some(parent_id) = removed_parent {
+                    if let Some(parent) = state.js_nodes.get_mut(&parent_id) {
+                        let before = parent.children.len();
+                        parent.children.retain(|c| *c != id);
+                        if parent.children.len() != before {
+                            state.dirty_nodes.insert(parent_id);
+                            state.z_order_dirty.insert(parent_id);
+                        }
                     }
-                }
-                for pid in dirtied_parents {
-                    state.dirty_nodes.insert(pid);
                 }
                 layout_changed   = true;
                 structure_changed = true;
             }
             SceneCommand::SetRoot { id } => {
                 state.js_root = Some(id);
+                if let Some(node) = state.js_nodes.get_mut(&id) {
+                    node.parent = None;
+                }
                 state.dirty_nodes.insert(id);
                 layout_changed   = true;
                 structure_changed = true;
@@ -701,9 +820,12 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                             match media.encoder_open(&output_path, w, h, fps) {
                                 Ok(enc) => {
                                     let mut ok = true;
-                                    for (_, _, ref data) in &buffered {
-                                        if media.encoder_write_rgba(&enc, data).is_err() { ok = false; break; }
+                                    // drain(): the calibration frames (~4-8 MB each) are
+                                    // freed as they're written, not held all recording long.
+                                    for (_, _, data) in buffered.drain(..) {
+                                        if media.encoder_write_rgba(&enc, &data).is_err() { ok = false; break; }
                                     }
+                                    buffered.shrink_to_fit();
                                     if ok {
                                         for (_, _, data) in frame_rx.iter() {
                                             if media.encoder_write_rgba(&enc, &data).is_err() { ok = false; break; }
@@ -761,9 +883,10 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         };
 
                         let mut stdin = child.stdin.take().unwrap();
-                        for (_, _, ref data) in &buffered {
-                            if stdin.write_all(data).is_err() { break; }
+                        for (_, _, data) in buffered.drain(..) {
+                            if stdin.write_all(&data).is_err() { break; }
                         }
+                        drop(buffered);
                         while let Ok((_, _, data)) = frame_rx.recv() {
                             if stdin.write_all(&data).is_err() { break; }
                         }
@@ -1017,9 +1140,13 @@ pub(crate) fn update_dirty_from_layout(state: &mut PerWindowState) -> bool {
 /// required.  Used by the software present path to redraw + push only the
 /// changed region (a hover repaints one button, a keystroke one line).
 ///
+/// Each dirty node contributes its VISUAL bounds (see `visual_bounds`: layout
+/// rect + shadow, mapped through its own and its ancestors' transforms, with
+/// mid-transition values from `overrides`) for this frame AND where it was
+/// drawn last frame (`prev_visual`, falling back to its previous layout
+/// rect), so a moving/rotating node erases its old pixels.
+///
 /// Full-frame bailout conditions (correctness over cleverness):
-/// - a dirty node has a `transform` (visual bounds ≠ layout bounds) or a
-///   `box_shadow` (draws outside its rect),
 /// - a dirty node is missing from the tree or has no resolved layout
 ///   (just removed / not yet laid out),
 /// - `dirty_nodes` is empty (callers treat that as "render everything").
@@ -1029,7 +1156,10 @@ pub(crate) fn update_dirty_from_layout(state: &mut PerWindowState) -> bool {
 /// Instead, the OUTERMOST ancestor with a non-zero `scroll_offset_y` is used
 /// as the damage contribution — its own rect is absolute-correct and clips
 /// its content, so it bounds the node's old and new visual positions.
-pub(crate) fn compute_frame_damage(state: &PerWindowState) -> Option<(f64, f64, f64, f64)> {
+pub(crate) fn compute_frame_damage(
+    state:     &PerWindowState,
+    overrides: &std::collections::HashMap<u32, crate::motion::Overrides>,
+) -> Option<(f64, f64, f64, f64)> {
     if state.dirty_nodes.is_empty() {
         return None;
     }
@@ -1037,14 +1167,6 @@ pub(crate) fn compute_frame_damage(state: &PerWindowState) -> Option<(f64, f64, 
     // layout NodeId → resolved rect
     let resolved: std::collections::HashMap<NodeId, &ResolvedLayout> =
         state.resolved.iter().map(|(nid, rl)| (*nid, rl)).collect();
-    // child → parent
-    let mut parent_of: std::collections::HashMap<u32, u32> =
-        std::collections::HashMap::with_capacity(state.js_nodes.len());
-    for (&pid, node) in &state.js_nodes {
-        for &cid in &node.children {
-            parent_of.insert(cid, pid);
-        }
-    }
 
     let mut ltrb: Option<(f64, f64, f64, f64)> = None;
 
@@ -1058,32 +1180,26 @@ pub(crate) fn compute_frame_damage(state: &PerWindowState) -> Option<(f64, f64, 
         });
     }
 
+    let rect_of = |id: u32| -> Option<(f64, f64, f64, f64)> {
+        let rl = resolved.get(&state.js_nodes.get(&id)?.layout_id?)?;
+        Some((rl.x as f64, rl.y as f64, rl.width as f64, rl.height as f64))
+    };
+
     for &id in &state.dirty_nodes {
-        let Some(node) = state.js_nodes.get(&id) else { return None };
-        if node.props.transform.is_some() || node.props.box_shadow.is_some() {
-            return None;
-        }
+        if !state.js_nodes.contains_key(&id) { return None; }
 
         // Outermost scrolled ancestor bounds this node's visual position.
-        let mut cur = id;
-        let mut outer_scrolled: Option<u32> = None;
-        while let Some(&pid) = parent_of.get(&cur) {
-            if let Some(pn) = state.js_nodes.get(&pid) {
-                if pn.props.scroll_offset_y.unwrap_or(0.0) != 0.0 {
-                    outer_scrolled = Some(pid);
-                }
-            }
-            cur = pid;
+        // Walks the persistent `parent` pointers maintained by
+        // `apply_scene_commands` — no per-frame child→parent map needed.
+        let target = outermost_scrolled_ancestor(&state.js_nodes, id).unwrap_or(id);
+        let (l, t, r, b) = visual_bounds(&state.js_nodes, &rect_of, overrides, target)?;
+        add(&mut ltrb, l, t, r - l, b - t);
+
+        // Include where it was drawn LAST frame so moved/shrunk/rotated nodes
+        // erase their old pixels.
+        if let Some(&(pl, pt, pr, pb)) = state.prev_visual.get(&target) {
+            add(&mut ltrb, pl, pt, pr - pl, pb - pt);
         }
-
-        let target = outer_scrolled.unwrap_or(id);
-        let Some(tnode) = state.js_nodes.get(&target)     else { return None };
-        let Some(lid)   = tnode.layout_id                  else { return None };
-        let Some(rl)    = resolved.get(&lid)               else { return None };
-        add(&mut ltrb, rl.x as f64, rl.y as f64, rl.width as f64, rl.height as f64);
-
-        // Include the PREVIOUS rect so moved/shrunk nodes erase their old
-        // pixels (prev_resolved is keyed by JS id and still holds last frame).
         if let Some(prl) = state.prev_resolved.get(&target) {
             add(&mut ltrb, prl.x as f64, prl.y as f64,
                 prl.width as f64, prl.height as f64);
@@ -1091,6 +1207,261 @@ pub(crate) fn compute_frame_damage(state: &PerWindowState) -> Option<(f64, f64, 
     }
 
     ltrb.map(|(l, t, r, b)| (l, t, r - l, b - t))
+}
+
+/// Screen-space bounds `(l, t, r, b)` of what node `id` draws: its layout
+/// rect grown by its box shadow, then mapped through its own transform and
+/// every ancestor's (each centred on that node's own rect, as the renderer
+/// does). Transform/shadow values come from `overrides` while a transition
+/// runs. Descendants are assumed to lie inside the node's rect (normal flow),
+/// matching the rest of the damage analysis. `None` if a rect is unknown.
+pub(crate) fn visual_bounds(
+    nodes:     &std::collections::HashMap<u32, JsNode>,
+    rect_of:   &dyn Fn(u32) -> Option<(f64, f64, f64, f64)>,
+    overrides: &std::collections::HashMap<u32, crate::motion::Overrides>,
+    id:        u32,
+) -> Option<(f64, f64, f64, f64)> {
+    use peniko::kurbo::{Affine, Point};
+    let node = nodes.get(&id)?;
+    let (x, y, w, h) = rect_of(id)?;
+    let (mut l, mut t, mut r, mut b) = (x, y, x + w, y + h);
+
+    let ov = overrides.get(&id);
+    if let Some((dx, dy, _)) = ov.and_then(|o| o.shadow).or(node.box_shadow) {
+        l = l.min(x + dx); t = t.min(y + dy);
+        r = r.max(x + w + dx); b = b.max(y + h + dy);
+    }
+
+    let mut cur = Some(id);
+    for _ in 0..=nodes.len() {
+        let Some(cid) = cur else { break };
+        let Some(n) = nodes.get(&cid) else { break };
+        let affine = overrides.get(&cid).and_then(|o| o.transform).or(n.transform);
+        if let Some(a) = affine {
+            let (nx, ny, nw, nh) = rect_of(cid)?;
+            let c = (nx + nw / 2.0, ny + nh / 2.0);
+            let m = Affine::translate(c) * a * Affine::translate((-c.0, -c.1));
+            let pts = [Point::new(l, t), Point::new(r, t), Point::new(l, b), Point::new(r, b)].map(|p| m * p);
+            l = pts.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+            t = pts.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+            r = pts.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+            b = pts.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+        }
+        cur = n.parent;
+    }
+    Some((l, t, r, b))
+}
+
+/// Remember where each node drawn this frame actually landed on screen
+/// (`visual_bounds`), so next frame's damage can erase it. Call after the
+/// frame is rendered, before `dirty_nodes` is cleared.
+pub(crate) fn record_visual_bounds(
+    state:     &mut PerWindowState,
+    overrides: &std::collections::HashMap<u32, crate::motion::Overrides>,
+) {
+    let resolved = &state.resolved_by_id;
+    let nodes = &state.js_nodes;
+    let rect_of = |id: u32| -> Option<(f64, f64, f64, f64)> {
+        let rl = resolved.get(&nodes.get(&id)?.layout_id?)?;
+        Some((rl.x as f64, rl.y as f64, rl.width as f64, rl.height as f64))
+    };
+    for &id in &state.dirty_nodes {
+        match visual_bounds(nodes, &rect_of, overrides, id) {
+            Some(v) => { state.prev_visual.insert(id, v); }
+            None    => { state.prev_visual.remove(&id); }
+        }
+    }
+    state.prev_visual.retain(|id, _| nodes.contains_key(id));
+}
+
+/// Find the topmost solid (click-opaque) node covering window-relative
+/// point `(x, y)`, or `None`.
+///
+/// Ports `events.js`'s `findTopmostSolid` to native code, computed once per
+/// real input event (see the `MouseButton`/`CursorMoved` construction sites
+/// in `lib.rs`) instead of JS calling `__glyx_getLayout` once per candidate
+/// node on every click and every cursor move. JS owned none of the state
+/// this needs to move faster — `js_nodes`, `parent`, and the layout cache
+/// are all native already — so this replaces N JS→native crossings per
+/// input event with zero: the result rides along as a field on the event
+/// JS was already going to receive.
+///
+/// Algorithm (must stay in lockstep with `findTopmostSolid` — same
+/// candidate set, same ancestor filter, same tie-break):
+/// 1. Every `View` node (not `pointerEvents:'none'`) whose cached layout
+///    rect covers `(x, y)`.
+/// 2. Keep only "deepest" nodes — drop any candidate that is an ancestor of
+///    another candidate (an ancestor is painted beneath its descendants).
+/// 3. Among the remaining siblings/cousins: highest ancestor-inherited
+///    z-index wins; ties broken by highest node id. Ids are allocated by a
+///    monotonically-increasing, never-reused counter (verified: `next_id`
+///    is a plain `fetch_add`, nothing returns freed ids to a pool), so
+///    comparing ids directly reproduces `solidRegistry`'s insertion-order
+///    rank without needing a separate counter natively.
+pub(crate) fn hit_test_solid(state: &PerWindowState, x: f32, y: f32) -> Option<u32> {
+    let cache_arc = state.runtime.layout_cache();
+    let cache = cache_arc.lock();
+    hit_test_solid_impl(&state.js_nodes, &cache, x, y)
+}
+
+/// The actual algorithm, taking its two dependencies directly instead of a
+/// whole `PerWindowState` — lets this be unit-tested without needing a full
+/// `JsRuntime` mock just to reach `layout_cache()`. See `hit_test_solid`'s
+/// doc comment for the algorithm and why this exists.
+fn hit_test_solid_impl(
+    js_nodes: &std::collections::HashMap<u32, JsNode>,
+    cache: &std::collections::HashMap<u32, [f32; 4]>,
+    x: f32, y: f32,
+) -> Option<u32> {
+    let mut covering: SmallVec<[u32; 8]> = SmallVec::new();
+    for (&id, node) in js_nodes {
+        if !matches!(node.node_type, NodeType::View) { continue; }
+        if node.props.pointer_events.as_deref() == Some("none") { continue; }
+        if node.props.hidden.unwrap_or(false) { continue; }
+        let Some(&[rx, ry, rw, rh]) = cache.get(&id) else { continue };
+        if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
+            covering.push(id);
+        }
+    }
+
+    if covering.len() <= 1 {
+        return covering.first().copied();
+    }
+
+    // Is `ancestor_id` an ancestor of `descendant_id`? Walks up the persistent
+    // `parent` chain, same direction as `events.js`'s `isAncestorOf`.
+    let is_ancestor_of = |ancestor_id: u32, descendant_id: u32| -> bool {
+        let mut cur = js_nodes.get(&descendant_id).and_then(|n| n.parent);
+        while let Some(id) = cur {
+            if id == ancestor_id { return true; }
+            cur = js_nodes.get(&id).and_then(|n| n.parent);
+        }
+        false
+    };
+
+    let deepest: SmallVec<[u32; 8]> = covering.iter().copied()
+        .filter(|&id| !covering.iter().any(|&other| other != id && is_ancestor_of(id, other)))
+        .collect();
+
+    if deepest.len() <= 1 {
+        return deepest.first().copied();
+    }
+
+    // Effective z-index: a node's own z-index, or its highest ancestor's if
+    // that's greater — matches `events.js`'s `effectiveZ`.
+    let effective_z = |id: u32| -> i32 {
+        let mut z = js_nodes.get(&id).and_then(|n| n.props.z_index).unwrap_or(0);
+        let mut cur = js_nodes.get(&id).and_then(|n| n.parent);
+        while let Some(p) = cur {
+            if let Some(pz) = js_nodes.get(&p).and_then(|n| n.props.z_index) {
+                if pz > z { z = pz; }
+            }
+            cur = js_nodes.get(&p).and_then(|n| n.parent);
+        }
+        z
+    };
+
+    let mut best = deepest[0];
+    let mut best_z = effective_z(best);
+    for &id in &deepest[1..] {
+        let z = effective_z(id);
+        if z > best_z || (z == best_z && id > best) {
+            best = id;
+            best_z = z;
+        }
+    }
+    Some(best)
+}
+
+/// Shrink collections whose backing capacity is still sized for a past
+/// transient spike (e.g. a big list rendered once) long after the spike is
+/// gone. `Vec`/`HashMap` never shrink their own allocation when elements are
+/// removed, and allocator-level reclaim (`mi_collect`) can't help either —
+/// that memory was never freed, just underused, which is invisible to the
+/// allocator. See the project performance changelog's memory-retention entry
+/// for the measurement that motivated this (a benchmark spiking `js_nodes`
+/// from 53 to 8,017 entries and never coming back down).
+///
+/// Called from the existing idle-trim gate (`lib.rs`, same cadence as
+/// `Renderer::trim_resources`), not its own timer — shrinking only makes
+/// sense once the app has been quiet for a while, never on every size
+/// fluctuation (a list that legitimately oscillates 8000 → 50 → 7000 → 20
+/// would turn every drop into a wasted reallocation if this ran eagerly).
+///
+/// Deliberately narrow in scope for now: only `js_nodes` and
+/// `resolved`/`resolved_by_id`, the two proven to spike in the benchmark
+/// that motivated this. `layout_cache` (native per-engine state, behind the
+/// `JsRuntime` trait boundary) is a likely candidate too but is left for a
+/// deliberate follow-up rather than being swept in here.
+// Conservative on purpose: small collections and modest oversizing aren't
+// worth a reallocation, and this must never fire often enough to turn normal
+// fluctuation into thrash.
+fn oversized(len: usize, cap: usize) -> bool {
+    cap > (len.saturating_mul(4)).max(256)
+}
+
+// Target the next power of two above `len` (with a small floor) rather than
+// an exact fit — leaves headroom so modest regrowth right after doesn't
+// immediately pay for another reallocation.
+fn target_capacity(len: usize) -> usize {
+    len.next_power_of_two().max(64)
+}
+
+pub(crate) fn shrink_oversized_collections(state: &mut PerWindowState) {
+    let len = state.js_nodes.len();
+    let cap = state.js_nodes.capacity();
+    if oversized(len, cap) {
+        let target = target_capacity(len);
+        log::debug!("[mem] shrinking js_nodes: len={len} capacity={cap} -> target={target}");
+        state.js_nodes.shrink_to(target);
+    }
+
+    let len = state.resolved.len();
+    let cap = state.resolved.capacity();
+    if oversized(len, cap) {
+        let target = target_capacity(len);
+        log::debug!("[mem] shrinking resolved: len={len} capacity={cap} -> target={target}");
+        state.resolved.shrink_to(target);
+    }
+
+    let len = state.resolved_by_id.len();
+    let cap = state.resolved_by_id.capacity();
+    if oversized(len, cap) {
+        let target = target_capacity(len);
+        log::debug!("[mem] shrinking resolved_by_id: len={len} capacity={cap} -> target={target}");
+        state.resolved_by_id.shrink_to(target);
+    }
+}
+
+/// Walk `id`'s persistent `parent` chain and return the **outermost**
+/// ancestor with a non-zero `scroll_offset_y` (if any). The chain is kept up
+/// to date by `apply_scene_commands`, so this is O(tree depth) with no
+/// per-frame child→parent map. Terminates on a stale link (parent id no
+/// longer present) because `js_nodes.get` then yields `None`.
+///
+/// Depth-bounded by `js_nodes.len()`: a well-formed tree can never have a
+/// parent chain longer than the total node count, so hitting the bound means
+/// a cycle has formed in `parent` pointers (a scene-command bug, e.g. a
+/// reparent creating a loop) — bail out instead of spinning forever. This
+/// guard exists because `build_dirty_subtrees`'s equivalent ancestor walk
+/// (same file) already needs one via its visited-set insert/break; this walk
+/// had none and hung the frame loop under `VirtualizedList`'s row recycling.
+fn outermost_scrolled_ancestor(
+    js_nodes: &std::collections::HashMap<u32, JsNode>,
+    id: u32,
+) -> Option<u32> {
+    let mut cur = id;
+    let mut outer = None;
+    for _ in 0..js_nodes.len() {
+        let Some(pid) = js_nodes.get(&cur).and_then(|n| n.parent) else { break };
+        if let Some(pn) = js_nodes.get(&pid) {
+            if pn.props.scroll_offset_y.unwrap_or(0.0) != 0.0 {
+                outer = Some(pid);
+            }
+        }
+        cur = pid;
+    }
+    outer
 }
 
 /// Update `prev_resolved` snapshot with the positions computed this frame.
@@ -1117,6 +1488,30 @@ pub(crate) fn snapshot_resolved(state: &mut PerWindowState) {
 /// - All **descendants** of dirty nodes — because changing a node's background,
 ///   clip, or opacity affects everything painted on top of it.
 ///
+/// Rebuild z-sorted child lists for every node whose child membership or a
+/// child's `z_index` changed (flagged by `apply_scene_commands`). Called once
+/// per frame after the scene-command batch; drains the dirty set so a clean
+/// frame costs nothing. The built table is read-only during render.
+pub(crate) fn reconcile_z_order(state: &mut PerWindowState) {
+    if state.z_order_dirty.is_empty() {
+        return;
+    }
+    let dirty: SmallVec<[u32; 16]> = state.z_order_dirty.drain().collect();
+    for pid in dirty {
+        let Some(node) = state.js_nodes.get(&pid) else {
+            state.z_order.remove(&pid);
+            continue;
+        };
+        let mut sorted: SmallVec<[u32; 4]> = node.children.iter().copied().collect();
+        // Stable sort — document order preserved for ties (same semantics as the
+        // old per-frame `sort_by_key` on the child ids).
+        sorted.sort_by_key(|&cid| {
+            state.js_nodes.get(&cid).and_then(|n| n.props.z_index).unwrap_or(0)
+        });
+        state.z_order.insert(pid, sorted);
+    }
+}
+
 /// An empty `dirty_subtrees` means "render everything" (blink / media frames).
 pub(crate) fn build_dirty_subtrees(state: &mut PerWindowState) {
     state.dirty_subtrees.clear();
@@ -1130,21 +1525,13 @@ pub(crate) fn build_dirty_subtrees(state: &mut PerWindowState) {
     // Seed with the dirty nodes themselves.
     state.dirty_subtrees.extend(state.dirty_nodes.iter().copied());
 
-    // Build child→parent map for the ancestor walk.
-    let mut parent_of: std::collections::HashMap<u32, u32> =
-        std::collections::HashMap::with_capacity(state.js_nodes.len());
-    for (&pid, node) in &state.js_nodes {
-        for &cid in &node.children {
-            parent_of.insert(cid, pid);
-        }
-    }
-
     // Walk ancestors so render_subtree traversal can reach each dirty node.
     // Required for ALL dirty nodes (containers need ancestors to recurse into them).
+    // Uses the persistent `parent` pointers (no per-frame map build).
     let dirty_snap: SmallVec<[u32; 16]> = state.dirty_nodes.iter().copied().collect();
     for &start in &dirty_snap {
         let mut cur = start;
-        while let Some(&pid) = parent_of.get(&cur) {
+        while let Some(pid) = state.js_nodes.get(&cur).and_then(|n| n.parent) {
             if !state.dirty_subtrees.insert(pid) {
                 break; // ancestor chain already visited
             }
@@ -1359,4 +1746,229 @@ fn spawn_video_audio(
     _start_secs:      f64,
 ) {
     // audio feature not enabled — video plays without sound
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(parent: Option<u32>, scroll_y: Option<f32>) -> JsNode {
+        let mut n = JsNode::new(NodeType::View, NodeProps { scroll_offset_y: scroll_y, ..NodeProps::default() });
+        n.parent = parent;
+        n
+    }
+
+    fn rects(list: &[(u32, (f64, f64, f64, f64))]) -> impl Fn(u32) -> Option<(f64, f64, f64, f64)> + '_ {
+        move |id| list.iter().find(|(i, _)| *i == id).map(|(_, r)| *r)
+    }
+
+    #[test]
+    fn visual_bounds_is_the_layout_rect_without_transform_or_shadow() {
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(1, node(None, None));
+        let r = [(1, (10.0, 20.0, 30.0, 40.0))];
+        let ov = std::collections::HashMap::new();
+        assert_eq!(visual_bounds(&nodes, &rects(&r), &ov, 1), Some((10.0, 20.0, 40.0, 60.0)));
+    }
+
+    #[test]
+    fn visual_bounds_follows_translate_rotate_and_shadow() {
+        let mut nodes = std::collections::HashMap::new();
+        let mut n = JsNode::new(NodeType::View, NodeProps {
+            transform: Some("translate(100, 0)".into()),
+            box_shadow: Some("5 5 0 #000000".into()),
+            ..NodeProps::default()
+        });
+        n.parent = None;
+        nodes.insert(1, n);
+        let r = [(1, (0.0, 0.0, 10.0, 10.0))];
+        let ov = std::collections::HashMap::new();
+        // Rect + shadow = (0,0)-(15,15), moved right by 100.
+        assert_eq!(visual_bounds(&nodes, &rects(&r), &ov, 1), Some((100.0, 0.0, 115.0, 15.0)));
+
+        // A 90° rotation about the centre of a 20x10 box swaps its extents.
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(2, JsNode::new(NodeType::View, NodeProps { transform: Some("rotate(90)".into()), ..NodeProps::default() }));
+        let r = [(2, (0.0, 0.0, 20.0, 10.0))];
+        let (l, t, rr, b) = visual_bounds(&nodes, &rects(&r), &ov, 2).unwrap();
+        assert!((l - 5.0).abs() < 1e-9 && (t + 5.0).abs() < 1e-9 && (rr - 15.0).abs() < 1e-9 && (b - 15.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn visual_bounds_applies_ancestor_transforms_and_live_overrides() {
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(1, JsNode::new(NodeType::View, NodeProps { transform: Some("translate(50, 0)".into()), ..NodeProps::default() }));
+        nodes.insert(2, node(Some(1), None));
+        let r = [(1, (0.0, 0.0, 100.0, 100.0)), (2, (10.0, 10.0, 10.0, 10.0))];
+        let mut ov = std::collections::HashMap::new();
+        // A child inside a translated parent lands where the parent moved it.
+        assert_eq!(visual_bounds(&nodes, &rects(&r), &ov, 2), Some((60.0, 10.0, 70.0, 20.0)));
+        // Mid-transition, the override (not the prop) decides.
+        ov.insert(1, crate::motion::Overrides {
+            transform: Some(peniko::kurbo::Affine::translate((20.0, 0.0))),
+            ..Default::default()
+        });
+        assert_eq!(visual_bounds(&nodes, &rects(&r), &ov, 2), Some((30.0, 10.0, 40.0, 20.0)));
+    }
+
+    #[test]
+    fn outermost_scrolled_ancestor_prefers_the_highest_scrolled_link() {
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(1, node(None, None));        // root (not scrolled)
+        nodes.insert(2, node(Some(1), Some(20.0))); // outer scrolled
+        nodes.insert(3, node(Some(2), Some(5.0)));  // inner scrolled
+        nodes.insert(4, node(Some(3), None));
+
+        // Walking up from 4 hits 3 then 2; outermost wins.
+        assert_eq!(outermost_scrolled_ancestor(&nodes, 4), Some(2));
+        // A node with no scrolled ancestor returns None.
+        assert_eq!(outermost_scrolled_ancestor(&nodes, 1), None);
+    }
+
+    #[test]
+    fn outermost_scrolled_ancestor_terminates_on_a_stale_parent_link() {
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(10, node(Some(99), None)); // 99 has been removed
+        assert_eq!(outermost_scrolled_ancestor(&nodes, 10), None);
+    }
+
+    #[test]
+    fn outermost_scrolled_ancestor_terminates_on_a_parent_cycle() {
+        // A malformed `parent` chain (a scene-command bug elsewhere producing
+        // a loop, e.g. under `VirtualizedList`'s row-recycling) must not hang
+        // the frame loop — this reproduces the crash found by actually
+        // running bench-app's virtualized benchmark, where this walk had no
+        // cycle guard (unlike its sibling in `build_dirty_subtrees`).
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(1, node(Some(2), Some(1.0)));
+        nodes.insert(2, node(Some(1), Some(1.0))); // 1 <-> 2 cycle
+
+        // Must return (not hang) and give some deterministic answer — the
+        // exact node found isn't the contract here, termination is.
+        let _ = outermost_scrolled_ancestor(&nodes, 1);
+    }
+
+    // ── hit_test_solid ──────────────────────────────────────────────────
+
+    fn solid(parent: Option<u32>, z_index: Option<i32>, pointer_events_none: bool) -> JsNode {
+        let props = NodeProps {
+            z_index,
+            pointer_events: if pointer_events_none { Some("none".to_string()) } else { None },
+            ..NodeProps::default()
+        };
+        let mut n = JsNode::new(NodeType::View, props);
+        n.parent = parent;
+        n
+    }
+
+    #[test]
+    fn hit_test_solid_returns_none_when_nothing_covers_the_point() {
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(1, solid(None, None, false));
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(1, [0.0, 0.0, 10.0, 10.0]);
+        assert_eq!(hit_test_solid_impl(&nodes, &cache, 50.0, 50.0), None);
+    }
+
+    #[test]
+    fn hit_test_solid_picks_the_only_covering_node() {
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(1, solid(None, None, false));
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(1, [0.0, 0.0, 10.0, 10.0]);
+        assert_eq!(hit_test_solid_impl(&nodes, &cache, 5.0, 5.0), Some(1));
+    }
+
+    #[test]
+    fn hit_test_solid_skips_pointer_events_none() {
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(1, solid(None, None, true)); // covers but pointer-events:none
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(1, [0.0, 0.0, 10.0, 10.0]);
+        assert_eq!(hit_test_solid_impl(&nodes, &cache, 5.0, 5.0), None);
+    }
+
+    #[test]
+    fn hit_test_solid_prefers_the_deepest_of_two_overlapping_siblings_by_ancestry() {
+        // 1 is the parent of 2; both cover (5,5). The ancestor filter must
+        // drop 1 (it's an ancestor of a covering node), leaving 2.
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(1, solid(None, None, false));
+        nodes.insert(2, solid(Some(1), None, false));
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(1, [0.0, 0.0, 10.0, 10.0]);
+        cache.insert(2, [0.0, 0.0, 10.0, 10.0]);
+        assert_eq!(hit_test_solid_impl(&nodes, &cache, 5.0, 5.0), Some(2));
+    }
+
+    #[test]
+    fn hit_test_solid_breaks_ties_between_unrelated_siblings_by_z_index() {
+        // Two unrelated (non-ancestor) nodes both cover the point; higher
+        // z-index wins regardless of id order.
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(1, solid(None, Some(5), false));
+        nodes.insert(2, solid(None, Some(1), false));
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(1, [0.0, 0.0, 10.0, 10.0]);
+        cache.insert(2, [0.0, 0.0, 10.0, 10.0]);
+        assert_eq!(hit_test_solid_impl(&nodes, &cache, 5.0, 5.0), Some(1));
+    }
+
+    #[test]
+    fn hit_test_solid_breaks_equal_z_index_ties_by_highest_id() {
+        // Equal z-index (both default 0): higher id (created later, "on
+        // top") wins — matches solidRegistry's insertion-order rank.
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(1, solid(None, None, false));
+        nodes.insert(2, solid(None, None, false));
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(1, [0.0, 0.0, 10.0, 10.0]);
+        cache.insert(2, [0.0, 0.0, 10.0, 10.0]);
+        assert_eq!(hit_test_solid_impl(&nodes, &cache, 5.0, 5.0), Some(2));
+    }
+
+    #[test]
+    fn hit_test_solid_inherits_z_index_from_an_ancestor() {
+        // Node 3's own z-index (0) loses to node 2's z-index (1) directly —
+        // but node 4 is a plain child of an ancestor (1) with z-index 10,
+        // which must beat node 2 via inheritance (`effectiveZ`).
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(1, solid(None, Some(10), false));       // high-z overlay layer
+        nodes.insert(4, solid(Some(1), None, false));         // leaf inside it, no own z
+        nodes.insert(2, solid(None, Some(1), false));         // unrelated sibling, lower z
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(1, [0.0, 0.0, 10.0, 10.0]);
+        cache.insert(4, [0.0, 0.0, 10.0, 10.0]);
+        cache.insert(2, [0.0, 0.0, 10.0, 10.0]);
+        // 1 is an ancestor of 4, so 1 gets filtered out by the ancestor
+        // filter; the contest is between 4 (inherited z=10) and 2 (z=1).
+        assert_eq!(hit_test_solid_impl(&nodes, &cache, 5.0, 5.0), Some(4));
+    }
+
+    // ── shrink_oversized_collections ─────────────────────────────────────
+
+    #[test]
+    fn oversized_matches_the_reviewed_threshold_table() {
+        assert!(!oversized(50, 100));
+        assert!(!oversized(50, 200));
+        assert!(oversized(50, 500));
+        assert!(oversized(53, 8017));
+        assert!(!oversized(500, 1500));
+        assert!(oversized(500, 3000));
+    }
+
+    #[test]
+    fn oversized_does_not_fire_on_tiny_collections_despite_a_large_ratio() {
+        // len=2, cap=9 is a 4.5x ratio but the absolute floor (256) must
+        // keep this from triggering — not worth a reallocation either way.
+        assert!(!oversized(2, 9));
+    }
+
+    #[test]
+    fn target_capacity_leaves_power_of_two_headroom_above_len() {
+        assert_eq!(target_capacity(53), 64);
+        assert_eq!(target_capacity(500), 512);
+        // Small len still gets the floor, not an undersized target.
+        assert_eq!(target_capacity(2), 64);
+    }
 }

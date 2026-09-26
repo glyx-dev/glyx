@@ -69,6 +69,15 @@ pub struct TextMeasureCtx {
     /// sibling text nodes (e.g. rich-text's per-span Text row) overlap.
     pub bold:       bool,
     pub italic:     bool,
+    /// Mirrors `NodeProps::line_height` — must match what `render.rs` uses
+    /// to build its `LabelKey`, or the measure and render paths key their
+    /// shared shaping cache differently and never share a hit for any node
+    /// that sets an explicit line height.
+    pub line_height: Option<f32>,
+    /// A never-wrapping single line (`textScrollX` set: inputs, rich-text
+    /// spans). Its width counts trailing whitespace, so a span ending in a
+    /// space keeps that space before the next span.
+    pub single_line: bool,
 }
 
 // ── LayoutTree ────────────────────────────────────────────────────────────────
@@ -150,8 +159,9 @@ impl LayoutTree {
         &mut self,
         viewport_width:  f32,
         viewport_height: f32,
+        resolved:        &mut Vec<(NodeId, ResolvedLayout)>,
         measure_fn: F,
-    ) -> Result<Vec<(NodeId, ResolvedLayout)>, LayoutError>
+    ) -> Result<(), LayoutError>
     where
         F: FnMut(
             Size<Option<f32>>,
@@ -174,9 +184,12 @@ impl LayoutTree {
             measure_fn,
         )?;
 
-        let mut results = Vec::with_capacity(self.meta.len());
-        self.collect_layouts(root, 0.0, 0.0, &mut results)?;
-        Ok(results)
+        // Fill the caller-owned buffer instead of allocating a fresh Vec every
+        // pass — the capacity stabilises across frames because the same buffer
+        // (PerWindowState.resolved) is reused (clear() below keeps it).
+        resolved.clear();
+        self.collect_layouts(root, 0.0, 0.0, resolved)?;
+        Ok(())
     }
 
     /// Recursively collect resolved layouts with absolute (not relative) positions.
@@ -313,7 +326,7 @@ mod tests {
     }
 
     fn ctx(text: &str) -> TextMeasureCtx {
-        TextMeasureCtx { text: text.into(), font_size: 16.0, max_height: None, bold: false, italic: false }
+        TextMeasureCtx { text: text.into(), font_size: 16.0, max_height: None, bold: false, italic: false, line_height: None, single_line: false }
     }
 
     /// Regression test for a real bug: `add_text_node` stores a Text node's
@@ -331,14 +344,16 @@ mod tests {
         let id = tree.add_text_node(Style::default(), ctx("hi"), None).unwrap();
         tree.set_root(id);
 
-        let first = tree.compute_with_measure(800.0, 600.0, char_width_measure).unwrap();
-        let (_, first_layout) = first.iter().find(|(nid, _)| *nid == id).unwrap();
+        // One reused buffer across passes — the public shape callers use.
+        let mut resolved = Vec::new();
+        tree.compute_with_measure(800.0, 600.0, &mut resolved, char_width_measure).unwrap();
+        let (_, first_layout) = resolved.iter().find(|(nid, _)| *nid == id).unwrap();
         assert_eq!(first_layout.width, 20.0, "\"hi\" should measure as 2 chars * 10px");
 
         tree.set_text_ctx(id, ctx("hello world")).unwrap();
 
-        let second = tree.compute_with_measure(800.0, 600.0, char_width_measure).unwrap();
-        let (_, second_layout) = second.iter().find(|(nid, _)| *nid == id).unwrap();
+        tree.compute_with_measure(800.0, 600.0, &mut resolved, char_width_measure).unwrap();
+        let (_, second_layout) = resolved.iter().find(|(nid, _)| *nid == id).unwrap();
         assert_eq!(
             second_layout.width, 110.0,
             "updated context should be re-measured as 11 chars * 10px, not frozen at the original 2-char width"

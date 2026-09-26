@@ -8,7 +8,15 @@ test('installStubs provides the core scene-graph bindings', () => {
   expect(typeof globalThis.__glyx_createNode).toBe('function');
   expect(typeof globalThis.__glyx_pollEvents).toBe('function');
   expect(globalThis.__glyx_pollEvents()).toEqual([]);
-  expect(globalThis.__glyx_getLayout()).toEqual({ x: 0, y: 0, width: 0, height: 0 });
+  expect(globalThis.__glyx_getLayout()).toEqual({
+    x: 0, y: 0, width: 0, height: 0,
+    boxX: 0, boxY: 0, boxWidth: 0, boxHeight: 0,
+  });
+  // Text hit-test stubs follow the native (text, x, y, opts) contract.
+  expect(globalThis.__glyx_text_pos_at('hello', 0, 0, { fontSize: 10 })).toBe(0);
+  expect(globalThis.__glyx_text_pos_at('hello', 1e6, 0, { fontSize: 10 })).toBe(5);
+  const c = globalThis.__glyx_text_caret_at('hello', 2, { fontSize: 10 });
+  expect(globalThis.__glyx_text_pos_at('hello', c.x, c.y + c.height / 2, { fontSize: 10 })).toBe(2);
   expect(globalThis.__glyx_getWindowSize()).toEqual({ width: 1280, height: 800 });
 });
 

@@ -7,6 +7,8 @@ import {
   addWindowSizeListener, removeWindowSizeListener,
   addGlobalClickListener, removeGlobalClickListener,
   registerImageError, unregisterImageError,
+  registerFocusable, unregisterFocusable,
+  setFocus,
 } from './events.js';
 import { glyxWindow, clipboard, input } from './api.js';
 
@@ -33,13 +35,32 @@ export const View = ({ children, style, ...props }) =>
 export const RepaintBoundary = ({ children, style, ...props }) =>
   React.createElement('repaintBoundary', { style, ...props }, children);
 
-export function Text({ children, style, showCursor, ...props }) {
+/**
+ * How many lines a Text shows before it's cut with "…". Three spellings:
+ * the `numberOfLines` prop (React Native), `style.numberOfLines`, and the
+ * web's `style={{ whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}` (or
+ * `textOverflow: 'ellipsis'` alone), which mean one line. The prop wins.
+ * Only one line is truncated with an ellipsis today; more lines are clipped.
+ */
+export function textLineLimit(numberOfLines, style) {
+  if (numberOfLines != null) return numberOfLines;
+  if (!style) return undefined;
+  if (style.numberOfLines != null) return style.numberOfLines;
+  if (style.textOverflow === 'ellipsis') return 1;
+  return undefined;
+}
+
+export function Text({ children, style, showCursor, numberOfLines, ...props }) {
   // Flatten mixed children (strings + expressions) to a single string,
   // matching browser behaviour where <Text>= {val}</Text> just works.
   const text = Array.isArray(children)
     ? children.map(c => (c == null ? '' : String(c))).join('')
     : (children == null ? '' : String(children));
-  return React.createElement('text', { text, style, showCursor, ...props });
+  const lines = textLineLimit(numberOfLines, style);
+  return React.createElement('text', {
+    text, style, showCursor, ...props,
+    ...(lines != null ? { numberOfLines: lines } : null),
+  });
 }
 
 export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', onError, style, ...props }) {
@@ -81,14 +102,22 @@ export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', 
 // always delegate to the latest closure values without needing re-registration
 // on every render.
 
-export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, disabled, feedback = true, style, _glyxOnMount: externalOnMount, ...props }) {
+export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, onPointerMove, onKeyDown, disabled, feedback = true, style, _glyxOnMount: externalOnMount, ...props }) {
   const nodeIdRef    = useRef(null);
   const handlersRef  = useRef(null);
   const [pressed, setPressed] = useState(false);
   const [hovered, setHovered] = useState(false);
+  // Keyboard-focus visibility only — Tab/Shift+Tab (or AT-driven focus) land
+  // here via the same 'accessibilityFocus' event TextInput already consumes
+  // (see events.js), but until now Pressable never registered for it, so
+  // keyboard focus was invisible: the native focus registry moved, nothing
+  // on screen showed it. `registerInput` below is what wires that up.
+  const [focused, setFocused] = useState(false);
 
   // Always keep handlersRef up to date with the latest prop values.
   handlersRef.current = {
+    onFocus: () => setFocused(true),
+    onBlur:  () => setFocused(false),
     onPress: (e) => {
       // Move the Rust-side focus registry here — events.js's mouseButton
       // dispatch calls `onPress` DIRECTLY for a plain click (onPressIn/Out
@@ -99,8 +128,11 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
       // so the accessibility tree's `focus` field falls back to the root —
       // which is why Narrator's highlight rect covered the whole window
       // instead of the actual control.
-      if (typeof __glyx_setFocus !== 'undefined' && nodeIdRef.current != null) {
-        __glyx_setFocus(nodeIdRef.current);
+      if (nodeIdRef.current != null) {
+        // A control that takes keys becomes the key target on click too, not
+        // only on Tab (setFocus also syncs the native focus registry).
+        if (onKeyDown) setFocus(nodeIdRef.current);
+        else if (typeof __glyx_setFocus !== 'undefined') __glyx_setFocus(nodeIdRef.current);
       }
       onPress?.(e);
     },
@@ -109,6 +141,8 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
     onPressOut: () => { setPressed(false); onPressOut?.(); },
     onHoverIn:  () => { setHovered(true);  onHoverIn?.(); },
     onHoverOut: () => { setHovered(false); onHoverOut?.(); },
+    onPointerMove: (e) => onPointerMove?.(e),
+    onKeyDown: (e) => onKeyDown?.(e),
   };
 
   // Called synchronously by createInstance the moment the native node exists.
@@ -122,8 +156,17 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
       onPressOut: () => handlersRef.current.onPressOut(),
       onHoverIn:  () => handlersRef.current.onHoverIn(),
       onHoverOut: () => handlersRef.current.onHoverOut(),
+      onPointerMove: (e) => handlersRef.current.onPointerMove(e),
     });
     registerDisabledNode(id, !!disabled);
+    // Keyboard-focus-visible only — NOT `registerInput` (that registry is
+    // also driven by mouse clicks, which would show a focus ring on every
+    // click; see events.js's `focusVisualRegistry` comment).
+    registerFocusable(id, {
+      onFocus: () => handlersRef.current.onFocus(),
+      onBlur:  () => handlersRef.current.onBlur(),
+      onKeyDown: (e) => handlersRef.current.onKeyDown(e),
+    });
     // Let a caller (e.g. RichTextEditor) also learn the native node id,
     // without clobbering Pressable's own registration below (see the
     // _glyxOnMount destructure above — this used to be spread in via
@@ -151,6 +194,7 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
       if (nodeIdRef.current !== null) {
         unregisterPressable(nodeIdRef.current);
         unregisterDisabledNode(nodeIdRef.current);
+        unregisterFocusable(nodeIdRef.current);
       }
     };
   }, []);
@@ -166,13 +210,24 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
   //   style={({ pressed, hovered }) => ({ ... })}
   // Function styles handle their own feedback, so opacity feedback is skipped.
   const styleIsFn = typeof style === 'function';
-  const resolvedStyle = styleIsFn ? style({ pressed, hovered }) : style;
+  const resolvedStyle = styleIsFn ? style({ pressed, hovered, focused }) : style;
   const baseOpacity = resolvedStyle?.opacity ?? 1;
-  const mergedStyle = (!styleIsFn && feedback && pressed && !disabled)
+  const feedbackStyle = (!styleIsFn && feedback && pressed && !disabled)
     ? { ...resolvedStyle, opacity: baseOpacity * 0.65 }
     : (!styleIsFn && feedback && hovered && !disabled)
     ? { ...resolvedStyle, opacity: baseOpacity * 0.85 }
     : resolvedStyle;
+  // Default keyboard-focus ring. Only applied when the caller hasn't already
+  // taken over styling via a function `style` (those get `focused` above and
+  // are expected to render their own indicator) — a plain object `style`
+  // otherwise had no way at all to show Tab-driven focus. Deliberately
+  // overrides any border the element's own style already sets (not just
+  // filling in when unset) — most real buttons already have a border, and
+  // a ring that only shows up on borderless elements isn't a visible focus
+  // indicator at all.
+  const mergedStyle = (!styleIsFn && focused && !disabled)
+    ? { ...feedbackStyle, borderWidth: 2, borderColor: '#4C9AFF' }
+    : feedbackStyle;
 
   return React.createElement(
     'view',
@@ -234,6 +289,14 @@ export function ScrollView({
   const nodeIdRef    = useRef(null);
   const maxScrollRef = useRef(0);
   const [scrollY, setScrollY] = useState(0);
+  // Tracks the current scroll offset for `getScrollY()` below, updated
+  // SYNCHRONOUSLY at the point a new value is decided (inside onScroll/
+  // onAbsoluteScroll) rather than mirrored from `scrollY` at render time —
+  // see those callbacks' comments for why the render-time-mirror version of
+  // this caused a real bug (Tab-driven scroll-into-view compounding into a
+  // runaway when a second scroll request landed before React's previous
+  // state update had rendered).
+  const scrollYRef = useRef(0);
 
   // ── Compute max scroll ──────────────────────────────────────────────────────
   // Prefer the explicit `contentHeight` prop when provided (most reliable).
@@ -263,26 +326,37 @@ export function ScrollView({
     if (id == null || typeof __glyx_getLayout === 'undefined') return;
     const l = __glyx_getLayout(id);
     if (l && typeof l.contentHeight === 'number' && l.contentHeight > 0) {
-      maxScrollRef.current = Math.max(0, l.contentHeight - l.height);
+      // Unclipped viewport height: contentHeight is measured natively from
+      // unclipped rects, so a clipped `height` (this ScrollView half-scrolled
+      // out of an outer one) would let the max scroll overshoot.
+      maxScrollRef.current = Math.max(0, l.contentHeight - (l.boxHeight ?? l.height));
     }
   }, []);
 
   const onScroll = useCallback((deltaY) => {
     refreshMaxScroll();
-    setScrollY((prev) => {
-      const max = maxScrollRef.current;
-      return Math.min(max, Math.max(0, prev + deltaY));
-    });
+    // `scrollYRef.current` (not `scrollY`/the functional-updater `prev`) is
+    // the base here deliberately: a function passed to `setScrollY` doesn't
+    // run synchronously — React executes it later, at render time. Reading
+    // and writing the ref right here, synchronously, at the moment the
+    // scroll is decided, is what actually fixes the staleness (an earlier
+    // attempt updated the ref FROM INSIDE the functional updater, which has
+    // the exact same lazy-execution problem and didn't fix anything).
+    const next = Math.min(maxScrollRef.current, Math.max(0, scrollYRef.current + deltaY));
+    scrollYRef.current = next;
+    setScrollY(next);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onAbsoluteScroll = useCallback((y) => {
     refreshMaxScroll();
-    setScrollY(Math.min(maxScrollRef.current, Math.max(0, y)));
+    const next = Math.min(maxScrollRef.current, Math.max(0, y));
+    scrollYRef.current = next;
+    setScrollY(next);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onMount = useCallback((id) => {
     nodeIdRef.current = id;
-    registerScrollView(id, { onScroll, onAbsoluteScroll });
+    registerScrollView(id, { onScroll, onAbsoluteScroll, getScrollY: () => scrollYRef.current });
   }, [onScroll, onAbsoluteScroll]);
 
   useEffect(() => {
@@ -360,6 +434,10 @@ export function VirtualizedList({
   const nodeIdRef    = useRef(null);
   const maxScrollRef = useRef(0);
   const [scrollY, setScrollY] = useState(0);
+  // See ScrollView's identical comment — updated synchronously in
+  // onScroll/onAbsoluteScroll below, not mirrored from `scrollY` at render
+  // time (that version compounded into a scroll runaway).
+  const scrollYRef = useRef(0);
 
   const totalItems    = data ? data.length : 0;
   const totalContentH = totalItems * itemHeight;
@@ -374,18 +452,26 @@ export function VirtualizedList({
   const topSpacerH    = firstVisible * itemHeight;
   const bottomSpacerH = Math.max(0, (totalItems - lastVisible) * itemHeight);
 
-  // Stable handlers — never re-registered between renders.
+  // Stable handlers — never re-registered between renders. Base the delta
+  // on `scrollYRef.current`, not the functional-updater `prev` — see
+  // ScrollView's identical fix/comment: a function passed to `setScrollY`
+  // runs later (at render time), so updating the ref from inside it doesn't
+  // actually make `getScrollY()` synchronous.
   const onScroll = useCallback((deltaY) => {
-    setScrollY((prev) => Math.min(maxScrollRef.current, Math.max(0, prev + deltaY)));
+    const next = Math.min(maxScrollRef.current, Math.max(0, scrollYRef.current + deltaY));
+    scrollYRef.current = next;
+    setScrollY(next);
   }, []);
 
   const onAbsoluteScroll = useCallback((y) => {
-    setScrollY(Math.min(maxScrollRef.current, Math.max(0, y)));
+    const next = Math.min(maxScrollRef.current, Math.max(0, y));
+    scrollYRef.current = next;
+    setScrollY(next);
   }, []);
 
   const onMount = useCallback((id) => {
     nodeIdRef.current = id;
-    registerScrollView(id, { onScroll, onAbsoluteScroll });
+    registerScrollView(id, { onScroll, onAbsoluteScroll, getScrollY: () => scrollYRef.current });
   }, [onScroll, onAbsoluteScroll]);
 
   useEffect(() => {
@@ -552,45 +638,69 @@ export function SelectableText({
   const text = typeof children === 'string' ? children
              : Array.isArray(children) ? children.join('') : String(children ?? '');
 
-  const nodeIdRef   = useRef(null);
+  const viewNodeIdRef  = useRef(null);
+  const textNodeIdRef  = useRef(null);
   const dragAnchor  = useRef(null);
   const [selStart, setSelStart] = useState(null);
   const [selEnd,   setSelEnd]   = useState(null);
 
+  // The inner Text node's shaping/placement props — spread into the Text
+  // element below AND passed to the native hit-test, so a click resolves
+  // with exactly what was rendered (see glyx-runtime's `text_props`).
+  const textHitProps = { fontSize, textAlign };
+
   // Stale-closure refs so event callbacks always see current values.
   const isSelectableRef = useRef(isSelectable);
-  const textRef         = useRef({ text, fontSize, selStart, selEnd });
+  const textRef         = useRef({ text, textHitProps, selStart, selEnd });
   useEffect(() => {
     isSelectableRef.current = isSelectable;
-    textRef.current         = { text, fontSize, selStart, selEnd };
+    textRef.current         = { text, textHitProps, selStart, selEnd };
   });
 
-  // Convert window-absolute x → character index.
-  function charAtAbsX(absX) {
-    if (typeof __glyx_text_char_at_x === 'undefined') return 0;
-    const id = nodeIdRef.current;
-    if (id === null) return 0;
+  // Convert window-absolute (x, y) → character index.
+  //
+  // Measured from the inner TEXT node (where the glyphs render, not the
+  // wrapper View), using its UNCLIPPED box (`boxX/boxY`) so a SelectableText
+  // half-scrolled out of a ScrollView still maps clicks to the right line.
+  // One native call then shapes + places the text exactly like the renderer
+  // (wrap width, alignment, vertical centering), so drag-selection spans
+  // soft-wrapped lines and clicks on centered/right text hit the glyph drawn.
+  function charAtAbsXY(absX, absY) {
+    const id = textNodeIdRef.current;
+    if (id === null || typeof __glyx_getLayout === 'undefined') return 0;
     const layout = __glyx_getLayout(id);
-    const localX = Math.max(0, absX - (layout ? layout.x : 0));
-    const { text: t, fontSize: fs } = textRef.current;
-    return __glyx_text_char_at_x(t, fs, 1e6, localX) | 0;
+    if (!layout) return 0;
+    const { text: t, textHitProps: props } = textRef.current;
+    const localX = absX - (layout.boxX ?? layout.x);
+    const localY = absY - (layout.boxY ?? layout.y);
+    if (typeof __glyx_text_pos_at !== 'undefined') {
+      return __glyx_text_pos_at(t, localX, localY, {
+        ...props,
+        boxWidth:  layout.boxWidth  ?? layout.width,
+        boxHeight: layout.boxHeight ?? layout.height,
+      }) | 0;
+    }
+    // Fallback (older runtime): single-line x-only approximation.
+    return (typeof __glyx_text_char_at_x !== 'undefined')
+      ? __glyx_text_char_at_x(t, props.fontSize, 1e6, Math.max(0, localX)) | 0
+      : 0;
   }
 
   // Mount: register both drag and pressable handlers once.
-  const _veloxOnMount = useCallback((id) => {
-    nodeIdRef.current = id;
+  const _glyxOnMount = useCallback((id) => {
+    viewNodeIdRef.current = id;
 
     registerDraggable(id, {
-      onDragStart({ x }) {
+      onDragStart({ x, y }) {
         if (!isSelectableRef.current) return;
-        const idx = charAtAbsX(x);
+        const idx = charAtAbsXY(x, y);
         dragAnchor.current = idx;
         setSelStart(idx);
         setSelEnd(idx);
       },
-      onDragMove({ x }) {
+      onDragMove({ x, y }) {
         if (!isSelectableRef.current) return;
-        const idx    = charAtAbsX(x);
+        const idx    = charAtAbsXY(x, y);
         const anchor = dragAnchor.current ?? idx;
         setSelStart(Math.min(anchor, idx));
         setSelEnd(Math.max(anchor, idx));
@@ -599,15 +709,22 @@ export function SelectableText({
     });
 
     registerPressable(id, {
-      onPress({ x }) {
+      onPress({ x, y }) {
         if (!isSelectableRef.current) return;
-        const idx = charAtAbsX(x);
+        const idx = charAtAbsXY(x, y);
         setSelStart(idx);
         setSelEnd(idx);
       },
       onPressIn() {}, onPressOut() {}, onHoverIn() {}, onHoverOut() {},
     });
   }, []); // No deps — reads from refs at call time.
+
+  // Capture the inner TEXT node id too — hit-testing must measure the node
+  // that actually renders the glyphs (its resolved width is what render.rs
+  // uses for the alignment shift), not the wrapper View.
+  const _textOnMount = useCallback((id) => {
+    textNodeIdRef.current = id;
+  }, []);
 
   // Ctrl/Cmd+C: copy selected text to clipboard.
   useEffect(() => {
@@ -628,13 +745,13 @@ export function SelectableText({
 
   return React.createElement(
     View,
-    { _veloxOnMount, style, ...rest },
+    { _glyxOnMount, style, ...rest },
     React.createElement(
       Text,
       {
-        fontSize,
+        _glyxOnMount: _textOnMount,
+        ...textHitProps,
         color,
-        textAlign,
         numberOfLines,
         selectionStart: hasSelection ? selStart : undefined,
         selectionEnd:   hasSelection ? selEnd   : undefined,

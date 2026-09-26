@@ -227,16 +227,33 @@ pub(super) struct PerWindowState {
     pub(super) layout_dirty: bool,
     pub(super) layout_structure_dirty: bool,
     pub(super) resolved:     Vec<(NodeId, ResolvedLayout)>,
+    /// `layout_id → rect` overlay over `resolved`, rebuilt in the same layout
+    /// pass — replaces the old `resolved.iter().find()` linear scan.
+    ///
+    /// This is a `HashMap`, not a `Vec` indexed by the raw id: Taffy's
+    /// `NodeId` is a `slotmap` key, and `usize::from(NodeId)` decodes to
+    /// `(version << 32) | index` (see `slotmap::KeyData::as_ffi`, an opaque
+    /// FFI value with no documented guarantees about its numeric range other
+    /// than round-tripping). `version` starts at 1, so even the very first
+    /// node ever allocated produces an id north of 4 billion — indexing a
+    /// `Vec` by that tries to allocate tens of gigabytes and aborts the
+    /// process. (This was shipped once and caught by actually running the
+    /// app, not by the unit tests — none of them exercise a real
+    /// Taffy-backed layout pass end-to-end.) Do not go back to a raw-index
+    /// `Vec` here without a documented, version-stable way to recover a
+    /// small dense index from `NodeId`.
+    pub(super) resolved_by_id: std::collections::HashMap<NodeId, ResolvedLayout>,
     pub(super) js_nodes:     std::collections::HashMap<u32, JsNode>,
     pub(super) js_root:      Option<u32>,
-    /// Active `opacity` transitions, keyed by node id — see `scene::tick_opacity_transitions`.
-    /// `@glyx-dev/motion` v1: JS declares a `transition` prop once on a style
-    /// change; Rust owns the interpolation entirely from here, evaluated
-    /// fresh every frame with zero JS re-entry (the worklet-style
-    /// architecture from the QuickJS perf plan's §8a, scoped to `opacity`
-    /// for v1 — `transform`/other properties are a natural v1.1 follow-up
-    /// once this proves out).
-    pub(super) opacity_transitions: std::collections::HashMap<u32, OpacityTransition>,
+    /// Active property transitions, keyed by node id — see `crate::motion`
+    /// and `scene::tick_transitions`. JS declares a `transition` prop once;
+    /// Rust owns the interpolation from there, sampled fresh every frame with
+    /// zero JS re-entry (the worklet-style architecture from the QuickJS perf
+    /// plan's §8a).
+    pub(super) transitions: std::collections::HashMap<u32, crate::motion::Transition>,
+    /// Running keyframe animations (`animation` prop), keyed by node id —
+    /// see `crate::motion::Animation` and `scene::tick_transitions`.
+    pub(super) animations:  std::collections::HashMap<u32, crate::motion::Animation>,
     pub(super) images:       std::collections::HashMap<u32, peniko::ImageData>,
     pub(super) images_by_path: ByteBudgetImageCache,
     pub(super) image_cache_hits: u64,
@@ -279,12 +296,16 @@ pub(super) struct PerWindowState {
     /// Screen rect of the focused TextInput (captured during render) — the
     /// damage region for blink-only frames under software present.
     pub(super) cursor_node_rect: Option<(f64, f64, f64, f64)>,
-    /// Global keyboard-focus registry — the node id JS last reported as
-    /// focused via `__glyx_setFocus`, or `None`. Foundation for IME
-    /// composition routing (attach to this node's rect) and, later,
-    /// accessibility (expose focus to the AT). Not yet consumed by anything;
-    /// this is step 1 of that work — see [[accessibility-and-ime-plan]].
+    /// Global keyboard-focus registry — the currently focused node id, set
+    /// either by JS via `__glyx_setFocus` or natively by Tab/Shift+Tab
+    /// cycling (see `focus.rs`). Drives IME composition routing (attach to
+    /// this node's rect) and the accessibility tree's reported focus.
     pub(super) focused_node: Option<u32>,
+    /// Tracks Shift key state for Tab-cycling direction. Independent of
+    /// `DevModeState::shift_down`, which only exists under the `dev`
+    /// feature and is scoped to the dev-overlay shortcut — this one is
+    /// always compiled since focus navigation isn't dev-only.
+    pub(super) shift_down: bool,
     /// Push an accessibility tree update to this window's `accesskit_winit`
     /// adapter. `None` when built without the `a11y` feature. Cheap to call
     /// every frame — no-ops internally when no AT is actually running.
@@ -296,6 +317,17 @@ pub(super) struct PerWindowState {
     /// nothing changed (e.g. a blink-only caret redraw).
     #[cfg(feature = "a11y")]
     pub(super) a11y_dirty: bool,
+    /// Per text field (keyed by the field's node id): the screen-reader text
+    /// run bookkeeping (`glyx_text::TextAccess`). Must persist across tree
+    /// updates so run node ids stay stable while text is edited, and so an
+    /// AT's `SetTextSelection` (which names run ids) can be mapped back.
+    /// Entries for fields that disappear are dropped on the next tree build.
+    #[cfg(feature = "a11y")]
+    pub(super) a11y_text: std::collections::HashMap<u32, glyx_text::TextAccess>,
+    /// Next AccessKit id for a text-run node. Starts at `a11y::RUN_ID_BASE`,
+    /// far above any scene node id, so run ids never collide with node ids.
+    #[cfg(feature = "a11y")]
+    pub(super) a11y_next_run_id: u64,
     /// Sender to the persistent blink-timer thread (spawned lazily on first
     /// focused TextInput). Sending a deadline schedules one redraw at that
     /// instant; newer deadlines received while waiting replace the pending one.
@@ -358,6 +390,20 @@ pub(super) struct PerWindowState {
     pub(super) descendant_cascade_nodes: std::collections::HashSet<u32>,
     pub(super) dirty_subtrees: std::collections::HashSet<u32>,
     pub(super) prev_resolved: std::collections::HashMap<u32, ResolvedLayout>,
+    /// Screen bounds `(l, t, r, b)` each node was last drawn at, transforms
+    /// and shadows included (`scene::record_visual_bounds`). Lets partial
+    /// redraw erase where a moved/rotated node WAS, not just its layout box.
+    pub(super) prev_visual:   std::collections::HashMap<u32, (f64, f64, f64, f64)>,
+    /// `z_index`-sorted children per js node id. Built by
+    /// `scene::reconcile_z_order` ONLY when flagged dirty, so a clean frame
+    /// renders with zero sorting (previously every View/RepaintBoundary cloned
+    /// + sorted its children each frame). Keyed by the current js node ids —
+    /// entries for removed nodes are dropped on the next reconcile.
+    pub(super) z_order: std::collections::HashMap<u32, SmallVec<[u32; 4]>>,
+    /// Js node ids whose `z_order` entry is stale (child list membership or a
+    /// child's `z_index` changed since it was built). Drained by
+    /// `scene::reconcile_z_order`.
+    pub(super) z_order_dirty: std::collections::HashSet<u32>,
     pub(super) scene_cache:     std::collections::HashMap<u32, Scene>,
     pub(super) scene_cache_new: std::collections::HashMap<u32, Scene>,
     pub(super) boundary_scene_cache:     std::collections::HashMap<u32, Scene>,
@@ -367,31 +413,51 @@ pub(super) struct PerWindowState {
     pub(super) dev_mode: Option<DevModeState>,
 }
 
+impl PerWindowState {
+    /// Resolved-rect lookup by taffy layout id — replaces the old
+    /// `resolved.iter().find(|(nid, _)| *nid == id)` linear scan.
+    pub(super) fn resolved_rect(&self, layout_id: NodeId) -> Option<&ResolvedLayout> {
+        self.resolved_by_id.get(&layout_id)
+    }
+}
+
 pub(super) struct JsNode {
     pub(super) node_type: NodeType,
     pub(super) props:     NodeProps,
+    /// Pre-parsed `transform` prop — built once per prop change by scene
+    /// commands via `render_props` instead of re-parsing the string every
+    /// frame during render.
+    pub(super) transform: Option<peniko::kurbo::Affine>,
+    /// Pre-parsed `box_shadow` prop → (dx, dy, colour).
+    pub(super) box_shadow: Option<(f64, f64, peniko::Color)>,
+    /// Pre-parsed `background_gradient` prop → gradient endpoints.
+    pub(super) gradient: Option<(peniko::Color, peniko::Color)>,
     pub(super) children:  SmallVec<[u32; 4]>,
+    /// Parent JS id, maintained by `apply_scene_commands` on every
+    /// append/insert/remove/set-root. Lets damage analysis and dirty-subtree
+    /// building walk ancestors without rebuilding a child→parent map per frame.
+    pub(super) parent:    Option<u32>,
     pub(super) layout_id: Option<NodeId>,
 }
 
-/// One in-progress `opacity` interpolation, driven entirely by Rust — see
-/// `PerWindowState::opacity_transitions`'s docs for the architecture.
-pub(super) struct OpacityTransition {
-    pub(super) from:        f32,
-    pub(super) to:          f32,
-    pub(super) start:       Instant,
-    pub(super) duration_ms: u32,
-}
-
-impl OpacityTransition {
-    /// Current eased value and whether the transition has finished.
-    /// Eases with a simple ease-out cubic — the common "settle in" curve
-    /// used by most CSS-transition defaults.
-    pub(super) fn sample(&self, now: Instant) -> (f32, bool) {
-        let elapsed_ms = now.saturating_duration_since(self.start).as_secs_f32() * 1000.0;
-        let t = (elapsed_ms / self.duration_ms.max(1) as f32).clamp(0.0, 1.0);
-        let eased = 1.0 - (1.0 - t).powi(3);
-        (self.from + (self.to - self.from) * eased, t >= 1.0)
+impl JsNode {
+    /// Create a node with its render props pre-parsed (transform / box-shadow /
+    /// gradient) so the render pass never re-parses strings.
+    pub(super) fn new(node_type: NodeType, props: NodeProps) -> Self {
+        use crate::render_props::{parse_box_shadow, parse_gradient, parse_transform};
+        let transform   = props.transform.as_deref().and_then(parse_transform);
+        let box_shadow  = props.box_shadow.as_deref().and_then(parse_box_shadow);
+        let gradient    = props.background_gradient.as_deref().and_then(parse_gradient);
+        JsNode {
+            node_type,
+            props,
+            transform,
+            box_shadow,
+            gradient,
+            children:  SmallVec::new(),
+            parent:    None,
+            layout_id: None,
+        }
     }
 }
 
@@ -434,25 +500,3 @@ pub(super) struct DevModeState {
     pub(super) startup_v8_total_bytes: usize,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn opacity_transition_samples_start_mid_and_end() {
-        let start = Instant::now();
-        let tr = OpacityTransition { from: 0.0, to: 1.0, start, duration_ms: 1000 };
-
-        let (v0, done0) = tr.sample(start);
-        assert_eq!(v0, 0.0);
-        assert!(!done0);
-
-        let (v_end, done_end) = tr.sample(start + std::time::Duration::from_millis(2000));
-        assert_eq!(v_end, 1.0);
-        assert!(done_end);
-
-        let (v_mid, done_mid) = tr.sample(start + std::time::Duration::from_millis(500));
-        assert!(v_mid > 0.0 && v_mid < 1.0);
-        assert!(!done_mid);
-    }
-}

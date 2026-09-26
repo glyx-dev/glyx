@@ -8,8 +8,22 @@ battery    = { workspace = true }
 sysinfo    = { workspace = true }
 keepawake  = { workspace = true }
 dark-light = { workspace = true }
-keyring    = { workspace = true }
 nokhwa     = { workspace = true }
 cpal       = { workspace = true }
 hound      = { workspace = true }
 log        = { workspace = true }
+
+# keyring 3 enables NO platform backend by default — with none selected it
+# silently falls back to its in-memory MOCK store, where every `Entry::new`
+# is a separate credential: `set` succeeds, the next `get` finds nothing, and
+# nothing ever reaches the OS. Select the real store per platform.
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }    # Credential Manager
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }      # Keychain
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Secret Service (GNOME Keyring / KWallet) over D-Bus; pure-Rust crypto so
+# no OpenSSL dependency. Needs libdbus-1-dev at build time.
+keyring = { workspace = true, features = ["sync-secret-service", "crypto-rust"] }

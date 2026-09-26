@@ -6,7 +6,7 @@
   "description": "Command palette (Cmd/Ctrl+K) with fuzzy search.",
   "peerDependencies": {
     "react": "^18.2.0",
-    "@glyx-dev/react": "0.1.0"
+    "@glyx-dev/react": "^0.1.0"
   },
   "scripts": {
     "test": "bun test"

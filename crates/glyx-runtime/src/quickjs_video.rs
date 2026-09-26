@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicU32;
 use rquickjs::Ctx;
 use tokio::runtime::Handle;
 
-use crate::bindings::{CompletionQueue, RedrawRequest, SceneCommand, SceneQueue};
+use crate::bindings::{CompletionQueue, FrameBuffer, RedrawRequest, SceneCommand, SceneQueue};
 use crate::quickjs_runtime::QuickJsRuntime;
 
 pub(crate) fn video_open<'js>(
@@ -32,29 +32,29 @@ pub(crate) fn video_open<'js>(
     })
 }
 
-pub(crate) fn video_seek(scene: &SceneQueue, handle_id: String, seconds: f64) {
+pub(crate) fn video_seek(frame: &FrameBuffer, handle_id: String, seconds: f64) {
     let handle_id = handle_id.parse().unwrap_or(0);
-    scene.lock().push_back(SceneCommand::SeekVideo { handle_id, seconds });
+    frame.borrow_mut().push(SceneCommand::SeekVideo { handle_id, seconds });
 }
 
-pub(crate) fn video_set_volume(scene: &SceneQueue, handle_id: String, volume: f32) {
+pub(crate) fn video_set_volume(frame: &FrameBuffer, handle_id: String, volume: f32) {
     let handle_id = handle_id.parse().unwrap_or(0);
-    scene.lock().push_back(SceneCommand::SetVideoVolume { handle_id, volume });
+    frame.borrow_mut().push(SceneCommand::SetVideoVolume { handle_id, volume });
 }
 
-pub(crate) fn video_close(scene: &SceneQueue, handle_id: String) {
+pub(crate) fn video_close(frame: &FrameBuffer, handle_id: String) {
     let handle_id = handle_id.parse().unwrap_or(0);
-    scene.lock().push_back(SceneCommand::CloseVideo { handle_id });
+    frame.borrow_mut().push(SceneCommand::CloseVideo { handle_id });
 }
 
-pub(crate) fn video_pause(scene: &SceneQueue, handle_id: String) {
+pub(crate) fn video_pause(frame: &FrameBuffer, handle_id: String) {
     let handle_id = handle_id.parse().unwrap_or(0);
-    scene.lock().push_back(SceneCommand::PauseVideo { handle_id });
+    frame.borrow_mut().push(SceneCommand::PauseVideo { handle_id });
 }
 
-pub(crate) fn video_play(scene: &SceneQueue, handle_id: String) {
+pub(crate) fn video_play(frame: &FrameBuffer, handle_id: String) {
     let handle_id = handle_id.parse().unwrap_or(0);
-    scene.lock().push_back(SceneCommand::ResumeVideo { handle_id });
+    frame.borrow_mut().push(SceneCommand::ResumeVideo { handle_id });
 }
 
 pub(crate) fn video_poll(events: &crate::bindings::VideoEvents) -> String {

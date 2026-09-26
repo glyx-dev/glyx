@@ -206,13 +206,19 @@ impl V8Runtime {
             .and_then(|v| v.parse::<u16>().ok())
             .map(|port| GlyxInspector::new(&mut isolate, &context, port, &inspect_handle, Arc::clone(&cdp_log_tx)));
 
-        Self {
+        let mut rt = Self {
             #[cfg(feature = "dev")]
             inspector,
             isolate, context, queue, scene, events, layout_cache,
             perf_state, deeplink_url_queue, db_pools, video_events, webview_events,
             raycast_requests, raycast_results, state_ptr,
+        };
+        // V8's built-in `console` prints nowhere without an inspector; route
+        // it through `__glyx_log` like the snapshot and QuickJS paths do.
+        if let Err(e) = rt.eval(crate::console_js::CONSOLE_POLYFILL) {
+            log::warn!("[v8] console install failed: {e}");
         }
+        rt
     }
 
     /// Create a new GlyxRuntime from a snapshot blob (pre-executed JS heap).

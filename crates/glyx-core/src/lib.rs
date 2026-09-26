@@ -99,6 +99,8 @@ pub use glyx_shell::RenderMode;
 mod config;
 mod state;
 mod dev_mode;
+#[cfg(feature = "dev")]
+mod devtools;
 mod scene;
 mod layout;
 mod render;
@@ -1021,6 +1023,14 @@ pub fn run(mut config: AppConfig) -> bool {
     // entire run when no splash is configured, or once handed off.
     let mut pending_splash: Option<(Arc<winit::window::Window>, soft_present::SoftPresent)> = None;
 
+    // GDP devtools server (`GLYX_DEVTOOLS_PORT`): started on the first
+    // WindowReady, the first point where an event-loop proxy exists to wake
+    // an idle app when a request arrives.
+    #[cfg(feature = "dev")]
+    let mut devtools: Option<devtools::Devtools> = None;
+    #[cfg(feature = "dev")]
+    let mut devtools_started = false;
+
     let restart = glyx_shell::run(window, move |event| {
         match event {
             // ── Pre-init splash window — paint it immediately, before any
@@ -1042,6 +1052,14 @@ pub fn run(mut config: AppConfig) -> bool {
             }
             // ── Window ready — initialise per-window subsystems ──────────
             ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy, #[cfg(feature = "a11y")] a11y_update } => {
+                #[cfg(feature = "dev")]
+                if !devtools_started {
+                    devtools_started = true;
+                    let proxy = Mutex::new(ev_proxy.clone());
+                    devtools = devtools::Devtools::start_from_env(&tokio_handle, Arc::new(move || {
+                        let _ = proxy.lock().send_event(GlyxUserEvent::Wake);
+                    }));
+                }
                 // Resolve RenderMode → BackendKind.
                 // GLYX_CPU_RENDER=1 forces the cheapest CPU path (TinySkia) for
                 // CI, headless testing, or machines without a supported GPU.
@@ -1940,7 +1958,13 @@ pub fn run(mut config: AppConfig) -> bool {
             }
 
             // ── Draw ──────────────────────────────────────────────────────
+            ShellEvent::Wake => {
+                #[cfg(feature = "dev")]
+                if let Some(d) = devtools.as_mut() { d.pump(&mut windows); }
+            }
             ShellEvent::RedrawRequested { window_handle } => {
+                #[cfg(feature = "dev")]
+                if let Some(d) = devtools.as_mut() { d.pump(&mut windows); }
                 let Some(s) = windows.get_mut(&window_handle) else { return };
 
                 #[cfg(feature = "dev")]

@@ -53,6 +53,7 @@ static DEFAULT_ICON_PNG: &[u8] = include_bytes!("../../../assets/glyx.png");
         glyx create my-app --template notes   Start from the notes template\n  \
         glyx dev                              Run with hot reload\n  \
         glyx dev --inspect                    Attach Chrome DevTools (port 9229)\n  \
+        glyx dev --devtools                   Serve the Glyx DevTools Protocol (port 9228)\n  \
         glyx build                            Self-contained release binary\n  \
         glyx build --check-performance        Build + enforce 60fps frame budget\n  \
         glyx package --installer              Native installer for this OS\n\n\
@@ -119,6 +120,12 @@ enum Commands {
         /// to set breakpoints and profile.
         #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "9229")]
         inspect: Option<u16>,
+        /// Serve the Glyx DevTools Protocol (GDP) for inspection and
+        /// automation, on both JS engines. Optionally pass a port (default
+        /// 9228). The address and session token are written to
+        /// target/glyx/devtools.json.
+        #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "9228")]
+        devtools: Option<u16>,
     },
     /// Produce a production build
     ///
@@ -343,7 +350,7 @@ fn run() -> Result<()> {
 
     match cli.command {
         Commands::Create { name, native, template } => cmd_create(&name, native, &template, pm),
-        Commands::Dev { inspect }         => cmd_dev(inspect, pm, cli.icupkg.clone()),
+        Commands::Dev { inspect, devtools } => cmd_dev(inspect, devtools, pm, cli.icupkg.clone()),
         Commands::Build { target, snapshot: _, bundle, portable, check_performance, perf_budget, perf_duration } => {
             let mode = if bundle { "bundle" } else if portable { "portable" } else { "snapshot" };
             cmd_build(target.as_deref(), mode, check_performance, perf_budget, perf_duration, pm, cli.icupkg.clone())

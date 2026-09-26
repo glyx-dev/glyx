@@ -257,56 +257,7 @@ impl QuickJsRuntime {
     /// matching the (otherwise-unused-at-runtime) snapshot stub script's
     /// own console shim in `snapshot.rs`.
     fn install_polyfills(&self) -> Result<(), RuntimeError> {
-        const POLYFILL: &str = r#"
-        (function() {
-            function _fmt(args) {
-                return Array.prototype.map.call(args, function(x) {
-                    return typeof x === 'object' ? JSON.stringify(x) : String(x);
-                }).join(' ');
-            }
-            function _table(data) {
-                if (data == null || typeof data !== 'object') { __glyx_log(String(data)); return; }
-                var rows = Array.isArray(data) ? data.map(function(v, i) { return [String(i), v]; })
-                                                : Object.keys(data).map(function(k) { return [k, data[k]]; });
-                var cols = [];
-                rows.forEach(function(r) {
-                    var v = r[1];
-                    if (v != null && typeof v === 'object') {
-                        Object.keys(v).forEach(function(k) { if (cols.indexOf(k) === -1) cols.push(k); });
-                    } else if (cols.indexOf('Values') === -1) {
-                        cols.push('Values');
-                    }
-                });
-                var headers = ['(index)'].concat(cols);
-                var lines = rows.map(function(r) {
-                    var v = r[1];
-                    var cells = cols.map(function(c) {
-                        if (v != null && typeof v === 'object') {
-                            return c in v ? String(v[c]) : '';
-                        }
-                        return c === 'Values' ? String(v) : '';
-                    });
-                    return [r[0]].concat(cells);
-                });
-                var widths = headers.map(function(h, i) {
-                    return Math.max(h.length, lines.reduce(function(m, l) { return Math.max(m, l[i].length); }, 0));
-                });
-                var pad = function(s, w) { return s + Array(w - s.length + 1).join(' '); };
-                var sep = '+-' + widths.map(function(w) { return Array(w + 1).join('-'); }).join('-+-') + '-+';
-                var fmtRow = function(cells) { return '| ' + cells.map(function(c, i) { return pad(c, widths[i]); }).join(' | ') + ' |'; };
-                var out = [sep, fmtRow(headers), sep].concat(lines.map(fmtRow)).concat([sep]);
-                __glyx_log(out.join('\n'));
-            }
-            globalThis.console = {
-                log:   function() { __glyx_log(_fmt(arguments)); },
-                info:  function() { __glyx_log(_fmt(arguments)); },
-                warn:  function() { __glyx_log('[warn] ' + _fmt(arguments)); },
-                error: function() { __glyx_log('[error] ' + _fmt(arguments)); },
-                debug: function() { __glyx_log('[debug] ' + _fmt(arguments)); },
-                table: function(data) { _table(data); },
-            };
-        })();
-        "#;
+        const POLYFILL: &str = crate::console_js::CONSOLE_POLYFILL;
         self.ctx.with(|ctx| ctx.eval::<(), _>(POLYFILL))
             .map_err(|e| RuntimeError::CompileError(format!("quickjs polyfill install: {e}")))
     }
@@ -546,8 +497,10 @@ struct RegisterState {
 fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
-    let log_fn = Function::new(ctx.clone(), |msg: String| {
+    let window_id = reg.my_handle;
+    let log_fn = Function::new(ctx.clone(), move |msg: String| {
         log::info!("[js] {msg}");
+        crate::log_bus::publish(Some(window_id), &msg);
     })?;
     globals.set("__glyx_log", log_fn)?;
 

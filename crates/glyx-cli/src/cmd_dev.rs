@@ -8,7 +8,21 @@ use super::{
     read_engine_from_config, pm,
 };
 
-pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm, icupkg: Option<PathBuf>) -> Result<()> {
+/// Where `glyx dev --devtools` asks the app to write its GDP address and token.
+pub(super) const DEVTOOLS_FILE: &str = "target/glyx/devtools.json";
+
+/// Pass `--devtools` through to the app: port, and an absolute discovery path
+/// (the app may change its working directory).
+fn apply_devtools_env(cmd: &mut Command, port: Option<u16>) {
+    if let Some(port) = port {
+        cmd.env("GLYX_DEVTOOLS_PORT", port.to_string());
+        let file = std::env::current_dir().map(|d| d.join(DEVTOOLS_FILE))
+            .unwrap_or_else(|_| PathBuf::from(DEVTOOLS_FILE));
+        cmd.env("GLYX_DEVTOOLS_FILE", file);
+    }
+}
+
+pub(super) fn cmd_dev(inspect: Option<u16>, devtools: Option<u16>, p: pm::Pm, icupkg: Option<PathBuf>) -> Result<()> {
     let project_name = read_project_name()
         .context("Run `glyx dev` from the project root (where glyx.config.ts or package.json lives)")?;
 
@@ -43,6 +57,9 @@ pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm, icupkg: Option<PathBuf>) 
     } else {
         println!("Starting dev server for '{project_name}' (hot reload active)...");
     }
+    if let Some(port) = devtools {
+        println!("  Glyx DevTools Protocol on ws://127.0.0.1:{port}/ (address + token: {DEVTOOLS_FILE})");
+    }
 
     let engine = read_engine_from_config();
 
@@ -67,6 +84,7 @@ pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm, icupkg: Option<PathBuf>) 
         if let Some(port) = inspect {
             cmd.env("GLYX_INSPECT_PORT", port.to_string());
         }
+        apply_devtools_env(&mut cmd, devtools);
         let status = cmd.status().context("Failed to run `cargo run`; is Rust installed?")?;
         std::process::exit(status.code().unwrap_or(1));
     } else {
@@ -117,6 +135,7 @@ pub(super) fn cmd_dev(inspect: Option<u16>, p: pm::Pm, icupkg: Option<PathBuf>) 
         if let Some(port) = inspect {
             cmd.env("GLYX_INSPECT_PORT", port.to_string());
         }
+        apply_devtools_env(&mut cmd, devtools);
         let status = cmd.status()
             .with_context(|| format!("Failed to launch {}", runner.display()))?;
         std::process::exit(status.code().unwrap_or(1));

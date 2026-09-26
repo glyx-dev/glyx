@@ -9,7 +9,7 @@
 /// These stubs are registered during snapshot creation and will be overridden
 /// at runtime by real Rust implementations.
 pub fn create_stub_bindings_script() -> &'static str {
-    r#"
+    concat!(r#"
 // V8 Snapshot stub bindings
 // Real implementations are registered at runtime via re_register_all()
 
@@ -26,57 +26,7 @@ globalThis.__glyx_getTime = function() { return Date.now(); };
 globalThis.__glyx_request_frame = function() {};
 globalThis.__glyx_log = function() {};
 
-// console — routes to __glyx_log so app code can use console.log() normally.
-// The real __glyx_log implementation also forwards to the CDP inspector when connected.
-(function() {
-  function _fmt(args) {
-    return Array.prototype.map.call(args, function(x) {
-      return typeof x === 'object' ? JSON.stringify(x) : String(x);
-    }).join(' ');
-  }
-  function _table(data) {
-    if (data == null || typeof data !== 'object') { __glyx_log(String(data)); return; }
-    var rows = Array.isArray(data) ? data.map(function(v, i) { return [String(i), v]; })
-                                    : Object.keys(data).map(function(k) { return [k, data[k]]; });
-    var cols = [];
-    rows.forEach(function(r) {
-      var v = r[1];
-      if (v != null && typeof v === 'object') {
-        Object.keys(v).forEach(function(k) { if (cols.indexOf(k) === -1) cols.push(k); });
-      } else if (cols.indexOf('Values') === -1) {
-        cols.push('Values');
-      }
-    });
-    var headers = ['(index)'].concat(cols);
-    var lines = rows.map(function(r) {
-      var v = r[1];
-      var cells = cols.map(function(c) {
-        if (v != null && typeof v === 'object') {
-          return c in v ? String(v[c]) : '';
-        }
-        return c === 'Values' ? String(v) : '';
-      });
-      return [r[0]].concat(cells);
-    });
-    var widths = headers.map(function(h, i) {
-      return Math.max(h.length, lines.reduce(function(m, l) { return Math.max(m, l[i].length); }, 0));
-    });
-    var pad = function(s, w) { return s + Array(w - s.length + 1).join(' '); };
-    var sep = '+-' + widths.map(function(w) { return Array(w + 1).join('-'); }).join('-+-') + '-+';
-    var fmtRow = function(cells) { return '| ' + cells.map(function(c, i) { return pad(c, widths[i]); }).join(' | ') + ' |'; };
-    var out = [sep, fmtRow(headers), sep].concat(lines.map(fmtRow)).concat([sep]);
-    __glyx_log(out.join('\n'));
-  }
-  globalThis.console = {
-    log:   function() { __glyx_log(_fmt(arguments)); },
-    info:  function() { __glyx_log(_fmt(arguments)); },
-    warn:  function() { __glyx_log('[warn] ' + _fmt(arguments)); },
-    error: function() { __glyx_log('[error] ' + _fmt(arguments)); },
-    debug: function() { __glyx_log('[debug] ' + _fmt(arguments)); },
-    table: function(data) { _table(data); },
-  };
-})();
-
+"#, crate::console_js::console_polyfill!(), r#"
 // File system bindings
 globalThis.__glyx_readFile      = function() { return stubPromise(''); };
 globalThis.__glyx_readFileBytes = function() { return stubPromise(''); };
@@ -264,7 +214,7 @@ globalThis.__glyx_splash_hide = function() {};
 
 // Backend command dispatch
 globalThis.__glyx_backend_call = function() { return stubPromise('null'); };
-"#
+"#)
 }
 
 /// Snapshot blob wrapper

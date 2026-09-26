@@ -49,6 +49,10 @@ pub enum GlyxUserEvent {
     Quit,
     /// Quit then re-launch the same executable (for OTA apply / settings reload).
     Restart,
+    /// Something outside the event loop (a devtools request) needs the app's
+    /// attention; forwarded as `ShellEvent::Wake` so an idle app handles it
+    /// without waiting for its next frame.
+    Wake,
     /// Routed from `accesskit_winit::Adapter` (created with `with_event_loop_proxy`)
     /// — initial-tree requests, AT action requests, and deactivation.
     #[cfg(feature = "a11y")]
@@ -85,6 +89,8 @@ impl std::fmt::Debug for A11yUpdateFn {
 /// All fields use primitive Rust types — no winit types leak through.
 #[derive(Debug, Clone)]
 pub enum ShellEvent {
+    /// See `GlyxUserEvent::Wake`.
+    Wake,
     /// The pre-init splash window (see `ShellConfig::splash_window`) is open
     /// and ready to be painted. Fired, at most once, before the real
     /// `WindowReady` for the main window — deliberately NOT part of the
@@ -564,6 +570,9 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
             GlyxUserEvent::Restart => {
                 self.restart_requested = true;
                 event_loop.exit();
+            }
+            GlyxUserEvent::Wake => {
+                (self.handler)(ShellEvent::Wake);
             }
             #[cfg(feature = "a11y")]
             GlyxUserEvent::Accesskit(accesskit_winit::Event { window_id, window_event }) => {

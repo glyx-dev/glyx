@@ -58,6 +58,7 @@ pub fn js_log(
     // Forward to CDP inspector console if connected.
     let ext   = v8::Local::<v8::External>::try_from(args.data()).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
+    crate::log_bus::publish(Some(state.my_handle), &msg);
     if let Some(tx) = state.cdp_log_tx.lock().as_ref() {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -53,6 +53,10 @@ pub enum GlyxUserEvent {
     /// attention; forwarded as `ShellEvent::Wake` so an idle app handles it
     /// without waiting for its next frame.
     Wake,
+    /// Synthetic input (devtools automation): delivered to the handler
+    /// exactly like the real event, then the windows are redrawn, as real
+    /// input does.
+    Inject(ShellEvent),
     /// Routed from `accesskit_winit::Adapter` (created with `with_event_loop_proxy`)
     /// — initial-tree requests, AT action requests, and deactivation.
     #[cfg(feature = "a11y")]
@@ -573,6 +577,10 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
             }
             GlyxUserEvent::Wake => {
                 (self.handler)(ShellEvent::Wake);
+            }
+            GlyxUserEvent::Inject(ev) => {
+                (self.handler)(ev);
+                for w in self.window_arcs.values() { w.request_redraw(); }
             }
             #[cfg(feature = "a11y")]
             GlyxUserEvent::Accesskit(accesskit_winit::Event { window_id, window_event }) => {

@@ -410,6 +410,20 @@ function hitTest(nodeId, px, py) {
   );
 }
 
+// Commits React updates made while handling one text-input key before the
+// next key is handled. A text field computes each edit from its `value` prop
+// and caret state as of the last render; when several keys arrive in one
+// frame (fast typing, a barcode scanner, automation), without this every key
+// edits the same stale value and only the last one survives. Set by
+// index.js to the reconciler's `flushSync`; a plain call elsewhere (tests).
+let flushKey = (fn) => fn();
+export function setKeyFlush(fn) { flushKey = fn; }
+
+/** Keys that press a focused button (winit physical key names). */
+export function isActivationKey(key) {
+  return key === 'Enter' || key === 'NumpadEnter' || key === 'Space';
+}
+
 /** True when the node is in the disabled registry. */
 function isDisabled(nodeId) {
   return disabledRegistry.has(nodeId);
@@ -637,13 +651,33 @@ export function dispatchEvents() {
         if (!handlers) {
           // Not a text input: a focused control that handles keys itself
           // (a chart's arrow-key navigation, say) via Pressable `onKeyDown`.
-          focusVisualRegistry.get(focusedNodeId)?.onKeyDown?.({
+          const kev = {
             key: ev.key, ctrl: ctrlHeld, shift: shiftHeld,
-          });
+            defaultPrevented: false,
+            preventDefault() { this.defaultPrevented = true; },
+          };
+          focusVisualRegistry.get(focusedNodeId)?.onKeyDown?.(kev);
+          // Enter / Space press a focused button, as on the web and native
+          // toolkits. `onKeyDown` can call `e.preventDefault()` to keep them.
+          if (!kev.defaultPrevented && isActivationKey(ev.key)) {
+            const id = focusedNodeId;
+            const ph = pressableRegistry.get(id);
+            if (ph && !isDisabled(id)) {
+              const layout = typeof __glyx_getLayout === 'function' ? __glyx_getLayout(id) : null;
+              const cx = layout ? boxOriginX(layout) + layout.width / 2 : 0;
+              const cy = layout ? boxOriginY(layout) + layout.height / 2 : 0;
+              ph.onPress?.({
+                x: cx, y: cy,
+                locationX: layout ? layout.width / 2 : 0,
+                locationY: layout ? layout.height / 2 : 0,
+                keyboard: true,
+              });
+            }
+          }
           break;
         }
 
-        handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld });
+        flushKey(() => handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld }));
         break;
       }
 
@@ -699,7 +733,7 @@ export function dispatchEvents() {
             cursorEnd: ev.cursorEnd ?? 0,
           });
         } else if (ev.kind === 'commit') {
-          handlers.onImeCommit?.(ev.text ?? '');
+          flushKey(() => handlers.onImeCommit?.(ev.text ?? ''));
         } else if (ev.kind === 'disabled') {
           handlers.onImePreedit?.({ text: '', cursorStart: 0, cursorEnd: 0 });
         }

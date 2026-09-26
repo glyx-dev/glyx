@@ -49,6 +49,13 @@ impl SoftPresent {
     pub fn width(&self)  -> u32 { self.width }
     pub fn height(&self) -> u32 { self.height }
 
+    /// The last presented frame as `(width, height, 0RGB pixels)`, or `None`
+    /// before the first full frame (or right after a resize).
+    pub fn last_frame(&self) -> Option<(u32, u32, &[u32])> {
+        let total = (self.width * self.height) as usize;
+        (self.last_frame.len() == total).then(|| (self.width, self.height, &self.last_frame[..]))
+    }
+
     pub fn resize(&mut self, w: u32, h: u32) {
         let w = w.max(1);
         let h = h.max(1);

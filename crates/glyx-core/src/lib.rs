@@ -101,6 +101,8 @@ mod state;
 mod dev_mode;
 #[cfg(feature = "dev")]
 mod devtools;
+#[cfg(feature = "dev")]
+mod devtools_inspect;
 mod scene;
 mod layout;
 mod render;
@@ -1055,10 +1057,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 #[cfg(feature = "dev")]
                 if !devtools_started {
                     devtools_started = true;
-                    let proxy = Mutex::new(ev_proxy.clone());
-                    devtools = devtools::Devtools::start_from_env(&tokio_handle, Arc::new(move || {
-                        let _ = proxy.lock().send_event(GlyxUserEvent::Wake);
-                    }));
+                    devtools = devtools::Devtools::start_from_env(&tokio_handle, ev_proxy.clone());
                 }
                 // Resolve RenderMode → BackendKind.
                 // GLYX_CPU_RENDER=1 forces the cheapest CPU path (TinySkia) for
@@ -1425,6 +1424,12 @@ pub fn run(mut config: AppConfig) -> bool {
                 // `dev`-only — write-only (and warns) otherwise.
                 #[cfg(feature = "dev")]
                 let mut initial_eval_error: Option<String> = None;
+                // Lets the React host config keep what devtools needs (node →
+                // component names) only when a devtools server is running.
+                #[cfg(feature = "dev")]
+                if std::env::var_os("GLYX_DEVTOOLS_PORT").is_some() {
+                    let _ = rt.eval("globalThis.__glyx_devtools = true;");
+                }
                 if let Some(ref js) = *js_src_arc {
                     match rt.eval(js) {
                         Ok(_)  => log::info!("Window {}: JS eval complete.", window_handle),
@@ -1502,6 +1507,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     last_trim_reserved_bytes: 0,
                     cursor_node_rect:      None,
                     focused_node:          None,
+                    focus_visible:         false,
                     shift_down:            false,
                     #[cfg(feature = "a11y")]
                     a11y_update,
@@ -1578,6 +1584,10 @@ pub fn run(mut config: AppConfig) -> bool {
                     boundary_scene_cache_new: std::collections::HashMap::new(),
                     pipeline_cache_saved:     false,
                     #[cfg(feature = "dev")]
+                    #[cfg(feature = "dev")]
+                    devtools_highlight: None,
+                    #[cfg(feature = "dev")]
+                    damage_log: None,
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
                         start_dev_mode_worker(
@@ -1686,6 +1696,8 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Mouse button ──────────────────────────────────────────────
             ShellEvent::MouseInput { window_handle, button, pressed } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    // Matches JS clearing the ring on any click (events.js).
+                    if pressed { s.focus_visible = false; }
                     // Native fallback close control (see CLOSE_BTN_SIZE doc)
                     // — only live when JS has never rendered anything, so it
                     // can never intercept a real app's own clicks.
@@ -1813,6 +1825,7 @@ pub fn run(mut config: AppConfig) -> bool {
                                     // fire) — Tab navigation needs identical JS-side
                                     // behavior and shouldn't require the `a11y`
                                     // feature to work.
+                                    s.focus_visible = target.is_some();
                                     if let Some(id) = target {
                                         s.runtime.push_event(InputEvent::AccessibilityFocus { node_id: id });
                                         reveal_focus_if_needed(s, id);
@@ -1863,6 +1876,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         "focus" => {
                             if s.js_nodes.contains_key(&target) {
                                 s.focused_node = Some(target);
+                                s.focus_visible = true;
                                 s.window.set_ime_allowed(true);
                                 s.runtime.push_event(InputEvent::AccessibilityFocus { node_id: target });
                                 reveal_focus_if_needed(s, target);
@@ -2035,6 +2049,11 @@ pub fn run(mut config: AppConfig) -> bool {
                 #[cfg(feature = "dev")]
                 if let Some(err) = frame_tick_err {
                     if let Some(dev) = s.dev_mode.as_mut() {
+                        // The overlay only has room for part of it; the
+                        // terminal always gets the whole error, once.
+                        if dev.last_js_error.as_deref() != Some(err.as_str()) {
+                            log::error!("[JS] uncaught error:\n{err}");
+                        }
                         dev.last_js_error = Some(err);
                     }
                 }
@@ -2346,7 +2365,8 @@ pub fn run(mut config: AppConfig) -> bool {
                     let splash_up = s.splash_state.as_ref().map_or(false, |sp| sp.is_visible());
                     #[cfg(feature = "dev")]
                     let overlay_up = s.dev_mode.as_ref()
-                        .map_or(false, |d| d.overlay_visible || d.last_js_error.is_some());
+                        .map_or(false, |d| d.overlay_visible || d.last_js_error.is_some())
+                        || s.devtools_highlight.is_some();
                     #[cfg(not(feature = "dev"))]
                     let overlay_up = false;
 
@@ -2394,6 +2414,20 @@ pub fn run(mut config: AppConfig) -> bool {
                         }
                     }
                 };
+
+                #[cfg(feature = "dev")]
+                if let Some(log) = s.damage_log.as_mut() {
+                    // Bounded: a client that stops reading can't grow this.
+                    if log.len() < 600 {
+                        log.push(crate::state::DamageRecord {
+                            rect: frame_damage.map(|(x, y, w, h)| [x, y, w, h]),
+                            dirty_nodes: s.dirty_nodes.len(),
+                            timestamp_ms: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64).unwrap_or(0),
+                        });
+                    }
+                }
 
                 let mut frame = match (&s.renderer, frame_damage) {
                     (glyx_renderer::AnyRenderer::TinySkia(_), Some(_)) => {
@@ -2606,6 +2640,9 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 #[cfg(feature = "dev")]
                 draw_error_overlay(s, &mut frame);
+
+                #[cfg(feature = "dev")]
+                dev_mode::draw_devtools_highlight(s, &mut frame);
 
                 // (overlay timer reschedule moved to before the blit-only fast path above)
 

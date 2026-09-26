@@ -62,3 +62,37 @@ test('keys reach a focused non-text control through onKeyDown', () => {
     unregisterFocusable(602);
   }
 });
+
+test('Enter and Space press a focused button; other keys and releases do not', () => {
+  const presses = [];
+  registerPressable(603, { onPress: (e) => presses.push(e.keyboard) });
+  registerFocusable(603, {});
+  try {
+    setFocus(603);
+    dispatch([{ type: 'keyInput', key: 'Enter', pressed: true }]);
+    dispatch([{ type: 'keyInput', key: 'Enter', pressed: false }]);
+    dispatch([{ type: 'keyInput', key: 'Space', pressed: true }]);
+    dispatch([{ type: 'keyInput', key: 'NumpadEnter', pressed: true }]);
+    dispatch([{ type: 'keyInput', key: 'KeyA', pressed: true }]);
+    expect(presses).toEqual([true, true, true]);
+  } finally {
+    setFocus(null);
+    unregisterPressable(603);
+    unregisterFocusable(603);
+  }
+});
+
+test('onKeyDown can keep Enter from pressing the button', () => {
+  const presses = [];
+  registerPressable(604, { onPress: () => presses.push('press') });
+  registerFocusable(604, { onKeyDown: (e) => e.preventDefault() });
+  try {
+    setFocus(604);
+    dispatch([{ type: 'keyInput', key: 'Enter', pressed: true }]);
+    expect(presses).toEqual([]);
+  } finally {
+    setFocus(null);
+    unregisterPressable(604);
+    unregisterFocusable(604);
+  }
+});

@@ -570,11 +570,12 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         next_focus(&order, None, false)
                     });
                     state.window.set_ime_allowed(state.focused_node.is_some());
-                    if let Some(new_focus) = state.focused_node {
-                        // Same event JS already handles for AT/Tab-driven
-                        // focus moves — keeps onFocus/styling in sync when
-                        // focus moves off a removed node, not just when a
-                        // human presses Tab.
+                    // Tell JS (onFocus + ring) only when the ring was already
+                    // showing, i.e. focus came by keyboard/AT. After a mouse
+                    // click the move stays silent: native focus (IME, a11y
+                    // tree) still moves, but no ring appears on some other
+                    // control the user never tabbed to.
+                    if let Some(new_focus) = state.focused_node.filter(|_| state.focus_visible) {
                         state.runtime.push_event(InputEvent::AccessibilityFocus { node_id: new_focus });
                         reveal_focus_if_needed(state, new_focus);
                     }

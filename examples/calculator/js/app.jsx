@@ -87,6 +87,44 @@ function compute(a, b, op) {
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
+// Defined at module level, not inside App: a component declared inside
+// another is a new type every render, so React would remount every button on
+// each key press (losing keyboard focus and redoing the whole keypad).
+// Per-render values come in through BtnContext instead.
+const BtnContext = React.createContext(null);
+
+const btnStyle = (color) => ({
+  backgroundColor: color,
+  borderRadius: 8,
+  alignItems: 'center',
+  justifyContent: 'center',
+  boxShadow: '0 2 4 #00000044',
+});
+
+function Btn({ label, color = C.surfaceAlt, span = 1, disabled = false, gridColumn, gridRow }) {
+  const { press, gridMode, gridBtnW, btnH } = React.useContext(BtnContext);
+  const isLongLabel = label.length > 1;
+  const fontSize = isLongLabel ? 14 : 20;
+  const textHeight = isLongLabel ? 20 : 28;
+  const labelColor = LIGHT_BG.has(color) ? C.onLight : C.text;
+  return (
+    <Pressable
+      disabled={disabled}
+      onPress={() => press(label)}
+      flex={gridMode ? undefined : span}
+      width={gridMode ? gridBtnW : undefined}
+      gridColumn={gridColumn}
+      gridRow={gridRow}
+      height={btnH}
+      style={{ ...btnStyle(color), opacity: disabled ? 0 : 1 }}
+    >
+      <Text fontSize={fontSize} height={textHeight} style={{ color: labelColor, textAlign: 'center' }}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
 function App() {
   const { width: winW, height: winH } = useWindowSize();
   const [state, setState] = useState({ disp: '0', prev: null, op: null, wait: false, expr: '' });
@@ -120,38 +158,10 @@ function App() {
   const gridW    = winW - 2 * pad;
   const gridBtnW = Math.floor((gridW - 3 * 4) / 4); // 4 cols, 3 gaps of 4px
 
-  const btnStyle = (color) => ({
-    backgroundColor: color,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    boxShadow: '0 2 4 #00000044',
-  });
-
-  const Btn = ({ label, color = C.surfaceAlt, span = 1, disabled = false, gridColumn, gridRow }) => {
-    const isLongLabel = label.length > 1;
-    const fontSize = isLongLabel ? 14 : 20;
-    const textHeight = isLongLabel ? 20 : 28;
-    const labelColor = LIGHT_BG.has(color) ? C.onLight : C.text;
-    return (
-      <Pressable
-        disabled={disabled}
-        onPress={() => press(label)}
-        flex={gridMode ? undefined : span}
-        width={gridMode ? gridBtnW : undefined}
-        gridColumn={gridColumn}
-        gridRow={gridRow}
-        height={btnH}
-        style={{ ...btnStyle(color), opacity: disabled ? 0 : 1 }}
-      >
-        <Text fontSize={fontSize} height={textHeight} style={{ color: labelColor, textAlign: 'center' }}>
-          {label}
-        </Text>
-      </Pressable>
-    );
-  };
+  const btnCtx = React.useMemo(() => ({ press, gridMode, gridBtnW, btnH }), [press, gridMode, gridBtnW, btnH]);
 
   return (
+    <BtnContext.Provider value={btnCtx}>
     <View
       style={{
         position: 'relative',
@@ -428,6 +438,7 @@ function App() {
         </View>
       )}
     </View>
+    </BtnContext.Provider>
   );
 }
 

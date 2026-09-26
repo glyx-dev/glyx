@@ -101,7 +101,7 @@ pub(super) fn build_snapshot_mode(target: Option<&str>, project_name: &str, p: p
 
     // 1. Build the app bundle (embedded in binary, eval'd at runtime)
     println!("Bundling JS: {} → {}", entry, output);
-    pm::js_bundle(p, &entry, &output, /*minify=*/false, /*source_map=*/true)
+    pm::js_bundle(p, &entry, &output, /*minify=*/false, /*source_map=*/true, !super::read_keep_test_ids())
         .context("JS build failed")?;
     println!("✓ JS bundled (dev output)");
     let bundle = build_app_bundle(project_name, &entry, p).context("app bundle build failed")?;
@@ -185,7 +185,7 @@ pub(super) fn build_portable_mode(target: Option<&str>, project_name: &str, p: p
 
     if let Some((entry, output)) = read_dev_config() {
         println!("Bundling JS: {} → {}", entry, output);
-        pm::js_bundle(p, &entry, &output, /*minify=*/false, /*source_map=*/true)
+        pm::js_bundle(p, &entry, &output, /*minify=*/false, /*source_map=*/true, !super::read_keep_test_ids())
             .context("JS build failed")?;
         println!("✓ JS built: {}", output);
     } else {

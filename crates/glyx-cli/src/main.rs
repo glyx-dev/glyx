@@ -737,7 +737,7 @@ fn runner_bin_name() -> &'static str {
 
 fn build_app_bundle(project_name: &str, entry: &str, p: pm::Pm) -> Result<PathBuf> {
     let bundle_out = format!("target/glyx/{project_name}.js");
-    pm::js_bundle(p, entry, &bundle_out, /*minify=*/true, /*source_map=*/false)?;
+    pm::js_bundle(p, entry, &bundle_out, /*minify=*/true, /*source_map=*/false, !read_keep_test_ids())?;
     Ok(PathBuf::from(bundle_out))
 }
 
@@ -1084,6 +1084,30 @@ fn read_dev_config() -> Option<(String, String)> {
     let cfg: Cfg = serde_json::from_str(&src).ok()?;
     let dev = cfg.dev?;
     Some((dev.entry?, dev.output?))
+}
+
+/// `keepTestIds` from glyx.config: keep `testID` props in release builds (for
+/// end-to-end tests against the release binary). Default false: stripped.
+fn read_keep_test_ids() -> bool {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Cfg { keep_test_ids: Option<bool> }
+    resolve_config_json().ok()
+        .and_then(|src| serde_json::from_str::<Cfg>(&src).ok())
+        .and_then(|c| c.keep_test_ids)
+        .unwrap_or(false)
+}
+
+/// `devtools.autoIdCacheThreshold` from glyx.config: node count above which
+/// devtools caches element IDs between requests.
+fn read_devtools_auto_id_cache_threshold() -> Option<usize> {
+    #[derive(serde::Deserialize)]
+    struct Cfg { devtools: Option<Devtools> }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Devtools { auto_id_cache_threshold: Option<usize> }
+    let src = resolve_config_json().ok()?;
+    serde_json::from_str::<Cfg>(&src).ok()?.devtools?.auto_id_cache_threshold
 }
 
 /// Read `dev.inspect` from glyx.config.ts/.json.

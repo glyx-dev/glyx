@@ -301,6 +301,11 @@ pub(super) struct PerWindowState {
     /// cycling (see `focus.rs`). Drives IME composition routing (attach to
     /// this node's rect) and the accessibility tree's reported focus.
     pub(super) focused_node: Option<u32>,
+    /// Focus arrived by keyboard or assistive tech (Tab, AT focus action), so
+    /// its ring is showing. Cleared by any mouse press, like the web's
+    /// `:focus-visible`. When the focused node is removed and focus moves on,
+    /// the ring only follows if this is set.
+    pub(super) focus_visible: bool,
     /// Tracks Shift key state for Tab-cycling direction. Independent of
     /// `DevModeState::shift_down`, which only exists under the `dev`
     /// feature and is scoped to the dev-overlay shortcut — this one is
@@ -411,6 +416,13 @@ pub(super) struct PerWindowState {
     pub(super) pipeline_cache_saved: bool,
     #[cfg(feature = "dev")]
     pub(super) dev_mode: Option<DevModeState>,
+    /// Devtools `Inspector.highlightNode` target, outlined on every frame.
+    #[cfg(feature = "dev")]
+    pub(super) devtools_highlight: Option<u32>,
+    /// Per-frame damage records while a devtools client subscribes
+    /// (`Inspector.enableDamage`); `None` otherwise, so nothing is kept.
+    #[cfg(feature = "dev")]
+    pub(super) damage_log: Option<Vec<DamageRecord>>,
 }
 
 impl PerWindowState {
@@ -481,6 +493,16 @@ pub(super) enum DevBuildEvent {
         prefix:      Option<String>,
         bundled_js:  String,
     },
+}
+
+/// One rendered frame's damage, for the devtools damage stream.
+#[cfg(feature = "dev")]
+#[derive(Debug, Clone)]
+pub(crate) struct DamageRecord {
+    /// Redrawn area `[x, y, w, h]`; `None` = the whole window.
+    pub rect: Option<[f64; 4]>,
+    pub dirty_nodes: usize,
+    pub timestamp_ms: u64,
 }
 
 #[cfg(feature = "dev")]

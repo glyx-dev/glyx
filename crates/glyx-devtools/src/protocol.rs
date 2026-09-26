@@ -50,6 +50,13 @@ pub mod codes {
     pub const NO_SUCH_WINDOW:   i32 = -32002;
     /// `Runtime.evaluate` threw or failed to compile.
     pub const EVAL_FAILED:      i32 = -32003;
+    /// `nodeId` names no node in that window.
+    pub const NO_SUCH_NODE:     i32 = -32004;
+    /// `Automation.waitFor` ran out of time.
+    pub const TIMEOUT:          i32 = -32005;
+    /// Not available in this build or on this renderer (e.g. screenshots
+    /// on a GPU renderer).
+    pub const UNSUPPORTED:      i32 = -32006;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

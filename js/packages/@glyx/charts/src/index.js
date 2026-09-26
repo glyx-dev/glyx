@@ -339,7 +339,12 @@ function _Interaction({
       case 'ArrowLeft':  case 'ArrowUp':   move(cur < 0 ? count - 1 : cur - 1); break;
       case 'Home': move(0); break;
       case 'End':  move(count - 1); break;
-      case 'Enter': case ' ': case 'Space': if (active != null) onActivate?.(active); break;
+      // Handled here (the active point), so Pressable's own Enter/Space
+      // press doesn't fire onActivate a second time.
+      case 'Enter': case 'NumpadEnter': case ' ': case 'Space':
+        e.preventDefault?.();
+        if (active != null) onActivate?.(active);
+        break;
       case 'Escape': setKb(false); setActive(null); break;
       default: break;
     }

@@ -19,6 +19,9 @@ fn apply_devtools_env(cmd: &mut Command, port: Option<u16>) {
         let file = std::env::current_dir().map(|d| d.join(DEVTOOLS_FILE))
             .unwrap_or_else(|_| PathBuf::from(DEVTOOLS_FILE));
         cmd.env("GLYX_DEVTOOLS_FILE", file);
+        if let Some(n) = super::read_devtools_auto_id_cache_threshold() {
+            cmd.env("GLYX_DEVTOOLS_AUTOID_CACHE_THRESHOLD", n.to_string());
+        }
     }
 }
 
@@ -40,7 +43,7 @@ pub(super) fn cmd_dev(inspect: Option<u16>, devtools: Option<u16>, p: pm::Pm, ic
     let cfg = read_dev_config();
     if let Some((entry, output)) = &cfg {
         println!("Building JS: {} → {}", entry, output);
-        pm::js_bundle(p, entry, output, /*minify=*/false, /*source_map=*/true)
+        pm::js_bundle(p, entry, output, /*minify=*/false, /*source_map=*/true, /*strip_test_ids=*/false)
             .context("Initial JS build failed")?;
         println!("✓ JS built");
     } else if config_json.is_empty() {

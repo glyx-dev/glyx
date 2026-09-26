@@ -9,6 +9,12 @@
 
 import { DefaultEventPriority } from 'react-reconciler/constants';
 import { setNodeParent, removeNodeFromTree } from './events.js';
+import { computeIds } from './devIds.js';
+
+// Release builds drop `testID` before it reaches native: `glyx build` defines
+// __GLYX_STRIP_TEST_IDS__ = true unless the app sets `keepTestIds` (for
+// end-to-end tests against the release binary). Dev keeps it.
+const STRIP_TEST_IDS = typeof __GLYX_STRIP_TEST_IDS__ !== 'undefined' && __GLYX_STRIP_TEST_IDS__;
 
 // ── Scene-op batching ─────────────────────────────────────────────────────────
 //
@@ -39,6 +45,95 @@ const OP_INSERT_BEFORE = 1; // op, parentId, childId, beforeId
 const OP_UPDATE        = 2; // op, id, props
 const OP_REMOVE        = 3; // op, id
 const OP_SET_ROOT      = 4; // op, id
+
+// ── Devtools: node → component names ─────────────────────────────────────────
+//
+// Only when a devtools server runs (`glyx dev --devtools` sets
+// `__glyx_devtools` before this bundle loads): node id → its React fiber, so
+// the Inspector can show `Btn@app.jsx:428 › Pressable` instead of a bare node
+// id. The fiber is alive anyway while the node is mounted; entries go on
+// unmount.
+const devFibers = globalThis.__glyx_devtools ? new Map() : null;
+
+// Glyx's own components (View, Text, Pressable, …), registered by index.js,
+// so names can point past them to the app component that used them.
+const libraryComponents = new WeakSet();
+export function markLibraryComponents(values) {
+  for (const v of values) if (typeof v === 'function') libraryComponents.add(v);
+}
+
+/**
+ * Which component a host node belongs to: the nearest component, plus the
+ * nearest one that isn't Glyx's own, outer first: `Btn@app.jsx:428 › Text`.
+ * Plain `Btn` when that's the nearest. `@file:line` is where the component
+ * was used, in dev JSX builds only.
+ */
+export function componentName(fiber) {
+  let nearest = null;
+  for (let f = fiber && fiber.return; f; f = f.return) {
+    const t = f.type;
+    const fn = typeof t === 'function' ? t
+      : t && typeof t === 'object' ? (t.render || t.type || null) : null; // forwardRef / memo
+    if (!fn) continue;
+    let name = (t && t.displayName) || fn.displayName || fn.name || 'Anonymous';
+    const src = f._debugSource;
+    if (src && src.fileName) name += '@' + String(src.fileName).split(/[\\/]/).pop() + ':' + src.lineNumber;
+    const isLib = libraryComponents.has(fn) || libraryComponents.has(t);
+    if (!isLib) return nearest ? name + ' › ' + nearest : name;
+    if (!nearest) nearest = name;
+  }
+  return nearest;
+}
+
+// ── Devtools: automatic element IDs (see devIds.js) ─────────────────────────
+//
+// Computed on request from React's current fiber tree, one O(n) pass. The
+// result is cached until the tree's structure changes (any append / insert /
+// remove, or a changed testID); devtools asks for the cached copy only when
+// the window has more nodes than its threshold, so small apps skip the
+// bookkeeping entirely and large ones don't recompute between commits.
+let devRoot = null;       // FiberRoot, from index.js
+let idEpoch = 0;          // bumped by every change that can alter an ID
+let idCache = null;
+let idCacheEpoch = -1;
+export function setDevRoot(root) { devRoot = root; }
+const idsChanged = () => { if (devFibers) idEpoch++; };
+
+function allDevIds(useCache) {
+  if (useCache && idCache && idCacheEpoch === idEpoch) return idCache;
+  const t0 = Date.now();
+  const ids = computeIds(devRoot && devRoot.current, (x) => libraryComponents.has(x));
+  globalThis.__glyx_devIdsLastMs = Date.now() - t0;
+  if (useCache) { idCache = ids; idCacheEpoch = idEpoch; } else { idCache = null; }
+  return ids;
+}
+
+if (devFibers) {
+  /** `{ nodeId: { id, pinned? } }` for `ids`, or for every node when `ids` is null. */
+  globalThis.__glyx_devNodeIds = (ids, useCache) => {
+    const all = allDevIds(!!useCache);
+    const out = {};
+    if (ids == null) { for (const [k, v] of all) out[k] = v; }
+    else { for (const id of ids) { const v = all.get(id); if (v) out[id] = v; } }
+    return out;
+  };
+  /** The node carrying element ID `id`, or null (a lookup, not a full dump). */
+  globalThis.__glyx_devFindId = (id, useCache) => {
+    for (const [nodeId, v] of allDevIds(!!useCache)) if (v.id === id) return nodeId;
+    return null;
+  };
+}
+
+if (devFibers) {
+  globalThis.__glyx_devNodeNames = (ids) => {
+    const out = {};
+    for (const id of ids) {
+      const name = componentName(devFibers.get(id));
+      if (name) out[id] = name;
+    }
+    return out;
+  };
+}
 
 let pendingOps = [];
 
@@ -116,7 +211,7 @@ function applyAnimation(nodeProps, animation) {
 
 // ── Instance creation ─────────────────────────────────────────────────────────
 
-function createInstance(type, props) {
+function createInstance(type, props, _rootContainer, _hostContext, fiber) {
   // Strip `children` — React manages the tree.
   // Flatten `style` into the top-level prop object so Rust sees
   // backgroundColor, borderRadius, etc. directly (not nested under style).
@@ -124,10 +219,12 @@ function createInstance(type, props) {
   // native node ID synchronously, without relying on ref forwarding.
   const { children, style, ref: _ref, _glyxOnMount, glyxDraggable, transition, animation, ...rest } = props;
   const nodeProps = { ...rest, ...style };
+  if (STRIP_TEST_IDS) delete nodeProps.testID;
   if (glyxDraggable) nodeProps.draggable = true;
   applyTransition(nodeProps, transition);
   applyAnimation(nodeProps, animation);
   const id = __glyx_createNode(type, nodeProps);
+  if (devFibers) devFibers.set(id, fiber);
   // Fire the mount callback immediately so the component can register its ID
   // before any useEffect / useLayoutEffect runs.
   if (typeof _glyxOnMount === 'function') {
@@ -157,6 +254,7 @@ function appendInitialChild(parentInstance, child) {
 // ── Tree construction (updates / re-renders) ──────────────────────────────────
 
 function appendChild(parentInstance, child) {
+  idsChanged();
   if (child.id !== -1) {
     queueOp(OP_APPEND, parentInstance.id, child.id);
     setNodeParent(child.id, parentInstance.id);
@@ -164,6 +262,7 @@ function appendChild(parentInstance, child) {
 }
 
 function appendChildToContainer(_container, child) {
+  idsChanged();
   // The container is the virtual root (created by createContainer).
   // Explicitly set this child as the scene root so Rust knows what to render.
   if (child.id !== -1) {
@@ -172,6 +271,7 @@ function appendChildToContainer(_container, child) {
 }
 
 function insertBefore(parentInstance, child, beforeChild) {
+  idsChanged();
   if (child.id !== -1) {
     if (beforeChild && beforeChild.id !== -1) {
       queueOp(OP_INSERT_BEFORE, parentInstance.id, child.id, beforeChild.id);
@@ -183,6 +283,7 @@ function insertBefore(parentInstance, child, beforeChild) {
 }
 
 function insertInContainerBefore(_container, child, _beforeChild) {
+  idsChanged();
   if (child.id !== -1) {
     queueOp(OP_SET_ROOT, child.id);
   }
@@ -191,12 +292,14 @@ function insertInContainerBefore(_container, child, _beforeChild) {
 // ── Tree removal ──────────────────────────────────────────────────────────────
 
 function removeChild(_parentInstance, child) {
+  idsChanged();
   if (child.id !== -1) {
     queueOp(OP_REMOVE, child.id);
   }
 }
 
 function removeChildFromContainer(_container, child) {
+  idsChanged();
   if (child.id !== -1) {
     queueOp(OP_REMOVE, child.id);
   }
@@ -208,6 +311,7 @@ function clearContainer(_container) {
 
 // Called by React after it has finished with a deleted instance.
 function detachDeletedInstance(instance) {
+  if (devFibers) devFibers.delete(instance.id);
   if (instance.id !== -1) {
     queueOp(OP_REMOVE, instance.id);
     removeNodeFromTree(instance.id);
@@ -230,9 +334,11 @@ function prepareUpdate(_instance, _type, oldProps, newProps) {
   return null; // no visual change — skip commitUpdate
 }
 
-function commitUpdate(instance, updatePayload) {
+function commitUpdate(instance, updatePayload, _type, oldProps, newProps) {
+  if (oldProps && newProps && oldProps.testID !== newProps.testID) idsChanged();
   const { children, style, ref: _ref, _glyxOnMount, glyxDraggable, transition, animation, ...rest } = updatePayload;
   const nodeProps = { ...rest, ...style };
+  if (STRIP_TEST_IDS) delete nodeProps.testID;
   if (glyxDraggable) nodeProps.draggable = true;
   applyTransition(nodeProps, transition);
   applyAnimation(nodeProps, animation);

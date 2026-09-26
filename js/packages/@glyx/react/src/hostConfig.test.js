@@ -83,3 +83,27 @@ test('applyAnimation spaces array keyframes evenly unless they carry an offset',
   applyAnimation(none, undefined);
   expect(none).toEqual({});
 });
+
+test('componentName names the nearest component above a host node', async () => {
+  const { componentName, markLibraryComponents } = await import('./hostConfig.js');
+  function Btn() {}
+  function Text() {}
+  const Memo = { $$typeof: 'memo', type: function Card() {} };
+  const Fwd = { $$typeof: 'forward_ref', render: function Field() {}, displayName: 'TextField' };
+  function Pressable() {}
+  markLibraryComponents([Pressable, Text]);
+  const host = (parent) => ({ type: 'view', return: parent });
+  expect(componentName(host({ type: 'view', return: { type: Btn } }))).toBe('Btn');
+  // Nearest component plus the nearest app component, past Glyx's own ones,
+  // each with where it was used.
+  const btn = { type: Btn, _debugSource: { fileName: String.raw`C:\app\js\app.jsx`, lineNumber: 428 } };
+  expect(componentName(host({ type: Pressable, return: btn }))).toBe('Btn@app.jsx:428 › Pressable');
+  const deep = { type: Btn, _debugSource: { fileName: '/home/me/app/app.jsx', lineNumber: 7 }, return: { type: function App() {} } };
+  expect(componentName(host({ type: Text, return: { type: Pressable, return: deep } }))).toBe('Btn@app.jsx:7 › Text');
+  // Only library components above: the nearest one.
+  expect(componentName(host({ type: Text, return: { type: Pressable } }))).toBe('Text');
+  expect(componentName(host({ type: Memo }))).toBe('Card');
+  expect(componentName(host({ type: Fwd }))).toBe('TextField');
+  expect(componentName(host(null))).toBe(null);
+  expect(componentName(undefined)).toBe(null);
+});

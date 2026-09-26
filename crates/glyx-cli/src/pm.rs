@@ -224,6 +224,7 @@ pub fn js_bundle(
     output:     &str,
     minify:     bool,
     source_map: bool,
+    strip_test_ids: bool,
 ) -> Result<()> {
     let mut args = vec![
         "build".to_string(), entry.to_string(),
@@ -233,6 +234,12 @@ pub fn js_bundle(
         "--define".to_string(), "process.env.NODE_ENV='production'".to_string(),
     ];
     if minify     { args.push("--minify".to_string()); }
+    // Release builds: the React host config drops `testID` props before they
+    // reach native (see @glyx-dev/react hostConfig.js).
+    if strip_test_ids {
+        args.push("--define".to_string());
+        args.push("__GLYX_STRIP_TEST_IDS__=true".to_string());
+    }
     if source_map { args.push("--sourcemap=inline".to_string()); }
 
     let run = || -> std::io::Result<std::process::Output> {

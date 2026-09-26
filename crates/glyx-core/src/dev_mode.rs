@@ -496,6 +496,32 @@ pub(super) fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut AnyFrame)
     }
 }
 
+/// Devtools `Inspector.highlightNode`: a translucent fill, a 2 px outline
+/// and a `Type #id  w×h` tag, like browser devtools' element highlight.
+#[cfg(feature = "dev")]
+pub(super) fn draw_devtools_highlight(state: &mut PerWindowState, frame: &mut AnyFrame) {
+    let Some(id) = state.devtools_highlight else { return };
+    let Some([x, y, w, h]) = state.runtime.layout_cache().lock().get(&id).copied() else { return };
+    let (x, y, w, h) = (x as f64, y as f64, w as f64, h as f64);
+    let fill = peniko::Color::from_rgba8(76, 154, 255, 60);
+    let edge = peniko::Color::from_rgba8(76, 154, 255, 230);
+    frame.fill_rect(x, y, w, h, fill);
+    frame.fill_rect(x, y, w, 2.0, edge);
+    frame.fill_rect(x, y + h - 2.0, w, 2.0, edge);
+    frame.fill_rect(x, y, 2.0, h, edge);
+    frame.fill_rect(x + w - 2.0, y, 2.0, h, edge);
+
+    let kind = state.js_nodes.get(&id)
+        .map(|n| crate::devtools_inspect::type_name(&n.node_type)).unwrap_or("Node");
+    let tag = format!("{kind} #{id}  {}×{}", w.round(), h.round());
+    let lbl = state.text_sys.label(&tag, 10.0);
+    // Above the node, or inside its top edge when there's no room above.
+    let tag_w = tag.chars().count() as f64 * 6.0 + 10.0;
+    let ty = if y >= 18.0 { y - 18.0 } else { y + 2.0 };
+    frame.fill_rect(x, ty, tag_w, 16.0, peniko::Color::from_rgba8(20, 40, 70, 235));
+    frame.draw_text(&lbl, x + 5.0, ty + 2.0, peniko::Color::from_rgba8(230, 240, 255, 255));
+}
+
 #[cfg(feature = "dev")]
 pub(super) fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFrame) {
     let Some(dev) = state.dev_mode.as_ref() else { return };
@@ -504,7 +530,46 @@ pub(super) fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFram
     let win_w = state.gpu.width()  as f64;
     let win_h = state.gpu.height() as f64;
 
-    let panel_h = 210.0_f64;
+    // Conservative average glyph width (px) — 7 undercounts for some content
+    // (bold-ish rendering, wider default metrics). 6 leaves more margin, the
+    // safe direction to be wrong.
+    let max_ch = ((win_w as usize).saturating_sub(40) / 6).max(12);
+    let frame_ch = ((win_w as usize).saturating_sub(50) / 6).max(12);
+
+    let all_lines: Vec<&str> = err.lines().collect();
+    let first_frame_idx = all_lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("at "))
+        .unwrap_or(all_lines.len());
+    let frame_lines: Vec<&str> = all_lines[first_frame_idx..].iter()
+        .map(|l| l.trim()).filter(|t| t.starts_with("at ")).collect();
+
+    // The message wraps instead of being cut to one line, so a narrow window
+    // still shows all of it (up to MAX_MSG lines).
+    const MAX_MSG: usize = 8;
+    let mut msg = wrap_lines(&all_lines[..first_frame_idx].join("\n"), max_ch);
+    if msg.len() > MAX_MSG {
+        msg.truncate(MAX_MSG);
+        if let Some(last) = msg.last_mut() { last.push('…'); }
+    }
+
+    // Size the panel to its content, up to 60% of the window; stack frames
+    // give way first, then message lines.
+    const HEAD: f64 = 32.0;
+    const MSG_H: f64 = 20.0;
+    const FRAME_H: f64 = 18.0;
+    const FOOT: f64 = 24.0;
+    let max_panel = (win_h * 0.6).max(120.0).min(win_h);
+    let total_frames = frame_lines.len();
+    let height = |m: usize, f: usize| HEAD + m as f64 * MSG_H + 5.0 + f as f64 * FRAME_H + FOOT
+        + if total_frames > f && f > 0 { FRAME_H } else { 0.0 };
+    let mut n_frames = total_frames.min(7);
+    while n_frames > 0 && height(msg.len(), n_frames) > max_panel { n_frames -= 1; }
+    while msg.len() > 1 && height(msg.len(), n_frames) > max_panel {
+        msg.pop();
+        if let Some(last) = msg.last_mut() { last.push('…'); }
+    }
+    let panel_h = height(msg.len(), n_frames).min(max_panel);
     let panel_y = win_h - panel_h;
 
     frame.fill_rounded_rect(0.0, panel_y, win_w, panel_h, 0.0,
@@ -518,58 +583,26 @@ pub(super) fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFram
     let frame_col  = peniko::Color::from_rgba8(180, 140, 140, 200);
     let dim_col    = peniko::Color::from_rgba8(130, 90,  90,  180);
 
-    let title_lbl = state.text_sys.label(
-        "⚠ JavaScript Error  —  fix source and save to dismiss", 11.0);
+    let title = pick_fitting(&[
+        "⚠ JavaScript Error  —  fix source and save to dismiss",
+        "⚠ JavaScript Error — save to dismiss",
+        "⚠ JavaScript Error",
+    ], max_ch);
+    let title_lbl = state.text_sys.label(title, 11.0);
     frame.draw_text(&title_lbl, 16.0, panel_y + 10.0, title_col);
 
     frame.fill_rect(0.0, panel_y + 25.0, win_w, 1.0,
         peniko::Color::from_rgba8(90, 20, 20, 140));
 
-    // Conservative average glyph width (px) — 7 undercounts for some content
-    // (bold-ish rendering, wider default metrics), letting truncated lines
-    // still run past the panel edge. 6 leaves more margin at the cost of a
-    // slightly shorter visible line, which is the safe direction to be wrong.
-    let max_ch = (win_w as usize).saturating_sub(56) / 6;
-    let trunc = |s: &str| -> String {
-        if s.len() > max_ch {
-            let end = s.char_indices().nth(max_ch).map(|(i, _)| i).unwrap_or(s.len());
-            format!("{}…", &s[..end])
-        } else {
-            s.to_owned()
-        }
-    };
-
-    let all_lines: Vec<&str> = err.lines().collect();
-    let first_frame_idx = all_lines
-        .iter()
-        .position(|l| l.trim_start().starts_with("at "))
-        .unwrap_or(all_lines.len());
-    let msg_lines   = &all_lines[..first_frame_idx];
-    let frame_lines = &all_lines[first_frame_idx..];
-
-    let mut y = panel_y + 32.0;
-    let mut drawn_msg = 0usize;
-    for line in msg_lines.iter().take(3) {
-        let t = line.trim();
-        if t.is_empty() { continue; }
-        if drawn_msg >= 2 { break; }
-        let lbl = state.text_sys.label(&trunc(t), 12.0);
+    let mut y = panel_y + HEAD;
+    for line in &msg {
+        let lbl = state.text_sys.label(line, 12.0);
         frame.draw_text(&lbl, 16.0, y, msg_col);
-        // Line-height margin: fixed increments (not measured against actual
-        // glyph ascent/descent) — widened from 19 to guard against taller
-        // glyphs visually overlapping the next line.
-        y += 22.0;
-        drawn_msg += 1;
+        y += MSG_H;
     }
     y += 5.0;
 
-    let max_frames = 7usize;
-    let mut drawn_frames = 0usize;
-    for line in frame_lines.iter() {
-        let t = line.trim();
-        if t.is_empty() || !t.starts_with("at ") { continue; }
-        if drawn_frames >= max_frames || y > panel_y + panel_h - 22.0 { break; }
-
+    for t in frame_lines.iter().take(n_frames) {
         let is_user = t.contains(".jsx") || t.contains(".tsx")
                    || (t.contains(".ts") && !t.contains("node_modules"))
                    || (t.contains(".js")
@@ -577,25 +610,92 @@ pub(super) fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFram
                        && !t.contains("polyfills")
                        && !t.contains("chunk-"));
         let col = if is_user { source_col } else { frame_col };
-
-        let lbl = state.text_sys.label(&trunc(t), 10.5);
+        let lbl = state.text_sys.label(&truncate_chars(t, frame_ch), 10.5);
         frame.draw_text(&lbl, 26.0, y, col);
-        y += 19.0; // widened, same reasoning as the message-line increment above
-        drawn_frames += 1;
+        y += FRAME_H;
     }
-
-    let total_frames = frame_lines.iter()
-        .filter(|l| l.trim_start().starts_with("at ")).count();
-    if total_frames > max_frames {
-        let more_lbl = state.text_sys.label(
-            &format!("  … {} more frames  (glyx dev --inspect for full trace)",
-                     total_frames - max_frames),
-            10.0,
-        );
+    if total_frames > n_frames && n_frames > 0 {
+        let more_lbl = state.text_sys.label(&format!("… {} more frames", total_frames - n_frames), 10.0);
         frame.draw_text(&more_lbl, 26.0, y, dim_col);
     }
 
-    let hint_lbl = state.text_sys.label(
-        "Ctrl+C to copy  ·  save any file to rebuild  ·  glyx dev --inspect for Chrome DevTools", 10.0);
-    frame.draw_text(&hint_lbl, 16.0, panel_y + panel_h - 14.0, dim_col);
+    // The full text is always in the terminal and on the clipboard (Ctrl+C);
+    // the footer says so in as many words as fit.
+    let hint = pick_fitting(&[
+        "Ctrl+C copies the full error (also in the terminal)  ·  save any file to rebuild",
+        "Ctrl+C copies the full error  ·  also in the terminal",
+        "Ctrl+C: copy full error",
+    ], (win_w as usize).saturating_sub(32) / 5);
+    let hint_lbl = state.text_sys.label(hint, 10.0);
+    frame.draw_text(&hint_lbl, 16.0, panel_y + panel_h - 16.0, dim_col);
+}
+
+/// The first option that fits in `max_ch` characters, else the last one.
+#[cfg(feature = "dev")]
+fn pick_fitting<'a>(options: &[&'a str], max_ch: usize) -> &'a str {
+    options.iter().copied().find(|o| o.chars().count() <= max_ch)
+        .unwrap_or(options[options.len() - 1])
+}
+
+#[cfg(feature = "dev")]
+fn truncate_chars(s: &str, max_ch: usize) -> String {
+    if s.chars().count() <= max_ch { return s.to_owned(); }
+    let mut out: String = s.chars().take(max_ch.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Word-wrap `text` to lines of at most `max_ch` characters, keeping its own
+/// line breaks and splitting words longer than a line.
+#[cfg(feature = "dev")]
+fn wrap_lines(text: &str, max_ch: usize) -> Vec<String> {
+    let max_ch = max_ch.max(1);
+    let mut out = Vec::new();
+    for para in text.lines() {
+        let mut line = String::new();
+        let mut len = 0usize;
+        for word in para.split_whitespace() {
+            let mut word: Vec<char> = word.chars().collect();
+            while word.len() > max_ch {
+                if len > 0 { out.push(std::mem::take(&mut line)); len = 0; }
+                out.push(word.drain(..max_ch).collect());
+            }
+            let wl = word.len();
+            if wl == 0 { continue; }
+            if len > 0 && len + 1 + wl > max_ch {
+                out.push(std::mem::take(&mut line));
+                len = 0;
+            }
+            if len > 0 { line.push(' '); len += 1; }
+            line.extend(word);
+            len += wl;
+        }
+        if len > 0 { out.push(line); }
+    }
+    out
+}
+
+#[cfg(all(test, feature = "dev"))]
+mod overlay_tests {
+    use super::*;
+
+    #[test]
+    fn long_messages_wrap_at_word_boundaries() {
+        assert_eq!(wrap_lines("Error converting from js null into type f64", 16),
+            vec!["Error converting", "from js null", "into type f64"]);
+    }
+
+    #[test]
+    fn words_longer_than_a_line_are_split_and_line_breaks_kept() {
+        assert_eq!(wrap_lines("abcdefghij\nok", 4), vec!["abcd", "efgh", "ij", "ok"]);
+        assert!(wrap_lines("", 10).is_empty());
+    }
+
+    #[test]
+    fn the_longest_fitting_option_is_chosen() {
+        assert_eq!(pick_fitting(&["long option", "short"], 6), "short");
+        assert_eq!(pick_fitting(&["long option", "short"], 3), "short");
+        assert_eq!(pick_fitting(&["long option", "short"], 40), "long option");
+        assert_eq!(truncate_chars("abcdef", 4), "abc…");
+    }
 }

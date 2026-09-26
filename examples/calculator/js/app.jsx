@@ -201,7 +201,7 @@ function App() {
           <View style={{ flex: 1 }} />
           <View style={{ flexDirection: 'row', gap: 4, paddingRight: 4 }}>
             <Pressable onPress={() => setShowHistory(s => !s)} width={24} height={24} style={{ backgroundColor: showHistory ? C.green : C.overlay, borderRadius: 6, alignItems: 'center', justifyContent: 'center' }}>
-              <Text fontSize={10} height={12} style={{ color: C.onLight }}>H</Text>
+              <Text fontSize={10} height={12} style={{ color: showHistory ? C.onLight : C.text }}>H</Text>
             </Pressable>
             <Pressable onPress={() => setGridMode(m => !m)} width={36} height={24} style={{ backgroundColor: C.mauve, borderRadius: 6, alignItems: 'center', justifyContent: 'center' }}>
               <Text fontSize={10} height={12} style={{ color: C.onLight }}>{gridMode ? 'Std' : 'Sci'}</Text>

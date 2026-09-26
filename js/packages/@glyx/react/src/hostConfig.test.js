@@ -107,3 +107,31 @@ test('componentName names the nearest component above a host node', async () => 
   expect(componentName(host(null))).toBe(null);
   expect(componentName(undefined)).toBe(null);
 });
+
+test('$0 (__glyx_devNode) exposes the element props and its owner component', async () => {
+  globalThis.__glyx_devtools = true;
+  const hc = await import('./hostConfig.js?devnode');
+  function Pressable() {}
+  function Btn() {}
+  hc.markLibraryComponents([Pressable]);
+  const onPress = () => 'pressed';
+  const btnFiber = { type: Btn, memoizedProps: { label: '7' }, memoizedState: { memoizedState: 42, next: { memoizedState: 'x', next: null } } };
+  const pressFiber = { type: Pressable, return: btnFiber, memoizedProps: {} };
+  const hostFiber = { tag: 5, type: 'view', return: pressFiber, memoizedProps: { onPress, testID: 't' }, key: null };
+  const root = { tag: 3 };
+  btnFiber.return = root;
+  hc.setDevRoot({ current: root });
+  const HostConfig = hc.default;
+  const prevCreate = globalThis.__glyx_createNode;
+  globalThis.__glyx_createNode = () => 777;
+  HostConfig.createInstance('view', { onPress, testID: 't' }, null, null, hostFiber);
+  const $0 = globalThis.__glyx_devNode(777);
+  expect($0.props.onPress()).toBe('pressed');
+  expect($0.owner.name).toBe('Btn');
+  expect($0.owner.props.label).toBe('7');
+  expect($0.owner.hooks).toEqual([42, 'x']);
+  expect($0.component).toBe('Btn › Pressable');
+  expect(globalThis.__glyx_devNode(999)).toBe(undefined);
+  delete globalThis.__glyx_devtools;
+  globalThis.__glyx_createNode = prevCreate;
+});

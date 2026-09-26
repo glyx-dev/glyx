@@ -59,6 +59,30 @@ jobs:
       - name: cargo test (tested crates)
         run: cargo test -p glyx-security -p glyx-core -p glyx-runtime
 
+  # A real app driven through the devtools protocol (GDP): the calculator
+  # example (QuickJS, so no V8 download; CPU renderer, so no GPU) under a
+  # virtual X display, checked by scripts/devtools/gdp-smoke.mjs and
+  # tests/devtools/gdp-calculator.mjs (input, tree, waitFor, screenshots).
+  devtools-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: devtools-e2e
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install display + window-system libs
+        run: sudo apt-get update && sudo apt-get install -y xvfb libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxrandr2 libxi6 fonts-dejavu-core
+      - run: bun install --frozen-lockfile
+      - name: Bundle the calculator's JS
+        working-directory: examples/calculator
+        run: bun build js/app.jsx --outfile js/dist/app.js --target browser --format iife --define "process.env.NODE_ENV='production'"
+      - run: cargo build -p calculator
+      - name: Drive the app over GDP
+        run: xvfb-run -a bash tests/devtools/run-calculator.sh
+
   js:
     runs-on: ubuntu-latest
     steps:
@@ -67,6 +91,6 @@ jobs:
         with:
           bun-version: latest
       - run: bun install --frozen-lockfile
-      - run: bun test js/packages scripts
+      - run: bun test js/packages scripts tools/glyx-devtools-ui
       - name: Versions consistent (packages, crates, internal ranges)
         run: bun scripts/release/check.mjs

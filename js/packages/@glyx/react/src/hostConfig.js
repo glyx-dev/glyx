@@ -99,6 +99,24 @@ let idCacheEpoch = -1;
 export function setDevRoot(root) { devRoot = root; }
 const idsChanged = () => { if (devFibers) idEpoch++; };
 
+/** React keeps two fibers per element; the one stored at creation may be the
+ *  stale one. The current one is reachable from the root's current tree. */
+function currentFiber(fiber) {
+  let top = fiber;
+  while (top.return) top = top.return;
+  return devRoot && top === devRoot.current ? fiber : (fiber.alternate ?? fiber);
+}
+
+/** A function component's hook values (useState, useRef, useMemo …), in order. */
+function hookValues(fiber) {
+  const out = [];
+  if (typeof fiber.type !== 'function' || fiber.type.prototype?.isReactComponent) {
+    return fiber.stateNode?.state != null ? [fiber.stateNode.state] : out; // class component
+  }
+  for (let h = fiber.memoizedState; h && out.length < 40; h = h.next) out.push(h.memoizedState);
+  return out;
+}
+
 function allDevIds(useCache) {
   if (useCache && idCache && idCacheEpoch === idEpoch) return idCache;
   const t0 = Date.now();
@@ -117,6 +135,26 @@ if (devFibers) {
     else { for (const id of ids) { const v = all.get(id); if (v) out[id] = v; } }
     return out;
   };
+  /**
+   * `$0` in the DevTools Console: the element's live React side. `props` are
+   * the element's current props (handlers included: `$0.props.onPress()`),
+   * `owner` the nearest app component with its props and hook state.
+   */
+  globalThis.__glyx_devNode = (nodeId) => {
+    const stored = devFibers.get(nodeId);
+    if (!stored) return undefined;
+    const fiber = currentFiber(stored);
+    let owner = null;
+    for (let f = fiber.return; f && !owner; f = f.return) {
+      const t = f.type;
+      const fn = typeof t === 'function' ? t : t && typeof t === 'object' ? (t.render || null) : null;
+      if (fn && !libraryComponents.has(fn) && !libraryComponents.has(t)) {
+        owner = { name: t.displayName || fn.displayName || fn.name || 'Anonymous', props: f.memoizedProps, hooks: hookValues(f) };
+      }
+    }
+    return { nodeId, component: componentName(fiber), type: fiber.type, key: fiber.key, props: fiber.memoizedProps, owner };
+  };
+
   /** The node carrying element ID `id`, or null (a lookup, not a full dump). */
   globalThis.__glyx_devFindId = (id, useCache) => {
     for (const [nodeId, v] of allDevIds(!!useCache)) if (v.id === id) return nodeId;

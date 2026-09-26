@@ -50,6 +50,7 @@
       "dependencies": {
         "@glyx-dev/design": "workspace:*",
         "@glyx-dev/react": "workspace:*",
+        "@glyx-dev/rich-text": "workspace:*",
         "@glyx-dev/router": "workspace:*",
         "react": "^18",
       },
@@ -204,7 +205,7 @@
       "name": "@glyx-dev/rich-text",
       "version": "0.1.0",
       "peerDependencies": {
-        "@glyx-dev/react": "*",
+        "@glyx-dev/react": "^0.1.0",
         "react": "*",
       },
     },
@@ -263,6 +264,14 @@
         "glyx": "bin/glyx.js",
       },
     },
+    "tools/glyx-devtools-ui": {
+      "name": "@glyx-dev/devtools-ui",
+      "version": "0.0.0",
+      "dependencies": {
+        "react": "^18.2.0",
+        "react-dom": "^18.2.0",
+      },
+    },
   },
   "packages": {
     "@glyx-dev/auth": ["@glyx-dev/auth@workspace:js/packages/@glyx/auth"],
@@ -276,6 +285,8 @@
     "@glyx-dev/context-menu": ["@glyx-dev/context-menu@workspace:js/packages/@glyx/context-menu"],
 
     "@glyx-dev/design": ["@glyx-dev/design@workspace:js/packages/@glyx/design"],
+
+    "@glyx-dev/devtools-ui": ["@glyx-dev/devtools-ui@workspace:tools/glyx-devtools-ui"],
 
     "@glyx-dev/drag-drop": ["@glyx-dev/drag-drop@workspace:js/packages/@glyx/drag-drop"],
 

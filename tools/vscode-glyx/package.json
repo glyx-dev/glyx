@@ -50,6 +50,12 @@
         "title": "Open glyx.config.json",
         "category": "Glyx",
         "icon": "$(settings-gear)"
+      },
+      {
+        "command": "glyx.openDevtools",
+        "title": "Open DevTools",
+        "category": "Glyx",
+        "icon": "$(inspect)"
       }
     ],
     "menus": {

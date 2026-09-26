@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { openDevtools, stopDevtools } from './devtools';
 
 // ── State ──────────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,11 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('glyx.package',      cmdPackage),
     vscode.commands.registerCommand('glyx.openConfig',   cmdOpenConfig),
     vscode.commands.registerCommand('glyx.createProject', cmdCreateProject),
+    vscode.commands.registerCommand('glyx.openDevtools', () => {
+      const root = getProjectRoot() ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!root) { vscode.window.showErrorMessage('Open a folder first.'); return; }
+      return openDevtools(context, getCli(), root);
+    }),
   );
 
   // Task provider so glyx tasks work in tasks.json
@@ -73,6 +79,7 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
+  stopDevtools();
   devTerminal?.dispose();
 }
 

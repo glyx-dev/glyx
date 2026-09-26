@@ -30,6 +30,7 @@ This document describes how the pieces fit together.
 20. [Local AI](#20-local-ai)
 21. [JS Package Ecosystem](#21-js-package-ecosystem)
 22. [Key Design Decisions](#22-key-design-decisions)
+23. [Devtools Protocol (GDP)](#23-devtools-protocol-gdp)
 
 ---
 
@@ -767,7 +768,7 @@ Main thread (handle_dev_build_events, called each frame):
 
 **Windows Bun invocation**: Bun installed via winget or scoop creates a `.cmd` shim rather than a native `.exe`. `Command::new("bun")` fails because Windows does not run `.cmd` files without a shell. Glyx first tries `bun` directly, then falls back to `cmd /C bun ...` if the first attempt fails.
 
-**Error overlay**: When a JS exception occurs (from `frame_tick`) or a build error (from HMR), a 140px red panel is drawn at the bottom of the window using `FrameBuilder` directly (bypassing the JS scene tree). It shows the exception message and stack trace with line wrapping.
+**Error overlay**: When a JS exception occurs (from `frame_tick`) or a build error (from HMR), a red panel is drawn at the bottom of the window using `FrameBuilder` directly (bypassing the JS scene tree). It sizes itself to the message, up to 60% of the window, wraps the message, and shows as many stack frames as fit; its title and footer shorten on narrow windows. The full error is also logged to the terminal once, and Ctrl+C copies it.
 
 **Dev feature gate**: HMR code is compiled only when the `dev` Cargo feature is enabled. The production glyx-runner binary is built with `--no-default-features`, which excludes `notify`, the file watcher, the error overlay, and the dev overlay. This removes ~2MB from the production binary.
 
@@ -1068,3 +1069,32 @@ The most expensive part of a UI framework is layout. Glyx distinguishes three di
 **ControlFlow::Wait**
 
 winit's `Wait` mode puts the process to sleep when no events are pending. A static Glyx app consumes 0% CPU. An animated app (Canvas, rotating 3D scene) must call `window.request_redraw()` each frame to keep the loop alive. This is a deliberate energy-efficiency tradeoff.
+
+---
+
+## 23. Devtools Protocol (GDP)
+
+**Files**: `crates/glyx-devtools/` (protocol + WebSocket server), `crates/glyx-core/src/devtools.rs` (request handling), `devtools_inspect.rs` (tree, queries, input, screenshots), `devtools_perf.rs` (perf + animation), `js/packages/@glyx/react/src/devIds.js` (element IDs). Reference: [DEVTOOLS.md](DEVTOOLS.md).
+
+GDP lets tests, editors and agents inspect and drive a running app over a local WebSocket. It is compiled only with the `dev` feature and started only when `GLYX_DEVTOOLS_PORT` is set (`glyx dev --devtools`).
+
+```
+client ──ws://127.0.0.1──▶ glyx-devtools server (tokio task)
+                             • Origin check, token handshake
+                             • queues requests, sends GlyxUserEvent::Wake
+                                         │
+                                         ▼
+                           event-loop thread: Devtools::pump(windows)
+                             (on Wake and on every redraw)
+                             • answers requests against PerWindowState,
+                               no locks on window state
+                             • settles waitFor / waitForSettled
+                             • streams console, damage, frame, animation events
+```
+
+- **Threading**: the server never touches window state. Requests queue up and the event loop drains them in `pump`, woken by `GlyxUserEvent::Wake`, so an idle app answers in milliseconds and a busy one between frames.
+- **Input**: `Automation.click/type/press/scroll` build `ShellEvent`s and send them back through the event loop as `GlyxUserEvent::Inject`, so synthetic input takes the same path as real input (hit-testing, focus, IME, React handlers).
+- **JavaScript side**: `Runtime.evaluate` wraps the snippet so its value returns as JSON on both engines. Component names and element IDs come from the React host config, which keeps a node → fiber map and the fiber root only when `globalThis.__glyx_devtools` is set before the bundle runs; devtools asks for them with one JS call per response.
+- **Element IDs**: one depth-first pass over React's current fiber tree builds code-structure IDs (`App#0 › Btn#0 › Pressable#0`); cached above `devtools.autoIdCacheThreshold` nodes until an append / insert / remove or `testID` change.
+- **Performance and animation**: `PerfFrame` records render, present (pacing sleep excluded), redrawn area and running animations per frame; violations and leak warnings get a numbered history that devtools reads without draining the app's own queues. Animation events come from diffing each window's running transitions / keyframe animations between pumps, keyed by start time so restarts show as ended + started.
+- **Cost when unused**: nothing is recorded or computed for events nobody subscribed to; the console feed, damage log and frame stream exist only while a client listens.

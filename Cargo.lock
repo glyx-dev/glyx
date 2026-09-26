@@ -3615,6 +3615,7 @@ dependencies = [
  "ed25519-dalek",
  "env_logger",
  "flate2",
+ "glyx-devtools",
  "glyx-verify",
  "ico",
  "image",
@@ -3625,6 +3626,7 @@ dependencies = [
  "sha2",
  "tar",
  "time",
+ "tokio",
  "ureq 2.12.1",
  "zip 2.4.2",
 ]

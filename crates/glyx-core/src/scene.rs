@@ -294,6 +294,11 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
     if commands.is_empty() {
         return false;
     }
+    #[cfg(feature = "dev")]
+    {
+        state.tree_version += 1;
+        if let Some(notify) = &state.devtools_notify { notify(); }
+    }
     // Mark the a11y tree dirty whenever any scene command actually ran, rather
     // than rebuilding it every rendered frame regardless of activity — the
     // tree only needs to change when the scene graph does. Slightly

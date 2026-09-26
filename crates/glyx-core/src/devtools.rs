@@ -22,25 +22,39 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 use crate::devtools_inspect as inspect;
+use crate::devtools_perf as perf;
 use crate::devtools_inspect::{Condition, Query};
 use crate::state::{PerWindowState, Present};
 
 /// Every method answered here, as listed in the handshake.
 pub(crate) const METHODS: &[&str] = &[
     "Runtime.handshake", "Runtime.ping", "Runtime.version", "Runtime.windows", "Runtime.evaluate",
-    "Console.enable", "Console.disable",
+    "Console.enable", "Console.disable", "Console.getMessages", "Console.clear",
     "Inspector.getTree", "Inspector.getNode", "Inspector.getLayout", "Inspector.selectElement",
     "Inspector.getAccessibilityTree", "Inspector.highlightNode", "Inspector.setNodeProp",
     "Inspector.enableDamage", "Inspector.disableDamage",
+    "Inspector.setInspectMode", "Inspector.enableTreeEvents", "Inspector.disableTreeEvents",
+    "Inspector.auditAccessibility", "Inspector.setOverlay",
     "Automation.findNodes", "Automation.click", "Automation.type", "Automation.press",
     "Automation.scroll", "Automation.dispatchInput", "Automation.screenshot", "Automation.waitFor",
+    "Performance.snapshot", "Performance.getBudget", "Performance.setBudget",
+    "Performance.getViolations", "Performance.getLeakWarnings",
+    "Performance.enableFrames", "Performance.disableFrames", "Performance.getFrameDetail",
+    "Animation.list", "Animation.enable", "Animation.disable", "Animation.waitForSettled",
 ];
-pub(crate) const EVENTS: &[&str] = &["Console.messageAdded", "Inspector.frameDamage"];
+pub(crate) const EVENTS: &[&str] = &[
+    "Console.messageAdded", "Inspector.frameDamage", "Performance.frame",
+    "Inspector.nodePicked", "Inspector.inspectModeChanged", "Inspector.treeChanged",
+    "Animation.started", "Animation.ended", "Animation.settled",
+];
 
 /// Responses that name nodes get each node's React component added.
-const NAMED: &[&str] = &["Inspector.getTree", "Inspector.getNode", "Inspector.selectElement", "Automation.findNodes"];
+const NAMED: &[&str] = &["Inspector.getTree", "Inspector.getNode", "Inspector.selectElement", "Automation.findNodes", "Inspector.auditAccessibility"];
 
 pub(crate) const ENGINE: &str = if cfg!(feature = "v8") { "V8" } else { "QuickJS" };
+
+/// Console messages kept for `Console.getMessages`.
+const CONSOLE_BACKLOG: usize = 1000;
 
 /// Node count above which element IDs are cached between requests.
 const DEFAULT_AUTO_ID_CACHE_THRESHOLD: usize = 2000;
@@ -58,6 +72,8 @@ struct Wait {
     window: u32,
     query: Query,
     condition: Condition,
+    /// `Animation.waitForSettled`: done when nothing animates (query unused).
+    settle: bool,
     deadline: Instant,
 }
 
@@ -75,15 +91,43 @@ pub(crate) struct Devtools {
     server: DevtoolsServer,
     /// Clients that sent `Console.enable`.
     console: HashSet<ConnId>,
-    /// Open only while at least one client listens, so an unwatched app
-    /// pays nothing for console forwarding.
+    /// The console feed. Subscribed for the whole devtools session (dev
+    /// builds with devtools on only), so the Console can show what was logged
+    /// before it opened.
     logs: Option<Receiver<LogEntry>>,
+    /// The last `CONSOLE_BACKLOG` messages, numbered.
+    backlog: std::collections::VecDeque<(u64, LogEntry)>,
+    log_seq: u64,
     /// Delivers synthetic input through the event loop, the same path real
     /// input takes.
     proxy: Mutex<EventLoopProxy<GlyxUserEvent>>,
     waits: Vec<Wait>,
     /// Clients that sent `Inspector.enableDamage`.
     damage: HashSet<ConnId>,
+    /// Clients that sent `Performance.enableFrames`, and the last frame
+    /// streamed per window.
+    frames: HashSet<ConnId>,
+    frames_sent: HashMap<u32, u64>,
+    /// Clients that sent `Animation.enable`, and each window's running
+    /// motion at the last look.
+    anim: HashSet<ConnId>,
+    anim_prev: HashMap<u32, HashSet<perf::MotionKey>>,
+    /// Clients that turned select mode on (they get its events; when the
+    /// last one leaves, select mode is switched off so the app gets its
+    /// clicks back).
+    inspecting: HashSet<ConnId>,
+    /// Who set the current highlight; cleared if they disconnect.
+    highlight_owner: Option<ConnId>,
+    /// Clients that sent `Inspector.enableTreeEvents`, and the tree version
+    /// last announced per window.
+    tree_subs: HashSet<ConnId>,
+    tree_sent: HashMap<u32, u64>,
+    /// Handed to windows while any stream is subscribed; wakes the loop.
+    notify: Arc<dyn Fn() + Send + Sync>,
+    /// Clients that turned paint flashing on (off when the last leaves).
+    overlay_conns: HashSet<ConnId>,
+    /// Clients streaming frames with detail (frame details kept meanwhile).
+    frame_detail_conns: HashSet<ConnId>,
     /// Windows with more nodes than this use the cached element IDs
     /// (`devtools.autoIdCacheThreshold` in glyx.config.json, via
     /// `GLYX_DEVTOOLS_AUTOID_CACHE_THRESHOLD`).
@@ -106,6 +150,8 @@ impl Devtools {
             .unwrap_or_else(glyx_devtools::new_token);
         let wake_proxy = Mutex::new(proxy.clone());
         let wake = Arc::new(move || { let _ = wake_proxy.lock().send_event(GlyxUserEvent::Wake); });
+        let notify_proxy = Mutex::new(proxy.clone());
+        let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || { let _ = notify_proxy.lock().send_event(GlyxUserEvent::Wake); });
         let server = match DevtoolsServer::start(handle, port, token.clone(), wake) {
             Ok(s) => s,
             Err(e) => { log::error!("[GDP] could not listen on 127.0.0.1:{port}: {e}"); return None; }
@@ -127,8 +173,14 @@ impl Devtools {
             Err(e) => log::warn!("[GDP] devtools on ws://127.0.0.1:{port}/; could not write {}: {e}", file.display()),
         }
         Some(Self {
-            server, console: HashSet::new(), logs: None,
+            server, console: HashSet::new(), logs: Some(log_bus::subscribe()),
+            backlog: std::collections::VecDeque::new(), log_seq: 0,
             proxy: Mutex::new(proxy), waits: Vec::new(), damage: HashSet::new(),
+            frames: HashSet::new(), frames_sent: HashMap::new(),
+            anim: HashSet::new(), anim_prev: HashMap::new(),
+            inspecting: HashSet::new(), highlight_owner: None,
+            tree_subs: HashSet::new(), tree_sent: HashMap::new(), notify,
+            overlay_conns: HashSet::new(), frame_detail_conns: HashSet::new(),
             auto_id_cache_threshold: std::env::var("GLYX_DEVTOOLS_AUTOID_CACHE_THRESHOLD").ok()
                 .and_then(|v| v.trim().parse().ok()).unwrap_or(DEFAULT_AUTO_ID_CACHE_THRESHOLD),
             tick_scheduled: Arc::new(AtomicBool::new(false)), tokio: handle.clone(),
@@ -140,7 +192,25 @@ impl Devtools {
         for conn in self.server.take_closed() {
             self.console.remove(&conn);
             self.damage.remove(&conn);
+            self.frames.remove(&conn);
+            self.anim.remove(&conn);
+            self.tree_subs.remove(&conn);
             self.waits.retain(|w| w.conn != conn);
+            if self.inspecting.remove(&conn) && self.inspecting.is_empty() {
+                set_inspect_mode(windows, false);
+            }
+            if self.overlay_conns.remove(&conn) && self.overlay_conns.is_empty() {
+                for s in windows.values_mut() { s.paint_flash = false; }
+            }
+            if self.frame_detail_conns.remove(&conn) && self.frame_detail_conns.is_empty() {
+                for s in windows.values_mut() { s.frame_details = None; }
+            }
+            if self.highlight_owner == Some(conn) {
+                self.highlight_owner = None;
+                for s in windows.values_mut() {
+                    if s.devtools_highlight.take().is_some() { s.window.request_redraw(); }
+                }
+            }
         }
         for Incoming { conn, mut request } in self.server.poll() {
             // `{ id: "…" }` selects by element ID: resolve it to the node now,
@@ -176,14 +246,26 @@ impl Devtools {
         }
         self.settle_waits(windows);
         self.forward_damage(windows);
-        if self.console.is_empty() {
-            self.logs = None;
-        } else if let Some(rx) = &self.logs {
+        self.forward_frames(windows);
+        self.forward_motion(windows);
+        self.forward_inspect(windows);
+        self.forward_tree(windows);
+        // Streams need a wake-up after changes that happen mid-redraw.
+        let streaming = !(self.tree_subs.is_empty() && self.frames.is_empty() && self.anim.is_empty() && self.damage.is_empty());
+        for s in windows.values_mut() {
+            if streaming != s.devtools_notify.is_some() {
+                s.devtools_notify = streaming.then(|| Arc::clone(&self.notify));
+            }
+        }
+        if let Some(rx) = &self.logs {
             for e in rx.try_iter() {
-                let params = json!({ "level": e.level, "text": e.text, "timestamp": e.timestamp_ms });
+                self.log_seq += 1;
+                let params = json!({ "seq": self.log_seq, "level": e.level, "text": e.text, "timestamp": e.timestamp_ms });
                 for &c in &self.console {
                     self.server.send_event(c, "Console.messageAdded", e.window_id, params.clone());
                 }
+                if self.backlog.len() == CONSOLE_BACKLOG { self.backlog.pop_front(); }
+                self.backlog.push_back((self.log_seq, e));
             }
         }
     }
@@ -202,6 +284,17 @@ impl Devtools {
             };
             // An element ID resolves to whichever node carries it right now
             // (none yet → matches nothing, so "gone" holds and "exists" waits).
+            if w.settle {
+                if perf::running_motion(s).is_empty() {
+                    server.respond(w.conn, &w.id, Ok(json!({ "settled": true })));
+                    return false;
+                }
+                if now >= w.deadline {
+                    server.respond(w.conn, &w.id, Err(ErrorBody::new(codes::TIMEOUT, "still animating")));
+                    return false;
+                }
+                return true;
+            }
             let mut query = w.query.clone();
             if let Some(auto_id) = query.auto_id.take() {
                 query.node_id = Some(resolve_auto_id(s, &auto_id, threshold).unwrap_or(u32::MAX));
@@ -224,6 +317,91 @@ impl Devtools {
                 flag.store(false, Ordering::Release);
                 let _ = proxy.send_event(GlyxUserEvent::Wake);
             });
+        }
+    }
+
+    /// Select-mode picks and cancels → `Inspector.nodePicked` /
+    /// `inspectModeChanged` to the clients inspecting. A pick ends select
+    /// mode (like browser devtools); the picked element stays outlined.
+    fn forward_inspect(&mut self, windows: &mut HashMap<u32, PerWindowState>) {
+        // (window, picked element or None for a cancel)
+        let mut ends: Vec<(u32, Option<u32>)> = Vec::new();
+        for (&win, s) in windows.iter_mut() {
+            for e in std::mem::take(&mut s.inspect_events) {
+                match e {
+                    crate::state::InspectEvent::Picked(id) => {
+                        let mut node = inspect::node_summary(s, id);
+                        node["path"] = json!(inspect::path_to(&s.js_nodes, id));
+                        add_node_info(s, &mut node, self.auto_id_cache_threshold);
+                        for &c in &self.inspecting { self.server.send_event(c, "Inspector.nodePicked", Some(win), node.clone()); }
+                        ends.push((win, Some(id)));
+                    }
+                    crate::state::InspectEvent::Cancelled => ends.push((win, None)),
+                }
+            }
+        }
+        let Some(&(win, picked)) = ends.last() else { return };
+        let params = json!({ "enabled": false, "reason": if picked.is_some() { "picked" } else { "cancelled" } });
+        for &c in &self.inspecting { self.server.send_event(c, "Inspector.inspectModeChanged", Some(win), params.clone()); }
+        // Select mode is over for everyone: forget who asked, or a later
+        // request + disconnect by someone else would leave it on (the app
+        // would keep swallowing clicks).
+        self.inspecting.clear();
+        set_inspect_mode(windows, false);
+        // Keep the picked element outlined, as browser devtools do.
+        if let (Some(id), Some(s)) = (picked, windows.get_mut(&win)) {
+            s.devtools_highlight = Some(id);
+            s.window.request_redraw();
+        }
+    }
+
+    /// `Inspector.treeChanged` when a window's element tree changed since the
+    /// last announcement (at most once per pump, so once per frame).
+    fn forward_tree(&mut self, windows: &HashMap<u32, PerWindowState>) {
+        if self.tree_subs.is_empty() { self.tree_sent.clear(); return; }
+        for (&win, s) in windows {
+            let sent = self.tree_sent.entry(win).or_insert(s.tree_version);
+            if *sent != s.tree_version {
+                *sent = s.tree_version;
+                let params = json!({ "version": s.tree_version });
+                for &c in &self.tree_subs { self.server.send_event(c, "Inspector.treeChanged", Some(win), params.clone()); }
+            }
+        }
+    }
+
+    /// `Performance.frame` for every frame recorded since the last pump.
+    fn forward_frames(&mut self, windows: &HashMap<u32, PerWindowState>) {
+        if self.frames.is_empty() { self.frames_sent.clear(); return; }
+        for (&win, s) in windows {
+            let p = s.perf.lock();
+            let sent = self.frames_sent.entry(win).or_insert(p.frame_seq);
+            let new = (p.frame_seq - *sent).min(p.ring.len() as u64) as usize;
+            let skip = p.ring.len() - new;
+            for (i, f) in p.ring.iter().skip(skip).enumerate() {
+                let mut params = perf::frame_json(f);
+                params["seq"] = json!(*sent + 1 + i as u64);
+                for &c in &self.frames {
+                    self.server.send_event(c, "Performance.frame", Some(win), params.clone());
+                }
+            }
+            *sent = p.frame_seq;
+        }
+    }
+
+    /// Animation.started / ended / settled from the running-motion diff.
+    fn forward_motion(&mut self, windows: &HashMap<u32, PerWindowState>) {
+        if self.anim.is_empty() { self.anim_prev.clear(); return; }
+        for (&win, s) in windows {
+            let now = perf::running_motion(s);
+            let prev = self.anim_prev.entry(win).or_default();
+            let changes = perf::diff_motion(prev, &now);
+            let send = |name: &str, params: Value| {
+                for &c in &self.anim { self.server.send_event(c, name, Some(win), params.clone()); }
+            };
+            for (k, info) in &changes.started { send("Animation.started", perf::motion_json(k, info)); }
+            for k in &changes.ended { send("Animation.ended", json!({ "nodeId": k.node, "kind": k.kind })); }
+            if changes.settled { send("Animation.settled", json!({})); }
+            *prev = now.into_keys().collect();
         }
     }
 
@@ -282,7 +460,13 @@ impl Devtools {
                     .ok_or_else(|| ErrorBody::invalid_params("expression (string) is required"))?;
                 let id = target_window(req.window_id, windows)?;
                 let s = windows.get_mut(&id).expect("target_window checked it");
-                let out = s.runtime.eval(&evaluate_source(expr))
+                // `$0` = the element selected in the DevTools Inspector (its
+                // live React side: props, component), like browser devtools.
+                if let Some(node) = p.get("selectedNodeId").and_then(Value::as_u64) {
+                    let _ = s.runtime.eval(&format!(
+                        "globalThis.$0 = (typeof __glyx_devNode === 'function') ? __glyx_devNode({node}) : undefined;"));
+                }
+                let out = s.runtime.eval(&evaluate_source_with_preview(expr))
                     .map_err(|e| ErrorBody::new(codes::EVAL_FAILED, e.to_string()))?;
                 // Promise continuations and React commits scheduled by the
                 // snippet run now; a redraw applies any UI change it made.
@@ -291,9 +475,19 @@ impl Devtools {
                 parse_evaluate_result(&out)
             })().into(),
             ("Console", "enable") => {
-                if self.logs.is_none() { self.logs = Some(log_bus::subscribe()); }
                 self.console.insert(conn);
                 Ok(json!({})).into()
+            }
+            ("Console", "getMessages") => {
+                let since = p.get("since").and_then(Value::as_u64).unwrap_or(0);
+                let messages: Vec<Value> = self.backlog.iter().filter(|(n, _)| *n > since).map(|(n, e)| json!({
+                    "seq": n, "level": e.level, "text": e.text, "timestamp": e.timestamp_ms, "windowId": e.window_id,
+                })).collect();
+                Ok(json!({ "messages": messages, "lastSeq": self.log_seq })).into()
+            }
+            ("Console", "clear") => {
+                self.backlog.clear();
+                Ok(json!({ "lastSeq": self.log_seq })).into()
             }
             ("Console", "disable") => {
                 self.console.remove(&conn);
@@ -349,6 +543,7 @@ impl Devtools {
                 };
                 s.devtools_highlight = id;
                 s.window.request_redraw();
+                self.highlight_owner = id.map(|_| conn);
                 Ok(json!({ "nodeId": id }))
             })().into(),
             ("Inspector", "setNodeProp") => (|| {
@@ -366,6 +561,42 @@ impl Devtools {
                 s.window.request_redraw();
                 Ok(json!({ "nodeId": id, "name": name, "value": value }))
             })().into(),
+            ("Inspector", "setInspectMode") => {
+                let enabled = p.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                if enabled { self.inspecting.insert(conn); } else { self.inspecting.remove(&conn); }
+                let on = !self.inspecting.is_empty();
+                set_inspect_mode(windows, on);
+                Ok(json!({ "enabled": on })).into()
+            }
+            ("Inspector", "setOverlay") => {
+                let on = p.get("paintFlashing").and_then(Value::as_bool).unwrap_or(false);
+                if on { self.overlay_conns.insert(conn); } else { self.overlay_conns.remove(&conn); }
+                let any = !self.overlay_conns.is_empty();
+                for s in windows.values_mut() {
+                    s.paint_flash = any;
+                    if !any { s.flashes.clear(); }
+                    s.window.request_redraw();
+                }
+                Ok(json!({ "paintFlashing": any })).into()
+            }
+            ("Inspector", "enableTreeEvents") => {
+                self.tree_subs.insert(conn);
+                Ok(json!({})).into()
+            }
+            ("Inspector", "disableTreeEvents") => {
+                self.tree_subs.remove(&conn);
+                Ok(json!({})).into()
+            }
+            ("Inspector", "auditAccessibility") => (|| {
+                let s = window(req, windows)?;
+                let issues = inspect::audit(&s.js_nodes, s.js_root);
+                let count = |sev: &str| issues.iter().filter(|i| i.severity == sev).count();
+                Ok(json!({
+                    "issues": issues.iter().map(inspect::Issue::json).collect::<Vec<_>>(),
+                    "errors": count("error"),
+                    "warnings": count("warning"),
+                }))
+            })().into(),
             ("Inspector", "enableDamage") => {
                 self.damage.insert(conn);
                 for s in windows.values_mut() {
@@ -378,6 +609,99 @@ impl Devtools {
                 self.damage.remove(&conn);
                 Ok(json!({})).into()
             }
+            // ── Performance ────────────────────────────────────────────────
+            ("Performance", "snapshot") => (|| {
+                let s = window(req, windows)?;
+                Ok(perf::snapshot_json(&s.perf.lock()))
+            })().into(),
+            ("Performance", "getBudget") => (|| {
+                let s = window(req, windows)?;
+                Ok(json!({ "budgetMs": s.perf.lock().budget_ms }))
+            })().into(),
+            ("Performance", "setBudget") => (|| {
+                let ms = p.get("ms").and_then(Value::as_f64).filter(|m| *m > 0.0 && m.is_finite())
+                    .ok_or_else(|| ErrorBody::invalid_params("ms (positive number, e.g. 16.667) is required"))?;
+                let s = window(req, windows)?;
+                s.perf.lock().budget_ms = ms;
+                Ok(json!({ "budgetMs": ms }))
+            })().into(),
+            ("Performance", "getViolations") | ("Performance", "getLeakWarnings") => (|| {
+                let s = window(req, windows)?;
+                let since = p.get("since").and_then(Value::as_u64).unwrap_or(0);
+                let kind = if req.method == "getViolations" { "violation" } else { "leak" };
+                Ok(perf::history_json(&s.perf.lock(), kind, since))
+            })().into(),
+            ("Performance", "enableFrames") => {
+                self.frames.insert(conn);
+                if p.get("detail").and_then(Value::as_bool).unwrap_or(false) {
+                    self.frame_detail_conns.insert(conn);
+                    for s in windows.values_mut() {
+                        if s.frame_details.is_none() { s.frame_details = Some(std::collections::VecDeque::new()); }
+                    }
+                }
+                for s in windows.values() { s.window.request_redraw(); }
+                Ok(json!({})).into()
+            }
+            ("Performance", "disableFrames") => {
+                self.frames.remove(&conn);
+                if self.frame_detail_conns.remove(&conn) && self.frame_detail_conns.is_empty() {
+                    for s in windows.values_mut() { s.frame_details = None; }
+                }
+                Ok(json!({})).into()
+            }
+            ("Performance", "getFrameDetail") => (|| {
+                let win = target_window(req.window_id, windows)?;
+                let seq = p.get("seq").and_then(Value::as_u64)
+                    .ok_or_else(|| ErrorBody::invalid_params("seq (a Performance.frame seq) is required"))?;
+                let s = windows.get_mut(&win).expect("target_window checked it");
+                let Some(details) = s.frame_details.as_ref() else {
+                    return Err(ErrorBody::new(codes::UNSUPPORTED, "frame detail is off: call Performance.enableFrames { detail: true }"));
+                };
+                let Some(d) = details.iter().find(|d| d.seq == seq).cloned() else {
+                    return Ok(json!({ "seq": seq, "found": false }));
+                };
+                let mut dirty: Vec<Value> = d.dirty.iter()
+                    .filter(|id| s.js_nodes.contains_key(id))
+                    .map(|&id| inspect::node_summary(s, id)).collect();
+                let gone = d.dirty.len() - dirty.len();
+                let mut v = json!({ "nodes": dirty.split_off(0) });
+                add_node_info(s, &mut v, self.auto_id_cache_threshold);
+                Ok(json!({
+                    "seq": seq, "found": true, "damage": d.damage,
+                    "dirty": v["nodes"], "dirtyCount": d.dirty_total, "removedSince": gone,
+                }))
+            })().into(),
+
+            // ── Animation ──────────────────────────────────────────────────
+            ("Animation", "list") => (|| {
+                let s = window(req, windows)?;
+                let mut running: Vec<(perf::MotionKey, perf::MotionInfo)> = perf::running_motion(s).into_iter().collect();
+                running.sort_by_key(|(k, _)| (k.node, k.kind));
+                Ok(json!({ "running": running.iter().map(|(k, i)| perf::motion_json(k, i)).collect::<Vec<_>>() }))
+            })().into(),
+            ("Animation", "enable") => {
+                self.anim.insert(conn);
+                Ok(json!({})).into()
+            }
+            ("Animation", "disable") => {
+                self.anim.remove(&conn);
+                Ok(json!({})).into()
+            }
+            ("Animation", "waitForSettled") => {
+                match target_window(req.window_id, windows) {
+                    Err(e) => Reply::Now(Err(e)),
+                    Ok(win) => {
+                        let timeout = p.get("timeoutMs").and_then(Value::as_u64)
+                            .map(Duration::from_millis).unwrap_or(DEFAULT_WAIT).min(MAX_WAIT);
+                        self.waits.push(Wait {
+                            conn, id: req.id.clone(), window: win, query: Query::default(),
+                            condition: Condition::Exists, settle: true, deadline: Instant::now() + timeout,
+                        });
+                        Reply::Later
+                    }
+                }
+            }
+
             ("Inspector", "selectElement") => (|| {
                 let s = window(req, windows)?;
                 let (x, y) = point_param(p)?;
@@ -493,7 +817,7 @@ impl Devtools {
                 match prepared {
                     Err(e) => Reply::Now(Err(e)),
                     Ok((win, query, condition, timeout)) => {
-                        self.waits.push(Wait { conn, id: req.id.clone(), window: win, query, condition, deadline: Instant::now() + timeout });
+                        self.waits.push(Wait { conn, id: req.id.clone(), window: win, query, condition, settle: false, deadline: Instant::now() + timeout });
                         Reply::Later
                     }
                 }
@@ -506,6 +830,19 @@ impl Devtools {
 /// Add each node's React component (`"component": "Btn@app.jsx:104"`) to a
 /// response, from the host config's devtools-only map. One JS call per
 /// response; nothing is added if the app's React layer doesn't provide it.
+/// Select mode on or off in every window. Off also clears the hover
+/// outline, so the app looks normal again.
+fn set_inspect_mode(windows: &mut HashMap<u32, PerWindowState>, on: bool) {
+    for s in windows.values_mut() {
+        if s.inspect_mode != on {
+            s.inspect_mode = on;
+            if !on { s.devtools_highlight = None; }
+            s.inspect_events.clear();
+            s.window.request_redraw();
+        }
+    }
+}
+
 /// Whether this window is big enough to use the cached element IDs.
 fn use_id_cache(s: &PerWindowState, threshold: usize) -> bool {
     s.js_nodes.len() > threshold
@@ -650,6 +987,45 @@ pub(crate) fn evaluate_source(expr: &str) -> String {
     )
 }
 
+/// Structured preview of any JS value, for the DevTools Console: depth- and
+/// size-limited, safe with cycles, getters that throw, functions, Maps,
+/// Sets, Dates and Errors. Inlined into the evaluated snippet so it works on
+/// both engines without the app's JS.
+const PREVIEW_JS: &str = r#"function __p(v,d,seen){
+ var t=typeof v;
+ if(v===null)return{t:'null',v:'null'};
+ if(t==='undefined')return{t:'undefined',v:'undefined'};
+ if(t==='number'||t==='boolean'||t==='bigint')return{t:t,v:String(v)};
+ if(t==='string')return{t:'string',v:v.length>2000?v.slice(0,2000)+'…':v};
+ if(t==='symbol')return{t:'symbol',v:String(v)};
+ if(t==='function'){var s='';try{s=Function.prototype.toString.call(v).slice(0,120)}catch(e){}return{t:'function',v:'ƒ '+(v.name||'anonymous')+'()',src:s};}
+ if(seen.indexOf(v)>=0)return{t:'circular',v:'[Circular]'};
+ if(v instanceof Error)return{t:'error',v:String(v.stack||v)};
+ if(v instanceof Date)return{t:'date',v:isNaN(v)?'Invalid Date':v.toISOString()};
+ var ctor='Object';try{ctor=(v.constructor&&v.constructor.name)||'Object'}catch(e){}
+ if(d>=3){var n0=0;try{n0=Array.isArray(v)?v.length:Object.keys(v).length}catch(e){}return{t:Array.isArray(v)?'array':'object',ctor:ctor,n:n0,collapsed:true};}
+ seen=seen.concat([v]);
+ var MAX=50,out;
+ if(Array.isArray(v)){out=[];for(var i=0;i<Math.min(v.length,MAX);i++)out.push(__p(v[i],d+1,seen));return{t:'array',n:v.length,items:out,more:v.length>MAX};}
+ if(typeof Map!=='undefined'&&v instanceof Map){out=[];var k=0;v.forEach(function(val,key){if(k++<MAX)out.push([__p(key,d+1,seen),__p(val,d+1,seen)])});return{t:'map',n:v.size,entries:out,more:v.size>MAX};}
+ if(typeof Set!=='undefined'&&v instanceof Set){out=[];var k2=0;v.forEach(function(val){if(k2++<MAX)out.push(__p(val,d+1,seen))});return{t:'set',n:v.size,items:out,more:v.size>MAX};}
+ var keys=[];try{keys=Object.keys(v)}catch(e){}
+ out=[];for(var j=0;j<Math.min(keys.length,MAX);j++){var val;try{val=__p(v[keys[j]],d+1,seen)}catch(e){val={t:'error',v:'<'+e+'>'}}out.push([keys[j],val]);}
+ return{t:'object',ctor:ctor,n:keys.length,entries:out,more:keys.length>MAX};
+}"#;
+
+/// `Runtime.evaluate` for people: like `evaluate_source`, plus a structured
+/// `preview` of the result (see `PREVIEW_JS`).
+pub(crate) fn evaluate_source_with_preview(expr: &str) -> String {
+    let src = serde_json::to_string(expr).unwrap_or_else(|_| "\"\"".into());
+    format!(
+        "(function(){{{PREVIEW_JS}var r=(0,eval)({src});var o={{type:r===null?'null':Array.isArray(r)?'array':typeof r}};\
+         try{{var j=JSON.stringify(r);if(j!==undefined)o.value=JSON.parse(j);}}catch(e){{}}\
+         try{{o.description=String(r);}}catch(e){{o.description=o.type;}}\
+         try{{o.preview=__p(r,0,[]);}}catch(e){{}}return JSON.stringify(o);}})()"
+    )
+}
+
 pub(crate) fn parse_evaluate_result(out: &str) -> Result<Value, ErrorBody> {
     serde_json::from_str(out).map_err(|e| ErrorBody::new(codes::INTERNAL, format!("unreadable evaluate result: {e}")))
 }
@@ -664,6 +1040,13 @@ mod tests {
         assert_eq!(pick_window(Some(2), [3, 1, 2].into_iter()), Ok(2));
         assert_eq!(pick_window(Some(9), [1].into_iter()).unwrap_err().code, codes::NO_SUCH_WINDOW);
         assert_eq!(pick_window(None, std::iter::empty()).unwrap_err().code, codes::NO_SUCH_WINDOW);
+    }
+
+    #[test]
+    fn the_repl_wrapper_adds_a_preview() {
+        let src = evaluate_source_with_preview("({ a: 1 })");
+        assert!(src.contains("function __p(") && src.contains("o.preview=__p(r,0,[])"), "{src}");
+        assert!(src.contains(r#"(0,eval)("({ a: 1 })")"#));
     }
 
     #[test]
@@ -698,6 +1081,15 @@ mod tests {
                   "Inspector.getLayout", "Inspector.enableDamage"] {
             assert!(METHODS.contains(&m), "{m}");
         }
-        assert_eq!(EVENTS, ["Console.messageAdded", "Inspector.frameDamage"]);
+        for m in ["Inspector.setInspectMode", "Inspector.auditAccessibility", "Inspector.enableTreeEvents",
+                  "Inspector.setOverlay", "Performance.getFrameDetail",
+                  "Performance.snapshot", "Performance.setBudget", "Performance.getViolations",
+                  "Performance.enableFrames", "Animation.list", "Animation.waitForSettled"] {
+            assert!(METHODS.contains(&m), "{m}");
+        }
+        for e in ["Console.messageAdded", "Inspector.frameDamage", "Performance.frame",
+                  "Animation.started", "Animation.ended", "Animation.settled"] {
+            assert!(EVENTS.contains(&e), "{e}");
+        }
     }
 }

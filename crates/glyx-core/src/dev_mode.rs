@@ -496,20 +496,65 @@ pub(super) fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut AnyFrame)
     }
 }
 
+/// `[x, y, w, h]` cut to the window on whole pixels; `None` when nothing is
+/// left or a value isn't finite. Overlay rects come from layout / damage and
+/// can extend past the window (scrolling, animations); tiny-skia's
+/// anti-aliased thin-rect path asserts on some such inputs, so overlays only
+/// ever draw clamped, whole-pixel rects.
+#[cfg(feature = "dev")]
+fn clamp_to_window([x, y, w, h]: [f64; 4], win_w: f64, win_h: f64) -> Option<[f64; 4]> {
+    if ![x, y, w, h].iter().all(|v| v.is_finite()) { return None; }
+    let x0 = x.max(0.0).floor();
+    let y0 = y.max(0.0).floor();
+    let x1 = (x + w).min(win_w).ceil();
+    let y1 = (y + h).min(win_h).ceil();
+    (x1 - x0 >= 1.0 && y1 - y0 >= 1.0).then_some([x0, y0, x1 - x0, y1 - y0])
+}
+
+/// A `t`-pixel outline inside `[x, y, w, h]` (whole pixels; thin rects
+/// collapse to a fill).
+#[cfg(feature = "dev")]
+fn outline(frame: &mut AnyFrame, x: f64, y: f64, w: f64, h: f64, t: f64, color: peniko::Color) {
+    if w <= t * 2.0 || h <= t * 2.0 {
+        frame.fill_rect(x, y, w, h, color);
+        return;
+    }
+    frame.fill_rect(x, y, w, t, color);
+    frame.fill_rect(x, y + h - t, w, t, color);
+    frame.fill_rect(x, y + t, t, h - t * 2.0, color);
+    frame.fill_rect(x + w - t, y + t, t, h - t * 2.0, color);
+}
+
+/// Paint flashing: each redrawn area fades out over `FLASH_MS`. Keeps
+/// requesting frames until the last flash is gone.
+#[cfg(feature = "dev")]
+fn draw_paint_flashes(state: &mut PerWindowState, frame: &mut AnyFrame) {
+    const FLASH_MS: f64 = 400.0;
+    if state.flashes.is_empty() { return; }
+    let now = std::time::Instant::now();
+    state.flashes.retain(|(_, at)| now.duration_since(*at).as_secs_f64() * 1000.0 < FLASH_MS);
+    let (win_w, win_h) = (state.gpu.width() as f64, state.gpu.height() as f64);
+    for (rect, at) in &state.flashes {
+        let Some([x, y, w, h]) = clamp_to_window(*rect, win_w, win_h) else { continue };
+        let fade = 1.0 - now.duration_since(*at).as_secs_f64() * 1000.0 / FLASH_MS;
+        let a = |base: f64| (base * fade).clamp(0.0, 255.0) as u8;
+        frame.fill_rect(x, y, w, h, peniko::Color::from_rgba8(245, 158, 11, a(55.0)));
+        outline(frame, x, y, w, h, 2.0, peniko::Color::from_rgba8(245, 158, 11, a(220.0)));
+    }
+    if !state.flashes.is_empty() { (state.request_redraw)(); }
+}
+
 /// Devtools `Inspector.highlightNode`: a translucent fill, a 2 px outline
 /// and a `Type #id  w×h` tag, like browser devtools' element highlight.
 #[cfg(feature = "dev")]
 pub(super) fn draw_devtools_highlight(state: &mut PerWindowState, frame: &mut AnyFrame) {
+    draw_paint_flashes(state, frame);
     let Some(id) = state.devtools_highlight else { return };
-    let Some([x, y, w, h]) = state.runtime.layout_cache().lock().get(&id).copied() else { return };
-    let (x, y, w, h) = (x as f64, y as f64, w as f64, h as f64);
-    let fill = peniko::Color::from_rgba8(76, 154, 255, 60);
-    let edge = peniko::Color::from_rgba8(76, 154, 255, 230);
-    frame.fill_rect(x, y, w, h, fill);
-    frame.fill_rect(x, y, w, 2.0, edge);
-    frame.fill_rect(x, y + h - 2.0, w, 2.0, edge);
-    frame.fill_rect(x, y, 2.0, h, edge);
-    frame.fill_rect(x + w - 2.0, y, 2.0, h, edge);
+    let Some(r) = state.runtime.layout_cache().lock().get(&id).copied() else { return };
+    let (win_w, win_h) = (state.gpu.width() as f64, state.gpu.height() as f64);
+    let Some([x, y, w, h]) = clamp_to_window([r[0] as f64, r[1] as f64, r[2] as f64, r[3] as f64], win_w, win_h) else { return };
+    frame.fill_rect(x, y, w, h, peniko::Color::from_rgba8(76, 154, 255, 60));
+    outline(frame, x, y, w, h, 2.0, peniko::Color::from_rgba8(76, 154, 255, 230));
 
     let kind = state.js_nodes.get(&id)
         .map(|n| crate::devtools_inspect::type_name(&n.node_type)).unwrap_or("Node");
@@ -678,6 +723,16 @@ fn wrap_lines(text: &str, max_ch: usize) -> Vec<String> {
 #[cfg(all(test, feature = "dev"))]
 mod overlay_tests {
     use super::*;
+
+    #[test]
+    fn overlay_rects_are_clamped_to_the_window_on_whole_pixels() {
+        assert_eq!(clamp_to_window([10.4, 20.6, 30.2, 5.0], 100.0, 100.0), Some([10.0, 20.0, 31.0, 6.0]));
+        assert_eq!(clamp_to_window([-50.0, -50.0, 80.0, 80.0], 100.0, 100.0), Some([0.0, 0.0, 30.0, 30.0]));
+        assert_eq!(clamp_to_window([90.0, 90.0, 500.0, 500.0], 100.0, 100.0), Some([90.0, 90.0, 10.0, 10.0]));
+        assert_eq!(clamp_to_window([200.0, 0.0, 10.0, 10.0], 100.0, 100.0), None, "off-screen");
+        assert_eq!(clamp_to_window([0.0, 0.0, f64::NAN, 1.0], 100.0, 100.0), None);
+        assert_eq!(clamp_to_window([5.0, 5.0, 0.2, 0.2], 100.0, 100.0), Some([5.0, 5.0, 1.0, 1.0]));
+    }
 
     #[test]
     fn long_messages_wrap_at_word_boundaries() {

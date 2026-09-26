@@ -25,7 +25,27 @@ fn apply_devtools_env(cmd: &mut Command, port: Option<u16>) {
     }
 }
 
-pub(super) fn cmd_dev(inspect: Option<u16>, devtools: Option<u16>, p: pm::Pm, icupkg: Option<PathBuf>) -> Result<()> {
+/// The app has exited: its discovery file would only mislead DevTools.
+fn forget_devtools_file(devtools: Option<u16>) {
+    if devtools.is_some() {
+        if let Ok(dir) = std::env::current_dir() { let _ = std::fs::remove_file(dir.join(DEVTOOLS_FILE)); }
+    }
+}
+
+pub(super) fn cmd_dev(inspect: Option<u16>, devtools: Option<u16>, open: bool, p: pm::Pm, icupkg: Option<PathBuf>) -> Result<()> {
+    // `--open`: DevTools UI server for the lifetime of this command, opened
+    // on this app (it attaches once the app writes its discovery file).
+    let _devtools_ui = if open && devtools.is_some() {
+        let ui = super::cmd_inspect::DevtoolsUi::start(None)?;
+        let app = std::env::current_dir().map(|d| d.join(DEVTOOLS_FILE)).unwrap_or_else(|_| PathBuf::from(DEVTOOLS_FILE));
+        let url = ui.url(Some(&app));
+        println!("[glyx] DevTools: {url}");
+        super::cmd_inspect::open_url(&url);
+        Some(ui)
+    } else {
+        None
+    };
+
     let project_name = read_project_name()
         .context("Run `glyx dev` from the project root (where glyx.config.ts or package.json lives)")?;
 
@@ -89,6 +109,7 @@ pub(super) fn cmd_dev(inspect: Option<u16>, devtools: Option<u16>, p: pm::Pm, ic
         }
         apply_devtools_env(&mut cmd, devtools);
         let status = cmd.status().context("Failed to run `cargo run`; is Rust installed?")?;
+        forget_devtools_file(devtools);
         std::process::exit(status.code().unwrap_or(1));
     } else {
         // JS-only project: spawn the prebuilt glyx-runner (dev build with hot-reload)
@@ -141,6 +162,7 @@ pub(super) fn cmd_dev(inspect: Option<u16>, devtools: Option<u16>, p: pm::Pm, ic
         apply_devtools_env(&mut cmd, devtools);
         let status = cmd.status()
             .with_context(|| format!("Failed to launch {}", runner.display()))?;
+        forget_devtools_file(devtools);
         std::process::exit(status.code().unwrap_or(1));
     }
 }

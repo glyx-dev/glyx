@@ -23,6 +23,8 @@ pub(crate) struct SoftPresent {
     /// For frame pacing (see `pace`).
     window:       Arc<Window>,
     last_present: Option<std::time::Instant>,
+    /// How long the last `pace` slept (not work; excluded from present time).
+    last_pace: std::time::Duration,
     /// `window.maxFps` from config; `None` = monitor refresh rate.
     max_fps:      Option<u32>,
 }
@@ -42,9 +44,12 @@ impl SoftPresent {
         log::info!("glyx-core: software present active ({w}x{h}, no wgpu).");
         Ok(Self {
             _context: context, surface, width: w, height: h, last_frame: Vec::new(),
-            window, last_present: None, max_fps,
+            window, last_present: None, last_pace: std::time::Duration::ZERO, max_fps,
         })
     }
+
+    /// Milliseconds the last present spent sleeping for frame pacing.
+    pub fn last_pace_ms(&self) -> f64 { self.last_pace.as_secs_f64() * 1000.0 }
 
     pub fn width(&self)  -> u32 { self.width }
     pub fn height(&self) -> u32 { self.height }
@@ -96,9 +101,11 @@ impl SoftPresent {
             .clamp(30.0, 500.0)
             .min(self.max_fps.map_or(f64::INFINITY, f64::from));
         let interval = std::time::Duration::from_secs_f64(1.0 / hz);
+        self.last_pace = std::time::Duration::ZERO;
         if let Some(last) = self.last_present {
             let since = last.elapsed();
             if since < interval {
+                self.last_pace = interval - since;
                 std::thread::sleep(interval - since);
             }
         }

@@ -103,6 +103,8 @@ mod dev_mode;
 mod devtools;
 #[cfg(feature = "dev")]
 mod devtools_inspect;
+#[cfg(feature = "dev")]
+mod devtools_perf;
 mod scene;
 mod layout;
 mod render;
@@ -1588,6 +1590,22 @@ pub fn run(mut config: AppConfig) -> bool {
                     devtools_highlight: None,
                     #[cfg(feature = "dev")]
                     damage_log: None,
+                    #[cfg(feature = "dev")]
+                    inspect_mode: false,
+                    #[cfg(feature = "dev")]
+                    inspect_events: Vec::new(),
+                    #[cfg(feature = "dev")]
+                    tree_version: 0,
+                    #[cfg(feature = "dev")]
+                    devtools_notify: None,
+                    #[cfg(feature = "dev")]
+                    paint_flash: false,
+                    #[cfg(feature = "dev")]
+                    flashes: Vec::new(),
+                    #[cfg(feature = "dev")]
+                    overlay_was_drawn: false,
+                    #[cfg(feature = "dev")]
+                    frame_details: None,
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
                         start_dev_mode_worker(
@@ -1653,6 +1671,19 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Cursor movement ───────────────────────────────────────────
             ShellEvent::CursorMoved { window_handle, x, y } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    // Devtools select mode: outline what's under the pointer;
+                    // the app doesn't see the move.
+                    #[cfg(feature = "dev")]
+                    if s.inspect_mode {
+                        s.cursor_x = x as f32;
+                        s.cursor_y = y as f32;
+                        let hit = hit_test_solid(s, s.cursor_x, s.cursor_y);
+                        if hit != s.devtools_highlight {
+                            s.devtools_highlight = hit;
+                            (s.request_redraw)();
+                        }
+                        return;
+                    }
                     let prev_x = s.cursor_x;
                     let prev_y = s.cursor_y;
                     s.cursor_x = x as f32;
@@ -1696,6 +1727,18 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Mouse button ──────────────────────────────────────────────
             ShellEvent::MouseInput { window_handle, button, pressed } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    // Devtools select mode: a left click picks the element
+                    // under the pointer instead of reaching the app.
+                    #[cfg(feature = "dev")]
+                    if s.inspect_mode {
+                        if pressed && button == 0 {
+                            if let Some(hit) = hit_test_solid(s, s.cursor_x, s.cursor_y) {
+                                s.inspect_events.push(crate::state::InspectEvent::Picked(hit));
+                                (s.request_redraw)();
+                            }
+                        }
+                        return;
+                    }
                     // Matches JS clearing the ring on any click (events.js).
                     if pressed { s.focus_visible = false; }
                     // Native fallback close control (see CLOSE_BTN_SIZE doc)
@@ -1785,6 +1828,16 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Keyboard ──────────────────────────────────────────────────
             ShellEvent::KeyInput { window_handle, key, text, pressed } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    // Devtools select mode: Escape cancels it; other keys
+                    // don't reach the app meanwhile.
+                    #[cfg(feature = "dev")]
+                    if s.inspect_mode {
+                        if pressed && key == "Escape" {
+                            s.inspect_events.push(crate::state::InspectEvent::Cancelled);
+                            (s.request_redraw)();
+                        }
+                        return;
+                    }
                     // Same native fallback as the close control drawn/hit-tested
                     // above: Escape closes the app, but only while JS has never
                     // rendered a scene — never intercepts a real app's own
@@ -2053,6 +2106,8 @@ pub fn run(mut config: AppConfig) -> bool {
                         // terminal always gets the whole error, once.
                         if dev.last_js_error.as_deref() != Some(err.as_str()) {
                             log::error!("[JS] uncaught error:\n{err}");
+                            // …and to the console feed, so DevTools' Console shows it.
+                            glyx_runtime::log_bus::publish(Some(window_handle), &format!("[error] Uncaught {err}"));
                         }
                         dev.last_js_error = Some(err);
                     }
@@ -2241,6 +2296,9 @@ pub fn run(mut config: AppConfig) -> bool {
                         || d.last_js_error.is_some()                 // error banner active
                     }).unwrap_or(false);
                     scene_needs_gpu || overlay_refresh_due
+                        // Devtools overlays draw on top of the scene: render
+                        // while one is up, and once more after (to clear it).
+                        || s.devtools_highlight.is_some() || !s.flashes.is_empty() || s.overlay_was_drawn
                 };
                 #[cfg(not(feature = "dev"))]
                 let _needs_full_render = true;
@@ -2360,13 +2418,37 @@ pub fn run(mut config: AppConfig) -> bool {
                 // rect — captured during the previous render — to the damage
                 // union.  An idle focused editor repaints one input at 2 Hz,
                 // not the whole window.
+                // Devtools: what the app's own changes redraw this frame, on
+                // any renderer (paint flashing, frame detail). Only computed
+                // while one of them is on.
+                #[cfg(feature = "dev")]
+                let (app_damage, dirty_list): (Option<[f64; 4]>, Option<(Vec<u32>, usize)>) =
+                    if (s.paint_flash || s.frame_details.is_some()) && !s.dirty_nodes.is_empty() {
+                        let full = [0.0, 0.0, s.gpu.width() as f64, s.gpu.height() as f64];
+                        let area = scene::compute_frame_damage(s, &motion_overrides)
+                            .map(|(x, y, w, h)| [x, y, w, h]).unwrap_or(full);
+                        if s.paint_flash { s.flashes.push((area, Instant::now())); }
+                        let list = s.frame_details.is_some().then(|| {
+                            let mut ids: Vec<u32> = s.dirty_nodes.iter().copied().collect();
+                            ids.sort_unstable();
+                            let total = ids.len();
+                            ids.truncate(200);
+                            (ids, total)
+                        });
+                        (Some(area), list)
+                    } else {
+                        (None, None)
+                    };
+
                 let frame_damage: Option<(f64, f64, f64, f64)> = {
                     let soft = matches!(s.gpu, Present::Soft(_));
                     let splash_up = s.splash_state.as_ref().map_or(false, |sp| sp.is_visible());
                     #[cfg(feature = "dev")]
                     let overlay_up = s.dev_mode.as_ref()
                         .map_or(false, |d| d.overlay_visible || d.last_js_error.is_some())
-                        || s.devtools_highlight.is_some();
+                        || s.devtools_highlight.is_some()
+                        || !s.flashes.is_empty()
+                        || s.overlay_was_drawn;
                     #[cfg(not(feature = "dev"))]
                     let overlay_up = false;
 
@@ -2428,6 +2510,13 @@ pub fn run(mut config: AppConfig) -> bool {
                         });
                     }
                 }
+
+                // Render / present split for the perf record: render runs from
+                // here (frame building) to the present call; present is the
+                // hand-off to the OS minus any pacing sleep.
+                let render_start = Instant::now();
+                let mut present_ms = 0.0_f64;
+                let mut pace_ms = 0.0_f64;
 
                 let mut frame = match (&s.renderer, frame_damage) {
                     (glyx_renderer::AnyRenderer::TinySkia(_), Some(_)) => {
@@ -2642,7 +2731,10 @@ pub fn run(mut config: AppConfig) -> bool {
                 draw_error_overlay(s, &mut frame);
 
                 #[cfg(feature = "dev")]
-                dev_mode::draw_devtools_highlight(s, &mut frame);
+                {
+                    dev_mode::draw_devtools_highlight(s, &mut frame);
+                    s.overlay_was_drawn = s.devtools_highlight.is_some() || !s.flashes.is_empty();
+                }
 
                 // (overlay timer reschedule moved to before the blit-only fast path above)
 
@@ -2888,7 +2980,9 @@ pub fn run(mut config: AppConfig) -> bool {
                             }
                         }
 
+                        let t = Instant::now();
                         texture.present();
+                        present_ms = t.elapsed().as_secs_f64() * 1000.0;
                     }
                     Present::Soft(sp) => {
                         // CPU path: finalize the tiny-skia frame and blit it to
@@ -2903,7 +2997,10 @@ pub fn run(mut config: AppConfig) -> bool {
                             (glyx_renderer::AnyRenderer::TinySkia(r),
                              glyx_renderer::AnyFrame::TinySkia(f)) => {
                                 r.finish_frame_soft(f, |rgba, w, h, damage| {
+                                    let t = Instant::now();
                                     sp.present_rgba(rgba, w, h, damage);
+                                    pace_ms = sp.last_pace_ms();
+                                    present_ms = (t.elapsed().as_secs_f64() * 1000.0 - pace_ms).max(0.0);
                                 });
                             }
                             _ => {
@@ -2949,7 +3046,9 @@ pub fn run(mut config: AppConfig) -> bool {
                                     log::error!("Direct2D render error: {e}");
                                     return;
                                 }
+                                let t = Instant::now();
                                 dp.present();
+                                present_ms = t.elapsed().as_secs_f64() * 1000.0;
                             }
                             _ => {
                                 log::error!("Direct2D present requires the Direct2D renderer");
@@ -2958,6 +3057,11 @@ pub fn run(mut config: AppConfig) -> bool {
                         }
                     }
                 }
+
+                let render_ms = (render_start.elapsed().as_secs_f64() * 1000.0 - present_ms - pace_ms).max(0.0);
+                let (win_w, win_h) = (s.gpu.width() as u64, s.gpu.height() as u64);
+                let damage_px = frame_damage.map_or(win_w * win_h, |(_, _, w, h)| (w.max(0.0) * h.max(0.0)) as u64);
+                let animating = (s.transitions.len() + s.animations.values().filter(|a| !a.settled).count()) as u32;
 
                 // Pre-init splash handoff: the main window's first real frame
                 // has now actually rendered and presented (we just did it,
@@ -3070,6 +3174,7 @@ pub fn run(mut config: AppConfig) -> bool {
 
                     perf.push(glyx_perf::PerfFrame {
                         frame_time_ms,
+                        work_ms: (frame_start.elapsed().as_secs_f64() * 1000.0 - pace_ms).max(0.001),
                         js_time_ms,
                         layout_time_ms,
                         gpu_time_ms,
@@ -3082,7 +3187,21 @@ pub fn run(mut config: AppConfig) -> bool {
                         gpu_reserved_bytes: gpu_reserved_bytes,
                         gpu_buffer_count:   gpu_buf_count,
                         gpu_texture_count:  gpu_tex_count,
+                        render_ms,
+                        present_ms,
+                        damage_px,
+                        partial: frame_damage.is_some(),
+                        animating,
                     });
+                    #[cfg(feature = "dev")]
+                    if let Some(details) = s.frame_details.as_mut() {
+                        if let Some((dirty, dirty_total)) = dirty_list {
+                            if details.len() == 300 { details.pop_front(); }
+                            details.push_back(crate::state::FrameDetail { seq: perf.frame_seq, dirty, dirty_total, damage: app_damage });
+                        }
+                    }
+                    #[cfg(feature = "dev")]
+                    if let Some(notify) = &s.devtools_notify { notify(); }
                 } else {
                     s.perf.lock().last_frame_at = Some(frame_start);
                 }

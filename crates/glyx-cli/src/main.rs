@@ -14,6 +14,7 @@ use std::process::Command;
 
 mod cmd_create;
 mod cmd_dev;
+mod cmd_inspect;
 mod cmd_build;
 mod cmd_package;
 mod icu_trim;
@@ -54,6 +55,8 @@ static DEFAULT_ICON_PNG: &[u8] = include_bytes!("../../../assets/glyx.png");
         glyx dev                              Run with hot reload\n  \
         glyx dev --inspect                    Attach Chrome DevTools (port 9229)\n  \
         glyx dev --devtools                   Serve the Glyx DevTools Protocol (port 9228)\n  \
+        glyx dev --devtools --open            …and open Glyx DevTools on it\n  \
+        glyx inspect                          Open Glyx DevTools for running apps\n  \
         glyx build                            Self-contained release binary\n  \
         glyx build --check-performance        Build + enforce 60fps frame budget\n  \
         glyx package --installer              Native installer for this OS\n\n\
@@ -126,6 +129,23 @@ enum Commands {
         /// target/glyx/devtools.json.
         #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "9228")]
         devtools: Option<u16>,
+        /// With --devtools: open Glyx DevTools in the browser, attached to
+        /// this app.
+        #[arg(long, requires = "devtools")]
+        open: bool,
+    },
+    /// Open Glyx DevTools: inspect, profile and drive running dev apps
+    ///
+    /// Serves the DevTools UI on 127.0.0.1 and lists the apps started with
+    /// `glyx dev --devtools` in this project, its subfolders, or anywhere
+    /// with GLYX_DEVTOOLS_PORT set.
+    Inspect {
+        /// Port for the DevTools page (default 9227, or any free one).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Print the address without opening a browser.
+        #[arg(long)]
+        no_open: bool,
     },
     /// Produce a production build
     ///
@@ -350,7 +370,8 @@ fn run() -> Result<()> {
 
     match cli.command {
         Commands::Create { name, native, template } => cmd_create(&name, native, &template, pm),
-        Commands::Dev { inspect, devtools } => cmd_dev(inspect, devtools, pm, cli.icupkg.clone()),
+        Commands::Dev { inspect, devtools, open } => cmd_dev(inspect, devtools, open, pm, cli.icupkg.clone()),
+        Commands::Inspect { port, no_open } => cmd_inspect::cmd_inspect(port, no_open),
         Commands::Build { target, snapshot: _, bundle, portable, check_performance, perf_budget, perf_duration } => {
             let mode = if bundle { "bundle" } else if portable { "portable" } else { "snapshot" };
             cmd_build(target.as_deref(), mode, check_performance, perf_budget, perf_duration, pm, cli.icupkg.clone())

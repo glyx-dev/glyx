@@ -545,6 +545,105 @@ pub(crate) fn a11y_tree(s: &mut PerWindowState) -> Option<Value> {
     Some(json!({ "focus": update.focus.0, "root": walk(root, &nodes, 0) }))
 }
 
+// ── Accessibility audit ─────────────────────────────────────────────────────
+
+/// One problem `Inspector.auditAccessibility` found.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Issue {
+    pub node: u32,
+    /// `pressable-name`, `image-name`, `contrast`, `focusable-role`.
+    pub rule: &'static str,
+    /// `error` (blocks people) or `warning`.
+    pub severity: &'static str,
+    pub message: String,
+}
+
+impl Issue {
+    pub(crate) fn json(&self) -> Value {
+        json!({ "nodeId": self.node, "rule": self.rule, "severity": self.severity, "message": self.message })
+    }
+}
+
+/// WCAG relative luminance of an sRGB colour.
+fn luminance([r, g, b, _]: [u8; 4]) -> f64 {
+    let ch = |c: u8| {
+        let c = c as f64 / 255.0;
+        if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+}
+
+/// `fg` (possibly translucent) drawn over the opaque `bg`.
+fn blend(fg: [u8; 4], bg: [u8; 4]) -> [u8; 4] {
+    let a = fg[3] as f64 / 255.0;
+    let mix = |f: u8, b: u8| (f as f64 * a + b as f64 * (1.0 - a)).round() as u8;
+    [mix(fg[0], bg[0]), mix(fg[1], bg[1]), mix(fg[2], bg[2]), 255]
+}
+
+/// WCAG contrast ratio of text colour `fg` on background `bg` (1–21).
+pub(crate) fn contrast_ratio(fg: [u8; 4], bg: [u8; 4]) -> f64 {
+    let (a, b) = (luminance(blend(fg, bg)), luminance(bg));
+    let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// Has visible text somewhere in its subtree (a name for screen readers).
+fn has_text(nodes: &HashMap<u32, JsNode>, id: u32, depth: u32) -> bool {
+    let Some(n) = nodes.get(&id) else { return false };
+    if n.props.text.as_deref().is_some_and(|t| !t.trim().is_empty()) { return true; }
+    depth < 16 && n.children.iter().any(|&c| has_text(nodes, c, depth + 1))
+}
+
+/// The nearest opaque background at or above `id`.
+fn background(nodes: &HashMap<u32, JsNode>, id: u32) -> Option<[u8; 4]> {
+    let mut cur = Some(id);
+    for _ in 0..64 {
+        let n = nodes.get(&cur?)?;
+        if let Some(bg) = n.props.background_color.filter(|c| c[3] == 255) { return Some(bg); }
+        cur = n.parent;
+    }
+    None
+}
+
+/// Problems a screen-reader or low-vision user would hit, from the element
+/// props alone (so it works without the `a11y` feature).
+pub(crate) fn audit(nodes: &HashMap<u32, JsNode>, root: Option<u32>) -> Vec<Issue> {
+    let mut out = Vec::new();
+    let named = |n: &JsNode| n.props.aria_label.as_deref().is_some_and(|l| !l.trim().is_empty());
+    let hidden_role = |n: &JsNode| matches!(n.props.role.as_deref(), Some("none" | "presentation"));
+    for id in attached(nodes, root) {
+        let n = &nodes[&id];
+        if hidden_role(n) { continue; }
+        if n.props.pressable == Some(true) && !named(n) && !has_text(nodes, id, 0) {
+            out.push(Issue { node: id, rule: "pressable-name", severity: "error",
+                message: "Pressable with no text or ariaLabel: screen readers announce it as an unnamed button.".into() });
+        }
+        if matches!(n.node_type, NodeType::Image) && !named(n) {
+            out.push(Issue { node: id, rule: "image-name", severity: "warning",
+                message: "Image with no ariaLabel (use role=\"presentation\" if it's decorative).".into() });
+        }
+        if let (NodeType::Text, Some(fg), true) = (&n.node_type, n.props.color, n.props.text.as_deref().is_some_and(|t| !t.trim().is_empty())) {
+            if let Some(bg) = background(nodes, id) {
+                let ratio = contrast_ratio(fg, bg);
+                let size = n.props.font_size.unwrap_or(14.0);
+                let bold = n.props.font_weight.as_deref().is_some_and(|w| w == "bold" || w.parse::<u32>().is_ok_and(|v| v >= 700));
+                let large = size >= 24.0 || (bold && size >= 18.66);
+                let need = if large { 3.0 } else { 4.5 };
+                if ratio < need {
+                    out.push(Issue { node: id, rule: "contrast", severity: if ratio < 3.0 { "error" } else { "warning" },
+                        message: format!("Text contrast {ratio:.2}:1 against its background; needs {need}:1 for {} text.",
+                            if large { "large" } else { "normal" }) });
+                }
+            }
+        }
+        if n.props.focusable == Some(true) && n.props.role.is_none() && n.props.pressable != Some(true) {
+            out.push(Issue { node: id, rule: "focusable-role", severity: "warning",
+                message: "Focusable with no role: screen readers can't say what it is.".into() });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,6 +800,38 @@ mod tests {
         assert_eq!(v["node"]["component"], "Btn@app.jsx:104");
         assert!(v.get("component").is_none());
         assert!(names_script(&[1, 2]).contains("__glyx_devNodeNames([1,2])"));
+    }
+
+    #[test]
+    fn contrast_matches_wcag_reference_values() {
+        let black = [0, 0, 0, 255];
+        let white = [255, 255, 255, 255];
+        assert!((contrast_ratio(black, white) - 21.0).abs() < 0.01);
+        assert!((contrast_ratio(white, white) - 1.0).abs() < 0.01);
+        // #777 on white ≈ 4.48:1, just under AA.
+        assert!((contrast_ratio([0x77, 0x77, 0x77, 255], white) - 4.48).abs() < 0.02);
+        // 50%-transparent black on white is a mid grey.
+        let half = contrast_ratio([0, 0, 0, 128], white);
+        assert!(half > 3.0 && half < 5.0, "{half}");
+    }
+
+    #[test]
+    fn the_audit_flags_unnamed_controls_images_and_low_contrast() {
+        let p = |f: fn(&mut NodeProps)| { let mut x = NodeProps::default(); f(&mut x); x };
+        let mut m = HashMap::new();
+        m.insert(1, node(NodeType::View, p(|x| x.background_color = Some([255, 255, 255, 255])), &[2, 3, 5, 6, 7, 8], None));
+        m.insert(2, node(NodeType::View, p(|x| x.pressable = Some(true)), &[], Some(1)));                        // unnamed
+        m.insert(3, node(NodeType::View, p(|x| x.pressable = Some(true)), &[4], Some(1)));                       // named by text
+        m.insert(4, node(NodeType::Text, p(|x| { x.text = Some("OK".into()); x.color = Some([0, 0, 0, 255]); }), &[], Some(3)));
+        m.insert(5, node(NodeType::Image, NodeProps::default(), &[], Some(1)));                                   // unnamed image
+        m.insert(6, node(NodeType::Text, p(|x| { x.text = Some("faint".into()); x.color = Some([0xbb, 0xbb, 0xbb, 255]); }), &[], Some(1)));
+        m.insert(7, node(NodeType::Text, p(|x| { x.text = Some("big".into()); x.color = Some([0x88, 0x88, 0x88, 255]); x.font_size = Some(28.0); }), &[], Some(1)));
+        m.insert(8, node(NodeType::View, p(|x| { x.pressable = Some(true); x.aria_label = Some("Close".into()); }), &[], Some(1)));
+        let issues = audit(&m, Some(1));
+        let found: Vec<(u32, &str)> = issues.iter().map(|i| (i.node, i.rule)).collect();
+        assert_eq!(found, vec![(2, "pressable-name"), (5, "image-name"), (6, "contrast")], "{issues:#?}");
+        assert_eq!(issues[2].severity, "error", "#bbb on white is under 3:1");
+        assert!(issues[2].message.contains(":1"));
     }
 
     #[test]

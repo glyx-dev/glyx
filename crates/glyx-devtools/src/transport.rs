@@ -154,6 +154,9 @@ async fn accept_loop(listener: tokio::net::TcpListener, shared: Arc<Shared>) {
             Ok(s) => s,
             Err(e) => { log::warn!("[GDP] accept error: {e}"); continue; }
         };
+        // Small request/response frames: without this, Nagle + delayed ACK
+        // add ~40 ms to many round trips.
+        let _ = stream.set_nodelay(true);
         tokio::spawn(serve(stream, Arc::clone(&shared)));
     }
 }

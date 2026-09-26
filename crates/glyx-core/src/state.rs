@@ -423,6 +423,40 @@ pub(super) struct PerWindowState {
     /// (`Inspector.enableDamage`); `None` otherwise, so nothing is kept.
     #[cfg(feature = "dev")]
     pub(super) damage_log: Option<Vec<DamageRecord>>,
+    /// Devtools select mode (`Inspector.setInspectMode`): pointer moves
+    /// outline the element under the pointer, a left click picks it instead
+    /// of reaching the app, Escape cancels.
+    #[cfg(feature = "dev")]
+    pub(super) inspect_mode: bool,
+    /// Picks and cancels from select mode, drained by the devtools pump.
+    #[cfg(feature = "dev")]
+    pub(super) inspect_events: Vec<InspectEvent>,
+    /// Bumped whenever scene commands change the element tree, so devtools
+    /// can tell the Inspector to refresh (`Inspector.treeChanged`).
+    #[cfg(feature = "dev")]
+    pub(super) tree_version: u64,
+    /// Set by devtools while a client subscribes to a stream (tree, frames,
+    /// animations, damage): called when the tree changes or a frame is
+    /// recorded, it wakes the event loop once more so the change is sent
+    /// even if the app then goes idle. `None` otherwise (costs nothing).
+    #[cfg(feature = "dev")]
+    pub(super) devtools_notify: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    /// Devtools paint flashing (`Inspector.setOverlay { paintFlashing }`):
+    /// each frame's redrawn area flashes briefly.
+    #[cfg(feature = "dev")]
+    pub(super) paint_flash: bool,
+    /// Flashes still fading: area `[x, y, w, h]` and when it was drawn.
+    #[cfg(feature = "dev")]
+    pub(super) flashes: Vec<([f64; 4], std::time::Instant)>,
+    /// A devtools overlay (highlight, paint flashes) was drawn last frame:
+    /// the next frame renders the whole window, so partial redraws never
+    /// leave stale overlay pixels behind once it's gone.
+    #[cfg(feature = "dev")]
+    pub(super) overlay_was_drawn: bool,
+    /// Per-frame "why did this render" records while a devtools client
+    /// streams frames with detail (`Performance.enableFrames { detail }`).
+    #[cfg(feature = "dev")]
+    pub(super) frame_details: Option<std::collections::VecDeque<FrameDetail>>,
 }
 
 impl PerWindowState {
@@ -493,6 +527,27 @@ pub(super) enum DevBuildEvent {
         prefix:      Option<String>,
         bundled_js:  String,
     },
+}
+
+/// What one frame redrew and why (devtools `Performance.getFrameDetail`).
+#[cfg(feature = "dev")]
+#[derive(Debug, Clone)]
+pub(crate) struct FrameDetail {
+    /// The perf record's `frame_seq`.
+    pub seq: u64,
+    /// Elements marked dirty for this frame (capped).
+    pub dirty: Vec<u32>,
+    pub dirty_total: usize,
+    /// The redrawn area the dirty elements add up to; `None` = whole window.
+    pub damage: Option<[f64; 4]>,
+}
+
+/// Something the user did in devtools select mode.
+#[cfg(feature = "dev")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum InspectEvent {
+    Picked(u32),
+    Cancelled,
 }
 
 /// One rendered frame's damage, for the devtools damage stream.

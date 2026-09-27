@@ -219,19 +219,50 @@ fn raw_cmd_with_args(bin: &str, args: &[&str]) -> Command {
 /// `minify`     — set to true for production bundles
 /// `source_map` — inline source map (useful for dev + crash reports)
 pub fn js_bundle(
-    _pm:        Pm,
+    pm:         Pm,
     entry:      &str,
     output:     &str,
     minify:     bool,
     source_map: bool,
     strip_test_ids: bool,
 ) -> Result<()> {
+    js_bundle_with_react(pm, entry, output, minify, source_map, strip_test_ids, ReactBuild::Production)
+}
+
+/// Which React build a bundle gets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReactBuild {
+    /// Fast, no dev checks. Every build except `glyx dev --devtools`.
+    Production,
+    /// React's development build: its warnings, and the render timings the
+    /// DevTools CPU profiler's Components view needs. `glyx dev --devtools`.
+    Development,
+}
+
+impl ReactBuild {
+    pub fn node_env_define(self) -> &'static str {
+        match self {
+            ReactBuild::Production => "process.env.NODE_ENV='production'",
+            ReactBuild::Development => "process.env.NODE_ENV='development'",
+        }
+    }
+}
+
+pub fn js_bundle_with_react(
+    _pm:        Pm,
+    entry:      &str,
+    output:     &str,
+    minify:     bool,
+    source_map: bool,
+    strip_test_ids: bool,
+    react:      ReactBuild,
+) -> Result<()> {
     let mut args = vec![
         "build".to_string(), entry.to_string(),
         "--outfile".to_string(), output.to_string(),
         "--target".to_string(), "browser".to_string(),
         "--format".to_string(), "iife".to_string(),
-        "--define".to_string(), "process.env.NODE_ENV='production'".to_string(),
+        "--define".to_string(), react.node_env_define().to_string(),
     ];
     if minify     { args.push("--minify".to_string()); }
     // Release builds: the React host config drops `testID` props before they

@@ -329,11 +329,13 @@ impl MotionClock {
         self.virt_base + real.saturating_duration_since(self.real_base).mul_f64(self.rate)
     }
 
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools only
     pub(crate) fn rate(&self) -> f64 { self.rate }
 
     /// Paused: animations hold still, and don't need frames.
     pub(crate) fn paused(&self) -> bool { self.rate == 0.0 }
 
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools only
     pub(crate) fn set_rate(&mut self, rate: f64) { self.rebase(Instant::now(), rate); }
 
     fn rebase(&mut self, real: Instant, rate: f64) {
@@ -343,6 +345,7 @@ impl MotionClock {
     }
 
     /// Move the clock by `ms` (negative = back).
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools only
     pub(crate) fn seek_by(&mut self, ms: f64) {
         let real = Instant::now();
         let rate = self.rate;
@@ -399,6 +402,7 @@ impl Transition {
     }
 
     /// The properties this transition animates (camelCase, as in JSX).
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools only
     pub(crate) fn properties(&self) -> Vec<&'static str> {
         let mut out = Vec::new();
         if self.opacity.is_some() { out.push("opacity"); }

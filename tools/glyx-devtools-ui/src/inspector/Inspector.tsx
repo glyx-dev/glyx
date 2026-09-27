@@ -11,7 +11,7 @@ interface Props {
   windowId: number | undefined;
 }
 
-interface Issue { nodeId: number; id?: string; rule: string; severity: string; message: string; component?: string }
+import { collapse, groupIssues, textSummary, type Issue } from './audit';
 
 /** Remembered across reloads: which element was selected (by element ID). */
 const SAVED_SELECTION = 'gx-devtools-selection';
@@ -170,7 +170,7 @@ export function Inspector({ client, status, windowId }: Props) {
           <div className="tabs" role="tablist">
             <button role="tab" aria-selected={tab === 'details'} className={tab === 'details' ? 'active' : ''} onClick={() => setTab('details')}>Details</button>
             <button role="tab" aria-selected={tab === 'a11y'} className={tab === 'a11y' ? 'active' : ''} onClick={() => setTab('a11y')}>
-              Accessibility{audit && audit.errors + audit.warnings > 0 ? <span className="count">{audit.errors + audit.warnings}</span> : null}
+              Accessibility{audit && audit.errors + audit.warnings > 0 ? <span className={`count${audit.errors ? '' : ' warn'}`}>{audit.errors + audit.warnings}</span> : null}
             </button>
           </div>
           {tab === 'details'
@@ -185,18 +185,65 @@ export function Inspector({ client, status, windowId }: Props) {
 }
 
 function AuditList({ audit, onPick }: { audit: { issues: Issue[]; errors: number; warnings: number } | null; onPick: (i: Issue) => void }) {
+  const [open, setOpen] = useState<Record<string, boolean>>({});
+  const groups = useMemo(() => groupIssues(audit?.issues ?? []), [audit]);
   if (!audit) return <p className="muted pad">Checking…</p>;
-  if (!audit.issues.length) return <p className="pad">No accessibility issues found. <span className="muted">Checked: unnamed pressables and images, text contrast, focusable elements without a role.</span></p>;
+  if (!audit.issues.length) return (
+    <div className="pad audit-ok">
+      <strong>No accessibility issues found.</strong>
+      <p className="muted small">Checked: buttons and images without a name, text contrast, focusable elements without a role. Re-checked whenever the UI changes.</p>
+    </div>
+  );
   return (
     <div className="audit">
-      <p className="muted pad small">{audit.errors} error{audit.errors === 1 ? '' : 's'}, {audit.warnings} warning{audit.warnings === 1 ? '' : 's'}</p>
-      {audit.issues.map((i, k) => (
-        <button key={k} className={`issue-row issue-${i.severity}`} onClick={() => onPick(i)}>
-          <span className="issue-sev">{i.severity}</span>
-          <span className="issue-msg">{i.message}</span>
-          <span className="issue-where mono">{i.component ?? i.id}</span>
-        </button>
-      ))}
+      <p className="muted pad small audit-sum">
+        {groups.length} kind{groups.length === 1 ? '' : 's'} of issue · {audit.errors} error{audit.errors === 1 ? '' : 's'}, {audit.warnings} warning{audit.warnings === 1 ? '' : 's'} · re-checked as the UI changes
+      </p>
+      {groups.map((g) => {
+        const all = open[g.rule];
+        const rows = collapse(g.issues);
+        const shown = all ? rows : rows.slice(0, 5);
+        return (
+          <section key={g.rule} className={`audit-group sev-${g.severity}`}>
+            <header>
+              <span className="audit-dot" aria-hidden="true" />
+              <strong>{g.title}</strong>
+              <span className="audit-count">{g.issues.length}</span>
+            </header>
+            {g.fix && <p className="audit-fix small muted">{g.fix}</p>}
+            {shown.map((r) => {
+              const expanded = open[r.key];
+              return (
+                <div key={r.key} className="audit-row">
+                  <button className={`issue-row issue-${r.severity}`} onClick={() => onPick(r.issues[0])} title={r.issues[0].message}>
+                    <span className="issue-where">
+                      <span className="mono">{r.component}</span>
+                      {r.texts.length > 0 && <span className="audit-text">{textSummary(r.texts)}</span>}
+                    </span>
+                    <span className="issue-msg">{r.detail}{r.issues.length > 1 && <span className="audit-times">×{r.issues.length}</span>}</span>
+                  </button>
+                  {r.issues.length > 1 && (
+                    <button className="link small audit-expand" onClick={() => setOpen((o) => ({ ...o, [r.key]: !expanded }))} aria-expanded={!!expanded}>
+                      {expanded ? 'Hide elements' : `Show the ${r.issues.length} elements`}
+                    </button>
+                  )}
+                  {expanded && r.issues.map((i) => (
+                    <button key={i.nodeId} className="issue-row audit-sub" onClick={() => onPick(i)}>
+                      <span className="issue-where">{i.text ? `“${i.text}”` : `node ${i.nodeId}`}</span>
+                      <span className="issue-msg mono">{i.id ?? ''}</span>
+                    </button>
+                  ))}
+                </div>
+              );
+            })}
+            {rows.length > 5 && (
+              <button className="link small audit-more" onClick={() => setOpen((o) => ({ ...o, [g.rule]: !all }))}>
+                {all ? 'Show fewer' : `Show all ${rows.length}`}
+              </button>
+            )}
+          </section>
+        );
+      })}
     </div>
   );
 }

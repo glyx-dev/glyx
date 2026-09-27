@@ -153,6 +153,8 @@ pub(super) struct VideoStream {
     pub(super) latest_image:    Option<peniko::ImageData>,
     pub(super) video_volume:    Arc<Mutex<f32>>,
     pub(super) url:             String,
+    /// Audio position the video follows (see `av_clock`).
+    pub(super) clock:           Arc<crate::av_clock::AvClock>,
 }
 
 // ── Image cache ───────────────────────────────────────────────────────────────

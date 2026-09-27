@@ -3701,8 +3701,10 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "sysinfo",
  "tokio",
  "tokio-tungstenite",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -6,6 +6,10 @@ import { Inspector } from './inspector/Inspector';
 import { Console } from './console/Console';
 import { Performance } from './perf/Performance';
 import { Animations } from './anim/Animations';
+import { Memory } from './memory/Memory';
+import { Layout } from './layout/Layout';
+import { Network } from './network/Network';
+import { Profiler } from './cpu/Profiler';
 
 type Theme = 'dark' | 'light';
 
@@ -143,7 +147,7 @@ export function App() {
         ))}
       </nav>
 
-      <main className={`main${['inspector', 'console', 'performance', 'animations'].includes(current.id) ? ' flush' : ''}`} aria-label={current.label}>
+      <main className={`main${['inspector', 'console', 'performance', 'animations', 'memory', 'layout', 'network', 'cpu'].includes(current.id) ? ' flush' : ''}`} aria-label={current.label}>
         {status.state !== 'connected' && <ConnectionNotice status={status} apps={apps} onRefresh={() => client.refreshApps()} />}
         {consoleOpened && (
           <div className="panel-host" hidden={current.id !== 'console'}>
@@ -160,7 +164,15 @@ export function App() {
                 ? <Performance client={client} status={status} windowId={windowId} theme={theme} />
                 : current.id === 'animations'
                   ? <Animations client={client} status={status} windowId={windowId} />
-                  : <ComingSoon label={current.label} phase={current.phase!} blurb={current.blurb} />}
+                  : current.id === 'memory'
+                    ? <Memory client={client} status={status} windowId={windowId} theme={theme} />
+                    : current.id === 'layout'
+                      ? <Layout client={client} status={status} windowId={windowId} />
+                      : current.id === 'network'
+                        ? <Network client={client} status={status} windowId={windowId} />
+                        : current.id === 'cpu'
+                          ? <Profiler client={client} status={status} windowId={windowId} theme={theme} />
+                          : <ComingSoon label={current.label} phase={current.phase!} blurb={current.blurb} />}
       </main>
     </div>
   );

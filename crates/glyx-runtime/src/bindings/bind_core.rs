@@ -9,7 +9,9 @@ pub fn get_time(
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as f64;
+        // Fractional ms: the `performance.now()` polyfill is built on this,
+        // and React's render timings need sub-millisecond resolution.
+        .as_secs_f64() * 1000.0;
     rv.set(v8::Number::new(scope, ms).into());
 }
 
@@ -39,6 +41,21 @@ pub fn request_frame_callback(
             redraw();
         });
     }
+}
+
+/// `__glyx_devNet(json)`: one network event for the DevTools Network panel
+/// (see `net_bus`). Only called when the app runs with devtools on.
+pub fn js_dev_net(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let Some(json) = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())) else { return };
+    let ext   = v8::Local::<v8::External>::try_from(args.data()).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    crate::net_bus::publish(Some(state.my_handle), json);
 }
 
 pub fn js_log(

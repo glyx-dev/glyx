@@ -145,6 +145,7 @@ pub mod cap_loader;
 pub mod runtime;
 pub mod runtime_trait;
 pub mod log_bus;
+pub mod net_bus;
 pub mod console_js;
 pub mod text_props;
 // V8-only: QuickJS has no equivalent to V8 heap snapshots (see
@@ -153,6 +154,8 @@ pub mod text_props;
 pub mod snapshot;
 #[cfg(all(feature = "dev", feature = "v8"))]
 pub mod inspector;
+#[cfg(all(feature = "dev", feature = "v8"))]
+pub mod profiler;
 #[cfg(feature = "v8")]
 pub mod icu;
 #[cfg(feature = "quickjs")]

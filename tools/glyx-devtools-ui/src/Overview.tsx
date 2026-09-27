@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import type { AppEntry, ConnStatus, RelayClient } from './relay';
+import { Capabilities } from './caps/Capabilities';
 
 interface Props {
   client: RelayClient;
@@ -67,6 +68,8 @@ export function Overview({ client, status, app, windowId }: Props) {
         <Card label="Glyx" value={version?.glyx ?? '…'} sub={`protocol v${hs.protocolVersion}`} />
         <Card label="Round trip" value={latency == null ? '…' : `${latency.toFixed(1)} ms`} sub="Runtime.ping" />
       </div>
+
+      <Capabilities client={client} connected={connected} />
 
       <h2>Windows</h2>
       <table className="table">

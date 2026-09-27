@@ -135,3 +135,24 @@ test('$0 (__glyx_devNode) exposes the element props and its owner component', as
   delete globalThis.__glyx_devtools;
   globalThis.__glyx_createNode = prevCreate;
 });
+
+test('component counts: elements per nearest app component', async () => {
+  globalThis.__glyx_devtools = true;
+  const hc = await import('./hostConfig.js?devcounts');
+  function View() {}
+  function Row() {}
+  function App() {}
+  hc.markLibraryComponents([View]);
+  const host = (sibling) => ({ tag: 5, type: 'view', child: null, sibling });
+  // App > View(host) + Row > View(host host) + Row > View(host)
+  const row2 = { type: Row, child: { type: View, child: host(null), sibling: null }, sibling: null };
+  const row1 = { type: Row, child: { type: View, child: host(host(null)), sibling: null }, sibling: row2 };
+  const app = { type: App, child: { type: View, child: host(null), sibling: row1 }, sibling: null };
+  hc.setDevRoot({ current: { tag: 3, child: app } });
+  const counts = globalThis.__glyx_devComponentCounts();
+  expect(counts).toEqual([
+    { component: 'Row', elements: 3, instances: 2 },
+    { component: 'App', elements: 1, instances: 1 },
+  ]);
+  delete globalThis.__glyx_devtools;
+});

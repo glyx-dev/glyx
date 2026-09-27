@@ -11,7 +11,11 @@
 pub mod protocol;
 pub mod transport;
 pub mod relay;
+pub mod private_file;
+pub mod client;
 
 pub use protocol::{codes, ErrorBody, Handshake, Request, WindowInfo, DEFAULT_PORT, PROTOCOL_VERSION};
 pub use transport::{new_token, origin_allowed, ConnId, DevtoolsServer, Incoming};
 pub use relay::{AppInfo, Assets, Relay, RelayConfig};
+pub use private_file::write_private;
+pub use client::{live_apps, GdpClient};

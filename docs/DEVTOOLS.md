@@ -9,13 +9,16 @@ protocol.
 It is a development tool: it exists only in `dev` builds and only while the
 app is started with devtools on. Release builds contain none of it.
 
+- [The DevTools UI](#the-devtools-ui)
+- [AI agents (MCP)](#ai-agents-mcp)
 - [Quick start](#quick-start)
 - [Security](#security)
 - [Messages](#messages)
 - [Choosing an element](#choosing-an-element)
-- [Methods](#methods): [Runtime](#runtime) · [Console](#console) · [Inspector](#inspector) · [Automation](#automation) · [Performance](#performance) · [Animation](#animation)
+- [Methods](#methods): [Runtime](#runtime) · [Console](#console) · [Inspector](#inspector) · [Automation](#automation) · [Performance](#performance) · [Animation](#animation) · [Memory](#memory) · [Profiler](#profiler) · [Network](#network)
 - [Events](#events)
 - [Errors](#errors)
+- [Versioning](#versioning)
 - [Element IDs](#element-ids)
 - [Measuring performance](#measuring-performance)
 - [Limitations](#limitations)
@@ -56,13 +59,68 @@ itself when there's one.
   Pause, slow motion (0.5× / 0.25× / 0.1×), and ±100 ms steps while paused;
   finished runs fade out after a few seconds. The app returns to normal speed
   when you leave the panel.
-- Memory, Layout, Network and CPU profiler panels are on the way (see the
-  rail).
+- **Memory**: JS heap, process and GPU memory and element count, sampled every
+  second for 10 minutes, with garbage collections, leak warnings and
+  snapshots marked. **Collect garbage** shows what it freed. **Take snapshot**
+  counts elements per component; take another after using the app and the
+  table shows what grew (a leak) and what went away.
+- **Layout**: for the selected element, why it has its width and height (in
+  words), its container drawn to scale with every child in place, live
+  controls for the container (direction, justify, align, gap) and the element
+  (flexGrow, width, height) that reflow the app, and its full layout style.
+  "↑ Container" walks up the tree.
+- **Network**: every fetch, WebSocket, IPC channel and backend command
+  call, with status, size, timing and a waterfall. Select one for its
+  headers, request and response bodies (JSON pretty-printed), or a socket's
+  messages in both directions. Filter by type, text or errors only.
+- **CPU profiler**: Record while you use the app, then Stop.
+  - *Components* (every engine): which React components rendered on each
+    commit and how long each took, as a flame chart per commit, plus the
+    slowest components over the recording.
+  - *Flame chart* and *Functions* (V8): sampled JavaScript over time (scroll
+    to zoom, drag to pan) and each function's self and total time. On
+    QuickJS these tabs explain that JS sampling needs V8.
+  - `glyx dev --devtools` bundles React's development build (the one with
+    render timings and React's warnings); plain `glyx dev` and release
+    builds keep the production build.
 
 The UI talks to a small server in the CLI (`glyx inspect`, port 9227) that
 finds apps from their discovery files, does the token handshake itself and
 reattaches when an app restarts. Scripts and agents keep talking to the app's
 GDP port directly, as below.
+
+## AI agents (MCP)
+
+`glyx mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
+server over stdio, so an agent (Claude Code, Cursor, VS Code…) can find,
+read and drive your running app with no client code. Add it to the agent's
+MCP config:
+
+```json
+{ "mcpServers": { "glyx": { "command": "glyx", "args": ["mcp"] } } }
+```
+
+Then start the app with `glyx dev --devtools` in the folder the agent runs
+in (or a folder below it). Several apps can run at once: each takes a free
+port when the default is taken, and `list_apps` / `select_app` choose
+between them.
+
+| Tool | Does |
+|---|---|
+| `list_apps` / `select_app` | Running apps, and which one the other tools use (needed only when several run). |
+| `get_tree` | The UI as an indented outline: type, component, text, element ID, position. |
+| `find` | Elements by `text`, `textContains`, `testID`, `id`, `role`, `label` or `type`. |
+| `click` | An element (by `id`, `testID`, `nodeId` or visible `text`) or a point. |
+| `type` / `press` / `scroll` | Keyboard and wheel input (`type` can click an element first). |
+| `wait_for` | Until an element exists, is visible, or is gone. |
+| `screenshot` | A PNG of the window or an element (CPU renderer, see [Limitations](#limitations)). |
+| `evaluate` | Run JavaScript in the app. |
+| `console` | Recent console output. |
+| `capabilities` | The app's capability report (see `Runtime.getCapabilities`). |
+| `gdp` | Any GDP method, for everything else. |
+
+Scripts can use the same client from Rust: `glyx_devtools::live_apps` and
+`GdpClient`.
 
 ## Quick start
 
@@ -98,6 +156,9 @@ const info = JSON.parse(readFileSync('target/glyx/devtools.json', 'utf8'));
 const gdp = await connect(info);
 await gdp.call('Runtime.handshake', { token: info.token });
 
+// The client takes "Domain.method" and sends it as separate `domain` and
+// `method` fields (see Messages).
+
 // Find the "Save" button by its label and click it.
 const [label] = (await gdp.call('Automation.findNodes', { text: 'Save', type: 'Text' })).result.nodes;
 await gdp.call('Automation.click', { id: label.id });
@@ -111,6 +172,10 @@ await gdp.call('Automation.waitFor', { text: 'Saved', condition: 'visible', time
 ```sh
 bun scripts/devtools/gdp-smoke.mjs target/glyx/devtools.json
 ```
+
+`glyx dev --devtools` asks for port 9228; when it's taken (another app is
+already running) the app takes a free port instead. The discovery file
+always has the real one.
 
 Without `glyx dev` (a built dev binary, CI): set `GLYX_DEVTOOLS_PORT`
 (`0` picks a free port) and optionally `GLYX_DEVTOOLS_FILE` for where the
@@ -127,6 +192,15 @@ down:
   (`localhost`, `127.0.0.1`, `::1`) is refused, so a website open in your
   browser can't reach it. Clients without an `Origin` (scripts, editors) are
   fine.
+- **No DNS rebinding.** A request whose `Host` header isn't a loopback name
+  (any port) is refused too, so a site whose domain is made to resolve to
+  127.0.0.1 still can't connect. The `glyx inspect` relay checks every
+  request the same way.
+- **Private discovery file.** `devtools.json` holds the token, so it is
+  written readable by you only (mode 0600 on macOS and Linux; on Windows an
+  access list with only its owner and SYSTEM), including the
+  `<temp>/glyx-devtools/` fallback. New projects' `.gitignore` excludes
+  `target/`, where it lives.
 - **Token first.** Until `Runtime.handshake` carries the session's token,
   nothing else is answered. A wrong token closes the connection. The token is
   new every launch unless `GLYX_DEVTOOLS_TOKEN` (16+ characters) sets one.
@@ -164,7 +238,8 @@ up for each request, so responses come back in a few milliseconds.
 
 ## Choosing an element
 
-Methods that act on one element accept any of:
+Where a method table says **element**, pass one of `id`, `testID` or
+`nodeId`. Methods that act on one element accept any of:
 
 | Param | Meaning |
 |---|---|
@@ -194,6 +269,7 @@ when the ID comes from a `testID`, `"pinned": true`.
 | Method | Params | Result |
 |---|---|---|
 | `handshake` | `token` | `protocolVersion`, `engine` (`V8` / `QuickJS`), `pid`, `windows`, `methods`, `events`. Must be the first call. |
+| `getCapabilities` | | `configured` (the app's `glyx.config.json` capabilities), `mayBreak` (uses in the app's own source files of Glyx APIs whose capability isn't granted, and literal `fetch` / `ws.connect` URLs whose host isn't in `network.allow`: `{ capability, api, file, line, reason, host? }`), `denied` (what was refused while running: `{ capability, target, count, firstMs, lastMs }`), `scanned` (`{ available, appFiles }`). The DevTools Overview shows this, with the config line to add. |
 | `ping` | | `{ pong: true }` |
 | `version` | | `protocolVersion`, `glyx`, `engine` |
 | `windows` | | `windows`: `[{ windowId, title, width, height, main }]` |
@@ -218,10 +294,11 @@ when the ID comes from a `testID`, `"pinned": true`.
 | `selectElement` | `x`, `y` | The topmost solid element at that point: `nodeId`, `node`, `path`. Often the `Pressable` over a label rather than the label itself. |
 | `getAccessibilityTree` | | What screen readers see: nested `{ nodeId, role, label?, value?, description?, placeholder?, toggled?, numericValue?, disabled?, bounds?, children? }` plus `focus`. Needs the app built with the `a11y` feature; otherwise error `-32006`. |
 | `highlightNode` | element, or `nodeId: null` to clear | Outlines the element in the live window with its type, id and size. |
-| `setNodeProp` | element, `name`, `value` | Changes one prop in the running app (`null` unsets it), until React next updates that element. Props: `text`, `testID`, `backgroundColor`, `color`, `borderColor` (hex), `borderWidth`, `borderRadius`, `opacity`, `fontSize`, `fontWeight`, `width`, `height`, `padding`, `margin`, `gap` (px number or `"50%"`), `flex`, `zIndex`. |
+| `setNodeProp` | element, `name`, `value` | Changes one prop in the running app (`null` unsets it), until React next updates that element. Props: `text`, `testID`, `backgroundColor`, `color`, `borderColor` (hex), `borderWidth`, `borderRadius`, `opacity`, `fontSize`, `fontWeight`, `width`, `height`, `padding`, `margin`, `gap` (px number or `"50%"`), `flex`, `zIndex`, `flexDirection`, `justifyContent`, `alignItems` (CSS keywords). |
 | `enableDamage` / `disableDamage` | | Starts / stops `Inspector.frameDamage` events. |
 | `setInspectMode` | `enabled` | Select mode: the app outlines the element under the pointer, a left click picks it (the app doesn't get the click) and ends select mode, Escape cancels. Picks arrive as `Inspector.nodePicked`. If the client that turned it on disconnects, select mode switches off. |
 | `enableTreeEvents` / `disableTreeEvents` | | Starts / stops `Inspector.treeChanged` (at most one per frame, only when the tree changed). |
+| `getLayoutDetails` | element | The layout engine's view: `style` (display, flexDirection, justify / align, flexGrow / Shrink / Basis, width / height with min / max, gap, margin, padding, border, overflow), `computed` (box, content size, resolved padding / border / margin), `explain: { width: [...], height: [...] }` (why it's that size: set, % of container, grew, shrank, stretched, capped by max / held at min, sized by content or text), `container` (its flex settings and inner size) and `children` (each child's flex settings, computed box and text). |
 | `setOverlay` | `paintFlashing` | Paint flashing: each redrawn area flashes amber in the app for ~400 ms. While flashes are up, frames render in full (so the numbers aren't representative meanwhile). Off when the client that turned it on disconnects. |
 | `auditAccessibility` | | `issues: [{ nodeId, id, component, rule, severity, message }]`, `errors`, `warnings`. Rules: `pressable-name` (pressable with no text or `ariaLabel`), `image-name`, `contrast` (WCAG AA: 4.5:1, 3:1 for large text, measured against the nearest opaque background), `focusable-role`. Works without the `a11y` feature. |
 
@@ -265,6 +342,41 @@ Covers CSS-style `transition`s and keyframe `animation`s.
 | `enable` / `disable` | | Starts / stops the `Animation.*` events. |
 | `waitForSettled` | `timeoutMs?` | Replies `{ settled: true }` once nothing animates in the window. Error `-32005` if it still animates at the timeout (it never settles while an infinite animation runs). Use it instead of sleeping in tests. |
 
+### Memory
+
+| Method | Params | Result |
+|---|---|---|
+| `sample` | | A live reading (no frame needed): `timestamp`, `heapUsed`, `heapTotal`, `rss` (working set, including shared pages such as DLLs and fonts), `privateBytes` (private working set: memory only this app uses, the number Task Manager shows; Windows only, otherwise null), `gpuBuffers`, `gpuTextures`, `gpuReserved`, `nodes`. |
+| `collectGarbage` | | Runs a garbage collection (V8: low-memory notification; QuickJS: full GC), then a sample plus `heapBefore` and `gcMs`. |
+| `snapshot` | | A sample plus `elements` (on screen), `detached` (created but not in the tree: inactive screens, caches, or leaks), `byType`, and `byComponent: [{ component, elements, instances }]` (per nearest app component, most first). Take two and compare to find what grows. |
+
+### Profiler
+
+One recording at a time, in one window. Stopped automatically if the client
+that started it disconnects.
+
+| Method | Params | Result |
+|---|---|---|
+| `getStatus` | | `{ engine, jsSampling, recording: { windowId, elapsedMs } \| null }` |
+| `start` | `intervalUs?` (sampling interval, default 250, 50–100000) | `{ jsSampling, jsSamplingError, components, engine }`: whether each recorder started. |
+| `stop` | | `{ engine, windowId, durationMs, cpuProfile, jsSamplingError, components }`. `cpuProfile` is Chrome's format (`nodes`, `startTime`, `endTime`, `samples`, `timeDeltas`; V8 only, else null). `components` is `{ commits: [{ at, duration, components: [{ name, depth, parent, self, total, library, mount }] }], dropped }` (last 500 commits). |
+
+### Network
+
+Recorded only while the app runs with devtools on: `@glyx/react` reports
+fetch, WebSocket, IPC and backend-command traffic through the native
+`__glyx_devNet` sink. The app keeps the last 1000 records; bodies and
+messages share a 32 MB budget (past it, the oldest lose their bodies but
+keep status and timing). Bodies over 256 KB are cut, with the real size kept.
+
+| Method | Params | Result |
+|---|---|---|
+| `enable` / `disable` | | Stream `Network.requestUpdated` (one request's summary per change). |
+| `getRequests` | `since?` | `{ requests, lastSeq }`: summaries changed after `since`. A summary has `key`, `windowId`, `kind` (`fetch`, `websocket`, `ipc`, `command`), `method`, `url`, `state` (`pending`, `done`, `open`, `closed`, `failed`), `start`, `end`, `duration`, `status`, `statusText`, `error`, `requestSize`, `responseSize`, `messages`, `messageBytes`, `contentType`. |
+| `getRequest` | `key` | The summary plus `requestHeaders`, `requestBody`, `responseHeaders`, `responseBody`, `bodiesDropped` and `frames` (`{ dir, data, size, ts }`, the last 500). |
+| `clear` | | Forgets every record; returns `lastSeq`. |
+
+
 ## Events
 
 | Event | Subscribe with | Params |
@@ -278,6 +390,7 @@ Covers CSS-style `transition`s and keyframe `animation`s.
 | `Animation.started` | `Animation.enable` | `nodeId`, `kind`, `durationMs`, `iterations`. A restart is an `ended` then a `started`. |
 | `Animation.ended` | `Animation.enable` | `nodeId`, `kind` (finished, cancelled or replaced). |
 | `Animation.settled` | `Animation.enable` | The window just went from animating to still. |
+| `Network.requestUpdated` | `Network.enable` | One request's summary (see [Network](#network) `getRequests`) each time it changes: started, answered, a socket message, closed or failed. |
 
 Events are only produced while someone listens, so an unwatched app pays
 nothing for them.
@@ -297,6 +410,21 @@ nothing for them.
 | `-32004` | No such element |
 | `-32005` | Timed out (`waitFor`, `waitForSettled`) |
 | `-32006` | Not available in this build or on this renderer |
+
+## Versioning
+
+`Runtime.handshake` returns `protocolVersion` (today `1`), along with the
+`methods` and `events` this app supports.
+
+- **`protocolVersion` changes only on breaking wire changes**: the message
+  shape, the handshake, or error codes changing meaning. A client should
+  refuse a version it doesn't know.
+- **Within a version, changes are additive**: new methods, new events, new
+  optional params, new result fields. Clients should ignore fields they
+  don't know, and check `methods` before calling something recent.
+- **Before Glyx 1.0 (0.x releases)**, an individual method's params or result
+  may still change without a version bump. Every such change is listed in
+  the release notes. Pin the Glyx version your tool is tested against.
 
 ## Element IDs
 
@@ -364,8 +492,11 @@ cached until the tree's structure changes:
 ## Limitations
 
 - **Screenshots need the CPU renderer**: start the app with
-  `GLYX_CPU_RENDER=1`. GPU renderers return `-32006` until a readback path
-  exists.
+  `GLYX_CPU_RENDER=1`. On a GPU renderer `Automation.screenshot` returns
+  `-32006` with the renderer's name and the restart command in the message,
+  and the same as data: `{ reason: "rendererNotSupported", renderer, fix: {
+  env, restart, command, powershell } }`. Reading frames back from the GPU is
+  planned.
 - **The accessibility tree needs the `a11y` feature** in the app's build.
 - **`component` names include `@file:line`** only when the bundle is built with
   development JSX (React's `_debugSource`). The examples aren't.
@@ -384,7 +515,7 @@ cached until the tree's structure changes:
 | `tests/devtools/gdp-notes.mjs` | notes-app (V8): driving by element ID, names, layout, highlight, live prop edits, damage, accessibility tree. |
 | `tests/devtools/gdp-motion.mjs` | motion-demo: frame stream, snapshot, budget violations, animation events, `waitForSettled`. |
 | `tests/devtools/gdp-inspector.mjs` | calculator: select mode (pick, Escape, disconnect safety), tree events, accessibility audit. |
-| `tests/devtools-ui/d0.mjs` … `d4.mjs` | The DevTools UI in a headless browser (`tests/devtools-ui/browser.mjs`, Chrome DevTools Protocol): connection, Overview, theme, keyboard; Inspector tree, details, live edit + reset, select mode, search, audit. |
+| `tests/devtools-ui/d0.mjs` … `d8.mjs` | The DevTools UI in a headless browser (`tests/devtools-ui/browser.mjs`, Chrome DevTools Protocol): connection, Overview, theme, keyboard; Inspector tree, details, live edit + reset, select mode, search, audit. |
 | `tests/devtools/run-calculator.sh` | Launches the calculator with devtools and runs the smoke and calculator tests; CI runs it under Xvfb (`devtools-e2e` job). |
 
 Each test script prints how to start its app in its header.

@@ -63,11 +63,18 @@ pub mod codes {
 pub struct ErrorBody {
     pub code: i32,
     pub message: String,
+    /// Machine-readable detail, e.g. how to fix it (`{ reason, fix }`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
 
 impl ErrorBody {
     pub fn new(code: i32, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self { code, message: message.into(), data: None }
+    }
+    pub fn with_data(mut self, data: Value) -> Self {
+        self.data = Some(data);
+        self
     }
     pub fn method_not_found(req: &Request) -> Self {
         Self::new(codes::METHOD_NOT_FOUND, format!("unknown method {}", req.name()))

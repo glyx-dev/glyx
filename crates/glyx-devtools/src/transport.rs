@@ -141,6 +141,22 @@ pub fn origin_allowed(origin: Option<&str>) -> bool {
     matches!(host.to_ascii_lowercase().as_str(), "127.0.0.1" | "localhost" | "::1")
 }
 
+/// `Host` must name loopback (`127.0.0.1`, `localhost`, `[::1]`, any port).
+/// Loopback binding plus the `Origin` check still leave DNS rebinding open:
+/// a page on `evil.example` whose name now resolves to 127.0.0.1 sends
+/// `Host: evil.example`, which this refuses. Absent is fine (non-HTTP/1.1
+/// clients); browsers always send it.
+pub fn host_allowed(host: Option<&str>) -> bool {
+    let Some(h) = host else { return true };
+    let h = h.trim();
+    let name = if let Some(v6) = h.strip_prefix('[') {
+        v6.split(']').next().unwrap_or("")
+    } else {
+        h.rsplit_once(':').map_or(h, |(n, port)| if port.chars().all(|c| c.is_ascii_digit()) { n } else { h })
+    };
+    matches!(name.to_ascii_lowercase().as_str(), "127.0.0.1" | "localhost" | "::1")
+}
+
 /// Token comparison without an early exit on the first differing byte.
 fn token_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
@@ -165,6 +181,13 @@ async fn serve(stream: tokio::net::TcpStream, shared: Arc<Shared>) {
     #[allow(clippy::result_large_err)]
     let check_origin = |req: &HttpRequest, resp: HttpResponse| -> Result<HttpResponse, ErrorResponse> {
         let origin = req.headers().get("origin").and_then(|v| v.to_str().ok());
+        let host = req.headers().get("host").and_then(|v| v.to_str().ok());
+        if !host_allowed(host) {
+            log::warn!("[GDP] refused connection for host {host:?} (not loopback)");
+            let mut r = ErrorResponse::new(Some("host not allowed".into()));
+            *r.status_mut() = StatusCode::FORBIDDEN;
+            return Err(r);
+        }
         if origin_allowed(origin) {
             Ok(resp)
         } else {
@@ -239,6 +262,17 @@ async fn serve(stream: tokio::net::TcpStream, shared: Arc<Shared>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_loopback_hosts_are_allowed() {
+        assert!(host_allowed(None));
+        for ok in ["127.0.0.1:9228", "localhost:9227", "LOCALHOST", "[::1]:9228", "127.0.0.1"] {
+            assert!(host_allowed(Some(ok)), "{ok}");
+        }
+        for bad in ["evil.example:9228", "evil.example", "127.0.0.1.evil.example:9228", "192.168.1.5:9228", "[::2]:1", ""] {
+            assert!(!host_allowed(Some(bad)), "{bad}");
+        }
+    }
 
     #[test]
     fn only_loopback_origins_are_allowed() {

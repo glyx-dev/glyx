@@ -939,8 +939,11 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 let (seek_tx, seek_rx) = std::sync::mpsc::sync_channel::<f64>(4);
                 let events = Arc::new(Mutex::new(std::collections::VecDeque::<String>::new()));
 
+                // Audio is the master clock; the video thread follows it.
+                let clock = Arc::new(crate::av_clock::AvClock::default());
                 // Audio thread owns its OutputStream + Sink (!Send) — reads volume + pause_flag each poll.
-                spawn_video_audio(&url, Arc::clone(&stop_flag), Arc::clone(&audio_stop_flag), Arc::clone(&pause_flag), Arc::clone(&video_volume), 0.0);
+                spawn_video_audio(&url, Arc::clone(&stop_flag), Arc::clone(&audio_stop_flag), Arc::clone(&pause_flag), Arc::clone(&video_volume), 0.0, Arc::clone(&clock));
+                let clock_clone = Arc::clone(&clock);
 
                 let url_stored  = url.clone(); // keep a copy for SeekVideo audio restart
                 let buf_clone   = Arc::clone(&frame_buf);
@@ -985,6 +988,13 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
 
                     let mut wall_start: Option<std::time::Instant> = None;
                     let mut pts_start  = 0f64;
+                    let mut last_shown = std::time::Instant::now();
+                    // After a seek, frames before the target (the decoder lands on the
+                    // keyframe before it) are skipped without being shown.
+                    let mut seek_target: Option<f64> = None;
+                    // A/V drift of shown frames and frames dropped, logged every 2 s at debug level.
+                    let (mut drift_sum, mut drift_max, mut drift_n, mut dropped) = (0f64, 0f64, 0u32, 0u32);
+                    let mut last_stats = std::time::Instant::now();
 
                     // Push timeupdate events at most 4× per second (250ms throttle).
                     let timeupdate_interval = std::time::Duration::from_millis(250);
@@ -1003,23 +1013,96 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         while let Ok(secs) = seek_rx.try_recv() {
                             media.decoder_seek(&dec, secs);
                             wall_start = None;
+                            seek_target = Some(secs);
                         }
 
                         match media.decoder_next_frame(&dec, &mut rgba_buf) {
                             Ok(Some(pts)) => {
-                                *buf_clone.lock() = Some((w, h, rgba_buf.clone()));
-                                (redraw)(); // wake the event loop so this frame is painted immediately
+                                use crate::av_clock::{frame_timing, FrameTiming};
+                                // A jump arrived while this frame decoded: it's from before
+                                // the jump, so drop it and seek (the loop starts over).
+                                macro_rules! take_seek { () => {
+                                    if let Ok(mut secs) = seek_rx.try_recv() {
+                                        while let Ok(s) = seek_rx.try_recv() { secs = s; }
+                                        media.decoder_seek(&dec, secs);
+                                        wall_start = None;
+                                        seek_target = Some(secs);
+                                        continue;
+                                    }
+                                } }
+                                take_seek!();
+                                if let Some(t) = seek_target {
+                                    // Half a frame of slack so the frame at the target counts.
+                                    if pts + 0.5 / fps.max(1.0) < t { continue; }
+                                    seek_target = None;
+                                    last_shown = std::time::Instant::now();
+                                }
+                                let show = |buf: &[u8]| {
+                                    *buf_clone.lock() = Some((w, h, buf.to_vec()));
+                                    (redraw)(); // wake the event loop so this frame is painted immediately
+                                };
 
-                                let ws = wall_start.get_or_insert_with(|| {
-                                    pts_start = pts;
-                                    std::time::Instant::now()
-                                });
+                                // Audio still opening (after start or a seek): show this
+                                // frame as a poster and wait for it, up to 2 s.
+                                if clock_clone.is_pending() {
+                                    show(&rgba_buf);
+                                    last_shown = std::time::Instant::now();
+                                    let t0 = std::time::Instant::now();
+                                    while clock_clone.is_pending() && t0.elapsed().as_secs_f64() < 2.0
+                                        && !stop_clone.load(std::sync::atomic::Ordering::Relaxed)
+                                    {
+                                        std::thread::sleep(std::time::Duration::from_millis(5));
+                                    }
+                                    take_seek!();
+                                }
 
-                                let video_pos = pts - pts_start;
-                                let to_sleep  = video_pos - ws.elapsed().as_secs_f64();
-                                if to_sleep > 0.001 {
-                                    std::thread::sleep(
-                                        std::time::Duration::from_secs_f64(to_sleep));
+                                let clock_gen = clock_clone.generation();
+                                if let Some(audio_pos) = clock_clone.position() {
+                                    // Follow the audio: wait if early, drop if late.
+                                    wall_start = None;
+                                    match frame_timing(pts, audio_pos, last_shown.elapsed().as_secs_f64()) {
+                                        FrameTiming::Drop => { dropped += 1; continue; }
+                                        FrameTiming::ShowNow => { show(&rgba_buf); last_shown = std::time::Instant::now(); }
+                                        FrameTiming::ShowAfter(secs) => {
+                                            // Wait in short steps so a jump isn't held up.
+                                            let until = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs);
+                                            while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+                                                if stop_clone.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                                                take_seek!();
+                                                std::thread::sleep(left.min(std::time::Duration::from_millis(5)));
+                                            }
+                                            take_seek!();
+                                            show(&rgba_buf);
+                                            last_shown = std::time::Instant::now();
+                                        }
+                                    }
+                                    // (Not across a jump: the clock restarted after this frame showed.)
+                                    if let Some(now_pos) = clock_clone.position().filter(|_| clock_clone.generation() == clock_gen) {
+                                        let d = (pts - now_pos).abs();
+                                        drift_sum += d; drift_n += 1; drift_max = drift_max.max(d);
+                                    }
+                                    if last_stats.elapsed().as_secs_f64() >= 2.0 {
+                                        log::debug!(
+                                            "[video] {handle_id}: a/v drift avg {:.1} ms, max {:.1} ms over {drift_n} frames; {dropped} late frames dropped",
+                                            drift_sum / drift_n.max(1) as f64 * 1000.0, drift_max * 1000.0,
+                                        );
+                                        (drift_sum, drift_max, drift_n, dropped) = (0.0, 0.0, 0, 0);
+                                        last_stats = std::time::Instant::now();
+                                    }
+                                } else {
+                                    // No audio: pace by the wall clock.
+                                    show(&rgba_buf);
+                                    last_shown = std::time::Instant::now();
+                                    let ws = wall_start.get_or_insert_with(|| {
+                                        pts_start = pts;
+                                        std::time::Instant::now()
+                                    });
+                                    let video_pos = pts - pts_start;
+                                    let to_sleep  = video_pos - ws.elapsed().as_secs_f64();
+                                    if to_sleep > 0.001 {
+                                        std::thread::sleep(
+                                            std::time::Duration::from_secs_f64(to_sleep));
+                                    }
                                 }
 
                                 // Throttled timeupdate event.
@@ -1053,6 +1136,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     latest_image: None,
                     video_volume,
                     url: url_stored,
+                    clock,
                 });
             }
 
@@ -1072,6 +1156,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         Arc::clone(&stream.pause_flag),
                         Arc::clone(&stream.video_volume),
                         seconds,
+                        Arc::clone(&stream.clock),
                     );
                 }
             }
@@ -1592,10 +1677,14 @@ fn spawn_video_audio(
     pause_flag:      Arc<std::sync::atomic::AtomicBool>,
     volume:          Arc<Mutex<f32>>,
     start_secs:      f64,
+    clock:           Arc<crate::av_clock::AvClock>,
 ) {
     use rodio::Source;
+    // A new audio stream: the video waits for it (or for `no_audio`).
+    let gen = clock.restart();
     // Only local files — skip network streams.
     if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("rtsp://") {
+        clock.no_audio(gen);
         return;
     }
     let path = url
@@ -1604,6 +1693,11 @@ fn spawn_video_audio(
         .to_string();
 
     std::thread::spawn(move || {
+        // Whatever happens below, when this thread is done the video paces itself.
+        struct Done(Arc<crate::av_clock::AvClock>, u64);
+        impl Drop for Done { fn drop(&mut self) { self.0.no_audio(self.1); } }
+        let _done = Done(Arc::clone(&clock), gen);
+
         let Some(media) = glyx_media::get_media() else {
             log::debug!("[video-audio] glyx-media not available");
             return;
@@ -1635,6 +1729,8 @@ fn spawn_video_audio(
             buf_pos:     0,
             buf_valid:   0,
             done:        false,
+            clock:       Arc::clone(&clock),
+            gen,
         };
 
         if start_secs > 0.001 {
@@ -1652,6 +1748,8 @@ fn spawn_video_audio(
         } else {
             sink.append(source);
         }
+        // The clock counts from here: samples handed to the output from `start_secs`.
+        clock.start(gen, start_secs, sample_rate as u64 * channels.max(1) as u64);
         sink.play();
         log::debug!("[video-audio] audio playing via ffmpeg ({sample_rate}Hz/{channels}ch), start={start_secs:.2}s");
 
@@ -1687,6 +1785,9 @@ struct FfmpegAudioSource {
     buf_pos:    usize,
     buf_valid:  usize,
     done:       bool,
+    /// Counts samples out, as the video's clock.
+    clock:      Arc<crate::av_clock::AvClock>,
+    gen:        u64,
 }
 
 // SAFETY: FfmpegAudioSource owns a VmAudioDecoder (opaque C pointer, no TLS).
@@ -1732,6 +1833,7 @@ impl Iterator for FfmpegAudioSource {
         }
         let s = self.buf[self.buf_pos];
         self.buf_pos += 1;
+        self.clock.advance(self.gen, 1);
         Some(s)
     }
 }
@@ -1752,8 +1854,11 @@ fn spawn_video_audio(
     _pause_flag:      Arc<std::sync::atomic::AtomicBool>,
     _volume:          Arc<Mutex<f32>>,
     _start_secs:      f64,
+    clock:            Arc<crate::av_clock::AvClock>,
 ) {
-    // audio feature not enabled — video plays without sound
+    // audio feature not enabled — video plays without sound, paced by the wall clock
+    let gen = clock.restart();
+    clock.no_audio(gen);
 }
 
 #[cfg(test)]

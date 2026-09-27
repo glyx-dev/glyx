@@ -36,7 +36,7 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
-use crate::transport::{new_token, origin_allowed};
+use crate::transport::{host_allowed, new_token, origin_allowed};
 
 /// Serves the UI's files: path without the leading `/` (`"index.html"`,
 /// `"assets/app.js"`) → body. `None` = 404.
@@ -172,6 +172,16 @@ async fn serve(mut stream: TcpStream, _peer: SocketAddr, shared: Arc<Shared>) {
         if buf.len() > 16 * 1024 { return; }
     };
     let Some(req) = parse_request(&head) else { return };
+    // Every request, page or socket: refuse non-loopback Host (DNS rebinding).
+    if !host_allowed(req.headers.get("host").map(String::as_str)) {
+        log::warn!("[relay] refused request for host {:?} (not loopback)", req.headers.get("host"));
+        let _ = stream.write_all(b"HTTP/1.1 403 Forbidden
+Content-Length: 0
+Connection: close
+
+").await;
+        return;
+    }
 
     let upgrade = req.headers.get("upgrade").is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
     if upgrade && req.path.split('?').next() == Some("/relay") {
@@ -298,8 +308,20 @@ async fn port_answers(port: u16) -> bool {
     matches!(tokio::time::timeout(Duration::from_millis(200), probe).await, Ok(Ok(_)))
 }
 
+/// Whether a process with this id is running. A file whose process has
+/// exited is stale: its port may belong to another app now, which would
+/// reject (and log) a handshake with the old token.
+fn process_alive(pid: u64) -> bool {
+    let Ok(pid32) = u32::try_from(pid) else { return false };
+    let pid = sysinfo::Pid::from_u32(pid32);
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), false);
+    sys.process(pid).is_some()
+}
+
 /// Handshake with the file's token; the reported pid must match the file's.
-async fn is_that_app(app: &AppInfo) -> bool {
+pub(crate) async fn is_that_app(app: &AppInfo) -> bool {
+    if app.pid != 0 && !process_alive(app.pid) { return false; }
     if !port_answers(app.port).await { return false; }
     match connect_app(app).await {
         Ok((mut ws, hs)) => {
@@ -322,11 +344,11 @@ fn apps_json(apps: &[AppInfo]) -> Value {
 // ── Sessions ────────────────────────────────────────────────────────────────
 
 type UiSocket = WebSocketStream<TcpStream>;
-type AppSocket = WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
+pub(crate) type AppSocket = WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 
 /// Connect to an app's GDP server and complete the token handshake.
 /// Returns the socket and the handshake result (engine, windows, methods…).
-async fn connect_app(app: &AppInfo) -> Result<(AppSocket, Value), String> {
+pub(crate) async fn connect_app(app: &AppInfo) -> Result<(AppSocket, Value), String> {
     let (mut ws, _) = tokio::time::timeout(Duration::from_secs(3),
         tokio_tungstenite::connect_async_with_config(&app.url, None, /* disable_nagle */ true)).await
         .map_err(|_| "timed out connecting".to_string())?
@@ -413,6 +435,8 @@ async fn session(ws: UiSocket, shared: Arc<Shared>) {
         }};
     }
 
+    // The last status sent while retrying an attach: repeats aren't re-sent.
+    let mut last_retry_status: Option<Value> = None;
     loop {
         tokio::select! {
             msg = ui_rx.next() => {
@@ -463,6 +487,7 @@ async fn session(ws: UiSocket, shared: Arc<Shared>) {
                 FromApp::Text(t) => { if ui_tx.send(Message::Text(t)).await.is_err() { break; } }
                 FromApp::Closed => {
                     // Lost the app (quit, crash, restart, reload of the runner).
+                    last_retry_status = None;
                     if to_app.take().is_some() && attached.is_some() {
                         let status = json!({ "type": "status", "state": "reconnecting", "key": attached });
                         if ui_tx.send(send(status)).await.is_err() { break; }
@@ -480,8 +505,15 @@ async fn session(ws: UiSocket, shared: Arc<Shared>) {
                 if to_app.is_none() {
                     if let Some(key) = attached.clone() {
                         if let Some(app) = apps.iter().find(|a| a.key == key).cloned() {
-                            let status = attach!(&app);
-                            if ui_tx.send(send(status)).await.is_err() { break; }
+                            let mut status = attach!(&app);
+                            // A retry that didn't work yet is still "reconnecting"
+                            // (with why), not an error: the UI shouldn't flip states
+                            // on every attempt.
+                            if status["state"] == "error" { status["state"] = json!("reconnecting"); }
+                            if last_retry_status.as_ref() != Some(&status) {
+                                last_retry_status = Some(status.clone());
+                                if ui_tx.send(send(status)).await.is_err() { break; }
+                            }
                         }
                     }
                 }
@@ -526,6 +558,8 @@ mod tests {
         assert_eq!((app.name.as_str(), app.port, app.pid, app.engine.as_str()), ("calculator", 9300, 42, "QuickJS"));
         let loose = dir.join("7.json");
         std::fs::write(&loose, r#"{"port":9301,"token":"x","pid":7}"#).unwrap();
+        assert!(process_alive(std::process::id() as u64));
+        assert!(!process_alive(u32::MAX as u64 - 1));
         assert_eq!(read_app(&loose).unwrap().name, "pid 7");
         std::fs::write(dir.join("junk.json"), "not json").unwrap();
         let all = scan(&[dir.clone(), file.clone()]);

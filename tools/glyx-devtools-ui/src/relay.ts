@@ -198,6 +198,9 @@ export class RelayClient {
   }
 
   private setStatus(s: ConnStatus) {
+    // Retries repeat the same status: don't re-render the page for those.
+    const prev = this.status;
+    if (prev && prev.state === s.state && prev.key === s.key && prev.message === s.message && prev.handshake === s.handshake) return;
     // A fresh status without a handshake keeps the last one's window list
     // out of the UI (it would be stale).
     this.status = s;

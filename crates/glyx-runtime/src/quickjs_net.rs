@@ -130,6 +130,9 @@ pub(crate) fn ws_connect<'js>(
         return rejected;
     }
     let handle = next_id.fetch_add(1, Ordering::Relaxed);
+    // Incoming messages are delivered on the next frame; ask for one so an
+    // idle app still sees them promptly.
+    let wake = redraw.clone();
     QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, async move {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -140,9 +143,10 @@ pub(crate) fn ws_connect<'js>(
         let (outbox_tx, mut outbox_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let inbox_read = Arc::clone(&inbox);
         tokio::spawn(async move {
+            let wake = || if let Some(w) = &wake { w() };
             while let Some(msg) = stream.next().await {
                 match msg {
-                    Ok(WsMessage::Text(text)) => inbox_read.lock().push_back(text.to_string()),
+                    Ok(WsMessage::Text(text)) => { inbox_read.lock().push_back(text.to_string()); wake(); }
                     Ok(WsMessage::Close(_)) | Err(_) => {
                         inbox_read.lock().push_back("__GLYX_WS_CLOSED__".to_string());
                         break;
@@ -151,6 +155,7 @@ pub(crate) fn ws_connect<'js>(
                 }
             }
             inbox_read.lock().push_back("__GLYX_WS_CLOSED__".to_string());
+            wake();
         });
         tokio::spawn(async move {
             while let Some(msg) = outbox_rx.recv().await {

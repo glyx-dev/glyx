@@ -134,6 +134,12 @@ pub(super) fn start_dev_mode_worker(
             while watch_rx.recv_timeout(Duration::from_millis(180)).is_ok() {}
             log::info!("[HMR] change detected — rebuilding… (cwd={:?})", cwd);
 
+            // Same React build `glyx dev` made: development with DevTools on.
+            let node_env = if std::env::var_os("GLYX_DEVTOOLS_PORT").is_some() {
+                "process.env.NODE_ENV='development'"
+            } else {
+                "process.env.NODE_ENV='production'"
+            };
             let run_bun = |cwd: &std::path::Path| -> std::io::Result<std::process::Output> {
                 let bun_args = [
                     "build",
@@ -142,7 +148,7 @@ pub(super) fn start_dev_mode_worker(
                     app_js.to_str().unwrap_or(""),
                     "--target",      "browser",
                     "--format",      "iife",
-                    "--define",      "process.env.NODE_ENV='production'",
+                    "--define",      node_env,
                     "--sourcemap=inline",
                 ];
                 #[cfg(target_os = "windows")]
@@ -335,7 +341,7 @@ pub(super) fn handle_dev_build_events(state: &mut PerWindowState) {
                 #[cfg(feature = "canvas3d")]
                 state.canvas3d_dirty.clear();
                 let _ = state.runtime.drain_scene_commands();
-                match state.runtime.eval(&js) {
+                match state.runtime.eval(&crate::devtools::prepare_bundle(&js)) {
                     Ok(_) => {
                         state.runtime.flush_microtasks();
                         let reload_cmds = state.runtime.drain_scene_commands();

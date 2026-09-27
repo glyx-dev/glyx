@@ -119,6 +119,19 @@ pub trait JsRuntime {
     /// short-lived React render objects outpacing incremental GC.
     fn gc_hint(&mut self);
 
+    // ── CPU profiling (DevTools, dev builds) ─────────────────────────────────
+
+    /// Start sampling the JS stack every `interval_us`. Engines without a
+    /// sampling profiler (QuickJS) say so.
+    fn profile_start(&mut self, _interval_us: u32) -> Result<(), String> {
+        Err("CPU profiling needs the V8 engine; this app runs on QuickJS".into())
+    }
+
+    /// Stop sampling and return the profile, in Chrome's `cpuProfile` format.
+    fn profile_stop(&mut self) -> Result<serde_json::Value, String> {
+        Err("not recording".into())
+    }
+
     // ── Shared-state accessors ────────────────────────────────────────────
     // These Arc clones let `Box<dyn JsRuntime>` consumers read shared state
     // without downcasting. glyx-core currently uses the concrete type alias

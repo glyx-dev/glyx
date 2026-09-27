@@ -1621,6 +1621,7 @@ pub fn register_all(
 
     register!("__glyx_request_frame", request_frame_callback);
     register!("__glyx_log",         js_log);
+    register!("__glyx_devNet",      js_dev_net);
     register!("__glyx_getEnv",      get_env_callback);
     register!("__glyx_readFile",      read_file_callback);
     register!("__glyx_readFileBytes", read_file_bytes_callback);

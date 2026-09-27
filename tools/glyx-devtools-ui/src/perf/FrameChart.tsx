@@ -7,9 +7,16 @@ interface Props {
   selected: number | null;          // frame seq
   onSelect: (seq: number) => void;
   theme: string;                    // redraw on theme change
+  /** How long no frame has arrived (live only); ≥1 s shows an idle band. */
+  idleMs?: number;
 }
 
+/** Width of the idle band drawn after the newest frame. */
+const IDLE_W = 96;
+
 const BAR = 5;       // px per frame (bar + gap)
+/** A frame that followed at least this much quiet gets an idle marker. */
+export const IDLE_GAP_MS = 500;
 const GAP = 1;
 const PAD_TOP = 14;
 const PAD_BOTTOM = 18;
@@ -18,7 +25,8 @@ const PAD_BOTTOM = 18;
  *  right. Colours come from the design tokens; slow frames are outlined in
  *  the error colour, full redraws get a dot under the bar (so partial vs full
  *  doesn't rely on colour). Canvas, so long recordings stay cheap. */
-export function FrameChart({ frames, budgetMs, selected, onSelect, theme }: Props) {
+export function FrameChart({ frames, budgetMs, selected, onSelect, theme, idleMs = 0 }: Props) {
+  const idle = idleMs >= 1000 ? Math.floor(idleMs / 1000) : 0;
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ w: 800, h: 220 });
@@ -32,7 +40,8 @@ export function FrameChart({ frames, budgetMs, selected, onSelect, theme }: Prop
   }, []);
 
   // Which frames fit: the newest ones.
-  const capacity = Math.max(1, Math.floor(size.w / BAR));
+  // While idle, the newest frames make room for the idle band on the right.
+  const capacity = Math.max(1, Math.floor((size.w - (idle ? IDLE_W : 0)) / BAR));
   const start = Math.max(0, frames.length - capacity);
   const shown = frames.slice(start);
   // Vertical scale: at least 2× budget, or the costliest shown frame.
@@ -67,6 +76,13 @@ export function FrameChart({ frames, budgetMs, selected, onSelect, theme }: Prop
 
     shown.forEach((f, k) => {
       const x = k * BAR;
+      // The app sat idle before this frame (it draws only on change).
+      if (k > 0 && f.frameTime >= IDLE_GAP_MS) {
+        g.strokeStyle = tok('--gx-text-tertiary');
+        g.setLineDash([2, 3]);
+        g.beginPath(); g.moveTo(x - 0.5, PAD_TOP); g.lineTo(x - 0.5, PAD_TOP + plotH); g.stroke();
+        g.setLineDash([]);
+      }
       let top = PAD_TOP + plotH;
       // The bar is the frame's own cost: the four phases, then "other".
       const other = otherTime(f);
@@ -96,7 +112,32 @@ export function FrameChart({ frames, budgetMs, selected, onSelect, theme }: Prop
         g.strokeRect(x - 1, PAD_TOP - 2, BAR + 1, plotH + 4);
       }
     });
-  }, [shown, size, maxMs, budgetMs, selected, theme]);
+
+    // Idle: a hatched band after the newest frame, so a quiet app reads as
+    // "idle", not "stuck".
+    if (idle) {
+      const x0 = shown.length * BAR + 2;
+      const w = Math.min(IDLE_W, size.w - x0);
+      if (w > 20) {
+        g.save();
+        g.beginPath(); g.rect(x0, PAD_TOP, w, plotH); g.clip();
+        g.fillStyle = tok('--gx-bg-inset');
+        g.fillRect(x0, PAD_TOP, w, plotH);
+        g.strokeStyle = tok('--gx-border-strong');
+        g.lineWidth = 1;
+        for (let k = -plotH; k < w; k += 8) { g.beginPath(); g.moveTo(x0 + k, PAD_TOP + plotH); g.lineTo(x0 + k + plotH, PAD_TOP); g.stroke(); }
+        g.restore();
+        g.fillStyle = tok('--gx-text-secondary');
+        g.font = '600 12px system-ui, sans-serif';
+        g.textAlign = 'center';
+        const cx = x0 + w / 2, cy = PAD_TOP + plotH / 2;
+        g.fillText('Idle', cx, cy - 4);
+        g.font = '11px system-ui, sans-serif';
+        g.fillText(idle < 60 ? `${idle} s` : `${Math.floor(idle / 60)} min ${idle % 60} s`, cx, cy + 12);
+        g.textAlign = 'start';
+      }
+    }
+  }, [shown, size, maxMs, budgetMs, selected, theme, idle]);
 
   const at = (e: React.MouseEvent) => {
     const r = canvas.current!.getBoundingClientRect();
@@ -111,7 +152,7 @@ export function FrameChart({ frames, budgetMs, selected, onSelect, theme }: Prop
         ref={canvas}
         style={{ width: size.w, height: size.h }}
         role="img"
-        aria-label={`Frame chart: ${shown.length} frames, budget ${budgetMs.toFixed(1)} ms`}
+        aria-label={`Frame chart: ${shown.length} frames, budget ${budgetMs.toFixed(1)} ms${idle ? `, idle for ${idle} s` : ''}`}
         onMouseMove={(e) => setHover(at(e))}
         onMouseLeave={() => setHover(null)}
         onClick={(e) => { const h = at(e); if (h) onSelect(shown[h.i].seq); }}

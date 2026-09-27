@@ -28,6 +28,8 @@ export function Performance({ client, status, windowId, theme }: Props) {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [flashing, setFlashing] = useState(false);
   const [imported, setImported] = useState<string | null>(null);
+  const lastFrameAt = useRef<number | null>(null);
+  const [now, setNow] = useState(Date.now());
   const modeRef = useRef(mode);
   modeRef.current = mode;
   const fileInput = useRef<HTMLInputElement>(null);
@@ -36,6 +38,7 @@ export function Performance({ client, status, windowId, theme }: Props) {
   useEffect(() => {
     if (!connected || mode === 'stopped') return;
     const off = client.onEvent<Frame>('Performance.frame', (f) => {
+      lastFrameAt.current = Date.now();
       setFrames((all) => {
         const next = [...all, f];
         const keep = modeRef.current === 'recording' ? RECORD_KEEP : LIVE_KEEP;
@@ -46,6 +49,14 @@ export function Performance({ client, status, windowId, theme }: Props) {
     client.call<{ budgetMs: number }>('Performance.getBudget', {}, windowId).then((r) => r.result && setBudget(r.result.budgetMs));
     return () => { off(); client.call('Performance.disableFrames'); };
   }, [client, connected, mode, windowId]);
+
+  // A clock for the idle note (frames stop while the app has nothing to draw).
+  useEffect(() => {
+    if (mode === 'stopped') return;
+    const t = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(t);
+  }, [mode]);
+  const idleMs = connected && mode !== 'stopped' && lastFrameAt.current != null ? now - lastFrameAt.current : 0;
 
   // Paint flashing follows the toggle; off when leaving the panel.
   useEffect(() => {
@@ -136,7 +147,12 @@ export function Performance({ client, status, windowId, theme }: Props) {
           </div>
         </div>
 
-        <FrameChart frames={frames} budgetMs={budget} selected={selected} onSelect={setSelected} theme={theme} />
+        <FrameChart frames={frames} budgetMs={budget} selected={selected} onSelect={setSelected} theme={theme} idleMs={idleMs} />
+        <p className="small muted idle-note" aria-live="polite">
+          {idleMs >= 1000
+            ? <>Idle: nothing on screen is changing, so the app isn't drawing (that's what keeps it at 0% CPU). New frames appear as soon as something changes.</>
+            : <>Dashed lines mark where the app sat idle between frames.</>}
+        </p>
         <div className="legend small muted">
           {PHASES.map((ph) => <span key={ph.key}><span className="dot" style={{ background: `var(${ph.token})` }} />{ph.label}</span>)}
           <span><span className="dot other" />Other</span>

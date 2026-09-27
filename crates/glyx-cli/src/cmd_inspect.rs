@@ -37,7 +37,7 @@ fn asset(name: &str) -> Option<Vec<u8>> {
 /// Where running dev apps announce themselves: this project, its
 /// subprojects one or two levels down (a monorepo's `examples/*`), and the
 /// temp-dir files of apps started without `glyx dev`.
-fn discovery_paths(root: &Path) -> Vec<PathBuf> {
+pub(super) fn discovery_paths(root: &Path) -> Vec<PathBuf> {
     let mut out = vec![root.join(DEVTOOLS_FILE)];
     let skip = |p: &Path| p.file_name().is_some_and(|n| {
         let n = n.to_string_lossy();

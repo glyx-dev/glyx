@@ -13,6 +13,10 @@ futures-util      = { workspace = true }
 parking_lot       = { workspace = true }
 getrandom         = "0.2"
 log               = { workspace = true }
+sysinfo           = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "sync", "macros", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Memory"] }

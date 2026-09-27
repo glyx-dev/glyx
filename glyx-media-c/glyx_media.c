@@ -342,6 +342,11 @@ struct VmAudioDecoder {
     int16_t*           overflow;
     int                overflow_count;  /* total i16 values stored   */
     int                overflow_pos;    /* next i16 index to read    */
+    /* After a seek: drop decoded audio before `skip_to` seconds, so playback
+     * starts exactly where it was asked to (the container seek lands on a
+     * packet at or before it). */
+    int                skipping;
+    double             skip_to;
 };
 
 VmAudioDecoder* vm_audio_decoder_open(const char* source_url,
@@ -419,6 +424,25 @@ int vm_audio_decoder_next_samples(VmAudioDecoder* dec, int16_t* buf, int max_sam
         int ret = avcodec_receive_frame(dec->codec_ctx, dec->frame);
         if (ret == 0) {
             int nb = dec->frame->nb_samples;
+            /* Frames before the seek target are dropped, the first one after
+             * it trimmed to the exact sample. */
+            int drop = 0;
+            if (dec->skipping) {
+                int64_t pts = dec->frame->best_effort_timestamp;
+                if (pts == AV_NOPTS_VALUE) {
+                    dec->skipping = 0;
+                } else {
+                    AVRational tb = dec->fmt_ctx->streams[dec->audio_stream_idx]->time_base;
+                    double start = pts * av_q2d(tb);
+                    double end   = start + (double)nb / dec->sample_rate;
+                    if (end <= dec->skip_to) { av_frame_unref(dec->frame); continue; }
+                    if (start < dec->skip_to) {
+                        drop = (int)((dec->skip_to - start) * dec->sample_rate + 0.5);
+                        if (drop > nb) drop = nb;
+                    }
+                    dec->skipping = 0;
+                }
+            }
             /* Allocate temporary packed S16 buffer for this frame. */
             int alloc = nb * dec->channels;
             int16_t* tmp = (int16_t*)av_malloc(alloc * sizeof(int16_t));
@@ -429,11 +453,12 @@ int vm_audio_decoder_next_samples(VmAudioDecoder* dec, int16_t* buf, int max_sam
                                         &out_plane, nb,
                                         (const uint8_t**)dec->frame->data, nb);
             av_frame_unref(dec->frame);
-            if (converted <= 0) { av_free(tmp); continue; }
+            if (converted <= drop) { av_free(tmp); continue; }
 
-            int total = converted * dec->channels;
+            int16_t* src = tmp + drop * dec->channels;
+            int total = (converted - drop) * dec->channels;
             int copy  = (total < max_samples) ? total : max_samples;
-            memcpy(buf, tmp, copy * sizeof(int16_t));
+            memcpy(buf, src, copy * sizeof(int16_t));
             written     += copy;
             buf         += copy;
             max_samples -= copy;
@@ -446,7 +471,7 @@ int vm_audio_decoder_next_samples(VmAudioDecoder* dec, int16_t* buf, int max_sam
                 dec->overflow_count   = remain;
                 dec->overflow_pos     = 0;
                 if (dec->overflow)
-                    memcpy(dec->overflow, tmp + copy, remain * sizeof(int16_t));
+                    memcpy(dec->overflow, src + copy, remain * sizeof(int16_t));
             }
             av_free(tmp);
             continue;
@@ -471,9 +496,17 @@ int vm_audio_decoder_next_samples(VmAudioDecoder* dec, int16_t* buf, int max_sam
 void vm_audio_decoder_seek(VmAudioDecoder* dec, double seconds)
 {
     if (!dec) return;
-    int64_t ts = (int64_t)(seconds * AV_TIME_BASE);
-    avformat_seek_file(dec->fmt_ctx, -1, INT64_MIN, ts, INT64_MAX, 0);
+    if (seconds < 0) seconds = 0;
+    /* Seek the audio stream itself, landing at or before the target (never
+     * after: the old any-direction seek on the default stream could start
+     * hundreds of ms late), then trim to it exactly while decoding. */
+    AVStream* st = dec->fmt_ctx->streams[dec->audio_stream_idx];
+    int64_t ts = av_rescale_q((int64_t)(seconds * AV_TIME_BASE), AV_TIME_BASE_Q, st->time_base);
+    if (avformat_seek_file(dec->fmt_ctx, dec->audio_stream_idx, INT64_MIN, ts, ts, 0) < 0)
+        avformat_seek_file(dec->fmt_ctx, dec->audio_stream_idx, INT64_MIN, ts, INT64_MAX, 0);
     avcodec_flush_buffers(dec->codec_ctx);
+    dec->skipping = 1;
+    dec->skip_to  = seconds;
     /* Reset overflow buffer so no stale pre-seek samples are replayed */
     dec->overflow_pos   = 0;
     dec->overflow_count = 0;

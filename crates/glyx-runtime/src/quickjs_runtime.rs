@@ -504,10 +504,16 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     })?;
     globals.set("__glyx_log", log_fn)?;
 
+    // DevTools Network panel feed (see `net_bus`).
+    let net_fn = Function::new(ctx.clone(), move |json: String| {
+        crate::net_bus::publish(Some(window_id), json);
+    })?;
+    globals.set("__glyx_devNet", net_fn)?;
+
     let time_fn = Function::new(ctx.clone(), || -> f64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as f64)
+            .map(|d| d.as_secs_f64() * 1000.0) // fractional ms, like V8's
             .unwrap_or(0.0)
     })?;
     globals.set("__glyx_getTime", time_fn)?;

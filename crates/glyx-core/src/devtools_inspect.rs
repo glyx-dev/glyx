@@ -485,10 +485,19 @@ fn text(v: &Value) -> Result<Option<String>, String> {
     }
 }
 
+/// A keyword from `allowed` (or null to unset).
+fn one_of(v: &Value, allowed: &[&str]) -> Result<Option<String>, String> {
+    match text(v)? {
+        Some(s) if !allowed.contains(&s.as_str()) => Err(format!("{s:?} isn't one of: {}", allowed.join(", "))),
+        other => Ok(other),
+    }
+}
+
 /// Props `Inspector.setNodeProp` can change, camelCase like JSX.
 pub(crate) const EDITABLE_PROPS: &[&str] = &[
     "text", "testID", "backgroundColor", "color", "borderColor", "borderWidth", "borderRadius",
     "opacity", "fontSize", "fontWeight", "width", "height", "padding", "margin", "gap", "flex", "zIndex",
+    "flexDirection", "justifyContent", "alignItems",
 ];
 
 /// Set one prop (null unsets it). The node keeps it until React next
@@ -498,6 +507,9 @@ pub(crate) fn set_prop(p: &mut NodeProps, name: &str, v: &Value) -> Result<(), S
         "text" => p.text = text(v)?,
         "testID" => p.test_id = text(v)?,
         "fontWeight" => p.font_weight = text(v)?,
+        "flexDirection" => p.flex_direction = one_of(v, &["row", "column", "row-reverse", "column-reverse"])?,
+        "justifyContent" => p.justify_content = one_of(v, &["flex-start", "flex-end", "center", "space-between", "space-around", "space-evenly"])?,
+        "alignItems" => p.align_items = one_of(v, &["flex-start", "flex-end", "center", "stretch", "baseline"])?,
         "backgroundColor" => p.background_color = color(v)?,
         "color" => p.color = color(v)?,
         "borderColor" => p.border_color = color(v)?,
@@ -556,12 +568,22 @@ pub(crate) struct Issue {
     /// `error` (blocks people) or `warning`.
     pub severity: &'static str,
     pub message: String,
+    /// The element's text, shortened (so a list of findings says which one).
+    pub text: Option<String>,
 }
 
 impl Issue {
     pub(crate) fn json(&self) -> Value {
-        json!({ "nodeId": self.node, "rule": self.rule, "severity": self.severity, "message": self.message })
+        let mut v = json!({ "nodeId": self.node, "rule": self.rule, "severity": self.severity, "message": self.message });
+        if let Some(t) = &self.text { v["text"] = json!(t); }
+        v
     }
+}
+
+/// Up to 40 characters of `t`, on one line.
+fn snippet(t: &str) -> String {
+    let one: String = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() > 40 { format!("{}…", one.chars().take(39).collect::<String>()) } else { one }
 }
 
 /// WCAG relative luminance of an sRGB colour.
@@ -594,15 +616,39 @@ fn has_text(nodes: &HashMap<u32, JsNode>, id: u32, depth: u32) -> bool {
     depth < 16 && n.children.iter().any(|&c| has_text(nodes, c, depth + 1))
 }
 
-/// The nearest opaque background at or above `id`.
+/// What's behind the text at `id`, as drawn: the nearest opaque background
+/// above it with every translucent background in between blended on top.
+/// `None` when nothing opaque is found (the window's colour isn't known here).
 fn background(nodes: &HashMap<u32, JsNode>, id: u32) -> Option<[u8; 4]> {
+    let mut layers = Vec::new(); // translucent backgrounds, nearest first
     let mut cur = Some(id);
     for _ in 0..64 {
         let n = nodes.get(&cur?)?;
-        if let Some(bg) = n.props.background_color.filter(|c| c[3] == 255) { return Some(bg); }
+        if let Some(bg) = n.props.background_color {
+            let bg = with_opacity(bg, subtree_opacity(nodes, n.parent).min(1.0) * n.props.opacity.map_or(1.0, |o| o as f64));
+            if bg[3] == 255 {
+                return Some(layers.iter().rev().fold(bg, |under, &layer| blend(layer, under)));
+            }
+            if bg[3] > 0 { layers.push(bg); }
+        }
         cur = n.parent;
     }
     None
+}
+
+/// Product of `opacity` from `id` up to the root.
+fn subtree_opacity(nodes: &HashMap<u32, JsNode>, id: Option<u32>) -> f64 {
+    let (mut o, mut cur) = (1.0, id);
+    for _ in 0..64 {
+        let Some(n) = cur.and_then(|c| nodes.get(&c)) else { break };
+        o *= n.props.opacity.map_or(1.0, |v| (v as f64).clamp(0.0, 1.0));
+        cur = n.parent;
+    }
+    o
+}
+
+fn with_opacity(c: [u8; 4], o: f64) -> [u8; 4] {
+    [c[0], c[1], c[2], (c[3] as f64 * o.clamp(0.0, 1.0)).round() as u8]
 }
 
 /// Problems a screen-reader or low-vision user would hit, from the element
@@ -616,13 +662,15 @@ pub(crate) fn audit(nodes: &HashMap<u32, JsNode>, root: Option<u32>) -> Vec<Issu
         if hidden_role(n) { continue; }
         if n.props.pressable == Some(true) && !named(n) && !has_text(nodes, id, 0) {
             out.push(Issue { node: id, rule: "pressable-name", severity: "error",
-                message: "Pressable with no text or ariaLabel: screen readers announce it as an unnamed button.".into() });
+                message: "Pressable with no text or ariaLabel: screen readers announce it as an unnamed button.".into(), text: None });
         }
         if matches!(n.node_type, NodeType::Image) && !named(n) {
             out.push(Issue { node: id, rule: "image-name", severity: "warning",
-                message: "Image with no ariaLabel (use role=\"presentation\" if it's decorative).".into() });
+                message: "Image with no ariaLabel (use role=\"presentation\" if it's decorative).".into(), text: None });
         }
         if let (NodeType::Text, Some(fg), true) = (&n.node_type, n.props.color, n.props.text.as_deref().is_some_and(|t| !t.trim().is_empty())) {
+            // Faded text (its own or an ancestor's opacity) is drawn lighter.
+            let fg = with_opacity(fg, subtree_opacity(nodes, Some(id)));
             if let Some(bg) = background(nodes, id) {
                 let ratio = contrast_ratio(fg, bg);
                 let size = n.props.font_size.unwrap_or(14.0);
@@ -632,13 +680,14 @@ pub(crate) fn audit(nodes: &HashMap<u32, JsNode>, root: Option<u32>) -> Vec<Issu
                 if ratio < need {
                     out.push(Issue { node: id, rule: "contrast", severity: if ratio < 3.0 { "error" } else { "warning" },
                         message: format!("Text contrast {ratio:.2}:1 against its background; needs {need}:1 for {} text.",
-                            if large { "large" } else { "normal" }) });
+                            if large { "large" } else { "normal" }),
+                        text: n.props.text.as_deref().map(snippet) });
                 }
             }
         }
         if n.props.focusable == Some(true) && n.props.role.is_none() && n.props.pressable != Some(true) {
             out.push(Issue { node: id, rule: "focusable-role", severity: "warning",
-                message: "Focusable with no role: screen readers can't say what it is.".into() });
+                message: "Focusable with no role: screen readers can't say what it is.".into(), text: None });
         }
     }
     out
@@ -663,6 +712,22 @@ mod tests {
         m.insert(4, node(NodeType::Text, NodeProps { text: Some("OK".into()), ..Default::default() }, &[], Some(3)));
         m.insert(9, node(NodeType::Text, NodeProps { text: Some("detached".into()), ..Default::default() }, &[], None));
         m
+    }
+
+    #[test]
+    fn contrast_sees_translucent_layers_and_opacity() {
+        let p = |f: &dyn Fn(&mut NodeProps)| { let mut x = NodeProps::default(); f(&mut x); x };
+        let mut m = HashMap::new();
+        // Black page, a 50% white card on it, grey text on the card.
+        m.insert(1, node(NodeType::View, p(&|x| x.background_color = Some([0, 0, 0, 255])), &[2], None));
+        m.insert(2, node(NodeType::View, p(&|x| x.background_color = Some([255, 255, 255, 128])), &[3], Some(1)));
+        m.insert(3, node(NodeType::Text, p(&|x| { x.text = Some("t".into()); x.color = Some([128, 128, 128, 255]); }), &[], Some(2)));
+        assert_eq!(background(&m, 3), Some([128, 128, 128, 255]), "the card lightens what's behind the text");
+        let issues = audit(&m, Some(1));
+        assert!(issues.iter().any(|i| i.rule == "contrast" && i.severity == "error"), "grey on grey fails");
+        // The card at half opacity: the text fades with it too.
+        m.get_mut(&2).unwrap().props.opacity = Some(0.5);
+        assert!(subtree_opacity(&m, Some(3)) < 0.51);
     }
 
     #[test]
@@ -763,6 +828,9 @@ mod tests {
         assert!(set_prop(&mut p, "color", &json!("red")).is_err());
         assert!(set_prop(&mut p, "fontSize", &json!("big")).is_err());
         assert!(set_prop(&mut p, "onPress", &json!(1)).unwrap_err().contains("editable props"));
+        set_prop(&mut p, "flexDirection", &json!("column")).unwrap();
+        assert_eq!(p.flex_direction.as_deref(), Some("column"));
+        assert!(set_prop(&mut p, "justifyContent", &json!("middle")).unwrap_err().contains("isn't one of"));
     }
 
     #[test]

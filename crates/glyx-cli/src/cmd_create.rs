@@ -90,7 +90,9 @@ pub(super) fn cmd_create_js(name: &str, dest: &Path, glyx_home: Option<&Path>, t
   }}
 }}
 "#))?;
-    write_file(dest.join(".gitignore"), "/node_modules\n/dist/\n/target/glyx/glyx.config.resolved.json\n")?;
+    // target/ holds generated files, including target/glyx/devtools.json
+    // (the DevTools token): never commit it.
+    write_file(dest.join(".gitignore"), "/node_modules\n/dist/\n/target/\n")?;
     write_file(dest.join(".claude/SKILLS.md"), &skills_md_template())?;
     Ok(())
 }

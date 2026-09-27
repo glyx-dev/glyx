@@ -105,6 +105,13 @@ mod devtools;
 mod devtools_inspect;
 #[cfg(feature = "dev")]
 mod devtools_perf;
+#[cfg(feature = "dev")]
+mod devtools_layout;
+#[cfg(feature = "dev")]
+mod devtools_net;
+#[cfg(feature = "dev")]
+mod devtools_caps;
+mod av_clock;
 mod scene;
 mod layout;
 mod render;
@@ -1324,17 +1331,18 @@ pub fn run(mut config: AppConfig) -> bool {
                     if let Some(ipc_name) = single_instance_ipc.take() {
                         let queue_clone = rt.deeplink_url_queue();
 
-                        // F1: Build SD before spawning to avoid holding *mut c_void across await.
-                        // Transmit as usize (Send); valid for the lifetime of sd_guard below.
+                        // F1: Build SD before spawning. The guard moves into the
+                        // listener task (it's Send), so the descriptor lives as long
+                        // as the pipes made with it. (It used to be dropped right
+                        // after spawning: every pipe then read freed memory and
+                        // failed with "The revision level is unknown".)
                         #[cfg(target_os = "windows")]
-                        let (_sd_guard, sd_ptr_usize) = {
-                            let g = pipe_dacl::current_user_only_sd();
-                            let p = g.as_ref().map(|sd| sd.ptr as usize).unwrap_or(0);
-                            (g, p)
-                        };
+                        let sd_guard = pipe_dacl::current_user_only_sd();
 
                         tokio_handle.spawn(async move {
                             use tokio::io::AsyncBufReadExt;
+                            #[cfg(target_os = "windows")]
+                            let sd_ptr_usize = sd_guard.as_ref().map(|sd| sd.ptr as usize).unwrap_or(0);
 
                             #[cfg(target_os = "windows")]
                             {
@@ -1433,6 +1441,8 @@ pub fn run(mut config: AppConfig) -> bool {
                     let _ = rt.eval("globalThis.__glyx_devtools = true;");
                 }
                 if let Some(ref js) = *js_src_arc {
+                    #[cfg(feature = "dev")]
+                    let js = &*devtools::prepare_bundle(js);
                     match rt.eval(js) {
                         Ok(_)  => log::info!("Window {}: JS eval complete.", window_handle),
                         Err(e) => {
@@ -1607,6 +1617,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     overlay_was_drawn: false,
                     #[cfg(feature = "dev")]
                     frame_details: None,
+                    #[cfg(feature = "dev")]
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
                         start_dev_mode_worker(

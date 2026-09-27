@@ -1,5 +1,6 @@
 // @glyx-dev/react — native API bindings and frame poll state.
 import { addKeyListener, registerSystemWatch, unregisterSystemWatch } from './events.js';
+import { netStart, netResponse, netOpen, netFrame, netClosed, netFailed, netIpc } from './devNet.js';
 
 /**
  * Whether the Rust host was built with the `a11y` Cargo feature enabled.
@@ -15,6 +16,8 @@ export function hasAccessibility() {
 //
 // Open sockets: id (number) → { onmessage, onclose, onerror }
 export const _wsOpenSockets = new Map();
+// Socket id → its Network panel record (devtools only).
+const _wsNetIds = new Map();
 
 // ── IPC inbox polling ─────────────────────────────────────────────────────────
 //
@@ -958,8 +961,19 @@ export async function fetch(url, options = {}) {
   }
   init.headers = hdrs.toObject();
 
-  const raw = await __glyx_fetch(url, JSON.stringify(init));
-  return _makeResponse(JSON.parse(raw), url);
+  const netId = netStart('fetch', url, {
+    method: (init.method || 'GET').toUpperCase(), headers: init.headers,
+    body: init.multipart ? `[multipart form: ${init.multipart.length} parts]` : init.body,
+  });
+  let data;
+  try {
+    data = JSON.parse(await __glyx_fetch(url, JSON.stringify(init)));
+  } catch (e) {
+    netFailed(netId, e);
+    throw e;
+  }
+  netResponse(netId, data);
+  return _makeResponse(data, url);
 }
 
 // ── Shell (Tier 1: scoped exec) ─────────────────────────────────────────────
@@ -1002,6 +1016,7 @@ if (typeof globalThis.Headers === 'undefined') globalThis.Headers = GlyxHeaders;
 // onmessage callbacks that call setState are batched with the rest of the frame.
 export function _pollWebSockets() {
   for (const [id, handlers] of _wsOpenSockets) {
+    const netId = _wsNetIds.get(id);
     let raw;
     try { raw = __glyx_ws_poll(id); } catch { continue; }
     if (!raw) continue;
@@ -1009,10 +1024,13 @@ export function _pollWebSockets() {
     try { msgs = JSON.parse(raw); } catch { continue; }
     for (const m of msgs) {
       if (m === '__GLYX_WS_CLOSED__') {
+        netClosed(netId);
+        _wsNetIds.delete(id);
         handlers.onclose?.();
         _wsOpenSockets.delete(id);
         break;
       } else {
+        netFrame(netId, 'in', m);
         handlers.onmessage?.({ data: m });
       }
     }
@@ -1064,13 +1082,16 @@ export const ws = {
    * @returns {Promise<{ send: (msg:string)=>void, close: ()=>void, id: number }>}
    */
   connect(url, handlers = {}) {
-    return __glyx_ws_connect(url).then(idStr => {
+    const netId = netStart('websocket', url);
+    return __glyx_ws_connect(url).catch(e => { netFailed(netId, e); throw e; }).then(idStr => {
       const id = Number(idStr);
       _wsOpenSockets.set(id, handlers);
+      if (netId) { _wsNetIds.set(id, netId); netOpen(netId); }
       return {
         get id() { return id; },
-        send(msg)  { __glyx_ws_send(id, String(msg)); },
+        send(msg)  { netFrame(netId, 'out', msg); __glyx_ws_send(id, String(msg)); },
         close()    {
+          if (_wsNetIds.delete(id)) netClosed(netId);
           __glyx_ws_close(id);
           _wsOpenSockets.delete(id);
           handlers.onclose?.();
@@ -1089,6 +1110,7 @@ export function _pollIpc() {
   try { msgs = __glyx_ipc_poll(); } catch { return; }
   if (!msgs) return;
   for (const msg of msgs) {
+    netIpc('in', null, msg);
     for (const cb of _ipcListeners) {
       try { cb(msg); } catch {}
     }
@@ -1114,6 +1136,7 @@ export const ipc = {
    */
   send(targetHandle, message) {
     if (typeof __glyx_ipc_send !== 'undefined') {
+      netIpc('out', targetHandle, message);
       __glyx_ipc_send(targetHandle, String(message));
     }
   },
@@ -1336,9 +1359,11 @@ export const crash = {
 
 function _backendCall(cmd, args) {
   var json = args === undefined ? '{}' : JSON.stringify(args);
+  var netId = netStart('command', cmd, { method: 'CALL', body: json });
   return __glyx_backend_call(cmd, json).then(function(raw) {
+    netResponse(netId, { statusText: 'Returned', body: raw });
     try { return JSON.parse(raw); } catch (_) { return raw; }
-  });
+  }, function(e) { netFailed(netId, e); throw e; });
 }
 
 function _backendNs(prefix) {

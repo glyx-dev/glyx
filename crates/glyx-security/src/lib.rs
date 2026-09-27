@@ -17,7 +17,7 @@
 use std::sync::OnceLock;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ── Path safety helpers (0.1) ─────────────────────────────────────────────────
 
@@ -145,7 +145,7 @@ pub fn resolve_shell_agent_cwd(requested: &Path) -> Result<PathBuf, DenyReason> 
 /// Requested paths are lexically normalized before matching, so
 /// `assets/../secrets.txt` is checked as `secrets.txt` — `..` cannot escape
 /// a granted glob.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct FsCapability {
     /// Glob patterns the app may read. `None` = no read access.
     pub read:   Option<Vec<String>>,
@@ -253,7 +253,7 @@ fn match_candidates(path: &str) -> Vec<String> {
 }
 
 /// Network access declarations.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct NetworkCapability {
     /// Whitelisted hostnames. Use `["*"]` to allow all outbound.
     pub allow: Vec<String>,
@@ -268,7 +268,7 @@ pub struct NetworkCapability {
 /// cannot be used for shell-metacharacter injection regardless of what a
 /// caller passes as arguments; that's a structural property of how the
 /// process is spawned, not a filter applied on top of it.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct ShellCapability {
     /// Exact binary names (or absolute paths) the app may spawn, e.g.
     /// `["git", "ffmpeg"]`.
@@ -284,7 +284,7 @@ pub struct ShellCapability {
 /// overlay — see `crates/glyx-core/src/lib.rs`'s `shell_agent_log`. This is
 /// deliberately a much higher trust level than `ShellCapability` and is
 /// meant to require an explicit, loud opt-in, not a boolean flip.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShellAgentCapability {
     /// The only filesystem root spawned processes' cwd may resolve within.
     #[serde(rename = "scopeDir")]
@@ -297,7 +297,7 @@ pub struct ShellAgentCapability {
 /// Patterns support a trailing `*` wildcard: `"MY_APP_*"` allows all vars
 /// with that prefix.  JS cannot enumerate or dump the process environment —
 /// it can only read names it explicitly requests that are in the allowlist.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct EnvCapability {
     /// Allowed env var name patterns. Supports trailing `*` wildcard.
     pub allow: Vec<String>,
@@ -317,7 +317,7 @@ fn env_pattern_matches(pattern: &str, name: &str) -> bool {
 ///
 /// Enables custom URL scheme handling so the OS can launch or focus the app
 /// when a link like `myapp://note/42` is activated from a browser or another app.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DeeplinkCapability {
     /// The URL scheme to register (without `://`), e.g. `"notes"`.
     pub scheme: String,
@@ -330,7 +330,7 @@ pub struct DeeplinkCapability {
 /// The full capability set for one Glyx application.
 ///
 /// Deserialises from the `"capabilities"` key in `glyx.config.json`.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct Capabilities {
     pub fs:      Option<FsCapability>,
     pub network: Option<NetworkCapability>,
@@ -448,12 +448,12 @@ impl Capabilities {
     /// True if `path` matches one of the declared `fs.read` globs.
     /// The path is lexically normalized first, so `..` cannot escape a glob.
     pub fn can_read_path(&self, path: &str) -> bool {
-        self.fs.as_ref().is_some_and(|f| f.allows(&f.read, &f.read_set, path))
+        allowed_or_log(self.fs.as_ref().is_some_and(|f| f.allows(&f.read, &f.read_set, path)), "fs.read", path)
     }
 
     /// True if `path` matches one of the declared `fs.write` globs.
     pub fn can_write_path(&self, path: &str) -> bool {
-        self.fs.as_ref().is_some_and(|f| f.allows(&f.write, &f.write_set, path))
+        allowed_or_log(self.fs.as_ref().is_some_and(|f| f.allows(&f.write, &f.write_set, path)), "fs.write", path)
     }
 
     /// True if `path` may be deleted.
@@ -462,19 +462,26 @@ impl Capabilities {
     /// If `fs.delete` is absent (`None`), falls back to `fs.write` globs.
     /// If `fs.delete` is an empty array (`[]`), deletion is denied everywhere.
     pub fn can_delete_path(&self, path: &str) -> bool {
-        let Some(fs) = self.fs.as_ref() else { return false };
-        match &fs.delete {
+        let ok = self.fs.as_ref().is_some_and(|fs| match &fs.delete {
             Some(_) => fs.allows(&fs.delete, &fs.delete_set, path),
             None    => fs.allows(&fs.write,  &fs.write_set,  path),
-        }
+        });
+        allowed_or_log(ok, "fs.delete", path)
     }
 
     /// True if `host` is in the network allowlist, or `"*"` is listed.
     pub fn can_network(&self, host: &str) -> bool {
-        self.network
+        let ok = self.network
             .as_ref()
             .map(|n| n.allow.iter().any(|h| h == "*" || h == host))
-            .unwrap_or(false)
+            .unwrap_or(false);
+        allowed_or_log(ok, "network", host)
+    }
+
+    /// Same as `can_network`, without recording a denial (for checks that
+    /// only predict, like DevTools' capability report).
+    pub fn would_allow_network(&self, host: &str) -> bool {
+        self.network.as_ref().is_some_and(|n| n.allow.iter().any(|h| h == "*" || h == host))
     }
 
     /// True if the app declared `mdns: true`.
@@ -482,7 +489,7 @@ impl Capabilities {
 
     /// True if `bin` (exact name) is in the `shellExec.allow` list.
     pub fn can_shell_run(&self, bin: &str) -> bool {
-        self.shell_exec.as_ref().is_some_and(|s| s.allow.iter().any(|b| b == bin))
+        allowed_or_log(self.shell_exec.as_ref().is_some_and(|s| s.allow.iter().any(|b| b == bin)), "shellExec", bin)
     }
 
     /// The declared `shellAgent.scopeDir`, if the capability is present.
@@ -499,10 +506,11 @@ impl Capabilities {
     /// Returns `false` (silently) when no `env` capability is declared or name is empty.
     pub fn can_get_env(&self, name: &str) -> bool {
         if name.is_empty() { return false; }
-        self.env
+        let ok = self.env
             .as_ref()
             .map(|e| e.allow.iter().any(|p| env_pattern_matches(p, name)))
-            .unwrap_or(false)
+            .unwrap_or(false);
+        allowed_or_log(ok, "env", name)
     }
 
     /// True if `name` is a recognized `glyx.config.json` capability key
@@ -629,12 +637,69 @@ pub fn is_initialized() -> bool {
 ///
 /// If `init()` has not been called, returns a zero-permission default so
 /// that unconfigured apps fail closed rather than open.
+// ── Denial log ───────────────────────────────────────────────────────────────
+
+/// One kind of request the capabilities refused, and how often.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Denial {
+    /// The capability that would allow it (`network`, `fs.read`, `shellExec`, `env` …).
+    pub capability: &'static str,
+    /// What was asked for: the host, path, binary or variable name.
+    pub target: String,
+    pub count: u64,
+    /// Milliseconds since the Unix epoch, first and last time.
+    pub first_ms: u64,
+    pub last_ms: u64,
+}
+
+/// Distinct denials kept (the oldest drop off).
+const MAX_DENIALS: usize = 200;
+static DENIALS: std::sync::Mutex<Vec<Denial>> = std::sync::Mutex::new(Vec::new());
+
+fn allowed_or_log(ok: bool, capability: &'static str, target: &str) -> bool {
+    if !ok { record_denial(capability, target); }
+    ok
+}
+
+/// Note a refused request (for DevTools' capability report). Cheap, and only
+/// on the refusal path.
+pub fn record_denial(capability: &'static str, target: &str) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let mut log = DENIALS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(d) = log.iter_mut().find(|d| d.capability == capability && d.target == target) {
+        d.count += 1;
+        d.last_ms = now;
+        return;
+    }
+    if log.len() == MAX_DENIALS { log.remove(0); }
+    log.push(Denial { capability, target: target.to_string(), count: 1, first_ms: now, last_ms: now });
+}
+
+/// Every refusal so far this run.
+pub fn denials() -> Vec<Denial> {
+    DENIALS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 pub fn get() -> &'static Capabilities {
     CAPS.get_or_init(Capabilities::default)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn denials_are_recorded_once_per_target_with_a_count() {
+        let caps = Capabilities::default();
+        assert!(!caps.can_network("denial-test.example"));
+        assert!(!caps.can_network("denial-test.example"));
+        assert!(!caps.would_allow_network("denial-test-2.example"));
+        let d: Vec<Denial> = denials().into_iter().filter(|d| d.target.starts_with("denial-test")).collect();
+        assert_eq!(d.len(), 1, "would_allow_network doesn't record");
+        assert_eq!((d[0].capability, d[0].count), ("network", 2));
+        let json = serde_json::to_value(&caps).unwrap();
+        assert_eq!(json["db"], false);
+    }
+
     use super::*;
 
     fn parse(json: &str) -> Capabilities {

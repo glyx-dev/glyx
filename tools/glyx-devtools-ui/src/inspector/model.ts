@@ -134,6 +134,7 @@ export const EDITABLE: Record<string, 'text' | 'color' | 'number' | 'length'> = 
   backgroundColor: 'color', color: 'color', borderColor: 'color',
   borderWidth: 'number', borderRadius: 'number', opacity: 'number', fontSize: 'number', flex: 'number', zIndex: 'number',
   width: 'length', height: 'length', padding: 'length', margin: 'length', gap: 'length',
+  flexDirection: 'text', justifyContent: 'text', alignItems: 'text',
 };
 
 export const PROP_GROUPS: [string, string[]][] = [

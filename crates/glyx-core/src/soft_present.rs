@@ -56,6 +56,7 @@ impl SoftPresent {
 
     /// The last presented frame as `(width, height, 0RGB pixels)`, or `None`
     /// before the first full frame (or right after a resize).
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools only
     pub fn last_frame(&self) -> Option<(u32, u32, &[u32])> {
         let total = (self.width * self.height) as usize;
         (self.last_frame.len() == total).then(|| (self.width, self.height, &self.last_frame[..]))

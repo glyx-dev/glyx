@@ -29,12 +29,13 @@ use crate::state::{PerWindowState, Present};
 /// Every method answered here, as listed in the handshake.
 pub(crate) const METHODS: &[&str] = &[
     "Runtime.handshake", "Runtime.ping", "Runtime.version", "Runtime.windows", "Runtime.evaluate",
+    "Runtime.getCapabilities",
     "Console.enable", "Console.disable", "Console.getMessages", "Console.clear",
     "Inspector.getTree", "Inspector.getNode", "Inspector.getLayout", "Inspector.selectElement",
     "Inspector.getAccessibilityTree", "Inspector.highlightNode", "Inspector.setNodeProp",
     "Inspector.enableDamage", "Inspector.disableDamage",
     "Inspector.setInspectMode", "Inspector.enableTreeEvents", "Inspector.disableTreeEvents",
-    "Inspector.auditAccessibility", "Inspector.setOverlay",
+    "Inspector.auditAccessibility", "Inspector.setOverlay", "Inspector.getLayoutDetails",
     "Automation.findNodes", "Automation.click", "Automation.type", "Automation.press",
     "Automation.scroll", "Automation.dispatchInput", "Automation.screenshot", "Automation.waitFor",
     "Performance.snapshot", "Performance.getBudget", "Performance.setBudget",
@@ -42,15 +43,19 @@ pub(crate) const METHODS: &[&str] = &[
     "Performance.enableFrames", "Performance.disableFrames", "Performance.getFrameDetail",
     "Animation.list", "Animation.enable", "Animation.disable", "Animation.waitForSettled",
     "Animation.setPlaybackRate", "Animation.seek", "Animation.getPlayback",
+    "Memory.sample", "Memory.collectGarbage", "Memory.snapshot",
+    "Network.enable", "Network.disable", "Network.getRequests", "Network.getRequest", "Network.clear",
+    "Profiler.getStatus", "Profiler.start", "Profiler.stop",
 ];
 pub(crate) const EVENTS: &[&str] = &[
     "Console.messageAdded", "Inspector.frameDamage", "Performance.frame",
     "Inspector.nodePicked", "Inspector.inspectModeChanged", "Inspector.treeChanged",
     "Animation.started", "Animation.ended", "Animation.settled",
+    "Network.requestUpdated",
 ];
 
 /// Responses that name nodes get each node's React component added.
-const NAMED: &[&str] = &["Inspector.getTree", "Inspector.getNode", "Inspector.selectElement", "Automation.findNodes", "Inspector.auditAccessibility", "Animation.list"];
+const NAMED: &[&str] = &["Inspector.getLayoutDetails", "Inspector.getTree", "Inspector.getNode", "Inspector.selectElement", "Automation.findNodes", "Inspector.auditAccessibility", "Animation.list"];
 
 pub(crate) const ENGINE: &str = if cfg!(feature = "v8") { "V8" } else { "QuickJS" };
 
@@ -78,6 +83,102 @@ struct Wait {
     deadline: Instant,
 }
 
+/// The name the app bundle is evaluated under while devtools is on, so
+/// profiles can tell its frames from console snippets.
+pub(crate) const BUNDLE_URL: &str = "glyx://app/bundle.js";
+
+/// The current bundle's inline source map (base64 JSON), for mapping
+/// profile frames back to source files.
+static BUNDLE_SOURCE_MAP: Mutex<Option<Arc<str>>> = Mutex::new(None);
+
+/// With devtools on: remember `js`'s inline source map and name the script.
+/// Otherwise `js` is evaluated as is.
+pub(crate) fn prepare_bundle(js: &str) -> std::borrow::Cow<'_, str> {
+    if std::env::var_os("GLYX_DEVTOOLS_PORT").is_none() { return js.into(); }
+    const MARK: &str = "//# sourceMappingURL=data:application/json;base64,";
+    let map = js.rfind(MARK).map(|i| Arc::<str>::from(js[i + MARK.len()..].trim_end()));
+    *BUNDLE_SOURCE_MAP.lock() = map;
+    format!("{js}
+//# sourceURL={BUNDLE_URL}
+").into()
+}
+
+/// The app bundle's original files `(path, content)`, from its source map.
+fn bundle_sources() -> Vec<(String, String)> {
+    let Some(b64) = BUNDLE_SOURCE_MAP.lock().clone() else { return Vec::new() };
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) else { return Vec::new() };
+    let Ok(map) = serde_json::from_slice::<Value>(&bytes) else { return Vec::new() };
+    let (Some(sources), Some(contents)) = (map["sources"].as_array(), map["sourcesContent"].as_array()) else { return Vec::new() };
+    sources.iter().zip(contents)
+        .filter_map(|(s, c)| Some((s.as_str()?.to_string(), c.as_str()?.to_string())))
+        .collect()
+}
+
+/// `Runtime.getCapabilities`: granted, possibly missing, and refused.
+fn capability_report() -> Value {
+    let caps = glyx_security::get();
+    let configured = serde_json::to_value(caps).unwrap_or(Value::Null);
+    let sources = bundle_sources();
+    let app_files = sources.iter().filter(|(p, _)| crate::devtools_caps::is_app_source(p)).count();
+    let findings = crate::devtools_caps::findings(&sources, &configured, |h| caps.would_allow_network(h));
+    json!({
+        "configured": configured,
+        "mayBreak": findings,
+        "denied": glyx_security::denials(),
+        "scanned": { "available": !sources.is_empty(), "appFiles": app_files },
+    })
+}
+
+/// The bundle's source map as JSON, if it has one.
+fn bundle_source_map() -> Option<Value> {
+    let b64 = BUNDLE_SOURCE_MAP.lock().clone()?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()).ok()?;
+    let mut map: Value = serde_json::from_slice(&bytes).ok()?;
+    // Only positions matter to the profiler; the sources can be large.
+    if let Some(o) = map.as_object_mut() { o.remove("sourcesContent"); }
+    Some(map)
+}
+
+/// `Automation.screenshot` on a GPU renderer: say exactly how to get one.
+/// (Reading frames back from the GPU is planned; today only the CPU
+/// renderer keeps the last frame in memory.)
+fn screenshot_unsupported(present: &Present) -> ErrorBody {
+    screenshot_error(match present {
+        Present::Gpu(_) => "gpu",
+        #[cfg(target_os = "windows")]
+        Present::Direct2D(_) => "direct2d",
+        Present::Soft(_) => "cpu",
+    })
+}
+
+fn screenshot_error(renderer: &str) -> ErrorBody {
+    ErrorBody::new(codes::UNSUPPORTED, format!(
+        "Screenshots need the CPU renderer, and this app is running on the {renderer} renderer.          Restart it with GLYX_CPU_RENDER=1 set: `GLYX_CPU_RENDER=1 glyx dev --devtools`          (PowerShell: `$env:GLYX_CPU_RENDER=1; glyx dev --devtools`). Everything else works on any renderer."
+    )).with_data(json!({
+        "reason": "rendererNotSupported",
+        "renderer": renderer,
+        "fix": {
+            "env": { "GLYX_CPU_RENDER": "1" },
+            "restart": true,
+            "command": "GLYX_CPU_RENDER=1 glyx dev --devtools",
+            "powershell": "$env:GLYX_CPU_RENDER=1; glyx dev --devtools",
+        },
+    }))
+}
+
+/// A CPU profile being recorded.
+struct Profiling {
+    owner: ConnId,
+    window: u32,
+    started: Instant,
+    /// Whether the engine's JS sampler is running (V8); why not, if not.
+    sampling: Result<(), String>,
+}
+
+/// JS for the component-render recorder (see `@glyx/react`'s devProfile.js).
+const PROFILE_START_JS: &str = "(typeof __glyx_devProfileStart === 'function') ? __glyx_devProfileStart() : false";
+const PROFILE_STOP_JS: &str = "(typeof __glyx_devProfileStop === 'function') ? __glyx_devProfileStop() : null";
+
 /// A handler's answer: now, or later (a `waitFor` that isn't met yet).
 enum Reply {
     Now(Result<Value, ErrorBody>),
@@ -99,6 +200,14 @@ pub(crate) struct Devtools {
     /// The last `CONSOLE_BACKLOG` messages, numbered.
     backlog: std::collections::VecDeque<(u64, LogEntry)>,
     log_seq: u64,
+    /// Clients that sent `Network.enable`.
+    network: HashSet<ConnId>,
+    /// The network feed, subscribed for the whole session like the console,
+    /// and the requests it has reported.
+    net_rx: Option<Receiver<glyx_runtime::net_bus::NetEvent>>,
+    net: crate::devtools_net::NetLog,
+    /// The recording in progress, if any (one at a time).
+    profiling: Option<Profiling>,
     /// Delivers synthetic input through the event loop, the same path real
     /// input takes.
     proxy: Mutex<EventLoopProxy<GlyxUserEvent>>,
@@ -155,7 +264,15 @@ impl Devtools {
         let wake = Arc::new(move || { let _ = wake_proxy.lock().send_event(GlyxUserEvent::Wake); });
         let notify_proxy = Mutex::new(proxy.clone());
         let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || { let _ = notify_proxy.lock().send_event(GlyxUserEvent::Wake); });
-        let server = match DevtoolsServer::start(handle, port, token.clone(), wake) {
+        // The port is only a preference: the discovery file carries the real
+        // one, so a second app (the default port taken) takes any free port.
+        let server = match DevtoolsServer::start(handle, port, token.clone(), wake.clone())
+            .or_else(|e| if port != 0 && e.kind() == std::io::ErrorKind::AddrInUse {
+                let s = DevtoolsServer::start(handle, 0, token.clone(), wake)?;
+                log::info!("[GDP] port {port} is taken (another app?); using {} instead", s.port());
+                Ok(s)
+            } else { Err(e) })
+        {
             Ok(s) => s,
             Err(e) => { log::error!("[GDP] could not listen on 127.0.0.1:{port}: {e}"); return None; }
         };
@@ -169,20 +286,21 @@ impl Devtools {
             "pid": std::process::id(),
             "engine": ENGINE,
         });
-        match std::fs::create_dir_all(file.parent().unwrap_or(std::path::Path::new(".")))
-            .and_then(|_| std::fs::write(&file, serde_json::to_string_pretty(&info).unwrap_or_default()))
-        {
+        // Owner-only: the token is full control of the app.
+        match glyx_devtools::write_private(&file, &serde_json::to_string_pretty(&info).unwrap_or_default()) {
             Ok(()) => log::info!("[GDP] devtools on ws://127.0.0.1:{port}/ (token in {})", file.display()),
             Err(e) => log::warn!("[GDP] devtools on ws://127.0.0.1:{port}/; could not write {}: {e}", file.display()),
         }
         Some(Self {
             server, console: HashSet::new(), logs: Some(log_bus::subscribe()),
             backlog: std::collections::VecDeque::new(), log_seq: 0,
+            network: HashSet::new(), net_rx: Some(glyx_runtime::net_bus::subscribe()), net: Default::default(),
+            profiling: None,
             proxy: Mutex::new(proxy), waits: Vec::new(), damage: HashSet::new(),
             frames: HashSet::new(), frames_sent: HashMap::new(),
             anim: HashSet::new(), anim_prev: HashMap::new(),
             inspecting: HashSet::new(), highlight_owner: None,
-            tree_subs: HashSet::new(), tree_sent: HashMap::new(), notify,
+            tree_subs: HashSet::new(), tree_sent: HashMap::new(), notify: { glyx_runtime::net_bus::set_waker(Arc::clone(&notify)); notify },
             overlay_conns: HashSet::new(), frame_detail_conns: HashSet::new(), playback_owner: None,
             auto_id_cache_threshold: std::env::var("GLYX_DEVTOOLS_AUTOID_CACHE_THRESHOLD").ok()
                 .and_then(|v| v.trim().parse().ok()).unwrap_or(DEFAULT_AUTO_ID_CACHE_THRESHOLD),
@@ -194,6 +312,16 @@ impl Devtools {
     pub(crate) fn pump(&mut self, windows: &mut HashMap<u32, PerWindowState>) {
         for conn in self.server.take_closed() {
             self.console.remove(&conn);
+            self.network.remove(&conn);
+            // Don't leave the app sampling for a client that's gone.
+            if self.profiling.as_ref().is_some_and(|p| p.owner == conn) {
+                if let Some(p) = self.profiling.take() {
+                    if let Some(s) = windows.get_mut(&p.window) {
+                        if p.sampling.is_ok() { let _ = s.runtime.profile_stop(); }
+                        let _ = s.runtime.eval(PROFILE_STOP_JS);
+                    }
+                }
+            }
             self.damage.remove(&conn);
             self.frames.remove(&conn);
             self.anim.remove(&conn);
@@ -220,6 +348,9 @@ impl Devtools {
                 }
             }
         }
+        // Before answering, so `Network.getRequests` sees everything the app
+        // has sent so far.
+        self.drain_network();
         for Incoming { conn, mut request } in self.server.poll() {
             // `{ id: "…" }` selects by element ID: resolve it to the node now,
             // so every method accepts it. waitFor resolves on each check
@@ -274,6 +405,19 @@ impl Devtools {
                 }
                 if self.backlog.len() == CONSOLE_BACKLOG { self.backlog.pop_front(); }
                 self.backlog.push_back((self.log_seq, e));
+            }
+        }
+        self.drain_network();
+    }
+
+    /// Fold new network events into the request list and stream the changes.
+    fn drain_network(&mut self) {
+        let Some(rx) = &self.net_rx else { return };
+        glyx_runtime::net_bus::drained();
+        for e in rx.try_iter() {
+            let Some(summary) = self.net.apply(e.window_id, &e.json) else { continue };
+            for &c in &self.network {
+                self.server.send_event(c, "Network.requestUpdated", e.window_id, summary.clone());
             }
         }
     }
@@ -457,6 +601,7 @@ impl Devtools {
                 events: EVENTS.iter().map(|s| s.to_string()).collect(),
             }).unwrap_or(Value::Null)).into(),
             ("Runtime", "ping") => Ok(json!({ "pong": true })).into(),
+            ("Runtime", "getCapabilities") => Ok(capability_report()).into(),
             ("Runtime", "version") => Ok(json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "glyx": env!("CARGO_PKG_VERSION"),
@@ -496,6 +641,75 @@ impl Devtools {
             ("Console", "clear") => {
                 self.backlog.clear();
                 Ok(json!({ "lastSeq": self.log_seq })).into()
+            }
+            ("Profiler", "getStatus") => Ok(json!({
+                "engine": ENGINE,
+                "jsSampling": cfg!(feature = "v8"),
+                "recording": self.profiling.as_ref().map(|p| json!({ "windowId": p.window, "elapsedMs": p.started.elapsed().as_millis() as u64 })),
+            })).into(),
+            ("Profiler", "start") => (|| {
+                if self.profiling.is_some() {
+                    return Err(ErrorBody::new(codes::INVALID_PARAMS, "already recording (stop it first)"));
+                }
+                let win = target_window(req.window_id, windows)?;
+                let s = windows.get_mut(&win).expect("target_window checked it");
+                let interval = p.get("intervalUs").and_then(Value::as_u64).unwrap_or(250).clamp(50, 100_000) as u32;
+                let sampling = s.runtime.profile_start(interval);
+                let components = s.runtime.eval(&evaluate_source(PROFILE_START_JS)).ok()
+                    .and_then(|o| parse_evaluate_result(&o).ok())
+                    .and_then(|v| v.get("value").and_then(Value::as_bool)).unwrap_or(false);
+                let out = json!({
+                    "jsSampling": sampling.is_ok(), "jsSamplingError": sampling.as_ref().err(),
+                    "components": components, "engine": ENGINE,
+                });
+                self.profiling = Some(Profiling { owner: conn, window: win, started: Instant::now(), sampling });
+                Ok(out)
+            })().into(),
+            ("Profiler", "stop") => (|| {
+                let Some(prof) = self.profiling.take() else {
+                    return Err(ErrorBody::new(codes::INVALID_PARAMS, "not recording"));
+                };
+                let s = windows.get_mut(&prof.window)
+                    .ok_or_else(|| ErrorBody::new(codes::NO_SUCH_WINDOW, "the window closed"))?;
+                let cpu = match &prof.sampling {
+                    Ok(()) => s.runtime.profile_stop().map_err(|e| e.to_string()),
+                    Err(e) => Err(e.clone()),
+                };
+                let components = s.runtime.eval(&evaluate_source(PROFILE_STOP_JS)).ok()
+                    .and_then(|o| parse_evaluate_result(&o).ok())
+                    .and_then(|v| v.get("value").and_then(Value::as_str).map(str::to_string))
+                    .and_then(|j| serde_json::from_str::<Value>(&j).ok())
+                    .unwrap_or(Value::Null);
+                Ok(json!({
+                    "engine": ENGINE, "windowId": prof.window,
+                    "durationMs": prof.started.elapsed().as_secs_f64() * 1000.0,
+                    "cpuProfile": cpu.as_ref().ok(), "jsSamplingError": cpu.as_ref().err(),
+                    "components": components,
+                    // For mapping bundle frames to source files (V8 profiles).
+                    "bundleUrl": BUNDLE_URL,
+                    "sourceMap": if cpu.is_ok() { bundle_source_map() } else { None },
+                }))
+            })().into(),
+            ("Network", "enable") => {
+                self.network.insert(conn);
+                Ok(json!({})).into()
+            }
+            ("Network", "disable") => {
+                self.network.remove(&conn);
+                Ok(json!({})).into()
+            }
+            ("Network", "getRequests") => {
+                let since = p.get("since").and_then(Value::as_u64).unwrap_or(0);
+                Ok(json!({ "requests": self.net.list(since), "lastSeq": self.net.last_seq() })).into()
+            }
+            ("Network", "getRequest") => match p.get("key").and_then(Value::as_str) {
+                Some(key) => self.net.detail(key)
+                    .ok_or_else(|| ErrorBody::new(codes::INVALID_PARAMS, format!("no request {key:?} (cleared, or too old)"))),
+                None => Err(ErrorBody::new(codes::INVALID_PARAMS, "key is required")),
+            }.into(),
+            ("Network", "clear") => {
+                self.net.clear();
+                Ok(json!({ "lastSeq": self.net.last_seq() })).into()
             }
             ("Console", "disable") => {
                 self.console.remove(&conn);
@@ -576,6 +790,12 @@ impl Devtools {
                 set_inspect_mode(windows, on);
                 Ok(json!({ "enabled": on })).into()
             }
+            ("Inspector", "getLayoutDetails") => (|| {
+                let s = window(req, windows)?;
+                let id = existing_node(s, node_param(p)?)?;
+                crate::devtools_layout::layout_details(s, id)
+                    .ok_or_else(|| ErrorBody::new(codes::NO_SUCH_NODE, format!("node {id} has no layout")))
+            })().into(),
             ("Inspector", "setOverlay") => {
                 let on = p.get("paintFlashing").and_then(Value::as_bool).unwrap_or(false);
                 if on { self.overlay_conns.insert(conn); } else { self.overlay_conns.remove(&conn); }
@@ -684,6 +904,43 @@ impl Devtools {
             ("Animation", "list") => (|| {
                 let s = window(req, windows)?;
                 Ok(json!({ "running": perf::motion_list(s), "rate": s.motion_clock.rate() }))
+            })().into(),
+            // ── Memory ─────────────────────────────────────────────────────
+            ("Memory", "sample") => (|| {
+                let win = target_window(req.window_id, windows)?;
+                Ok(memory_sample(windows.get_mut(&win).expect("target_window checked it")))
+            })().into(),
+            ("Memory", "collectGarbage") => (|| {
+                let win = target_window(req.window_id, windows)?;
+                let s = windows.get_mut(&win).expect("target_window checked it");
+                let before = s.runtime.heap_stats().used_heap_size;
+                let t0 = Instant::now();
+                s.runtime.gc_hint();
+                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                let mut after = memory_sample(s);
+                after["heapBefore"] = json!(before);
+                after["gcMs"] = json!((ms * 1000.0).round() / 1000.0);
+                Ok(after)
+            })().into(),
+            ("Memory", "snapshot") => (|| {
+                let win = target_window(req.window_id, windows)?;
+                let s = windows.get_mut(&win).expect("target_window checked it");
+                let attached = inspect::attached(&s.js_nodes, s.js_root);
+                let mut by_type: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+                for id in &attached {
+                    if let Some(n) = s.js_nodes.get(id) { *by_type.entry(inspect::type_name(&n.node_type)).or_default() += 1; }
+                }
+                // Per component, from the React tree (devtools-only JS helper).
+                let by_component = s.runtime.eval(&evaluate_source(
+                    "(typeof __glyx_devComponentCounts === 'function') ? __glyx_devComponentCounts() : null"))
+                    .ok().and_then(|o| parse_evaluate_result(&o).ok()).and_then(|v| v.get("value").cloned())
+                    .unwrap_or(Value::Null);
+                let mut out = memory_sample(s);
+                out["elements"] = json!(attached.len());
+                out["detached"] = json!(s.js_nodes.len().saturating_sub(attached.len()));
+                out["byType"] = json!(by_type);
+                out["byComponent"] = by_component;
+                Ok(out)
             })().into(),
             ("Animation", "getPlayback") => (|| {
                 let s = window(req, windows)?;
@@ -821,8 +1078,7 @@ impl Devtools {
                     None => None,
                 };
                 let Present::Soft(sp) = &s.gpu else {
-                    return Err(ErrorBody::new(codes::UNSUPPORTED,
-                        "screenshots need the CPU renderer for now; start the app with GLYX_CPU_RENDER=1"));
+                    return Err(screenshot_unsupported(&s.gpu));
                 };
                 let (w, h, px) = sp.last_frame()
                     .ok_or_else(|| ErrorBody::new(codes::UNSUPPORTED, "no frame presented yet"))?;
@@ -861,6 +1117,48 @@ impl Devtools {
 /// Add each node's React component (`"component": "Btn@app.jsx:104"`) to a
 /// response, from the host config's devtools-only map. One JS call per
 /// response; nothing is added if the app's React layer doesn't provide it.
+/// A live memory reading (doesn't wait for a frame).
+fn memory_sample(s: &mut PerWindowState) -> Value {
+    let heap = s.runtime.heap_stats();
+    let (gpu_buf, gpu_tex, gpu_reserved, _, _) = s.gpu.memory_counters();
+    json!({
+        "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+        "heapUsed": heap.used_heap_size,
+        "heapTotal": heap.total_heap_size,
+        "rss": s.rss_bytes.load(std::sync::atomic::Ordering::Relaxed),
+        "privateBytes": private_working_set(),
+        "gpuBuffers": gpu_buf,
+        "gpuTextures": gpu_tex,
+        "gpuReserved": gpu_reserved,
+        "nodes": s.js_nodes.len(),
+    })
+}
+
+/// Memory only this process uses (Task Manager's "Memory" column): the
+/// private working set, without shared DLL / font / mapped-file pages that
+/// `rss` (the full working set) includes. None where the OS can't say.
+#[cfg(windows)]
+fn private_working_set() -> Option<u64> {
+    use windows_sys::Win32::System::{ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS}, Threading::GetCurrentProcess};
+    // PROCESS_MEMORY_COUNTERS_EX2 (Windows 10 1809+); not in windows-sys 0.59.
+    #[repr(C)]
+    #[derive(Default)]
+    struct CountersEx2 {
+        cb: u32, page_fault_count: u32,
+        peak_working_set: usize, working_set: usize,
+        quota_peak_paged: usize, quota_paged: usize, quota_peak_non_paged: usize, quota_non_paged: usize,
+        pagefile: usize, peak_pagefile: usize, private_usage: usize,
+        private_working_set: usize, shared_commit: usize,
+    }
+    let mut c = CountersEx2 { cb: std::mem::size_of::<CountersEx2>() as u32, ..Default::default() };
+    // SAFETY: c is a valid, correctly sized EX2 buffer; the pseudo-handle needs no closing.
+    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c as *mut _ as *mut PROCESS_MEMORY_COUNTERS, c.cb) };
+    (ok != 0 && c.private_working_set > 0).then_some(c.private_working_set as u64)
+}
+
+#[cfg(not(windows))]
+fn private_working_set() -> Option<u64> { None }
+
 /// Select mode on or off in every window. Off also clears the hover
 /// outline, so the app looks normal again.
 fn set_inspect_mode(windows: &mut HashMap<u32, PerWindowState>, on: bool) {
@@ -1063,6 +1361,16 @@ pub(crate) fn parse_evaluate_result(out: &str) -> Result<Value, ErrorBody> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gpu_screenshot_error_says_how_to_fix_it() {
+        let e = screenshot_error("gpu");
+        assert_eq!(e.code, codes::UNSUPPORTED);
+        assert!(e.message.contains("gpu renderer") && e.message.contains("GLYX_CPU_RENDER=1 glyx dev --devtools"), "{}", e.message);
+        let d = e.data.expect("machine-readable fix");
+        assert_eq!(d["reason"], "rendererNotSupported");
+        assert_eq!(d["fix"]["env"]["GLYX_CPU_RENDER"], "1");
+    }
+
     use super::*;
 
     #[test]
@@ -1114,7 +1422,7 @@ mod tests {
         }
         for m in ["Inspector.setInspectMode", "Inspector.auditAccessibility", "Inspector.enableTreeEvents",
                   "Inspector.setOverlay", "Performance.getFrameDetail",
-                  "Animation.setPlaybackRate", "Animation.seek", "Animation.getPlayback",
+                  "Memory.sample", "Memory.collectGarbage", "Memory.snapshot", "Animation.setPlaybackRate", "Animation.seek", "Animation.getPlayback",
                   "Performance.snapshot", "Performance.setBudget", "Performance.getViolations",
                   "Performance.enableFrames", "Animation.list", "Animation.waitForSettled"] {
             assert!(METHODS.contains(&m), "{m}");

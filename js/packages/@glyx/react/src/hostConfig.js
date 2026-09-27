@@ -10,6 +10,7 @@
 import { DefaultEventPriority } from 'react-reconciler/constants';
 import { setNodeParent, removeNodeFromTree } from './events.js';
 import { computeIds } from './devIds.js';
+import { isRecording, recordCommit, startRecording, stopRecording } from './devProfile.js';
 
 // Release builds drop `testID` before it reaches native: `glyx build` defines
 // __GLYX_STRIP_TEST_IDS__ = true unless the app sets `keepTestIds` (for
@@ -127,6 +128,9 @@ function allDevIds(useCache) {
 }
 
 if (devFibers) {
+  // CPU profiler, Components view: per-commit render times (see devProfile.js).
+  globalThis.__glyx_devProfileStart = () => { startRecording(); return true; };
+  globalThis.__glyx_devProfileStop = () => JSON.stringify(stopRecording());
   /** `{ nodeId: { id, pinned? } }` for `ids`, or for every node when `ids` is null. */
   globalThis.__glyx_devNodeIds = (ids, useCache) => {
     const all = allDevIds(!!useCache);
@@ -153,6 +157,40 @@ if (devFibers) {
       }
     }
     return { nodeId, component: componentName(fiber), type: fiber.type, key: fiber.key, props: fiber.memoizedProps, owner };
+  };
+
+  /**
+   * DevTools Memory snapshot: elements per app component (the nearest
+   * component that isn't Glyx's own), most first. `{ component, elements,
+   * instances }`, one O(n) walk of the current tree.
+   */
+  globalThis.__glyx_devComponentCounts = () => {
+    const counts = new Map();
+    const root = devRoot && devRoot.current;
+    if (!root) return [];
+    const stack = [[root.child, 'App']];
+    // Push siblings too: each frame is [fiber, owning component name].
+    while (stack.length) {
+      const [f, owner] = stack.pop();
+      if (!f) continue;
+      stack.push([f.sibling, owner]);
+      const t = f.type;
+      const fn = typeof t === 'function' ? t : t && typeof t === 'object' ? (t.render || null) : null;
+      let next = owner;
+      if (fn && !libraryComponents.has(fn) && !libraryComponents.has(t)) {
+        next = (t && t.displayName) || fn.displayName || fn.name || 'Anonymous';
+        const c = counts.get(next) ?? { component: next, elements: 0, instances: 0 };
+        c.instances++;
+        counts.set(next, c);
+      }
+      if (f.tag === 5) {
+        const c = counts.get(owner) ?? { component: owner, elements: 0, instances: 0 };
+        c.elements++;
+        counts.set(owner, c);
+      }
+      stack.push([f.child, next]);
+    }
+    return [...counts.values()].filter((c) => c.elements > 0 || c.instances > 0).sort((a, b) => b.elements - a.elements);
   };
 
   /** The node carrying element ID `id`, or null (a lookup, not a full dump). */
@@ -409,7 +447,11 @@ function getPublicInstance(instance) { return instance; }
 // ── Commit lifecycle ──────────────────────────────────────────────────────────
 
 function prepareForCommit()  { return null; }
-function resetAfterCommit()  { flushSceneOps(); }
+function resetAfterCommit()  {
+  flushSceneOps();
+  // Still the old tree here; the finished one is its alternate.
+  if (devFibers && isRecording()) recordCommit(devRoot && devRoot.current && devRoot.current.alternate, (t) => libraryComponents.has(t));
+}
 
 // ── Text content ──────────────────────────────────────────────────────────────
 

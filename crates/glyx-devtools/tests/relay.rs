@@ -34,7 +34,7 @@ async fn fake_app(token: &'static str) -> (u16, FakeApp) {
                     let v: Value = serde_json::from_str(&t).unwrap();
                     let reply = match (v["method"].as_str(), v["params"]["token"].as_str()) {
                         (Some("handshake"), Some(t)) if t == token =>
-                            json!({ "id": v["id"], "result": { "engine": "Fake", "pid": 1, "methods": ["Runtime.ping"] } }),
+                            json!({ "id": v["id"], "result": { "engine": "Fake", "pid": std::process::id(), "methods": ["Runtime.ping"] } }),
                         (Some("handshake"), _) => json!({ "id": v["id"], "error": { "code": -32001, "message": "wrong token" } }),
                         (Some("ping"), _) => json!({ "id": v["id"], "result": { "pong": true } }),
                         _ => json!({ "id": v["id"], "error": { "code": -32601, "message": "nope" } }),
@@ -51,7 +51,7 @@ async fn fake_app(token: &'static str) -> (u16, FakeApp) {
 
 fn write_discovery(file: &PathBuf, port: u16, token: &str) {
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    std::fs::write(file, json!({ "url": format!("ws://127.0.0.1:{port}/"), "port": port, "token": token, "pid": 1, "engine": "Fake" }).to_string()).unwrap();
+    std::fs::write(file, json!({ "url": format!("ws://127.0.0.1:{port}/"), "port": port, "token": token, "pid": std::process::id(), "engine": "Fake" }).to_string()).unwrap();
 }
 
 fn start_relay(discovery: Vec<PathBuf>) -> Relay {
@@ -86,8 +86,12 @@ async fn recv_type(ws: &mut Ws, ty: &str) -> Value {
 }
 
 async fn http_get(port: u16, path: &str) -> String {
+    http_get_host(port, path, &format!("127.0.0.1:{port}")).await
+}
+
+async fn http_get_host(port: u16, path: &str, host: &str) -> String {
     let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).await.unwrap();
+    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes()).await.unwrap();
     let mut out = String::new();
     s.read_to_string(&mut out).await.unwrap();
     out
@@ -108,6 +112,8 @@ async fn the_ui_files_are_served_and_nothing_outside_them() {
     assert!(js.contains("text/javascript") && js.contains("no-store"));
     assert!(http_get(relay.port(), "/missing.js").await.starts_with("HTTP/1.1 404"));
     assert!(http_get(relay.port(), "/../Cargo.toml").await.starts_with("HTTP/1.1 404"));
+    // DNS rebinding: a non-loopback Host is refused, even for the page.
+    assert!(http_get_host(relay.port(), "/", "evil.example").await.starts_with("HTTP/1.1 403"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

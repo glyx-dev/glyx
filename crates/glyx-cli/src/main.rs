@@ -15,6 +15,7 @@ use std::process::Command;
 mod cmd_create;
 mod cmd_dev;
 mod cmd_inspect;
+mod cmd_mcp;
 mod cmd_build;
 mod cmd_package;
 mod icu_trim;
@@ -139,6 +140,15 @@ enum Commands {
     /// Serves the DevTools UI on 127.0.0.1 and lists the apps started with
     /// `glyx dev --devtools` in this project, its subfolders, or anywhere
     /// with GLYX_DEVTOOLS_PORT set.
+    /// Serve running dev apps to AI agents over MCP (stdio)
+    ///
+    /// Add to your agent's MCP config:
+    ///   { "mcpServers": { "glyx": { "command": "glyx", "args": ["mcp"] } } }
+    /// Then start apps with `glyx dev --devtools` in this folder (or below):
+    /// the agent can list them, read the UI, click, type, wait and take
+    /// screenshots.
+    #[command(verbatim_doc_comment)]
+    Mcp,
     Inspect {
         /// Port for the DevTools page (default 9227, or any free one).
         #[arg(long)]
@@ -360,6 +370,10 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
+    // MCP speaks JSON-RPC on stdout: nothing else may print there, so it
+    // skips the update notice and config detection below.
+    if matches!(cli.command, Commands::Mcp) { return cmd_mcp::cmd_mcp(); }
+
     // "A newer glyx is available" — instant (reads the last cached result);
     // any network refresh happens in the background.
     updates::run(&glyx_dir(), env!("CARGO_PKG_VERSION"), glyx_source_checkout().is_some());
@@ -372,6 +386,7 @@ fn run() -> Result<()> {
         Commands::Create { name, native, template } => cmd_create(&name, native, &template, pm),
         Commands::Dev { inspect, devtools, open } => cmd_dev(inspect, devtools, open, pm, cli.icupkg.clone()),
         Commands::Inspect { port, no_open } => cmd_inspect::cmd_inspect(port, no_open),
+        Commands::Mcp => unreachable!("handled above"),
         Commands::Build { target, snapshot: _, bundle, portable, check_performance, perf_budget, perf_duration } => {
             let mode = if bundle { "bundle" } else if portable { "portable" } else { "snapshot" };
             cmd_build(target.as_deref(), mode, check_performance, perf_budget, perf_duration, pm, cli.icupkg.clone())

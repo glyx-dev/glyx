@@ -307,6 +307,51 @@ impl Overrides {
     }
 }
 
+/// The clock transitions and keyframe animations run on. At rate 1 (always,
+/// unless devtools changes it) it's the real clock. Devtools can slow it down
+/// (`0.25`), pause it (`0`) or move it (`seek_by`) to study an animation;
+/// changing the rate rebases the clock, so nothing jumps.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MotionClock {
+    rate: f64,
+    real_base: Instant,
+    virt_base: Instant,
+}
+
+impl Default for MotionClock {
+    fn default() -> Self { let n = Instant::now(); Self { rate: 1.0, real_base: n, virt_base: n } }
+}
+
+impl MotionClock {
+    pub(crate) fn now(&self) -> Instant { self.at(Instant::now()) }
+
+    fn at(&self, real: Instant) -> Instant {
+        self.virt_base + real.saturating_duration_since(self.real_base).mul_f64(self.rate)
+    }
+
+    pub(crate) fn rate(&self) -> f64 { self.rate }
+
+    /// Paused: animations hold still, and don't need frames.
+    pub(crate) fn paused(&self) -> bool { self.rate == 0.0 }
+
+    pub(crate) fn set_rate(&mut self, rate: f64) { self.rebase(Instant::now(), rate); }
+
+    fn rebase(&mut self, real: Instant, rate: f64) {
+        self.virt_base = self.at(real);
+        self.real_base = real;
+        self.rate = rate.clamp(0.0, 4.0);
+    }
+
+    /// Move the clock by `ms` (negative = back).
+    pub(crate) fn seek_by(&mut self, ms: f64) {
+        let real = Instant::now();
+        let rate = self.rate;
+        self.rebase(real, rate);
+        let d = std::time::Duration::from_secs_f64(ms.abs() / 1000.0);
+        self.virt_base = if ms >= 0.0 { self.virt_base + d } else { self.virt_base.checked_sub(d).unwrap_or(self.virt_base) };
+    }
+}
+
 /// One node's in-flight transition: a shared clock plus a track per property.
 #[derive(Clone, Debug)]
 pub(crate) struct Transition {
@@ -351,6 +396,18 @@ impl Transition {
         let ms = now.saturating_duration_since(self.start).as_secs_f32() * 1000.0;
         let t = (ms / self.duration_ms.max(1) as f32).clamp(0.0, 1.0);
         (self.easing.apply(t), t >= 1.0)
+    }
+
+    /// The properties this transition animates (camelCase, as in JSX).
+    pub(crate) fn properties(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.opacity.is_some() { out.push("opacity"); }
+        if self.transform.is_some() { out.push("transform"); }
+        if self.background.is_some() { out.push("backgroundColor"); }
+        if self.border_color.is_some() { out.push("borderColor"); }
+        if self.radius.is_some() { out.push("borderRadius"); }
+        if self.shadow.is_some() { out.push("boxShadow"); }
+        out
     }
 
     /// Current values plus whether the transition has finished.
@@ -593,6 +650,24 @@ impl Animation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_motion_clock_scales_pauses_and_seeks_without_jumping() {
+        let t0 = Instant::now();
+        let mut c = MotionClock { rate: 1.0, real_base: t0, virt_base: t0 };
+        let at = |c: &MotionClock, ms: u64| c.at(t0 + Duration::from_millis(ms)).duration_since(t0).as_millis();
+        assert_eq!(at(&c, 100), 100, "rate 1 is the real clock");
+        c.rebase(t0 + Duration::from_millis(100), 0.25);
+        assert_eq!(at(&c, 100), 100, "no jump when the rate changes");
+        assert_eq!(at(&c, 500), 200, "400 ms real at 0.25x = 100 ms");
+        c.rebase(t0 + Duration::from_millis(500), 0.0);
+        assert_eq!(at(&c, 5000), 200, "paused");
+        assert!(c.paused());
+        c.virt_base += Duration::from_millis(50);
+        assert_eq!(at(&c, 5000), 250, "seek moves it");
+        c.rebase(t0 + Duration::from_millis(5000), 9.0);
+        assert_eq!(c.rate(), 4.0, "rate is clamped");
+    }
     use std::time::Duration;
 
     fn vis() -> Visual {

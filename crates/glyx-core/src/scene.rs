@@ -255,7 +255,9 @@ fn rgba_premul_srgb_to_peniko(mut bytes: Vec<u8>, w: u32, h: u32) -> Option<peni
 /// render loop mid-transition.
 pub(crate) fn tick_transitions(state: &mut PerWindowState) -> bool {
     if state.transitions.is_empty() && state.animations.is_empty() { return false; }
-    let now = Instant::now();
+    // Paused by devtools: nothing moves, so no frames are needed.
+    if state.motion_clock.paused() { return false; }
+    let now = state.motion_clock.now();
     let dirty_nodes = &mut state.dirty_nodes;
     state.transitions.retain(|&id, t| {
         let (_, finished) = t.sample(now);
@@ -278,7 +280,7 @@ fn sync_animation(state: &mut PerWindowState, id: u32, props: &NodeProps) {
     match motion::AnimSpec::from_props(props) {
         Some(spec) => {
             if motion::needs_restart(state.animations.get(&id), &spec) {
-                state.animations.insert(id, motion::Animation { spec, start: Instant::now(), settled: false });
+                state.animations.insert(id, motion::Animation { spec, start: state.motion_clock.now(), settled: false });
                 (state.request_redraw)();
             }
         }
@@ -432,7 +434,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     // Unrelated updates (text, layout, …) leave a running
                     // transition alone — restarting its clock would stall it.
                     if old_v != new_v {
-                        let now  = Instant::now();
+                        let now  = state.motion_clock.now();
                         let from = match state.transitions.get(&id) {
                             Some(t) => t.current(&old_v, now),
                             None    => old_v,

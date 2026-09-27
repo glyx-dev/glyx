@@ -120,6 +120,35 @@ pub(crate) fn running_motion(s: &PerWindowState) -> HashMap<MotionKey, MotionInf
     out
 }
 
+/// `Animation.list`: what's running, with how far along each run is on the
+/// motion clock, its easing and what it animates.
+pub(crate) fn motion_list(s: &PerWindowState) -> Vec<Value> {
+    let now = s.motion_clock.now();
+    let elapsed = |start: Instant| now.saturating_duration_since(start).as_secs_f64() * 1000.0;
+    let mut out: Vec<(u32, Value)> = Vec::new();
+    for (&node, t) in &s.transitions {
+        let e = elapsed(t.start);
+        out.push((node, json!({
+            "nodeId": node, "kind": "transition", "durationMs": t.duration_ms, "iterations": 1,
+            "elapsedMs": round(e), "progress": round((e / t.duration_ms.max(1) as f64).min(1.0)),
+            "easing": format!("{:?}", t.easing), "properties": t.properties(),
+        })));
+    }
+    for (&node, a) in &s.animations {
+        if a.settled { continue; }
+        let e = elapsed(a.start);
+        let d = a.spec.duration_ms.max(1) as f64;
+        out.push((node, json!({
+            "nodeId": node, "kind": "animation", "durationMs": a.spec.duration_ms,
+            "iterations": if a.spec.iterations.is_finite() { json!(a.spec.iterations) } else { json!("infinite") },
+            "elapsedMs": round(e), "progress": round((e % d) / d), "iteration": (e / d).floor() as u64,
+            "easing": format!("{:?}", a.spec.easing), "alternate": a.spec.alternate, "keyframes": a.spec.stops.len(),
+        })));
+    }
+    out.sort_by_key(|(n, _)| *n);
+    out.into_iter().map(|(_, v)| v).collect()
+}
+
 pub(crate) fn motion_json(key: &MotionKey, info: &MotionInfo) -> Value {
     json!({
         "nodeId": key.node,

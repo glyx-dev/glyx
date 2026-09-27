@@ -41,6 +41,7 @@ pub(crate) const METHODS: &[&str] = &[
     "Performance.getViolations", "Performance.getLeakWarnings",
     "Performance.enableFrames", "Performance.disableFrames", "Performance.getFrameDetail",
     "Animation.list", "Animation.enable", "Animation.disable", "Animation.waitForSettled",
+    "Animation.setPlaybackRate", "Animation.seek", "Animation.getPlayback",
 ];
 pub(crate) const EVENTS: &[&str] = &[
     "Console.messageAdded", "Inspector.frameDamage", "Performance.frame",
@@ -49,7 +50,7 @@ pub(crate) const EVENTS: &[&str] = &[
 ];
 
 /// Responses that name nodes get each node's React component added.
-const NAMED: &[&str] = &["Inspector.getTree", "Inspector.getNode", "Inspector.selectElement", "Automation.findNodes", "Inspector.auditAccessibility"];
+const NAMED: &[&str] = &["Inspector.getTree", "Inspector.getNode", "Inspector.selectElement", "Automation.findNodes", "Inspector.auditAccessibility", "Animation.list"];
 
 pub(crate) const ENGINE: &str = if cfg!(feature = "v8") { "V8" } else { "QuickJS" };
 
@@ -128,6 +129,8 @@ pub(crate) struct Devtools {
     overlay_conns: HashSet<ConnId>,
     /// Clients streaming frames with detail (frame details kept meanwhile).
     frame_detail_conns: HashSet<ConnId>,
+    /// Who changed the motion clock's rate; back to 1x when they leave.
+    playback_owner: Option<ConnId>,
     /// Windows with more nodes than this use the cached element IDs
     /// (`devtools.autoIdCacheThreshold` in glyx.config.json, via
     /// `GLYX_DEVTOOLS_AUTOID_CACHE_THRESHOLD`).
@@ -180,7 +183,7 @@ impl Devtools {
             anim: HashSet::new(), anim_prev: HashMap::new(),
             inspecting: HashSet::new(), highlight_owner: None,
             tree_subs: HashSet::new(), tree_sent: HashMap::new(), notify,
-            overlay_conns: HashSet::new(), frame_detail_conns: HashSet::new(),
+            overlay_conns: HashSet::new(), frame_detail_conns: HashSet::new(), playback_owner: None,
             auto_id_cache_threshold: std::env::var("GLYX_DEVTOOLS_AUTOID_CACHE_THRESHOLD").ok()
                 .and_then(|v| v.trim().parse().ok()).unwrap_or(DEFAULT_AUTO_ID_CACHE_THRESHOLD),
             tick_scheduled: Arc::new(AtomicBool::new(false)), tokio: handle.clone(),
@@ -204,6 +207,11 @@ impl Devtools {
             }
             if self.frame_detail_conns.remove(&conn) && self.frame_detail_conns.is_empty() {
                 for s in windows.values_mut() { s.frame_details = None; }
+            }
+            // Never leave the app in slow motion or paused.
+            if self.playback_owner == Some(conn) {
+                self.playback_owner = None;
+                for s in windows.values_mut() { s.motion_clock.set_rate(1.0); s.window.request_redraw(); }
             }
             if self.highlight_owner == Some(conn) {
                 self.highlight_owner = None;
@@ -675,9 +683,32 @@ impl Devtools {
             // ── Animation ──────────────────────────────────────────────────
             ("Animation", "list") => (|| {
                 let s = window(req, windows)?;
-                let mut running: Vec<(perf::MotionKey, perf::MotionInfo)> = perf::running_motion(s).into_iter().collect();
-                running.sort_by_key(|(k, _)| (k.node, k.kind));
-                Ok(json!({ "running": running.iter().map(|(k, i)| perf::motion_json(k, i)).collect::<Vec<_>>() }))
+                Ok(json!({ "running": perf::motion_list(s), "rate": s.motion_clock.rate() }))
+            })().into(),
+            ("Animation", "getPlayback") => (|| {
+                let s = window(req, windows)?;
+                Ok(json!({ "rate": s.motion_clock.rate(), "paused": s.motion_clock.paused() }))
+            })().into(),
+            ("Animation", "setPlaybackRate") => (|| {
+                let rate = p.get("rate").and_then(Value::as_f64).filter(|r| (0.0..=4.0).contains(r))
+                    .ok_or_else(|| ErrorBody::invalid_params("rate is a number from 0 (paused) to 4"))?;
+                for s in windows.values_mut() {
+                    s.motion_clock.set_rate(rate);
+                    s.window.request_redraw();
+                }
+                self.playback_owner = (rate != 1.0).then_some(conn);
+                Ok(json!({ "rate": rate }))
+            })().into(),
+            ("Animation", "seek") => (|| {
+                let by = p.get("byMs").and_then(Value::as_f64).filter(|v| v.is_finite())
+                    .ok_or_else(|| ErrorBody::invalid_params("byMs (milliseconds; negative goes back) is required"))?;
+                for s in windows.values_mut() {
+                    s.motion_clock.seek_by(by);
+                    // Paused animations don't request frames: draw the new moment.
+                    for id in s.transitions.keys().chain(s.animations.keys()).copied().collect::<Vec<_>>() { s.dirty_nodes.insert(id); }
+                    s.window.request_redraw();
+                }
+                Ok(json!({ "byMs": by }))
             })().into(),
             ("Animation", "enable") => {
                 self.anim.insert(conn);
@@ -1083,6 +1114,7 @@ mod tests {
         }
         for m in ["Inspector.setInspectMode", "Inspector.auditAccessibility", "Inspector.enableTreeEvents",
                   "Inspector.setOverlay", "Performance.getFrameDetail",
+                  "Animation.setPlaybackRate", "Animation.seek", "Animation.getPlayback",
                   "Performance.snapshot", "Performance.setBudget", "Performance.getViolations",
                   "Performance.enableFrames", "Animation.list", "Animation.waitForSettled"] {
             assert!(METHODS.contains(&m), "{m}");

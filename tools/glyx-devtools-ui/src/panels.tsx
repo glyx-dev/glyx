@@ -33,7 +33,7 @@ export const PANELS: PanelDef[] = [
   { id: 'performance', label: 'Performance', phase: null,
     blurb: 'Frame chart split into JS, layout, render and present, jank marked, redraw overlays, recordings.',
     icon: <Icon d="M4 20V10M10 20V4M16 20v-7M22 20H2" /> },
-  { id: 'animations', label: 'Animations', phase: 'D4',
+  { id: 'animations', label: 'Animations', phase: null,
     blurb: 'Timeline of transitions and keyframe animations, slow motion and scrubbing.',
     icon: <Icon d="M3 12c3-6 6-6 9 0s6 6 9 0" /> },
   { id: 'memory', label: 'Memory', phase: 'D5',

@@ -5,6 +5,7 @@ import { Overview } from './Overview';
 import { Inspector } from './inspector/Inspector';
 import { Console } from './console/Console';
 import { Performance } from './perf/Performance';
+import { Animations } from './anim/Animations';
 
 type Theme = 'dark' | 'light';
 
@@ -142,7 +143,7 @@ export function App() {
         ))}
       </nav>
 
-      <main className={`main${['inspector', 'console', 'performance'].includes(current.id) ? ' flush' : ''}`} aria-label={current.label}>
+      <main className={`main${['inspector', 'console', 'performance', 'animations'].includes(current.id) ? ' flush' : ''}`} aria-label={current.label}>
         {status.state !== 'connected' && <ConnectionNotice status={status} apps={apps} onRefresh={() => client.refreshApps()} />}
         {consoleOpened && (
           <div className="panel-host" hidden={current.id !== 'console'}>
@@ -157,7 +158,9 @@ export function App() {
               ? null
               : current.id === 'performance'
                 ? <Performance client={client} status={status} windowId={windowId} theme={theme} />
-                : <ComingSoon label={current.label} phase={current.phase!} blurb={current.blurb} />}
+                : current.id === 'animations'
+                  ? <Animations client={client} status={status} windowId={windowId} />
+                  : <ComingSoon label={current.label} phase={current.phase!} blurb={current.blurb} />}
       </main>
     </div>
   );

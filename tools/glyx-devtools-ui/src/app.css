@@ -370,3 +370,23 @@ select:hover { border-color: var(--gx-border-focus); }
 .dirty-list { display: grid; gap: 2px; max-height: 260px; overflow: auto; }
 .dirty-row { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-radius: 4px; font-size: 12.5px; cursor: default; }
 .dirty-row:hover { background: var(--gx-bg-hover); }
+
+/* ── Animations ─────────────────────────────────────────────────────────── */
+.anim { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.anim-body { flex: 1; overflow: auto; padding: 8px 0; }
+.lane { padding: 8px 16px; border-bottom: 1px solid var(--gx-border-default); }
+.lane:hover { background: var(--gx-bg-hover); }
+.lane.ended { opacity: .45; }
+.lane-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; min-width: 0; }
+.lane-id { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
+.kind { font-size: 10.5px; border-radius: 4px; padding: 0 5px; border: 1px solid var(--gx-border-default); }
+.kind-transition { color: var(--gx-link); border-color: var(--gx-link); }
+.kind-animation { color: var(--gx-action-primary); border-color: var(--gx-action-primary); }
+.lane-row { display: grid; grid-template-columns: 1fr 170px 64px; align-items: center; gap: 12px; }
+.track { position: relative; height: 10px; border-radius: 5px; background: var(--gx-bg-inset); border: 1px solid var(--gx-border-default); overflow: hidden; }
+.track.infinite { background-image: repeating-linear-gradient(90deg, transparent 0 10px, var(--gx-bg-elevated) 10px 20px); }
+.track-fill { position: absolute; inset: 0 auto 0 0; background: var(--gx-selection); }
+.track-head { position: absolute; top: -1px; bottom: -1px; width: 3px; margin-left: -1px; background: var(--gx-action-primary); border-radius: 2px; }
+.lane-time { color: var(--gx-text-secondary); white-space: nowrap; }
+.curve { color: var(--gx-link); }
+.curve-dot { fill: var(--gx-action-primary); }

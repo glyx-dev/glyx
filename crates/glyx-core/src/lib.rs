@@ -1488,6 +1488,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     js_root:      None,
                     transitions: std::collections::HashMap::new(),
                     animations:  std::collections::HashMap::new(),
+                    motion_clock: Default::default(),
                     images:       std::collections::HashMap::with_capacity(32),
                     images_by_path: ByteBudgetImageCache::new(256 * 1024 * 1024),
                     image_cache_hits: 0,
@@ -2394,7 +2395,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 // Sample each active transition once, fresh every frame — this
                 // is the actual interpolation step. Shared by the damage
                 // analysis and the renderer so both see the same values.
-                let now = Instant::now();
+                let now = s.motion_clock.now();
                 let mut motion_overrides: std::collections::HashMap<u32, motion::Overrides> = s.transitions
                     .iter()
                     .map(|(&id, t)| (id, t.sample(now).0))

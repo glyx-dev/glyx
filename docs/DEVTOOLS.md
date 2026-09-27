@@ -51,8 +51,13 @@ itself when there's one.
   bar for its breakdown and **why it rendered** (the elements that changed;
   hover one to outline it). Record, stop, export and import sessions; turn
   on **paint flashing** to see what each frame redraws, in the app.
-- Animations, Memory, Layout, Network and CPU profiler panels are on the way
-  (see the rail).
+- **Animations**: a lane per running transition or keyframe animation: the
+  element, what it animates, progress, iteration and its easing curve.
+  Pause, slow motion (0.5× / 0.25× / 0.1×), and ±100 ms steps while paused;
+  finished runs fade out after a few seconds. The app returns to normal speed
+  when you leave the panel.
+- Memory, Layout, Network and CPU profiler panels are on the way (see the
+  rail).
 
 The UI talks to a small server in the CLI (`glyx inspect`, port 9227) that
 finds apps from their discovery files, does the token handshake itself and
@@ -253,7 +258,10 @@ Covers CSS-style `transition`s and keyframe `animation`s.
 
 | Method | Params | Result |
 |---|---|---|
-| `list` | | `running: [{ nodeId, kind: "transition" / "animation", durationMs, iterations }]`. `iterations` is `"infinite"` for endless ones. |
+| `list` | | `running: [{ nodeId, id, component, kind: "transition" / "animation", durationMs, iterations, elapsedMs, progress, easing, properties? (transitions), keyframes?, alternate?, iteration? }]` (times on the motion clock; `iterations` is `"infinite"` for endless ones), `rate`. |
+| `setPlaybackRate` | `rate` (0–4) | The motion clock's speed for every window: `1` normal, `0.25` slow motion, `0` paused (paused animations stop requesting frames). Changing it never makes an animation jump. Back to `1` when the client that changed it disconnects. |
+| `seek` | `byMs` | Move the motion clock (negative = back), e.g. to step through a paused animation. Finished transitions are gone and don't come back. |
+| `getPlayback` | | `{ rate, paused }` |
 | `enable` / `disable` | | Starts / stops the `Animation.*` events. |
 | `waitForSettled` | `timeoutMs?` | Replies `{ settled: true }` once nothing animates in the window. Error `-32005` if it still animates at the timeout (it never settles while an infinite animation runs). Use it instead of sleeping in tests. |
 
@@ -376,7 +384,7 @@ cached until the tree's structure changes:
 | `tests/devtools/gdp-notes.mjs` | notes-app (V8): driving by element ID, names, layout, highlight, live prop edits, damage, accessibility tree. |
 | `tests/devtools/gdp-motion.mjs` | motion-demo: frame stream, snapshot, budget violations, animation events, `waitForSettled`. |
 | `tests/devtools/gdp-inspector.mjs` | calculator: select mode (pick, Escape, disconnect safety), tree events, accessibility audit. |
-| `tests/devtools-ui/d0.mjs` … `d3.mjs` | The DevTools UI in a headless browser (`tests/devtools-ui/browser.mjs`, Chrome DevTools Protocol): connection, Overview, theme, keyboard; Inspector tree, details, live edit + reset, select mode, search, audit. |
+| `tests/devtools-ui/d0.mjs` … `d4.mjs` | The DevTools UI in a headless browser (`tests/devtools-ui/browser.mjs`, Chrome DevTools Protocol): connection, Overview, theme, keyboard; Inspector tree, details, live edit + reset, select mode, search, audit. |
 | `tests/devtools/run-calculator.sh` | Launches the calculator with devtools and runs the smoke and calculator tests; CI runs it under Xvfb (`devtools-e2e` job). |
 
 Each test script prints how to start its app in its header.

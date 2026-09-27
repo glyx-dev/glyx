@@ -254,6 +254,9 @@ pub(super) struct PerWindowState {
     /// Running keyframe animations (`animation` prop), keyed by node id —
     /// see `crate::motion::Animation` and `scene::tick_transitions`.
     pub(super) animations:  std::collections::HashMap<u32, crate::motion::Animation>,
+    /// The clock `transitions` / `animations` run on (the real clock unless
+    /// devtools changes its rate).
+    pub(super) motion_clock: crate::motion::MotionClock,
     pub(super) images:       std::collections::HashMap<u32, peniko::ImageData>,
     pub(super) images_by_path: ByteBudgetImageCache,
     pub(super) image_cache_hits: u64,

@@ -83,7 +83,7 @@ impl SoftPresent {
     /// so premultiplied == straight and the conversion is a channel shuffle:
     /// RGBA bytes → 0x00RRGGBB u32 (softbuffer's format).
     ///
-    /// With `damage: Some((x, y, dw, dh))` only that region is converted and
+    /// With `damage: Some(rects)` only those regions are converted and
     /// pushed to the OS (`present_with_damage`), so a keystroke costs one text
     /// line's worth of pixels rather than the whole window.  Requires a valid
     /// `last_frame` (pixels outside the damage region are refreshed from it,
@@ -114,7 +114,7 @@ impl SoftPresent {
     }
 
     pub fn present_rgba(&mut self, rgba: &[u8], w: u32, h: u32,
-                        damage: Option<(u32, u32, u32, u32)>) {
+                        damage: Option<&[(u32, u32, u32, u32)]>) {
         self.pace();
         if w != self.width || h != self.height {
             // Stale frame from just before a resize — drop it; the next
@@ -126,7 +126,7 @@ impl SoftPresent {
 
         // Partial present is only safe when we hold a full previous frame.
         let damage = match damage {
-            Some(d) if self.last_frame.len() == total => Some(d),
+            Some(d) if self.last_frame.len() == total && !d.is_empty() => Some(d),
             _ => None,
         };
 
@@ -145,29 +145,32 @@ impl SoftPresent {
                     log::warn!("softbuffer present: {e}");
                 }
             }
-            Some((dx, dy, dw, dh)) => {
-                let dx = dx.min(w) as usize;
-                let dy = dy.min(h) as usize;
-                let dw = (dw as usize).min(w as usize - dx);
-                let dh = (dh as usize).min(h as usize - dy);
+            Some(rects) => {
                 // The OS swap buffer may be double-buffered (contents undefined
                 // or two frames old).  age()==1 means it holds last frame's
                 // pixels; anything else → restore from our last_frame copy.
                 if buffer.age() != 1 {
                     buffer.copy_from_slice(&self.last_frame[..total]);
                 }
-                // Convert only the damaged rows/cols.
-                for row in dy..dy + dh {
-                    let i = row * w as usize + dx;
-                    rgba_to_0rgb(&rgba[i * 4..(i + dw) * 4], &mut buffer[i..i + dw]);
-                    self.last_frame[i..i + dw].copy_from_slice(&buffer[i..i + dw]);
+                // Convert only the damaged rows/cols, rect by rect.
+                let mut os_rects = Vec::with_capacity(rects.len());
+                for &(dx, dy, dw, dh) in rects {
+                    let dx = dx.min(w) as usize;
+                    let dy = dy.min(h) as usize;
+                    let dw = (dw as usize).min(w as usize - dx);
+                    let dh = (dh as usize).min(h as usize - dy);
+                    for row in dy..dy + dh {
+                        let i = row * w as usize + dx;
+                        rgba_to_0rgb(&rgba[i * 4..(i + dw) * 4], &mut buffer[i..i + dw]);
+                        self.last_frame[i..i + dw].copy_from_slice(&buffer[i..i + dw]);
+                    }
+                    os_rects.push(softbuffer::Rect {
+                        x: dx as u32, y: dy as u32,
+                        width:  std::num::NonZeroU32::new(dw.max(1) as u32).unwrap(),
+                        height: std::num::NonZeroU32::new(dh.max(1) as u32).unwrap(),
+                    });
                 }
-                let rect = softbuffer::Rect {
-                    x: dx as u32, y: dy as u32,
-                    width:  std::num::NonZeroU32::new(dw.max(1) as u32).unwrap(),
-                    height: std::num::NonZeroU32::new(dh.max(1) as u32).unwrap(),
-                };
-                if let Err(e) = buffer.present_with_damage(&[rect]) {
+                if let Err(e) = buffer.present_with_damage(&os_rects) {
                     log::warn!("softbuffer present_with_damage: {e}");
                 }
             }

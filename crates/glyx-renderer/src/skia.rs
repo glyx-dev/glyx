@@ -191,6 +191,92 @@ fn poly_path(pts: &[f32], close: bool) -> Option<tiny_skia::Path> {
     pb.finish()
 }
 
+/// The polygon `pts` (a flat `[x0, y0, …]` list, closed) cut down to the box
+/// `(l, t, r, b)` — Sutherland–Hodgman against each side in turn. Inside the box
+/// the result covers exactly what the original covers, so filling it there is
+/// pixel-identical; outside, nothing is drawn. Concave input can leave edges that
+/// run back along the box's sides, which enclose no area and fill nothing.
+/// Empty when nothing of the polygon is inside the box.
+fn clip_polygon_to_box(pts: &[f32], l: f32, t: f32, r: f32, b: f32) -> Vec<f32> {
+    let mut poly: Vec<(f32, f32)> = pts.chunks_exact(2).map(|p| (p[0], p[1])).collect();
+    // (is the point inside this side, where the segment a→b crosses it)
+    type Side = (fn(&(f32, f32), f32) -> bool, fn((f32, f32), (f32, f32), f32) -> (f32, f32), f32);
+    fn at_x(a: (f32, f32), b: (f32, f32), x: f32) -> (f32, f32) { (x, a.1 + (b.1 - a.1) * (x - a.0) / (b.0 - a.0)) }
+    fn at_y(a: (f32, f32), b: (f32, f32), y: f32) -> (f32, f32) { (a.0 + (b.0 - a.0) * (y - a.1) / (b.1 - a.1), y) }
+    let sides: [Side; 4] = [
+        (|p, v| p.0 >= v, at_x, l), (|p, v| p.0 <= v, at_x, r),
+        (|p, v| p.1 >= v, at_y, t), (|p, v| p.1 <= v, at_y, b),
+    ];
+    for (inside, cross, v) in sides {
+        if poly.is_empty() { break; }
+        let mut out = Vec::with_capacity(poly.len() + 4);
+        let mut prev = *poly.last().unwrap();
+        for &cur in &poly {
+            match (inside(&prev, v), inside(&cur, v)) {
+                (true, true)  => out.push(cur),
+                (true, false) => out.push(cross(prev, cur, v)),
+                (false, true) => { out.push(cross(prev, cur, v)); out.push(cur); }
+                (false, false) => {}
+            }
+            prev = cur;
+        }
+        poly = out;
+    }
+    poly.iter().flat_map(|p| [p.0, p.1]).collect()
+}
+
+/// Index ranges `(first, last)` of the points of an open polyline whose
+/// segments come within `reach` of the box `(l, t, r, b)`; a segment that stays
+/// farther away than that cannot touch the box once stroked. Each range is
+/// stroked on its own. Cutting there is invisible: the ends of a range meet the
+/// dropped segments at a vertex, where a round join and a round cap are the
+/// same disc.
+fn polyline_runs_near(pts: &[f32], l: f32, t: f32, r: f32, b: f32, reach: f32) -> Vec<(usize, usize)> {
+    let n = pts.len() / 2;
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for i in 0..n.saturating_sub(1) {
+        let (x0, y0, x1, y1) = (pts[i * 2], pts[i * 2 + 1], pts[i * 2 + 2], pts[i * 2 + 3]);
+        let near = x0.max(x1) >= l - reach && x0.min(x1) <= r + reach
+                && y0.max(y1) >= t - reach && y0.min(y1) <= b + reach;
+        if !near { continue; }
+        match runs.last_mut() {
+            Some(run) if run.1 == i => run.1 = i + 1,
+            _ => runs.push((i, i + 1)),
+        }
+    }
+    runs
+}
+
+/// Narrows a clip mask to the box `(l, t, r, b)` in place: everything outside
+/// is zeroed, and the edge pixels a fractional box only partly covers keep that
+/// fraction. What `Mask::intersect_path` does for a rectangle, without
+/// rasterizing a path and multiplying the whole buffer: a window-sized mask
+/// costs a few hundred microseconds this way instead of a couple of
+/// milliseconds, and a chart inside a rounded card pushes a clip or two per frame.
+fn mask_intersect_rect(m: &mut tiny_skia::Mask, l: f32, t: f32, r: f32, b: f32) {
+    let (w, h) = (m.width() as usize, m.height() as usize);
+    let clamp_to = |v: f32, max: usize| (v.max(0.0) as usize).min(max);
+    let (x0, x1) = (clamp_to(l.floor(), w), clamp_to(r.ceil(), w));
+    let (y0, y1) = (clamp_to(t.floor(), h), clamp_to(b.ceil(), h));
+    // How much of the pixel at `i` the span `lo..hi` covers.
+    let cov = |i: usize, lo: f32, hi: f32| (hi.min(i as f32 + 1.0) - lo.max(i as f32)).clamp(0.0, 1.0);
+    let data = m.data_mut();
+    for row in 0..h {
+        let line = &mut data[row * w..(row + 1) * w];
+        if row < y0 || row >= y1 || x1 <= x0 { line.fill(0); continue; }
+        line[..x0].fill(0);
+        line[x1..].fill(0);
+        let cy = cov(row, t, b);
+        if cy < 1.0 {
+            for v in line[x0..x1].iter_mut() { *v = (*v as f32 * cy + 0.5) as u8; }
+        }
+        // The left and right pixels of a fractional box are only partly inside.
+        let (cl, cr) = (cov(x0, l, r), cov(x1 - 1, l, r));
+        if cl < 1.0 { line[x0] = (line[x0] as f32 * cl + 0.5) as u8; }
+        if cr < 1.0 && (x1 - 1 != x0 || cl >= 1.0) { line[x1 - 1] = (line[x1 - 1] as f32 * cr + 0.5) as u8; }
+    }
+}
+
 // ── Glyph cache ───────────────────────────────────────────────────────────────
 
 /// Cache key for a rasterized glyph alpha mask.
@@ -301,12 +387,66 @@ fn linear_premul_to_srgb_premul_in_place(out: &mut [u8], swap_rb: bool) {
 #[cfg(test)]
 static NO_LAZY_CLIP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Most rects a partial redraw is split into (`glyx-core`'s `damage_rects`
+/// merges down to this many).
+const MAX_DAMAGE_RECTS: usize = 8;
+
+/// A few disjoint pixel rects, `Copy` so a clip layer can save and restore one
+/// without allocating. The region a partial redraw repaints, and the (lazy)
+/// rectangular clip it is intersected with.
+#[derive(Clone, Copy)]
+struct RectSet {
+    n: usize,
+    r: [tiny_skia::Rect; MAX_DAMAGE_RECTS],
+}
+
+impl RectSet {
+    fn from_slice(rects: &[tiny_skia::Rect]) -> Option<Self> {
+        if rects.is_empty() || rects.len() > MAX_DAMAGE_RECTS { return None; }
+        let mut r = [rects[0]; MAX_DAMAGE_RECTS];
+        r[..rects.len()].copy_from_slice(rects);
+        Some(Self { n: rects.len(), r })
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &tiny_skia::Rect> { self.r[..self.n].iter() }
+
+    /// Whether the box lies inside ONE of the rects, with `slack` pixels to spare.
+    fn contains_box(&self, l: f32, t: f32, r: f32, b: f32, slack: f32) -> bool {
+        self.iter().any(|p| l - slack >= p.left() && t - slack >= p.top()
+                         && r + slack <= p.right() && b + slack <= p.bottom())
+    }
+
+    fn intersects_box(&self, l: f32, t: f32, r: f32, b: f32) -> bool {
+        self.iter().any(|d| !(r <= d.left() || l >= d.right() || b <= d.top() || t >= d.bottom()))
+    }
+
+    /// Every rect cut down to the box; the ones that miss it are dropped.
+    /// `None` when none of them touches it.
+    fn clipped_to(&self, l: f32, t: f32, r: f32, b: f32) -> Option<Self> {
+        let mut out: Vec<tiny_skia::Rect> = Vec::with_capacity(self.n);
+        for p in self.iter() {
+            let (il, it, ir, ib) = (l.max(p.left()), t.max(p.top()), r.min(p.right()), b.min(p.bottom()));
+            if ir > il && ib > it {
+                if let Some(c) = tiny_skia::Rect::from_ltrb(il, it, ir, ib) { out.push(c); }
+            }
+        }
+        Self::from_slice(&out)
+    }
+
+    /// The rects as one path, for building a clip mask.
+    fn path(&self) -> Option<tiny_skia::Path> {
+        let mut pb = tiny_skia::PathBuilder::new();
+        for d in self.iter() { pb.push_rect(*d); }
+        pb.finish()
+    }
+}
+
 /// One frame accumulated in a CPU `Pixmap`.
 pub struct TinySkiaFrame {
     pub(crate) pixmap: tiny_skia::Pixmap,
     /// Clip state saved by push_layer, restored by pop_layer: the mask and the
     /// pending rect (below) as they were before the push.
-    clip_stack:   Vec<(Option<tiny_skia::Mask>, Option<tiny_skia::Rect>)>,
+    clip_stack:   Vec<(Option<tiny_skia::Mask>, Option<RectSet>, bool)>,
     /// Active clip mask (`None` = no clip, or only a pending rect).
     current_mask: Option<tiny_skia::Mask>,
     /// A rectangular clip whose mask hasn't been built yet: the damage rect of a
@@ -315,10 +455,16 @@ pub struct TinySkiaFrame {
     /// the full-window mask — a window-sized allocation plus a pass over every
     /// pixel — is only built when some draw actually crosses the rect's edge
     /// (`ensure_mask`). Meaningful only while `current_mask` is `None`.
-    pending_base: Option<tiny_skia::Rect>,
+    pending_base: Option<RectSet>,
+    /// `current_mask` is only the mask of `pending_base` (built by `ensure_mask`
+    /// because some draw crossed an edge), kept as a cache: the rect set is still
+    /// the clip, so further rect layers just narrow it and draws that lie inside
+    /// it still skip the mask. When `false`, `current_mask` is the whole clip
+    /// (it came from a rounded or rotated layer) and `pending_base` is `None`.
+    mask_is_rects: bool,
     /// Damage region for partial redraw (`None` = full frame).  Draws are
-    /// clipped to this rect via the base mask AND bbox-culled for speed.
-    damage:       Option<tiny_skia::Rect>,
+    /// clipped to these rects via the base mask AND bbox-culled for speed.
+    damage:       Option<RectSet>,
     /// Current transform (node `transform` props, composed down the tree),
     /// applied to every draw and clip. Identity keeps tiny-skia's fast paths.
     xf:           tiny_skia::Transform,
@@ -344,7 +490,7 @@ impl TinySkiaFrame {
     /// no correctly-sized pooled pixmap exists (first frame, resize).
     fn new_damaged(
         width: u32, height: u32, bg: peniko::Color, mut shared: TinySkiaShared,
-        damage: Option<(f64, f64, f64, f64)>,
+        damage: Option<&[(f64, f64, f64, f64)]>,
     ) -> Option<Self> {
         // Partial redraw needs last frame's pixels — only valid when the
         // pooled pixmap exists at the same size.
@@ -354,31 +500,63 @@ impl TinySkiaFrame {
             _ => (tiny_skia::Pixmap::new(width, height)?, None),
         };
 
-        // Clamp damage to the pixmap; treat degenerate/full-coverage as full.
-        let damage_rect = damage.and_then(|(x, y, w, h)| {
-            let x0 = (x.max(0.0)).floor() as f32;
-            let y0 = (y.max(0.0)).floor() as f32;
-            let x1 = ((x + w).min(width  as f64)).ceil() as f32;
-            let y1 = ((y + h).min(height as f64)).ceil() as f32;
-            if x1 <= x0 || y1 <= y0 { return None; }             // empty
-            if x0 <= 0.0 && y0 <= 0.0
-                && x1 >= width as f32 && y1 >= height as f32 { return None; } // full
-            tiny_skia::Rect::from_ltrb(x0, y0, x1, y1)
+        // Clamp each rect to the pixmap; any that covers it all, or none left,
+        // means a full frame.
+        let damage_set = damage.and_then(|rects| {
+            let mut out: Vec<tiny_skia::Rect> = Vec::with_capacity(rects.len());
+            for &(x, y, w, h) in rects {
+                let x0 = (x.max(0.0)).floor() as f32;
+                let y0 = (y.max(0.0)).floor() as f32;
+                let x1 = ((x + w).min(width  as f64)).ceil() as f32;
+                let y1 = ((y + h).min(height as f64)).ceil() as f32;
+                if x1 <= x0 || y1 <= y0 { continue; }                 // empty
+                if x0 <= 0.0 && y0 <= 0.0
+                    && x1 >= width as f32 && y1 >= height as f32 { return None; } // full
+                out.push(tiny_skia::Rect::from_ltrb(x0, y0, x1, y1)?);
+            }
+            // Rounding outward can make neighbours overlap by a pixel, and a
+            // translucent fill would then land twice there: merge any that do.
+            'merge: loop {
+                for i in 0..out.len() {
+                    for j in i + 1..out.len() {
+                        let (a, b) = (out[i], out[j]);
+                        if a.left() < b.right() && b.left() < a.right() && a.top() < b.bottom() && b.top() < a.bottom() {
+                            out[i] = tiny_skia::Rect::from_ltrb(
+                                a.left().min(b.left()), a.top().min(b.top()),
+                                a.right().max(b.right()), a.bottom().max(b.bottom()))?;
+                            out.swap_remove(j);
+                            continue 'merge;
+                        }
+                    }
+                }
+                break;
+            }
+            if out.len() > MAX_DAMAGE_RECTS {
+                // More than we track: one box around them all.
+                let l = out.iter().map(|r| r.left()).fold(f32::MAX, f32::min);
+                let t = out.iter().map(|r| r.top()).fold(f32::MAX, f32::min);
+                let r = out.iter().map(|r| r.right()).fold(f32::MIN, f32::max);
+                let b = out.iter().map(|r| r.bottom()).fold(f32::MIN, f32::max);
+                out = vec![tiny_skia::Rect::from_ltrb(l, t, r, b)?];
+            }
+            RectSet::from_slice(&out)
         });
 
         let q = bg.to_rgba8();
         let bg_color = tiny_skia::Color::from_rgba8(q.r, q.g, q.b, q.a);
-        match damage_rect {
+        match &damage_set {
             None => pixmap.fill(bg_color),
-            Some(d) => {
-                // Clear only the damaged region to the background color.
+            Some(set) => {
+                // Clear only the damaged regions to the background color.
                 let paint = tiny_skia::Paint {
                     shader: tiny_skia::Shader::SolidColor(bg_color),
                     blend_mode: tiny_skia::BlendMode::Source,
                     anti_alias: false,
                     ..Default::default()
                 };
-                pixmap.fill_rect(d, &paint, tiny_skia::Transform::identity(), None);
+                for d in set.iter() {
+                    pixmap.fill_rect(*d, &paint, tiny_skia::Transform::identity(), None);
+                }
             }
         }
 
@@ -386,20 +564,21 @@ impl TinySkiaFrame {
             pixmap,
             clip_stack:   Vec::new(),
             current_mask: None,
-            pending_base: damage_rect,
-            damage:       damage_rect,
+            mask_is_rects: false,
+            pending_base: damage_set,
+            damage:       damage_set,
             xf:           tiny_skia::Transform::identity(),
             xf_stack:     Vec::new(),
             shared,
         })
     }
 
-    /// The clamped damage rect this frame was created with (`None` = full).
-    pub fn damage(&self) -> Option<(u32, u32, u32, u32)> {
-        self.damage.map(|d| {
+    /// The clamped damage rects this frame was created with (`None` = full).
+    pub fn damage(&self) -> Option<Vec<(u32, u32, u32, u32)>> {
+        self.damage.map(|set| set.iter().map(|d| {
             (d.left() as u32, d.top() as u32,
              (d.right() - d.left()) as u32, (d.bottom() - d.top()) as u32)
-        })
+        }).collect())
     }
 
     /// True when a draw with the given bbox lies entirely outside the damage
@@ -407,9 +586,9 @@ impl TinySkiaFrame {
     /// avoids the rasterization work).
     #[inline]
     fn culled(&self, x: f64, y: f64, w: f64, h: f64) -> bool {
-        let Some(d) = self.damage else { return false };
+        let Some(d) = &self.damage else { return false };
         let (l, t, r, b) = self.screen_bbox(x, y, w, h);
-        r <= d.left() || l >= d.right() || b <= d.top() || t >= d.bottom()
+        !d.intersects_box(l, t, r, b)
     }
 
     /// Screen-space bbox `(l, t, r, b)` of a local-space box under the
@@ -457,11 +636,10 @@ impl TinySkiaFrame {
     /// anti-aliased shape, 0 for one whose edges lie on whole pixels.
     #[inline]
     fn clip_needs_mask_with(&self, l: f32, t: f32, r: f32, b: f32, slack: f32) -> bool {
-        if self.current_mask.is_some() { return true; }
+        if self.current_mask.is_some() && !self.mask_is_rects { return true; }
         match self.pending_base {
             None => false,
-            Some(p) => !(l - slack >= p.left() && t - slack >= p.top()
-                      && r + slack <= p.right() && b + slack <= p.bottom()),
+            Some(p) => !p.contains_box(l, t, r, b, slack),
         }
     }
 
@@ -469,12 +647,14 @@ impl TinySkiaFrame {
     /// draw that passes `current_mask` without a `needs_mask` check, and
     /// every clip push, calls this first.
     fn ensure_mask(&mut self) {
-        let Some(d) = self.pending_base.take() else { return };
+        if self.current_mask.is_some() { return; }
+        let Some(d) = self.pending_base else { return };
+        let Some(p) = d.path() else { return };
         self.current_mask = tiny_skia::Mask::new(self.pixmap.width(), self.pixmap.height()).map(|mut m| {
-            let p = tiny_skia::PathBuilder::from_rect(d);
             m.fill_path(&p, tiny_skia::FillRule::Winding, true, tiny_skia::Transform::identity());
             m
         });
+        self.mask_is_rects = self.current_mask.is_some();
     }
 
     /// `needs_mask`, materializing the deferred mask when it's needed.
@@ -497,16 +677,11 @@ impl TinySkiaFrame {
     /// carries a few pixels of slack, which often reaches into a corner's
     /// square without touching its arc.) `None` → draw the shape normally.
     fn damage_clipped_fill(&self, x: f64, y: f64, w: f64, h: f64, radius: f64)
-        -> Option<tiny_skia::Rect>
+        -> Option<RectSet>
     {
         let d = self.damage?;
         if !self.xf.is_identity() { return None; }
         let (x, y, r, b) = (x as f32, y as f32, (x + w) as f32, (y + h) as f32);
-        let (il, it) = (x.max(d.left()), y.max(d.top()));
-        let (ir, ib) = (r.min(d.right()), b.min(d.bottom()));
-        if ir <= il || ib <= it { return None; }
-        // Not worth it (and not needed) when the shape is already inside.
-        if il == x && it == y && ir == r && ib == b { return None; }
         let rad = (radius as f32).min((r - x) * 0.5).min((b - y) * 0.5).max(0.0);
         let inside = |px: f32, py: f32| {
             if px < x || px > r || py < y || py > b { return false; }
@@ -516,8 +691,19 @@ impl TinySkiaFrame {
             // Only a point in a corner square (off the inner rect on both axes) is near an arc.
             dx == 0.0 || dy == 0.0 || dx * dx + dy * dy <= (rad - 1.0) * (rad - 1.0)
         };
-        if rad > 0.0 && !(inside(il, it) && inside(ir, it) && inside(il, ib) && inside(ir, ib)) { return None; }
-        tiny_skia::Rect::from_ltrb(il, it, ir, ib)
+        // The shape's intersection with each damage rect (they are disjoint, so
+        // together they cover exactly what the damage will show of it).
+        let mut parts: Vec<tiny_skia::Rect> = Vec::with_capacity(d.n);
+        for dr in d.iter() {
+            let (il, it) = (x.max(dr.left()), y.max(dr.top()));
+            let (ir, ib) = (r.min(dr.right()), b.min(dr.bottom()));
+            if ir <= il || ib <= it { continue; }
+            // Not worth it (and not needed) when the shape is already inside.
+            if il == x && it == y && ir == r && ib == b { return None; }
+            if rad > 0.0 && !(inside(il, it) && inside(ir, it) && inside(il, ib) && inside(ir, ib)) { return None; }
+            parts.push(tiny_skia::Rect::from_ltrb(il, it, ir, ib)?);
+        }
+        RectSet::from_slice(&parts)
     }
 
     // ── Transforms ────────────────────────────────────────────────────────────
@@ -539,14 +725,16 @@ impl TinySkiaFrame {
     pub fn fill_rounded_rect(&mut self, x: f64, y: f64, w: f64, h: f64,
                               radius: f64, color: peniko::Color) {
         if self.culled(x, y, w, h) { return; }
-        if let Some(rect) = self.damage_clipped_fill(x, y, w, h, radius) {
+        if let Some(set) = self.damage_clipped_fill(x, y, w, h, radius) {
             let paint = solid_paint(color);
-            // The rect IS inside the damage, so only a pushed clip layer matters.
-            let needs = !self.clip_stack.is_empty()
-                && self.clip_needs_mask(rect.left(), rect.top(), rect.right(), rect.bottom());
-            if needs { self.ensure_mask(); }
-            let mask = if needs { self.current_mask.as_ref() } else { None };
-            self.pixmap.fill_rect(rect, &paint, self.xf, mask);
+            for rect in set.iter() {
+                // The rect IS inside the damage, so only a pushed clip layer matters.
+                let needs = !self.clip_stack.is_empty()
+                    && self.clip_needs_mask(rect.left(), rect.top(), rect.right(), rect.bottom());
+                if needs { self.ensure_mask(); }
+                let mask = if needs { self.current_mask.as_ref() } else { None };
+                self.pixmap.fill_rect(*rect, &paint, self.xf, mask);
+            }
             return;
         }
         let Some(path) = rrect_path(x as f32, y as f32, w as f32, h as f32, radius as f32)
@@ -564,13 +752,15 @@ impl TinySkiaFrame {
             pb.push_path(&path);
             pb.push_rect(hole);
             if let Some(ring) = pb.finish() {
-                let part = match self.damage {
-                    Some(d) => tiny_skia::Rect::from_ltrb(
+                // The hole cropped to each damage rect, so it needs no mask to
+                // stay inside the damage.
+                let parts: Vec<tiny_skia::Rect> = match &self.damage {
+                    Some(set) => set.iter().filter_map(|d| tiny_skia::Rect::from_ltrb(
                         hole.left().max(d.left()), hole.top().max(d.top()),
-                        hole.right().min(d.right()), hole.bottom().min(d.bottom())),
-                    None => Some(hole),
+                        hole.right().min(d.right()), hole.bottom().min(d.bottom()))).collect(),
+                    None => vec![hole],
                 };
-                if let Some(part) = part {
+                for part in parts {
                     // Whole-pixel edges: no anti-aliasing, so no slack is needed.
                     let needs = self.clip_needs_mask_with(part.left(), part.top(), part.right(), part.bottom(), 0.0);
                     if needs { self.ensure_mask(); }
@@ -617,18 +807,19 @@ impl TinySkiaFrame {
         let paint = solid_paint(color);
         // A damage-clipped rect is inside the damage by construction, so only
         // a pushed clip layer can still matter.
-        let (rect, needs) = match self.damage_clipped_fill(x, y, w, h, 0.0) {
-            Some(r) => {
+        if let Some(set) = self.damage_clipped_fill(x, y, w, h, 0.0) {
+            for r in set.iter() {
                 let needs = !self.clip_stack.is_empty()
                     && self.clip_needs_mask(r.left(), r.top(), r.right(), r.bottom());
                 if needs { self.ensure_mask(); }
-                (Some(r), needs)
+                let mask = if needs { self.current_mask.as_ref() } else { None };
+                self.pixmap.fill_rect(*r, &paint, self.xf, mask);
             }
-            None => (tiny_skia::Rect::from_xywh(x as f32, y as f32, w as f32, h as f32),
-                     self.mask_needed(x, y, w, h)),
-        };
+            return;
+        }
+        let needs = self.mask_needed(x, y, w, h);
         let mask = if needs { self.current_mask.as_ref() } else { None };
-        if let Some(rect) = rect {
+        if let Some(rect) = tiny_skia::Rect::from_xywh(x as f32, y as f32, w as f32, h as f32) {
             self.pixmap.fill_rect(rect, &paint, self.xf, mask);
         }
     }
@@ -704,7 +895,36 @@ impl TinySkiaFrame {
         Some((l as f64 - pad, t as f64 - pad, (r - l) as f64 + pad * 2.0, (b - t) as f64 + pad * 2.0))
     }
 
+    /// The box around the damage rects, grown by `margin` (`None` for a full
+    /// frame, or when a transform means local points aren't screen points).
+    fn damage_box(&self, margin: f32) -> Option<(f32, f32, f32, f32)> {
+        if !self.xf.is_identity() { return None; }
+        let d = self.damage.as_ref()?;
+        let l = d.iter().map(|r| r.left()).fold(f32::MAX, f32::min);
+        let t = d.iter().map(|r| r.top()).fold(f32::MAX, f32::min);
+        let r = d.iter().map(|r| r.right()).fold(f32::MIN, f32::max);
+        let b = d.iter().map(|r| r.bottom()).fold(f32::MIN, f32::max);
+        Some((l - margin, t - margin, r + margin, b + margin))
+    }
+
+    /// A filled polygon only has to be rasterized where the damage is: tiny-skia
+    /// scan-converts a whole path before the clip mask trims it, so a chart's
+    /// area fill costs the same for a thin crosshair strip as for a repaint of
+    /// the whole chart. Returns the polygon cut to the damage (grown a couple of
+    /// pixels, so its new edges never reach a visible pixel), or `None` when
+    /// there is nothing to gain: no damage, a transform, or it already fits.
+    fn clip_fill_to_damage(&self, pts: &[f32]) -> Option<Vec<f32>> {
+        let (l, t, r, b) = self.damage_box(2.0)?;
+        let (x, y, w, h) = Self::points_box(pts, 0.0)?;
+        let inside = x as f32 >= l && y as f32 >= t && (x + w) as f32 <= r && (y + h) as f32 <= b;
+        if inside || w * h < 8_000.0 { return None; }
+        Some(clip_polygon_to_box(pts, l, t, r, b))
+    }
+
     pub fn fill_path(&mut self, pts: &[f32], color: peniko::Color) {
+        if let Some((x, y, w, h)) = Self::points_box(pts, 0.0) { if self.culled(x, y, w, h) { return; } }
+        let clipped = self.clip_fill_to_damage(pts);
+        let pts = match &clipped { Some(c) if c.len() < 6 => return, Some(c) => c.as_slice(), None => pts };
         let Some(path) = poly_path(pts, true) else { return };
         let paint = solid_paint(color);
         let needs = Self::points_box(pts, 0.0).map_or(true, |(x, y, w, h)| self.mask_needed(x, y, w, h));
@@ -725,6 +945,9 @@ impl TinySkiaFrame {
     }
 
     pub fn fill_path_with_brush(&mut self, pts: &[f32], brush: &peniko::Brush) {
+        if let Some((x, y, w, h)) = Self::points_box(pts, 0.0) { if self.culled(x, y, w, h) { return; } }
+        let clipped = self.clip_fill_to_damage(pts);
+        let pts = match &clipped { Some(c) if c.len() < 6 => return, Some(c) => c.as_slice(), None => pts };
         let Some(path) = poly_path(pts, true) else { return };
         let strip = self.gradient_strip(brush);
         let Some(paint) = brush_paint(brush, &strip) else { return };
@@ -734,6 +957,24 @@ impl TinySkiaFrame {
     }
 
     pub fn stroke_path(&mut self, pts: &[f32], width: f64, closed: bool, color: peniko::Color) {
+        if let Some((x, y, w, h)) = Self::points_box(pts, width) { if self.culled(x, y, w, h) { return; } }
+        // An open polyline is only stroked where it comes near the damage.
+        if !closed {
+            if let (Some((l, t, r, b)), Some((x, y, w, h))) = (self.damage_box(0.0), Self::points_box(pts, width)) {
+                let fits = x as f32 >= l && y as f32 >= t && (x + w) as f32 <= r && (y + h) as f32 <= b;
+                if !fits && pts.len() >= 8 {
+                    for (a, z) in polyline_runs_near(pts, l, t, r, b, width as f32 + 2.0) {
+                        self.stroke_polyline(&pts[a * 2..z * 2 + 2], width, false, color);
+                    }
+                    return;
+                }
+            }
+        }
+        self.stroke_polyline(pts, width, closed, color);
+    }
+
+    /// Strokes the polyline exactly as given (`stroke_path` decides which parts).
+    fn stroke_polyline(&mut self, pts: &[f32], width: f64, closed: bool, color: peniko::Color) {
         let Some(path) = poly_path(pts, closed) else { return };
         let paint  = solid_paint(color);
         let stroke = tiny_skia::Stroke {
@@ -1025,9 +1266,11 @@ impl TinySkiaFrame {
 
     fn push_clip_path(&mut self, path: &tiny_skia::Path) {
         self.ensure_mask();
+        // The new mask folds in whatever rect clip is pending, so from here the
+        // clip is the mask alone; the rect set and mask are saved to restore.
         let saved = self.current_mask.take();
-        // `ensure_mask` consumed the pending rect, so a complex clip saves a
-        // mask and no pending rect.
+        let saved_pending = self.pending_base.take();
+        let saved_flag = std::mem::replace(&mut self.mask_is_rects, false);
         let new_mask = match saved.as_ref() {
             Some(parent) => {
                 let mut m = parent.clone();
@@ -1044,7 +1287,7 @@ impl TinySkiaFrame {
                 })
             }
         };
-        self.clip_stack.push((saved, None));
+        self.clip_stack.push((saved, saved_pending, saved_flag));
         self.current_mask = new_mask;
     }
 
@@ -1055,17 +1298,35 @@ impl TinySkiaFrame {
     fn push_clip_rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> bool {
         #[cfg(test)]
         if NO_LAZY_CLIP.load(std::sync::atomic::Ordering::Relaxed) { return false; }
-        if self.current_mask.is_some() || !(self.xf.is_identity() || self.xf.is_translate()) {
-            return false;
-        }
+        if !(self.xf.is_identity() || self.xf.is_translate()) { return false; }
         let (l, t, r, b) = self.screen_bbox(x, y, w, h);
-        let (l, t, r, b) = match self.pending_base {
-            Some(p) => (l.max(p.left()), t.max(p.top()), r.min(p.right()), b.min(p.bottom())),
-            None    => (l, t, r, b),
+        if self.current_mask.is_some() && !self.mask_is_rects {
+            // The clip is already a mask (a rounded or rotated layer): narrow a
+            // copy of it to this rect directly instead of rasterizing a path.
+            if !(r > l && b > t) { return false; }
+            let Some(parent) = self.current_mask.take() else { return false };
+            let mut narrowed = parent.clone();
+            mask_intersect_rect(&mut narrowed, l, t, r, b);
+            self.clip_stack.push((Some(parent), self.pending_base.take(), false));
+            self.current_mask = Some(narrowed);
+            return true;
+        }
+        let merged = match &self.pending_base {
+            // Every pending rect cut down to the layer; none left means it
+            // misses the clip altogether, which a mask has to handle.
+            Some(p) => match p.clipped_to(l, t, r, b) { Some(m) => m, None => return false },
+            None => {
+                if !(r > l && b > t) { return false; }
+                let Some(rect) = tiny_skia::Rect::from_ltrb(l, t, r, b) else { return false };
+                let Some(set) = RectSet::from_slice(&[rect]) else { return false };
+                set
+            }
         };
-        if !(r > l && b > t) { return false; }
-        let Some(merged) = tiny_skia::Rect::from_ltrb(l, t, r, b) else { return false };
-        self.clip_stack.push((None, self.pending_base));
+        // The cached mask (if any) belongs to the clip being narrowed: set it
+        // aside, and build a new one only if a draw crosses the narrower edge.
+        let saved = self.current_mask.take();
+        self.clip_stack.push((saved, self.pending_base, self.mask_is_rects));
+        self.mask_is_rects = false;
         self.pending_base = Some(merged);
         true
     }
@@ -1091,9 +1352,10 @@ impl TinySkiaFrame {
     pub fn pop_layer(&mut self) {
         // Back to the clip as it was before the matching push: its mask, or the
         // rect still waiting to become one.
-        let (mask, pending) = self.clip_stack.pop().unwrap_or((None, None));
+        let (mask, pending, rects) = self.clip_stack.pop().unwrap_or((None, None, false));
         self.current_mask = mask;
         self.pending_base = pending;
+        self.mask_is_rects = rects;
     }
 }
 
@@ -1220,13 +1482,13 @@ impl TinySkiaRenderer {
     pub fn finish_frame_soft(
         &mut self,
         frame: TinySkiaFrame,
-        write: impl FnOnce(&[u8], u32, u32, Option<(u32, u32, u32, u32)>),
+        write: impl FnOnce(&[u8], u32, u32, Option<&[(u32, u32, u32, u32)]>),
     ) {
         let damage = frame.damage();
         let TinySkiaFrame { pixmap, shared, .. } = frame;
         let w = pixmap.width();
         let h = pixmap.height();
-        write(pixmap.data(), w, h, damage);
+        write(pixmap.data(), w, h, damage.as_deref());
         let mut shared = shared;
         if self.width == w && self.height == h {
             shared.pixmap = Some(pixmap);
@@ -1260,7 +1522,7 @@ impl TinySkiaRenderer {
 
     /// Begin a frame restricted to a damage rect (falls back to a full frame
     /// when no pooled pixmap is available — first frame or just-resized).
-    pub fn begin_frame_damaged(&mut self, damage: Option<(f64, f64, f64, f64)>) -> TinySkiaFrame {
+    pub fn begin_frame_damaged(&mut self, damage: Option<&[(f64, f64, f64, f64)]>) -> TinySkiaFrame {
         let shared = self.shared.take().expect("skia: frame already in progress");
         TinySkiaFrame::new_damaged(self.width, self.height, self.background_color, shared, damage)
             .expect("Pixmap creation failed — zero-sized window?")
@@ -1566,7 +1828,7 @@ mod transform_tests {
         let mut r = TinySkiaRenderer::new_cpu_only(64, 16);
         let seed = r.begin_frame();
         r.finish_frame_soft(seed, |_, _, _, _| {});
-        let mut frame = r.begin_frame_damaged(Some((20.0, 0.0, 20.0, 16.0)));
+        let mut frame = r.begin_frame_damaged(Some(&[(20.0, 0.0, 20.0, 16.0)]));
         frame.fill_rounded_rect(0.0, 0.0, 64.0, 16.0, 4.0, RED);
         frame.stroke_line(0.0, 8.0, 64.0, 8.0, 3.0, RED);
         frame.fill_path(&[0.0, 0.0, 64.0, 0.0, 64.0, 16.0], RED);
@@ -1581,7 +1843,7 @@ mod transform_tests {
         let mut r = TinySkiaRenderer::new_cpu_only(64, 16);
         let seed = r.begin_frame(); // seeds the pooled pixmap so damage is honoured
         r.finish_frame_soft(seed, |_, _, _, _| {});
-        let mut frame = r.begin_frame_damaged(Some((40.0, 0.0, 20.0, 16.0)));
+        let mut frame = r.begin_frame_damaged(Some(&[(40.0, 0.0, 20.0, 16.0)]));
         assert!(frame.damage().is_some());
         // Untransformed box (0..10) is outside the damage; the moved one isn't.
         frame.push_transform(Affine::translate((40.0, 0.0)));
@@ -1712,7 +1974,7 @@ mod canvas_cost {
             let frames = 60;
             let t0 = Instant::now();
             for _ in 0..frames {
-                let mut f = match damage { Some(d) => r.begin_frame_damaged(Some(d)), None => r.begin_frame() };
+                let mut f = match damage { Some(d) => r.begin_frame_damaged(Some(&[d])), None => r.begin_frame() };
                 chart(&mut f, 32.0, 100.0);
                 chart(&mut f, 32.0, 380.0);
                 r.finish_frame_soft(f, |_, _, _, _| {});
@@ -1760,7 +2022,7 @@ mod canvas_cost_parts {
         let mut time = |label: &str, clip: bool, part: &dyn Fn(&mut TinySkiaFrame)| {
             let t0 = Instant::now();
             for _ in 0..frames {
-                let mut f = r.begin_frame_damaged(Some((28.0, 96.0, 844.0, 270.0)));
+                let mut f = r.begin_frame_damaged(Some(&[(28.0, 96.0, 844.0, 270.0)]));
                 if clip { f.push_layer(ox, oy, w, h); }
                 part(&mut f);
                 if clip { f.pop_layer(); }
@@ -1813,7 +2075,7 @@ mod lazy_clip_tests {
         let mut r = TinySkiaRenderer::new_cpu_only(240, 120);
         let seed = r.begin_frame();
         r.finish_frame_soft(seed, |_, _, _, _| {});
-        let mut f = match damage { Some(d) => r.begin_frame_damaged(Some(d)), None => r.begin_frame() };
+        let mut f = match damage { Some(d) => r.begin_frame_damaged(Some(&[d])), None => r.begin_frame() };
         f.push_layer(40.5, 20.25, 120.0, 60.0);
         // The reference behaviour: the mask built the moment the clip is pushed.
         if forced { f.ensure_mask(); }
@@ -1927,7 +2189,7 @@ mod lazy_clip_ab {
             let frames = 30;
             let t0 = Instant::now();
             for _ in 0..frames {
-                let mut f = r.begin_frame_damaged(Some((28.0, 96.0, 844.0, 540.0)));
+                let mut f = r.begin_frame_damaged(Some(&[(28.0, 96.0, 844.0, 540.0)]));
                 chart(&mut f, 32.0, 100.0);
                 chart(&mut f, 32.0, 380.0);
                 r.finish_frame_soft(f, |_, _, _, _| {});
@@ -2130,7 +2392,7 @@ mod damage_fill_tests {
         let mut seed = r.begin_frame();
         seed.fill_rect(0.0, 0.0, 300.0, 200.0, PAGE);
         r.finish_frame_soft(seed, |_, _, _, _| {});
-        let mut f = match damage { Some(d) => r.begin_frame_damaged(Some(d)), None => r.begin_frame() };
+        let mut f = match damage { Some(d) => r.begin_frame_damaged(Some(&[d])), None => r.begin_frame() };
         f.fill_rect(0.0, 0.0, 300.0, 200.0, PAGE);
         f.fill_rounded_rect(shape.0, shape.1, shape.2, shape.3, shape.4, PANEL);
         (f, r)
@@ -2176,7 +2438,7 @@ mod damage_fill_tests {
         keep.finish_frame_soft(seed, |_, _, _, _| {});
         // Damage whose slack reaches into the top corner squares of a radius-12 panel, but stops
         // short of its bottom edge: every corner of the intersection is clear of the arcs.
-        let f = keep.begin_frame_damaged(Some((28.0, 116.0, 844.0, 100.0)));
+        let f = keep.begin_frame_damaged(Some(&[(28.0, 116.0, 844.0, 100.0)]));
         assert!(f.damage_clipped_fill(20.0, 108.0, 860.0, 274.0, r).is_some(), "slack inside the corner square, clear of the arc");
         drop(f);
         // The same slack on damage that runs down past the panel's bottom edge reaches the bottom
@@ -2184,14 +2446,14 @@ mod damage_fill_tests {
         let mut keep3 = TinySkiaRenderer::new_cpu_only(900, 700);
         let seed = keep3.begin_frame();
         keep3.finish_frame_soft(seed, |_, _, _, _| {});
-        let f3 = keep3.begin_frame_damaged(Some((28.0, 116.0, 844.0, 540.0)));
+        let f3 = keep3.begin_frame_damaged(Some(&[(28.0, 116.0, 844.0, 540.0)]));
         assert!(f3.damage_clipped_fill(20.0, 108.0, 860.0, 274.0, r).is_none(), "the rect would cross the bottom corners' arcs");
         drop(f3);
         // Damage that reaches the shape's own corner point (far outside the arc) must not use the plain fill.
         let mut keep2 = TinySkiaRenderer::new_cpu_only(900, 700);
         let seed = keep2.begin_frame();
         keep2.finish_frame_soft(seed, |_, _, _, _| {});
-        let f2 = keep2.begin_frame_damaged(Some((20.0, 108.0, 10.0, 10.0)));
+        let f2 = keep2.begin_frame_damaged(Some(&[(20.0, 108.0, 10.0, 10.0)]));
         assert!(f2.damage_clipped_fill(20.0, 108.0, 860.0, 274.0, r).is_none(), "the corner of the damage is outside the arc");
     }
 }
@@ -2257,7 +2519,7 @@ mod ring_fill_tests {
             let mut seed = r.begin_frame();
             seed.fill_rect(0.0, 0.0, 300.0, 220.0, col(13, 13, 20, 255));
             r.finish_frame_soft(seed, |_, _, _, _| {});
-            let mut f = match damage { Some(d) => r.begin_frame_damaged(Some(d)), None => r.begin_frame() };
+            let mut f = match damage { Some(d) => r.begin_frame_damaged(Some(&[d])), None => r.begin_frame() };
             f.fill_rect(0.0, 0.0, 300.0, 220.0, col(13, 13, 20, 255));
             f.push_layer(40.5, 30.25, 190.0, 130.0);
             if forced { f.ensure_mask(); }
@@ -2304,7 +2566,7 @@ mod ring_fill_tests {
         for _ in 0..8 {
             let t0 = Instant::now();
             for _ in 0..40 {
-                let mut f = r.begin_frame_damaged(Some((28.0, 116.0, 844.0, 540.0)));
+                let mut f = r.begin_frame_damaged(Some(&[(28.0, 116.0, 844.0, 540.0)]));
                 f.fill_rounded_rect(20.0, 108.0, 860.0, 274.0, 12.0, c);
                 r.finish_frame_soft(f, |_, _, _, _| {});
             }
@@ -2363,5 +2625,306 @@ mod stroke_cost_by_points {
             }
             println!("{n:5} vertices: stroke {:.2} ms | area fill {:.2} ms", best.0, best.1);
         }
+    }
+}
+
+#[cfg(test)]
+mod multi_damage_tests {
+    use super::*;
+
+    const PAGE:  peniko::Color = peniko::Color::from_rgba8(13, 13, 20, 255);
+    const PANEL: peniko::Color = peniko::Color::from_rgba8(18, 19, 26, 255);
+    const BLUE:  peniko::Color = peniko::Color::from_rgba8(76, 141, 246, 255);
+    const GOLD:  peniko::Color = peniko::Color::from_rgba8(242, 169, 59, 255);
+    const GLASS: peniko::Color = peniko::Color::from_rgba8(255, 255, 255, 40);
+
+    const W: u32 = 400;
+    const H: u32 = 260;
+
+    /// A little scene. `variant` moves the two things that "changed" between
+    /// frames, both inside the damage rects the tests pass; everything else is
+    /// identical in both variants, as it would be for a real partial redraw.
+    fn scene(f: &mut TinySkiaFrame, variant: u32) {
+        f.fill_rect(0.0, 0.0, W as f64, H as f64, PAGE);
+        f.fill_rounded_rect(10.0, 10.0, 380.0, 240.0, 14.0, PANEL);
+        // A translucent band across the whole panel: drawn through every damage
+        // rect, so a piece that landed twice would show as a brighter strip.
+        f.fill_rect(10.0, 120.0, 380.0, 30.0, GLASS);
+        f.stroke_line(20.0, 200.0, 380.0, 200.0, 2.0, BLUE);
+        f.fill_circle(300.0, 60.0, 14.0, GOLD);
+        // Something clipped, partly outside its layer.
+        f.push_layer(60.0, 160.0, 120.0, 60.0);
+        f.fill_rect(40.0, 170.0, 200.0, 20.0, BLUE);
+        f.pop_layer();
+        // The changing parts.
+        let dx = if variant == 0 { 0.0 } else { 7.0 };
+        f.fill_rounded_rect(40.0 + dx, 40.0, 50.0, 40.0, 6.0, GOLD);
+        f.fill_rect(250.0, 90.0 + dx, 30.0, 70.0, BLUE);
+    }
+
+    fn render(variant: u32, seed_variant: Option<u32>, damage: Option<&[(f64, f64, f64, f64)]>) -> Vec<u8> {
+        let mut r = TinySkiaRenderer::new_cpu_only(W, H);
+        if let Some(sv) = seed_variant {
+            let mut seed = r.begin_frame();
+            scene(&mut seed, sv);
+            r.finish_frame_soft(seed, |_, _, _, _| {});
+        }
+        let mut f = match damage { Some(d) => r.begin_frame_damaged(Some(d)), None => r.begin_frame() };
+        scene(&mut f, variant);
+        let mut out = Vec::new();
+        r.finish_frame_soft(f, |px, _, _, _| out = px.to_vec());
+        out
+    }
+
+    #[test]
+    fn repainting_through_several_rects_matches_a_full_repaint() {
+        // Every changed pixel lies inside one of the rects.
+        let cases: [&[(f64, f64, f64, f64)]; 5] = [
+            &[(30.0, 30.0, 80.0, 60.0), (240.0, 80.0, 50.0, 100.0)],
+            &[(30.0, 30.0, 80.0, 60.0), (240.0, 80.0, 50.0, 100.0), (60.0, 160.0, 40.0, 50.0)],
+            // Fractional edges, which round outward and may touch.
+            &[(30.5, 30.5, 80.2, 60.1), (110.7, 30.5, 30.0, 60.0), (239.5, 79.5, 50.5, 100.5)],
+            // Rects that touch or overlap before rounding.
+            &[(30.0, 30.0, 80.0, 60.0), (110.0, 30.0, 40.0, 60.0), (200.0, 70.0, 100.0, 120.0), (260.0, 150.0, 100.0, 60.0)],
+            // One rect: the old behaviour.
+            &[(25.0, 25.0, 280.0, 180.0)],
+        ];
+        let full = render(1, None, None);
+        for rects in cases {
+            let part = render(1, Some(0), Some(rects));
+            let mut bad = 0usize;
+            let mut worst = 0i32;
+            for i in 0..full.len() {
+                let d = (full[i] as i32 - part[i] as i32).abs();
+                worst = worst.max(d);
+                if d > 2 { bad += 1; }
+            }
+            assert!(bad == 0 && worst <= 12, "{rects:?}: {bad} bytes differ by more than 2 (worst {worst})");
+        }
+    }
+
+    #[test]
+    fn nothing_outside_the_rects_is_touched() {
+        // Seed with variant 0, then repaint with variant 1 but a scene that would
+        // paint everywhere: only the rects may change.
+        let rects: &[(f64, f64, f64, f64)] = &[(30.0, 30.0, 80.0, 60.0), (240.0, 80.0, 50.0, 100.0)];
+        let mut r = TinySkiaRenderer::new_cpu_only(W, H);
+        let mut seed = r.begin_frame();
+        seed.fill_rect(0.0, 0.0, W as f64, H as f64, PAGE);
+        r.finish_frame_soft(seed, |_, _, _, _| {});
+        let mut f = r.begin_frame_damaged(Some(rects));
+        f.fill_rect(0.0, 0.0, W as f64, H as f64, GOLD);
+        f.fill_rounded_rect(0.0, 0.0, W as f64, H as f64, 20.0, BLUE);
+        f.stroke_line(0.0, 130.0, W as f64, 130.0, 6.0, GOLD);
+        f.fill_circle(200.0, 130.0, 150.0, GLASS);
+        let mut out = Vec::new();
+        r.finish_frame_soft(f, |px, _, _, _| out = px.to_vec());
+        let inside = |x: u32, y: u32| rects.iter().any(|&(rx, ry, rw, rh)| {
+            (x as f64) >= rx.floor() && (x as f64) < (rx + rw).ceil() && (y as f64) >= ry.floor() && (y as f64) < (ry + rh).ceil()
+        });
+        let page = [13u8, 13, 20, 255];
+        for y in 0..H {
+            for x in 0..W {
+                let i = ((y * W + x) * 4) as usize;
+                if !inside(x, y) {
+                    assert_eq!(&out[i..i + 4], &page, "({x},{y}) is outside every rect and must still be the page colour");
+                }
+            }
+        }
+        // And the rects themselves were repainted.
+        let i = ((60 * W + 60) * 4) as usize;
+        assert_ne!(&out[i..i + 4], &page);
+    }
+
+    #[test]
+    fn the_frame_reports_every_rect_it_repaints() {
+        let mut r = TinySkiaRenderer::new_cpu_only(W, H);
+        let seed = r.begin_frame();
+        r.finish_frame_soft(seed, |_, _, _, _| {});
+        let f = r.begin_frame_damaged(Some(&[(10.0, 10.0, 20.0, 20.0), (100.0, 100.0, 30.0, 30.0)]));
+        let mut got = f.damage().expect("partial");
+        got.sort();
+        assert_eq!(got, vec![(10, 10, 20, 20), (100, 100, 30, 30)]);
+        // Any rect that covers the window makes it a full frame.
+        let mut r2 = TinySkiaRenderer::new_cpu_only(W, H);
+        let seed = r2.begin_frame();
+        r2.finish_frame_soft(seed, |_, _, _, _| {});
+        assert!(r2.begin_frame_damaged(Some(&[(10.0, 10.0, 20.0, 20.0), (0.0, 0.0, W as f64, H as f64)])).damage().is_none());
+    }
+}
+
+#[cfg(test)]
+mod path_clip_tests {
+    use super::*;
+
+    fn col(r: u8, g: u8, b: u8, a: u8) -> peniko::Color { peniko::Color::from_rgba8(r, g, b, a) }
+
+    fn shoelace(pts: &[f32]) -> f64 {
+        let n = pts.len() / 2;
+        let mut a = 0.0f64;
+        for i in 0..n {
+            let (x0, y0) = (pts[i * 2] as f64, pts[i * 2 + 1] as f64);
+            let (x1, y1) = (pts[((i + 1) % n) * 2] as f64, pts[((i + 1) % n) * 2 + 1] as f64);
+            a += x0 * y1 - x1 * y0;
+        }
+        (a / 2.0).abs()
+    }
+
+    #[test]
+    fn a_polygon_is_cut_to_the_box_and_keeps_its_area_there() {
+        // A 100x100 square, cut to the box x 50..150, y 20..80: a 50x60 piece.
+        let sq = [0.0f32, 0.0, 100.0, 0.0, 100.0, 100.0, 0.0, 100.0];
+        let c = clip_polygon_to_box(&sq, 50.0, 20.0, 150.0, 80.0);
+        assert!((shoelace(&c) - 50.0 * 60.0).abs() < 1e-3, "{c:?}");
+        // A triangle fully inside is untouched; one fully outside vanishes.
+        let tri = [10.0f32, 10.0, 40.0, 10.0, 10.0, 40.0];
+        assert!((shoelace(&clip_polygon_to_box(&tri, 0.0, 0.0, 100.0, 100.0)) - 450.0).abs() < 1e-3);
+        assert!(clip_polygon_to_box(&tri, 200.0, 200.0, 300.0, 300.0).is_empty());
+    }
+
+    #[test]
+    fn a_concave_polygon_keeps_exactly_the_area_inside_the_box() {
+        // A "U": 0..90 wide, 0..60 tall, with a notch 30..60 x 0..40 cut from the top.
+        let u = [0.0f32, 0.0, 30.0, 0.0, 30.0, 40.0, 60.0, 40.0, 60.0, 0.0, 90.0, 0.0, 90.0, 60.0, 0.0, 60.0];
+        assert!((shoelace(&u) - (90.0 * 60.0 - 30.0 * 40.0)).abs() < 1e-3);
+        // The box spans the notch: only the left and right legs plus the base are inside.
+        let c = clip_polygon_to_box(&u, 20.0, 10.0, 70.0, 50.0);
+        let expect = 50.0 * 40.0 - 30.0 * 30.0; // box minus the notch part inside it (30x30)
+        // Degenerate edges along the box side enclose no area, so compare filled pixels instead.
+        let mut a = tiny_skia::Pixmap::new(100, 70).unwrap();
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color_rgba8(255, 255, 255, 255);
+        paint.anti_alias = false;
+        a.fill_path(&poly_path(&c, true).unwrap(), &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
+        let filled = a.pixels().iter().filter(|p| p.alpha() > 127).count() as f64;
+        assert!((filled - expect).abs() <= 60.0, "{filled} px filled, expected about {expect}");
+    }
+
+    #[test]
+    fn a_polyline_keeps_the_runs_that_come_near_the_box() {
+        // A zig-zag along x, y alternating 0/100.
+        let pts: Vec<f32> = (0..20).flat_map(|i| [i as f32 * 10.0, if i % 2 == 0 { 0.0 } else { 100.0 }]).collect();
+        // A box around x 95..105 only: only segments near it (4..6) are kept, as one run.
+        let runs = polyline_runs_near(&pts, 95.0, 0.0, 105.0, 100.0, 2.0);
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        let (a, z) = runs[0];
+        assert!(a >= 7 && z <= 12 && z > a, "{runs:?}");
+        // Two far-apart boxes' worth of nearness make two runs.
+        let mut far = pts.clone();
+        far.extend([500.0, 0.0]); // nothing special; just checking nothing near gives nothing
+        assert!(polyline_runs_near(&pts, 1000.0, 0.0, 1010.0, 100.0, 2.0).is_empty());
+    }
+
+    const W: u32 = 908;
+    const H: u32 = 708;
+
+    fn chart(f: &mut TinySkiaFrame, ox: f64, oy: f64) {
+        let (w, h, n) = (836.0f64, 250.0f64, 120);
+        f.push_layer(ox, oy, w, h);
+        let mut line = Vec::new();
+        for i in 0..n {
+            let x = i as f64 / (n - 1) as f64 * (w - 60.0) + 50.0;
+            let y = 120.0 + 70.0 * (i as f64 * 0.11).sin() + 20.0 * (i as f64 * 0.43).sin();
+            line.push((ox + x) as f32); line.push((oy + y) as f32);
+        }
+        let mut area = line.clone();
+        area.extend([(ox + w - 10.0) as f32, (oy + h - 30.0) as f32, (ox + 50.0) as f32, (oy + h - 30.0) as f32]);
+        let g = peniko::Gradient::new_linear(peniko::kurbo::Point::new(ox, oy + 40.0), peniko::kurbo::Point::new(ox, oy + h - 30.0))
+            .with_stops([(0.0f32, col(129, 140, 248, 90)), (1.0f32, col(129, 140, 248, 0))].as_slice());
+        f.fill_path_with_brush(&area, &peniko::Brush::Gradient(g));
+        f.fill_path(&area, col(255, 200, 80, 40));
+        f.stroke_path(&line, 2.5, false, col(129, 140, 248, 255));
+        for k in 0..6 { let y = oy + 40.0 + k as f64 * 30.0; f.stroke_line(ox + 50.0, y, ox + w - 10.0, y, 1.0, col(255, 255, 255, 30)); }
+        f.pop_layer();
+    }
+
+    fn render(damage: Option<&[(f64, f64, f64, f64)]>) -> Vec<u8> {
+        let mut r = TinySkiaRenderer::new_cpu_only(W, H);
+        let mut seed = r.begin_frame();
+        seed.fill_rect(0.0, 0.0, W as f64, H as f64, col(18, 19, 26, 255));
+        chart(&mut seed, 32.0, 100.0);
+        chart(&mut seed, 32.0, 380.0);
+        r.finish_frame_soft(seed, |_, _, _, _| {});
+        let mut f = match damage { Some(d) => r.begin_frame_damaged(Some(d)), None => r.begin_frame() };
+        f.fill_rect(0.0, 0.0, W as f64, H as f64, col(18, 19, 26, 255));
+        chart(&mut f, 32.0, 100.0);
+        chart(&mut f, 32.0, 380.0);
+        let mut out = Vec::new();
+        r.finish_frame_soft(f, |px, _, _, _| out = px.to_vec());
+        out
+    }
+
+    #[test]
+    fn a_chart_repainted_through_thin_damage_matches_a_full_repaint() {
+        let full = render(None);
+        let cases: [&[(f64, f64, f64, f64)]; 6] = [
+            &[(300.0, 100.0, 16.0, 250.0)],                              // a crosshair strip
+            &[(60.0, 150.0, 140.0, 90.0), (500.0, 100.0, 16.0, 250.0)],  // a card and a strip
+            &[(850.0, 100.0, 40.0, 250.0)],                               // the right edge of the plot
+            &[(32.0, 330.0, 840.0, 20.0)],                                // a band across both fills
+            &[(0.0, 0.0, 908.0, 40.0)],                                   // nowhere near the chart
+            &[(100.4, 120.6, 50.3, 40.2), (400.5, 400.5, 60.0, 60.0)],   // fractional, two charts
+        ];
+        for rects in cases {
+            let part = render(Some(rects));
+            let mut bad = 0usize;
+            for i in 0..full.len() {
+                if (full[i] as i32 - part[i] as i32).abs() > 1 { bad += 1; }
+            }
+            assert_eq!(bad, 0, "{rects:?}: {bad} bytes differ from a full repaint");
+        }
+    }
+}
+
+#[cfg(test)]
+mod mask_rect_tests {
+    use super::*;
+
+    fn round_mask(w: u32, h: u32) -> tiny_skia::Mask {
+        // Something that is not a plain rect: a rounded rect.
+        let mut m = tiny_skia::Mask::new(w, h).unwrap();
+        let p = rrect_path(10.0, 10.0, w as f32 - 20.0, h as f32 - 20.0, 24.0).unwrap();
+        m.fill_path(&p, tiny_skia::FillRule::Winding, true, tiny_skia::Transform::identity());
+        m
+    }
+
+    fn via_path(mut m: tiny_skia::Mask, l: f32, t: f32, r: f32, b: f32) -> tiny_skia::Mask {
+        let p = rrect_path(l, t, r - l, b - t, 0.0).unwrap();
+        m.intersect_path(&p, tiny_skia::FillRule::Winding, true, tiny_skia::Transform::identity());
+        m
+    }
+
+    #[test]
+    fn narrowing_a_mask_to_a_whole_pixel_rect_matches_intersecting_a_path() {
+        for (l, t, r, b) in [(30.0, 40.0, 200.0, 150.0), (0.0, 0.0, 64.0, 64.0), (50.0, 20.0, 51.0, 120.0), (-10.0, -10.0, 90.0, 300.0), (150.0, 100.0, 400.0, 400.0)] {
+            let mut fast = round_mask(240, 180);
+            mask_intersect_rect(&mut fast, l, t, r, b);
+            let slow = via_path(round_mask(240, 180), l, t, r, b);
+            assert_eq!(fast.data(), slow.data(), "rect {l},{t},{r},{b}");
+        }
+    }
+
+    #[test]
+    fn a_fractional_rect_differs_from_the_path_version_only_by_edge_antialiasing() {
+        for (l, t, r, b) in [(30.5, 40.25, 200.75, 150.5), (12.3, 7.7, 99.9, 60.1)] {
+            let mut fast = round_mask(240, 180);
+            mask_intersect_rect(&mut fast, l, t, r, b);
+            let slow = via_path(round_mask(240, 180), l, t, r, b);
+            let worst = fast.data().iter().zip(slow.data()).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap();
+            let off = fast.data().iter().zip(slow.data()).filter(|(a, b)| (**a as i32 - **b as i32).abs() > 24).count();
+            assert!(worst <= 64, "rect {l},{t},{r},{b}: worst difference {worst}/255");
+            // Only the one-pixel border can differ much.
+            assert!(off <= 2 * ((r - l) as usize + (b - t) as usize) + 8, "{off} pixels differ by more than 24");
+        }
+    }
+
+    #[test]
+    fn a_rect_that_misses_the_mask_empties_it() {
+        let mut m = round_mask(100, 100);
+        mask_intersect_rect(&mut m, 500.0, 500.0, 600.0, 600.0);
+        assert!(m.data().iter().all(|v| *v == 0));
+        let mut m2 = round_mask(100, 100);
+        mask_intersect_rect(&mut m2, 50.0, 50.0, 50.0, 80.0); // zero width
+        assert!(m2.data().iter().all(|v| *v == 0));
     }
 }

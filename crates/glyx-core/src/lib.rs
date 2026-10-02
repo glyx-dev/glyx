@@ -114,6 +114,7 @@ mod devtools_caps;
 mod av_clock;
 mod scene;
 mod canvas_damage;
+mod damage_rects;
 mod layout;
 mod render;
 mod render_props;
@@ -2488,9 +2489,16 @@ pub fn run(mut config: AppConfig) -> bool {
                 let (app_damage, dirty_list): (Option<[f64; 4]>, Option<(Vec<u32>, usize)>) =
                     if (s.paint_flash || s.frame_details.is_some()) && !s.dirty_nodes.is_empty() {
                         let full = [0.0, 0.0, s.gpu.width() as f64, s.gpu.height() as f64];
-                        let area = scene::compute_frame_damage(s, &motion_overrides, &canvas_damage)
+                        let rects = scene::compute_frame_damage(s, &motion_overrides, &canvas_damage);
+                        let area = rects.as_deref().and_then(damage_rects::bounds)
                             .map(|(x, y, w, h)| [x, y, w, h]).unwrap_or(full);
-                        if s.paint_flash { s.flashes.push((area, Instant::now())); }
+                        if s.paint_flash {
+                            let now = Instant::now();
+                            match &rects {
+                                Some(rs) => for r in rs { s.flashes.push(([r.0, r.1, r.2, r.3], now)); },
+                                None => s.flashes.push((full, now)),
+                            }
+                        }
                         let list = s.frame_details.is_some().then(|| {
                             let mut ids: Vec<u32> = s.dirty_nodes.iter().copied().collect();
                             ids.sort_unstable();
@@ -2503,7 +2511,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         (None, None)
                     };
 
-                let frame_damage: Option<(f64, f64, f64, f64)> = {
+                let frame_damage: Option<Vec<damage_rects::Rect>> = {
                     let soft = matches!(s.gpu, Present::Soft(_));
                     let splash_up = s.splash_state.as_ref().map_or(false, |sp| sp.is_visible());
                     #[cfg(feature = "dev")]
@@ -2518,42 +2526,32 @@ pub fn run(mut config: AppConfig) -> bool {
                     if !soft || splash_up || overlay_up {
                         None
                     } else {
-                        // Dirty-node contribution: empty set → no rect;
-                        // non-empty → union rect, or bail (full frame).
-                        let dirty_damage: Option<Option<(f64, f64, f64, f64)>> =
+                        // Dirty-node contribution: empty set → no rects;
+                        // non-empty → the coalesced rects, or bail (full frame).
+                        let dirty_damage: Option<Vec<damage_rects::Rect>> =
                             if s.dirty_nodes.is_empty() {
-                                Some(None)
+                                Some(Vec::new())
                             } else {
-                                match scene::compute_frame_damage(s, &motion_overrides, &canvas_damage) {
-                                    Some(d) => Some(Some(d)),
-                                    None    => None, // bail → full
-                                }
+                                scene::compute_frame_damage(s, &motion_overrides, &canvas_damage)
                             };
                         match dirty_damage {
-                            None => None,
-                            Some(dd) => {
+                            None => None, // bail → full
+                            Some(mut rects) => {
                                 if blink_changed {
                                     match s.cursor_node_rect {
                                         // Pad matches compute_frame_damage's AA slack.
                                         Some((cx, cy, cw, ch)) => {
-                                            let cr = (cx - 4.0, cy - 4.0, cw + 8.0, ch + 8.0);
-                                            Some(match dd {
-                                                None => cr,
-                                                Some((dx, dy, dw, dh)) => {
-                                                    let l = dx.min(cr.0);
-                                                    let t = dy.min(cr.1);
-                                                    let r = (dx + dw).max(cr.0 + cr.2);
-                                                    let b = (dy + dh).max(cr.1 + cr.3);
-                                                    (l, t, r - l, b - t)
-                                                }
-                                            })
+                                            rects.push((cx - 4.0, cy - 4.0, cw + 8.0, ch + 8.0));
+                                            Some(damage_rects::coalesce(rects))
                                         }
                                         // Caret position unknown (first blink
                                         // before any render) → full frame.
                                         None => None,
                                     }
+                                } else if rects.is_empty() {
+                                    None
                                 } else {
-                                    dd
+                                    Some(rects)
                                 }
                             }
                         }
@@ -2565,7 +2563,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     // Bounded: a client that stops reading can't grow this.
                     if log.len() < 600 {
                         log.push(crate::state::DamageRecord {
-                            rect: frame_damage.map(|(x, y, w, h)| [x, y, w, h]),
+                            rect: frame_damage.as_deref().and_then(damage_rects::bounds).map(|(x, y, w, h)| [x, y, w, h]),
                             dirty_nodes: s.dirty_nodes.len(),
                             timestamp_ms: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -2581,11 +2579,11 @@ pub fn run(mut config: AppConfig) -> bool {
                 let mut present_ms = 0.0_f64;
                 let mut pace_ms = 0.0_f64;
 
-                let mut frame = match (&s.renderer, frame_damage) {
+                let mut frame = match (&s.renderer, &frame_damage) {
                     (glyx_renderer::AnyRenderer::TinySkia(_), Some(_)) => {
                         match &mut s.renderer {
                             glyx_renderer::AnyRenderer::TinySkia(r) =>
-                                glyx_renderer::AnyFrame::TinySkia(r.begin_frame_damaged(frame_damage)),
+                                glyx_renderer::AnyFrame::TinySkia(r.begin_frame_damaged(frame_damage.as_deref())),
                             _ => unreachable!(),
                         }
                     }
@@ -3126,7 +3124,7 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 let render_ms = (render_start.elapsed().as_secs_f64() * 1000.0 - present_ms - pace_ms).max(0.0);
                 let (win_w, win_h) = (s.gpu.width() as u64, s.gpu.height() as u64);
-                let damage_px = frame_damage.map_or(win_w * win_h, |(_, _, w, h)| (w.max(0.0) * h.max(0.0)) as u64);
+                let damage_px = frame_damage.as_deref().map_or(win_w * win_h, |r| damage_rects::total_area(r) as u64);
                 let animating = (s.transitions.len() + s.canvas_tweens.len() + s.animations.values().filter(|a| !a.settled).count()) as u32;
 
                 // Pre-init splash handoff: the main window's first real frame

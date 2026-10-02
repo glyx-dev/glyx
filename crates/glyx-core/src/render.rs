@@ -82,6 +82,7 @@ fn apply_opacity(c: peniko::Color, opacity: f32) -> peniko::Color {
     if opacity >= 1.0 { c } else { c.multiply_alpha(opacity) }
 }
 
+
 pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut RenderCtx<'_>) {
     // ── O4b: clean-node fast path ────────────────────────────────────────
     // If dirty_subtrees is non-empty AND this node is absent from it, the node

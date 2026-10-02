@@ -1379,10 +1379,11 @@ pub(crate) fn update_dirty_from_layout(state: &mut PerWindowState) -> bool {
     any_changed
 }
 
-/// Compute the union damage rect for this frame from the dirty node set.
+/// Compute the damage rects for this frame from the dirty node set.
 ///
-/// Returns `Some((x, y, w, h))` when every visual change this frame is
-/// provably contained in that rect, `None` when a full-frame render is
+/// Returns `Some(rects)` (a few disjoint `(x, y, w, h)`, see
+/// `damage_rects::coalesce`) when every visual change this frame is
+/// provably contained in them, `None` when a full-frame render is
 /// required.  Used by the software present path to redraw + push only the
 /// changed region (a hover repaints one button, a keystroke one line).
 ///
@@ -1406,7 +1407,7 @@ pub(crate) fn compute_frame_damage(
     state:         &PerWindowState,
     overrides:     &std::collections::HashMap<u32, crate::motion::Overrides>,
     canvas_damage: &std::collections::HashMap<u32, [f64; 4]>,
-) -> Option<(f64, f64, f64, f64)> {
+) -> Option<Vec<crate::damage_rects::Rect>> {
     if state.dirty_nodes.is_empty() {
         return None;
     }
@@ -1415,16 +1416,15 @@ pub(crate) fn compute_frame_damage(
     let resolved: std::collections::HashMap<NodeId, &ResolvedLayout> =
         state.resolved.iter().map(|(nid, rl)| (*nid, rl)).collect();
 
-    let mut ltrb: Option<(f64, f64, f64, f64)> = None;
+    // Every change contributes its own rect; `coalesce` merges the ones worth
+    // merging at the end, so two distant changes aren't joined by a box
+    // around everything in between.
+    let mut rects: Vec<crate::damage_rects::Rect> = Vec::new();
 
-    fn add(ltrb: &mut Option<(f64, f64, f64, f64)>, x: f64, y: f64, w: f64, h: f64) {
+    fn add(rects: &mut Vec<crate::damage_rects::Rect>, x: f64, y: f64, w: f64, h: f64) {
         // Padding covers anti-aliased edges and 1px layout rounding.
         const PAD: f64 = 4.0;
-        let (l, t, r, b) = (x - PAD, y - PAD, x + w + PAD, y + h + PAD);
-        *ltrb = Some(match *ltrb {
-            None                     => (l, t, r, b),
-            Some((ul, ut, ur, ub))   => (ul.min(l), ut.min(t), ur.max(r), ub.max(b)),
-        });
+        rects.push((x - PAD, y - PAD, w + 2.0 * PAD, h + 2.0 * PAD));
     }
 
     let rect_of = |id: u32| -> Option<(f64, f64, f64, f64)> {
@@ -1443,7 +1443,7 @@ pub(crate) fn compute_frame_damage(
             let scrolled = outermost_scrolled_ancestor(&state.js_nodes, id).is_some();
             if let (Some(rect), Some((bl, bt, br, bb))) = (rect_of(id), visual_bounds(&state.js_nodes, &rect_of, overrides, id)) {
                 if let Some((x, y, w, h)) = crate::canvas_damage::partial_rect(rect, (bl, bt, br, bb), prev, scrolled, *local) {
-                    add(&mut ltrb, x, y, w, h);
+                    add(&mut rects, x, y, w, h);
                     continue;
                 }
             }
@@ -1454,20 +1454,21 @@ pub(crate) fn compute_frame_damage(
         // `apply_scene_commands` — no per-frame child→parent map needed.
         let target = outermost_scrolled_ancestor(&state.js_nodes, id).unwrap_or(id);
         let (l, t, r, b) = visual_bounds(&state.js_nodes, &rect_of, overrides, target)?;
-        add(&mut ltrb, l, t, r - l, b - t);
+        add(&mut rects, l, t, r - l, b - t);
 
         // Include where it was drawn LAST frame so moved/shrunk/rotated nodes
         // erase their old pixels.
         if let Some(&(pl, pt, pr, pb)) = state.prev_visual.get(&target) {
-            add(&mut ltrb, pl, pt, pr - pl, pb - pt);
+            add(&mut rects, pl, pt, pr - pl, pb - pt);
         }
         if let Some(prl) = state.prev_resolved.get(&target) {
-            add(&mut ltrb, prl.x as f64, prl.y as f64,
+            add(&mut rects, prl.x as f64, prl.y as f64,
                 prl.width as f64, prl.height as f64);
         }
     }
 
-    ltrb.map(|(l, t, r, b)| (l, t, r - l, b - t))
+    let rects = crate::damage_rects::coalesce(rects);
+    (!rects.is_empty()).then_some(rects)
 }
 
 /// Screen-space bounds `(l, t, r, b)` of what node `id` draws: its layout

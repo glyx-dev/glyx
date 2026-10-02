@@ -348,6 +348,9 @@ pub struct Capabilities {
     /// Launch-at-login: `autostart.enable()` / `.disable()` / `.isEnabled()`.
     #[serde(default)]
     pub autostart:    bool,
+    /// Printing: `print.listPrinters()` / `.getDefaultPrinter()` / `.file()`.
+    #[serde(default)]
+    pub print:        bool,
     #[serde(default)]
     pub notification: bool,
     /// System tray icon and menu.
@@ -524,7 +527,7 @@ impl Capabilities {
             | "battery" | "usb" | "shell" | "mdns" | "system" | "power" | "storage"
             | "gamepads" | "globalShortcuts" | "credentials" | "audio" | "ai"
             | "camera" | "microphone" | "hid" | "updater" | "video" | "crash" | "deeplink"
-            | "tray" | "webview" | "autostart"
+            | "tray" | "webview" | "autostart" | "print"
         )
     }
 
@@ -543,6 +546,7 @@ impl Capabilities {
             "dialog"           => self.dialog,
             "clipboard"        => self.clipboard,
             "autostart"        => self.autostart,
+            "print"            => self.print,
             "notification"     => self.notification,
             "battery"          => self.battery,
             "usb"              => self.usb,

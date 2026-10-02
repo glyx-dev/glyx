@@ -1136,6 +1136,27 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let f = Function::new(ctx.clone(), move || crate::quickjs_sys::deeplink_poll(Arc::clone(&dl)))?;
         globals.set("__glyx_deeplink_poll", f)?;
     }
+    {
+        let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+            crate::quickjs_sys::print_list_printers(ctx, Arc::clone(&queue), tokio.clone(), redraw.clone())
+        })?;
+        globals.set("__glyx_print_listPrinters", f)?;
+    }
+    {
+        let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+            crate::quickjs_sys::print_get_default_printer(ctx, Arc::clone(&queue), tokio.clone(), redraw.clone())
+        })?;
+        globals.set("__glyx_print_getDefaultPrinter", f)?;
+    }
+    {
+        let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, path: String, printer: String| {
+            crate::quickjs_sys::print_file(ctx, path, printer, Arc::clone(&queue), tokio.clone(), redraw.clone())
+        })?;
+        globals.set("__glyx_print_file", f)?;
+    }
     globals.set("__glyx_autostart_isEnabled", Function::new(ctx.clone(), crate::quickjs_sys::autostart_is_enabled)?)?;
     globals.set("__glyx_autostart_setEnabled", Function::new(ctx.clone(), crate::quickjs_sys::autostart_set_enabled)?)?;
     globals.set("__glyx_autostart_wasOpenedAtLogin", Function::new(ctx.clone(), crate::quickjs_sys::autostart_was_opened_at_login)?)?;
@@ -2420,6 +2441,7 @@ mod tests {
             "__glyx_storage_getDrives", "__glyx_credentials_set", "__glyx_credentials_get",
             "__glyx_credentials_delete", "__glyx_deeplink_getInitialUrl", "__glyx_deeplink_poll",
             "__glyx_autostart_isEnabled", "__glyx_autostart_setEnabled", "__glyx_autostart_wasOpenedAtLogin",
+            "__glyx_print_listPrinters", "__glyx_print_getDefaultPrinter", "__glyx_print_file",
             "__glyx_perf_snapshot", "__glyx_perf_set_budget", "__glyx_perf_poll_violations",
             "__glyx_perf_poll_leak_warnings", "__glyx_quit", "__glyx_window_close", "__glyx_restart",
             "__glyx_platform", "__glyx_getEnv", "__glyx_collect_memory", "__glyx_open_external",

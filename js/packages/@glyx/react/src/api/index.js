@@ -36,3 +36,4 @@ export * from './webview.js';
 export * from './input.js';
 export * from './deeplink.js';
 export * from './autostart.js';
+export * from './print.js';

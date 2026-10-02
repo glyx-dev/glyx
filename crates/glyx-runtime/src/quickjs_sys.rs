@@ -129,6 +129,40 @@ pub(crate) fn notification_send<'js>(
     })
 }
 
+// ── Printing ─────────────────────────────────────────────────────────────
+//
+// Ported from bind_print.rs. The capability check lives in crate::print
+// itself (shared with V8), not here — see its `require_cap`.
+
+pub(crate) fn print_list_printers<'js>(
+    ctx: Ctx<'js>, queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>,
+) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, async move {
+        let names = crate::print::list_printers().await?;
+        serde_json::to_string(&names).map_err(|e| e.to_string())
+    })
+}
+
+pub(crate) fn print_get_default_printer<'js>(
+    ctx: Ctx<'js>, queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>,
+) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, async move {
+        let name = crate::print::default_printer().await?;
+        serde_json::to_string(&name).map_err(|e| e.to_string())
+    })
+}
+
+/// `printer`: empty string means "use the default printer".
+pub(crate) fn print_file<'js>(
+    ctx: Ctx<'js>, path: String, printer: String,
+    queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>,
+) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, async move {
+        let printer_ref = if printer.is_empty() { None } else { Some(printer.as_str()) };
+        crate::print::print_file(&path, printer_ref).await.map(|()| String::new())
+    })
+}
+
 // ── Autostart ────────────────────────────────────────────────────────────
 //
 // Same "sync but Promise-free" shape as __glyx_platform / deeplink_get_initial_url:

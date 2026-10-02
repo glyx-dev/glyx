@@ -130,6 +130,8 @@ mod bind_updater;
 mod bind_tray;
 #[cfg(all(feature = "v8", feature = "shell"))]
 mod bind_shell;
+#[cfg(feature = "v8")]
+mod bind_print;
 
 #[cfg(feature = "v8")]
 pub use self::bind_core::*;
@@ -153,6 +155,8 @@ pub use self::bind_updater::*;
 pub use self::bind_tray::*;
 #[cfg(all(feature = "v8", feature = "shell"))]
 pub use self::bind_shell::*;
+#[cfg(feature = "v8")]
+pub use self::bind_print::*;
 
 // IPC bus 
 //
@@ -1708,6 +1712,11 @@ pub fn register_all(
     //  Shell (Tier 1: scoped exec)
     #[cfg(feature = "shell")]
     register!("__glyx_shell_run", shell_run_callback);
+
+    //  Printing
+    register!("__glyx_print_listPrinters",      print_list_printers_callback);
+    register!("__glyx_print_getDefaultPrinter",  print_get_default_printer_callback);
+    register!("__glyx_print_file",               print_file_callback);
 
     //  Network
     #[cfg(feature = "fetch")]

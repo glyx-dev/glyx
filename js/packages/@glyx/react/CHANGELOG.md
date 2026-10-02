@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- `autostart` API: `isEnabled()`, `setEnabled(boolean)`, `wasOpenedAtLogin()`. Registers the app to launch at login (Windows Run key, Linux `.desktop` autostart file, macOS LaunchAgents plist — macOS not yet verified on real hardware) and lets the app tell a login-triggered launch apart from a normal one, via a `--glyx-autostart` flag. Gated by a new `autostart` capability.
+- `print` API: `listPrinters()`, `getDefaultPrinter()`, `file(path, { printer? })`. Sends a file to a printer via the OS's own print handling (no new dependency — PowerShell's print verb on Windows, CUPS's `lp` on macOS/Linux, macOS/Linux not yet verified on real hardware). Choosing a specific printer is honored on macOS/Linux only; Windows always uses the default. Gated by a new `print` capability.
 - Canvas 2D:
   - `createLinearGradient()` / `addColorStop()` as a `fillStyle` for `fill()` and `fillRect()`.
   - `pushClip(x, y, w, h)` / `popClip()`.
@@ -53,6 +55,7 @@
 - The internal host config (`hostConfig.js`) now batches append/insertBefore/update/remove/setRoot operations from one React commit into a single native call instead of one call per operation, encoded as one flat array instead of nested per-op arrays. No API or behavior change — purely a native-bridge efficiency change (see the project performance changelog for the numbers).
 - Click and hover hit-testing (`findTopmostSolid` in `events.js`) is no longer computed in JS at all — it's resolved natively when an input event is captured and attached to the event before JS ever sees it, instead of JS calling a native layout query once per candidate element on every click and every cursor move. As a result, the JS-side bookkeeping that only existed to support that lookup (the solid-node registry and the per-node z-index map, along with `registerSolid`/`unregisterSolid`/`setNodeZIndex`) has been removed entirely — one fewer Map write on every node's creation, update, and removal. (An earlier point release in this same cycle had fixed an O(n²) bug in that registry's removal path; this change removes the registry altogether, superseding that fix.) No public API changed — these were internal to `hostConfig.js`/`events.js`, never re-exported.
 - `TextInput`'s multiline auto-height calculation is now memoized (`useMemo`) instead of running unconditionally in the render body on every render, including ones triggered by unrelated parent/context changes. It now only re-measures when text, font size, field width, or the min/max line props actually change. No behavior change.
+- `src/api.js` (previously one ~2200-line file covering every native API) is now split into one file per domain under `src/api/` (`fs.js`, `db.js`, `clipboard.js`, `autostart.js`, `print.js`, …), re-exported from `src/api/index.js`. `api.js` itself is now a one-line re-export, so this is a no-op for every documented way of importing from the package. Internal only — mentioned here in case anything deep-imported `src/api.js` directly.
 
 
 ## [0.1.0] - 2026-08-07

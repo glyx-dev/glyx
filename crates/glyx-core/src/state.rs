@@ -256,6 +256,29 @@ pub(super) struct PerWindowState {
     /// Running keyframe animations (`animation` prop), keyed by node id —
     /// see `crate::motion::Animation` and `scene::tick_transitions`.
     pub(super) animations:  std::collections::HashMap<u32, crate::motion::Animation>,
+    /// Smooth-scrolling springs, keyed by ScrollView node id — see
+    /// `scene::sync_scroll` / `scene::tick_scroll`. While one runs, the node's
+    /// `props.scroll_offset_y` holds the *displayed* offset (so render, hit
+    /// testing and damage all agree); the spring's `target` is JS's value.
+    pub(super) scroll_springs: std::collections::HashMap<u32, crate::motion::ScrollSpring>,
+    /// Canvases easing toward a new command list, keyed by canvas node id —
+    /// see `scene::tick_canvas`. `canvas_cmds[id]` is always the target; the
+    /// tween holds where it started, and the frame loop samples what to draw.
+    pub(super) canvas_tweens: std::collections::HashMap<u32, crate::motion::CanvasTween>,
+    /// Each canvas's width/height (px) at its last draw. A canvas that was
+    /// resized redraws instantly: easing a resize would lag behind the window.
+    pub(super) canvas_size: std::collections::HashMap<u32, (Option<f32>, Option<f32>)>,
+    /// When each canvas was last redrawn, and the running average gap (ms)
+    /// between its redraws — see `motion::adapt_pace`.
+    pub(super) canvas_cadence: std::collections::HashMap<u32, (std::time::Instant, f64)>,
+    /// What each canvas looked like when last drawn, so the next redraw can be
+    /// limited to the part that changed — see `canvas_damage`.
+    pub(super) canvas_drawn: std::collections::HashMap<u32, crate::canvas_damage::CanvasDrawn>,
+    /// Frames left in which scrolling is from a precision device (touchpad):
+    /// its deltas are already smooth, so they apply with no easing. Counted in
+    /// frames, not time: a frame can take longer than any fixed window, and the
+    /// JS handler only runs when the next frame does.
+    pub(super) precise_scroll_frames: u8,
     /// The clock `transitions` / `animations` run on (the real clock unless
     /// devtools changes its rate).
     pub(super) motion_clock: crate::motion::MotionClock,

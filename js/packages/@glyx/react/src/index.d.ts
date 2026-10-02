@@ -47,12 +47,22 @@ export interface ImageProps {
   style?:      GlyxStyle;
 }
 
+/** Properties a `transition` can animate (`'all'` for every one). Default: opacity only. */
+export type TransitionProperty = 'opacity' | 'transform' | 'backgroundColor' | 'borderColor' | 'borderRadius' | 'boxShadow';
+
+/** Animate a style change instead of snapping: a timed, eased tween, or a spring. */
+export type TransitionConfig =
+  | { duration: number; easing?: string; properties?: 'all' | TransitionProperty[] }
+  | { spring: true | { stiffness?: number; damping?: number }; properties?: 'all' | TransitionProperty[] };
+
 export interface PressableProps {
   onPress?:    () => void;
   onPressIn?:  () => void;
   onPressOut?: () => void;
   onHoverIn?:  () => void;
   onHoverOut?: () => void;
+  /** Hover/press/focus changes ease on a spring by default; `false` snaps like before. */
+  transition?: false | TransitionConfig;
   style?:      GlyxStyle;
   width?:      number;
   height?:     number;
@@ -64,6 +74,8 @@ export interface ScrollViewProps {
   width?:          number;
   height?:         number;
   contentHeight?:  number;
+  /** Ease wheel and keyboard scrolling on a spring (default `true`). Scrollbar drags and touchpads are never eased. */
+  smoothScroll?:   boolean;
   children?:       React.ReactNode;
 }
 

@@ -102,7 +102,13 @@ export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', 
 // always delegate to the latest closure values without needing re-registration
 // on every render.
 
-export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, onPointerMove, onKeyDown, disabled, feedback = true, style, _glyxOnMount: externalOnMount, ...props }) {
+// Hover, press and focus changes ease in on a spring instead of snapping: stiff
+// and critically damped, so it feels immediate (no bounce) and an interrupted
+// hover turns around smoothly. Rust interpolates it — no JS per frame. Opt out
+// per Pressable with `transition={false}`, or pass your own `transition`.
+const PRESSABLE_TRANSITION = { spring: { stiffness: 600, damping: 48 }, properties: 'all' };
+
+export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, onPointerMove, onKeyDown, disabled, feedback = true, transition = PRESSABLE_TRANSITION, style, _glyxOnMount: externalOnMount, ...props }) {
   const nodeIdRef    = useRef(null);
   const handlersRef  = useRef(null);
   const [pressed, setPressed] = useState(false);
@@ -233,7 +239,7 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
     'view',
     // pressable:true tells the Rust drag-check that this node is interactive,
     // so glyxDraggable regions skip the window drag when this is under cursor.
-    { _glyxOnMount: onMount, style: mergedStyle, pressable: true, ...props },
+    { _glyxOnMount: onMount, style: mergedStyle, pressable: true, transition, ...props },
     children
   );
 }
@@ -270,6 +276,10 @@ export function useDraggable(handlers) {
 // The native view receives two extra props that the Rust renderer handles:
 //   clip: true          — push a Vello clip layer around children
 //   scrollOffsetY: n    — shift children upward by n pixels
+//   smoothScroll: true  — Rust eases the drawn offset toward each new
+//                         scrollOffsetY (a spring, no JS per frame) instead of
+//                         jumping; scrollbar drags and touchpads still apply
+//                         instantly. Opt out with `smoothScroll={false}`.
 //
 // Scroll deltas arrive via the `scroll` input event, routed by events.js to
 // whichever ScrollView the cursor is currently over.  The component converts
@@ -284,6 +294,7 @@ export function ScrollView({
   showScrollbar   = true,
   scrollbarWidth  = 8,
   scrollbarColor  = '#8c8caa99',
+  smoothScroll    = true,
   ...props
 }) {
   const nodeIdRef    = useRef(null);
@@ -375,6 +386,7 @@ export function ScrollView({
     // Rust: push Vello clip layer + shift children by scrollOffsetY.
     clip:           true,
     scrollOffsetY:  scrollY,
+    smoothScroll,
     // Scrollbar visual props
     showScrollbar,
     scrollbarWidth,

@@ -117,6 +117,10 @@ pub(crate) fn running_motion(s: &PerWindowState) -> HashMap<MotionKey, MotionInf
         out.insert(MotionKey { kind: "animation", node, start: a.start },
                    MotionInfo { duration_ms: a.spec.duration_ms, iterations: a.spec.iterations });
     }
+    for (&node, c) in &s.canvas_tweens {
+        out.insert(MotionKey { kind: "canvas", node, start: c.start() },
+                   MotionInfo { duration_ms: c.duration_ms, iterations: 1.0 });
+    }
     out
 }
 
@@ -131,7 +135,8 @@ pub(crate) fn motion_list(s: &PerWindowState) -> Vec<Value> {
         out.push((node, json!({
             "nodeId": node, "kind": "transition", "durationMs": t.duration_ms, "iterations": 1,
             "elapsedMs": round(e), "progress": round((e / t.duration_ms.max(1) as f64).min(1.0)),
-            "easing": format!("{:?}", t.easing), "properties": t.properties(),
+            "easing": if t.is_spring() { "spring".to_string() } else { format!("{:?}", t.easing) },
+            "spring": t.is_spring(), "properties": t.properties(),
         })));
     }
     for (&node, a) in &s.animations {
@@ -143,6 +148,14 @@ pub(crate) fn motion_list(s: &PerWindowState) -> Vec<Value> {
             "iterations": if a.spec.iterations.is_finite() { json!(a.spec.iterations) } else { json!("infinite") },
             "elapsedMs": round(e), "progress": round((e % d) / d), "iteration": (e / d).floor() as u64,
             "easing": format!("{:?}", a.spec.easing), "alternate": a.spec.alternate, "keyframes": a.spec.stops.len(),
+        })));
+    }
+    for (&node, c) in &s.canvas_tweens {
+        let e = elapsed(c.start());
+        out.push((node, json!({
+            "nodeId": node, "kind": "canvas", "durationMs": c.duration_ms, "iterations": 1,
+            "elapsedMs": round(e), "progress": round((e / c.duration_ms.max(1) as f64).min(1.0)),
+            "easing": if c.is_spring() { "spring" } else { "timed" }, "spring": c.is_spring(),
         })));
     }
     out.sort_by_key(|(n, _)| *n);

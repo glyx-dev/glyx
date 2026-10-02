@@ -170,7 +170,21 @@ function _normSeries({ data, series, color, name, palette = DEFAULT_PALETTE }) {
 
 // ── Canvas host ─────────────────────────────────────────────────────────────
 
-function _ChartCanvas({ width, height, draw, deps }) {
+// New data eases in: each update draws the final chart once, and the native
+// engine moves the previous drawing toward it (a canvas `transition`), so no
+// JavaScript runs per frame. Critically damped: quick, never overshooting the
+// data. It also glides the hover crosshair between points; the speed matches
+// the tooltip card's glide so the two stay together. A resized chart redraws
+// instantly. When a draw gains or loses parts (an axis tick, a label), what
+// lines up still eases and the new or removed parts appear or vanish at once;
+// a data line that gained a point replaces the old one.
+const _DATA_TRANSITION = { spring: { stiffness: 300, damping: 35 } };
+
+// Segments per pie/donut arc. 48 keeps the rim within 0.1px of a true circle
+// at any size a chart is likely to be, even for a half-circle slice.
+const _ARC_SEGMENTS = 48;
+
+function _ChartCanvas({ width, height, draw, deps, animate = true }) {
   const ref = useRef(null);
   useEffect(() => {
     const ctx = ref.current;
@@ -179,7 +193,7 @@ function _ChartCanvas({ width, height, draw, deps }) {
     draw(ctx);
     ctx.flush();
   }, deps); // eslint-disable-line react-hooks/exhaustive-deps
-  return React.createElement(Canvas, { ref, width, height });
+  return React.createElement(Canvas, { ref, width, height, ...(animate ? { transition: _DATA_TRANSITION } : null) });
 }
 
 // A soft fade-and-rise when a chart first appears. Native keyframes: no JS
@@ -190,6 +204,17 @@ const _ENTRANCE = {
 };
 
 // ── Drawing helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Line segments per curve between two data points: about one per pixel of the
+ * gap, within 4–20. The canvas default of 20 put a vertex every third of a pixel
+ * on a 7px gap, which cost ~3x the stroke time and showed no difference. It
+ * depends only on the gap, never on the data values, so consecutive draws have
+ * the same number of points and the canvas can ease between them.
+ */
+function _curveSegments(gap) {
+  return Math.max(4, Math.min(20, Math.ceil(Math.abs(gap))));
+}
 
 /** Monotone cubic (Fritsch–Carlson) through `pts` — smooth, never overshoots the data. */
 function _smoothPath(ctx, pts, moveFirst = true) {
@@ -219,6 +244,7 @@ function _smoothPath(ctx, pts, moveFirst = true) {
       pts[i][0] + h, pts[i][1] + t[i] * h,
       pts[i + 1][0] - h, pts[i + 1][1] - t[i + 1] * h,
       pts[i + 1][0], pts[i + 1][1],
+      _curveSegments(dx[i]),
     );
   }
 }
@@ -288,24 +314,60 @@ function _drawXLabels(ctx, labels, xs, L, T) {
 
 // ── Tooltip card ────────────────────────────────────────────────────────────
 
-function _Tooltip({ T, anchorX, top, chartW, title, rows }) {
+// The card glides between points on a spring (moved with `transform`, which
+// the native engine can animate; `left`/`top` are layout and would snap), and
+// fades in and out. Native keyframes and transitions: no JS runs per frame.
+const _TOOLTIP_GLIDE   = { spring: { stiffness: 420, damping: 34 }, properties: ['transform', 'opacity'] };
+const _TOOLTIP_FADE_IN = { duration: 120, easing: 'ease-out', keyframes: { from: { opacity: 0 }, to: { opacity: 1 } } };
+// Stays mounted this long after the pointer leaves, so the fade-out can play.
+const _TOOLTIP_LINGER_MS = 220;
+
+/**
+ * `data` is `{ anchorX, top, title, rows }` while a point is active, else null.
+ * With `motion` (default) the card is one persistent node that moves between
+ * points and fades; without it, it mounts and unmounts at each point as before.
+ * Unmounted whenever idle, so assistive tech never sees a duplicate of the
+ * point announcements.
+ */
+function _Tooltip({ T, chartW, data, motion = true }) {
+  const last = useRef(null);
+  if (data) last.current = data;
+  const [mounted, setMounted] = useState(!!data);
+  const active = !!data;
+  useEffect(() => {
+    if (active) { setMounted(true); return undefined; }
+    const h = setTimeout(() => setMounted(false), _TOOLTIP_LINGER_MS);
+    return () => clearTimeout(h);
+  }, [active]);
+
+  // While fading out there is no data: show the last card.
+  const d = data || last.current;
+  if (!d || (!data && (!motion || !mounted))) return null;
+  const { anchorX, top, title, rows } = d;
+
   const W = Math.max(
     120,
     _textW(title, 11) + 24,
     ...rows.map((r) => 28 + _textW(r.name, 12) + 16 + _textW(r.value, 12, true) + 12),
   );
-  const left = anchorX + 14 + W > chartW ? anchorX - 14 - W : anchorX + 14;
+  const left = Math.max(0, anchorX + 14 + W > chartW ? anchorX - 14 - W : anchorX + 14);
+  const card = {
+    backgroundColor: T.tooltipBg, borderRadius: 8,
+    borderWidth: 1, borderColor: T.tooltipBorder,
+    paddingHorizontal: 10, paddingVertical: 8,
+    boxShadow: '0 6 0 #00000030',
+  };
+  // Rounded: the transform parser reads plain decimals, not exponents (1e-7).
+  const r1 = (v) => Math.round(v * 10) / 10;
   return React.createElement(
     View,
     {
-      style: {
-        position: 'absolute', left: Math.max(0, left), top, width: W,
-        backgroundColor: T.tooltipBg, borderRadius: 8,
-        borderWidth: 1, borderColor: T.tooltipBorder,
-        paddingHorizontal: 10, paddingVertical: 8,
-        boxShadow: '0 6 0 #00000030',
-      },
+      style: motion
+        ? { ...card, position: 'absolute', left: 0, top: 0, width: W,
+            transform: `translate(${r1(left)}px, ${r1(top)}px)`, opacity: data ? 1 : 0 }
+        : { ...card, position: 'absolute', left, top, width: W },
       pointerEvents: 'none',
+      ...(motion ? { transition: _TOOLTIP_GLIDE, animation: _TOOLTIP_FADE_IN } : null),
     },
     React.createElement(Text, { fontSize: 11, style: { color: T.label, marginBottom: 4 } }, String(title)),
     ...rows.map((r, i) => React.createElement(
@@ -476,7 +538,7 @@ function _cartesianLayout({ width, height, scale, showLabels, xCount, topPad = 1
 function _lineChart(kind, props) {
   const {
     width = 480, height = 260, lineWidth = 2.5, showGrid = true, showLabels = true,
-    showDots, showTooltip = true, onPointPress, zoomPan = false, smooth = true,
+    showDots, showTooltip = true, tooltipMotion = true, animate = true, onPointPress, zoomPan = false, smooth = true,
     theme, palette, title, showLegend, formatValue = _fmt, formatLabel = (x) => String(x),
   } = props;
   const T = _theme(theme);
@@ -579,11 +641,14 @@ function _lineChart(kind, props) {
     return `${x}: ${parts.join(', ')}. ${i + 1} of ${n}.`;
   };
 
-  const tooltip = showTooltip && activeIdx != null && n > 0
+  const tooltip = showTooltip
     ? React.createElement(_Tooltip, {
-        T, anchorX: layout.toX(activeIdx), top: layout.PAD.top, chartW: width,
-        title: formatLabel(series[0].data[activeIdx].x),
-        rows: series.map((s) => ({ name: s.name || 'Value', color: s.color, value: formatValue(s.data[activeIdx]?.y) })),
+        T, chartW: width, motion: tooltipMotion,
+        data: activeIdx != null && n > 0 ? {
+          anchorX: layout.toX(activeIdx), top: layout.PAD.top,
+          title: formatLabel(series[0].data[activeIdx].x),
+          rows: series.map((s) => ({ name: s.name || 'Value', color: s.color, value: formatValue(s.data[activeIdx]?.y) })),
+        } : null,
       })
     : null;
 
@@ -591,7 +656,7 @@ function _lineChart(kind, props) {
     View,
     { style: { width, height: chartH, position: 'relative' }, _glyxOnMount: zoomPan ? zp.onMount : undefined },
     React.createElement(_ChartCanvas, {
-      width, height: chartH, draw,
+      width, height: chartH, draw, animate,
       deps: [series, width, chartH, lineWidth, showGrid, showLabels, dots, smooth, activeIdx, T],
     }),
     React.createElement(_Interaction, {
@@ -647,7 +712,7 @@ export function AreaChart(props) { return _lineChart('area', props); }
 export function BarChart(props) {
   const {
     data, width = 480, height = 260, color = DEFAULT_PALETTE[0],
-    showGrid = true, showLabels = true, showTooltip = true, onPointPress,
+    showGrid = true, showLabels = true, showTooltip = true, tooltipMotion = true, animate = true, onPointPress,
     theme, title, name = 'Value', formatValue = _fmt, formatLabel = (x) => String(x),
   } = props;
   const T = _theme(theme);
@@ -703,11 +768,14 @@ export function BarChart(props) {
   const summary = _cartesianSummary({ title, kindName: 'bar chart', series: [{ name, data: rows }], formatValue, formatLabel });
   const describe = (i) => `${formatLabel(rows[i].x)}: ${formatValue(rows[i].y)}. ${i + 1} of ${n}.`;
 
-  const tooltip = showTooltip && activeIdx != null
+  const tooltip = showTooltip
     ? React.createElement(_Tooltip, {
-        T, anchorX: layout.toX(activeIdx) + barW / 2 - 8, top: layout.PAD.top, chartW: width,
-        title: formatLabel(rows[activeIdx].x),
-        rows: [{ name, color: rows[activeIdx].color || color, value: formatValue(rows[activeIdx].y) }],
+        T, chartW: width, motion: tooltipMotion,
+        data: activeIdx != null ? {
+          anchorX: layout.toX(activeIdx) + barW / 2 - 8, top: layout.PAD.top,
+          title: formatLabel(rows[activeIdx].x),
+          rows: [{ name, color: rows[activeIdx].color || color, value: formatValue(rows[activeIdx].y) }],
+        } : null,
       })
     : null;
 
@@ -715,7 +783,7 @@ export function BarChart(props) {
     View,
     { style: { width, height, position: 'relative' }, animation: _ENTRANCE },
     React.createElement(_ChartCanvas, {
-      width, height, draw, deps: [rows, width, height, color, showGrid, showLabels, activeIdx, T],
+      width, height, draw, animate, deps: [rows, width, height, color, showGrid, showLabels, activeIdx, T],
     }),
     React.createElement(_Interaction, {
       width, height, T, count: n, pick, active: activeIdx, setActive,
@@ -733,7 +801,7 @@ export function PieChart(props) {
   const {
     data, width = 260, height = 260, palette = DEFAULT_PALETTE,
     innerRadius = 0, // > 0 → donut (fraction of the radius, 0–1)
-    showTooltip = true, onPointPress, showLegend = false,
+    showTooltip = true, tooltipMotion = true, animate = true, onPointPress, showLegend = false,
     theme, title, centerLabel = 'Total', formatValue = _fmt, formatLabel = (x) => String(x),
   } = props;
   const T = _theme(theme);
@@ -757,17 +825,19 @@ export function PieChart(props) {
     return rows.map((d) => { const a0 = a; a += (Math.max(0, d.y) / total) * Math.PI * 2; return [a0, a]; });
   }, [rows, total]);
 
+  // A fixed number of segments per arc, however wide: a slice that grows or
+  // shrinks keeps the same points, so the pie can ease between two draws.
   const wedge = (ctx, a0, a1, rOut, rIn, ox = 0, oy = 0) => {
     ctx.beginPath();
     if (rIn > 0) {
       ctx.moveTo(cx + ox + rIn * Math.cos(a0), cy + oy + rIn * Math.sin(a0));
       ctx.lineTo(cx + ox + rOut * Math.cos(a0), cy + oy + rOut * Math.sin(a0));
-      ctx.arc(cx + ox, cy + oy, rOut, a0, a1);
+      ctx.arc(cx + ox, cy + oy, rOut, a0, a1, false, _ARC_SEGMENTS);
       ctx.lineTo(cx + ox + rIn * Math.cos(a1), cy + oy + rIn * Math.sin(a1));
-      ctx.arc(cx + ox, cy + oy, rIn, a1, a0, true);
+      ctx.arc(cx + ox, cy + oy, rIn, a1, a0, true, _ARC_SEGMENTS);
     } else {
       ctx.moveTo(cx + ox, cy + oy);
-      ctx.arc(cx + ox, cy + oy, rOut, a0, a1);
+      ctx.arc(cx + ox, cy + oy, rOut, a0, a1, false, _ARC_SEGMENTS);
     }
     ctx.closePath();
   };
@@ -826,21 +896,25 @@ export function PieChart(props) {
 
   // A donut shows the hovered segment in its centre; a full pie needs a card.
   let tooltip = null;
-  if (showTooltip && !donut && activeIdx != null) {
-    const [a0, a1] = angles[activeIdx];
-    const mid = (a0 + a1) / 2;
-    tooltip = React.createElement(_Tooltip, {
-      T, anchorX: cx + Math.cos(mid) * r * 0.6, top: Math.max(0, cy + Math.sin(mid) * r * 0.6 - 30), chartW: width,
-      title: formatLabel(rows[activeIdx].x),
-      rows: [{ name: pct(rows[activeIdx].y), color: colorOf(rows[activeIdx], activeIdx), value: formatValue(rows[activeIdx].y) }],
-    });
+  if (showTooltip && !donut) {
+    let data = null;
+    if (activeIdx != null) {
+      const [a0, a1] = angles[activeIdx];
+      const mid = (a0 + a1) / 2;
+      data = {
+        anchorX: cx + Math.cos(mid) * r * 0.6, top: Math.max(0, cy + Math.sin(mid) * r * 0.6 - 30),
+        title: formatLabel(rows[activeIdx].x),
+        rows: [{ name: pct(rows[activeIdx].y), color: colorOf(rows[activeIdx], activeIdx), value: formatValue(rows[activeIdx].y) }],
+      };
+    }
+    tooltip = React.createElement(_Tooltip, { T, chartW: width, motion: tooltipMotion, data });
   }
 
   const chart = React.createElement(
     View,
     { style: { width, height: chartH, position: 'relative' } },
     React.createElement(_ChartCanvas, {
-      width, height: chartH, draw, deps: [rows, width, chartH, innerRadius, palette, activeIdx, T, centerLabel],
+      width, height: chartH, draw, animate, deps: [rows, width, chartH, innerRadius, palette, activeIdx, T, centerLabel],
     }),
     React.createElement(_Interaction, {
       width, height: chartH, T, count: n, pick, active: activeIdx, setActive,
@@ -862,7 +936,103 @@ export function PieChart(props) {
   );
 }
 
+// ── Realtime ────────────────────────────────────────────────────────────────
+
+/**
+ * A fixed-length window over a stream of points. Pushing is cheap and can
+ * happen as often as data arrives; the window is handed on at most once per
+ * `intervalMs`, however many points came in, so a feed of hundreds of messages
+ * a second costs the UI a bounded number of renders. Pure: the scheduler is
+ * injectable so it can be tested without real timers.
+ */
+class _ChartStream {
+  constructor({ capacity, intervalMs, onFlush, schedule = setTimeout, cancel = clearTimeout }) {
+    this.cap = Math.max(1, Math.floor(capacity));
+    this.intervalMs = intervalMs;
+    this.onFlush = onFlush;
+    this.schedule = schedule;
+    this.cancel = cancel;
+    this.buf = new Array(this.cap);
+    this.head = 0; // index of the oldest point
+    this.n = 0;
+    this.timer = null;
+    this.disposed = false;
+  }
+
+  /** Append one point or an array of them; the oldest fall off once full. */
+  push(points) {
+    if (this.disposed) return;
+    if (Array.isArray(points)) for (const p of points) this._add(p);
+    else this._add(points);
+    if (this.timer === null) {
+      this.timer = this.schedule(() => { this.timer = null; if (!this.disposed) this.onFlush(this.toArray()); }, this.intervalMs);
+    }
+  }
+
+  _add(p) {
+    if (this.n < this.cap) { this.buf[(this.head + this.n) % this.cap] = p; this.n++; }
+    else { this.buf[this.head] = p; this.head = (this.head + 1) % this.cap; }
+  }
+
+  /** The window, oldest first. */
+  toArray() {
+    const out = new Array(this.n);
+    for (let i = 0; i < this.n; i++) out[i] = this.buf[(this.head + i) % this.cap];
+    return out;
+  }
+
+  clear() {
+    this.head = 0; this.n = 0;
+    if (this.timer !== null) { this.cancel(this.timer); this.timer = null; }
+    if (!this.disposed) this.onFlush([]);
+  }
+
+  dispose() {
+    this.disposed = true;
+    if (this.timer !== null) { this.cancel(this.timer); this.timer = null; }
+  }
+}
+
+/**
+ * Feed a live chart. Returns `{ data, push, clear }`: pass `data` to a chart
+ * and call `push({ x, y })` (or an array) whenever a value arrives.
+ *
+ *   const { data, push } = useChartStream({ capacity: 120 });
+ *   useEffect(() => feed.subscribe((v) => push({ x: clock(v.t), y: v.value })), []);
+ *   return <LineChart data={data} width={600} height={240} />;
+ *
+ * `data` is a window of the latest `capacity` points. Once it is full, each new
+ * point drops the oldest, so the chart keeps the same number of points and its
+ * native transition can ease from one update to the next. Points are matched by
+ * position, so the line morphs between the two windows rather than translating;
+ * on a fast stream it glides over each gap between updates, so it never trails
+ * the data. Updates reach React at most `maxHz` times a second however fast
+ * `push` is called. `initial` seeds the window.
+ */
+export function useChartStream({ capacity = 120, maxHz = 30, initial } = {}) {
+  const [data, setData] = useState(() => (initial ? initial.slice(-capacity) : []));
+  const latest = useRef(data);
+  latest.current = data;
+  const streamRef = useRef(null);
+
+  const intervalMs = Math.max(1, Math.round(1000 / Math.max(1, maxHz)));
+  // A new stream when the window size or rate changes, carrying the points over.
+  const stream = useMemo(() => {
+    streamRef.current?.dispose();
+    const s = new _ChartStream({ capacity, intervalMs, onFlush: (pts) => { latest.current = pts; setData(pts); } });
+    for (const p of latest.current.slice(-capacity)) s._add(p);
+    return s;
+  }, [capacity, intervalMs]);
+  streamRef.current = stream;
+  useEffect(() => () => stream.dispose(), [stream]);
+
+  // Stable identities: callers put `push` in effect dependency lists.
+  const push  = useCallback((points) => streamRef.current.push(points), []);
+  const clear = useCallback(() => streamRef.current.clear(), []);
+  return { data, push, clear };
+}
+
 export { DEFAULT_PALETTE, THEMES };
 
 // Internals exported for unit tests only.
-export const _internals = { _niceScale, _niceStep, _fmt, _fmtTick, _normSeries, _theme, _cartesianSummary };
+export const _internals = { _niceScale, _niceStep, _fmt, _fmtTick, _normSeries, _theme, _cartesianSummary, _ChartStream, _smoothPath, _curveSegments };

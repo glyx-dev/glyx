@@ -91,6 +91,7 @@ pub(crate) fn props_json(p: &NodeProps) -> Value {
     put!("overflow", p.overflow.clone());
     put!("zIndex", p.z_index);
     put!("scrollOffsetY", p.scroll_offset_y);
+    put!("smoothScroll", p.smooth_scroll);
     put_dbg!("width", p.width);
     put_dbg!("height", p.height);
     put_dbg!("padding", p.padding);

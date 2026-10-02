@@ -113,6 +113,7 @@ mod devtools_net;
 mod devtools_caps;
 mod av_clock;
 mod scene;
+mod canvas_damage;
 mod layout;
 mod render;
 mod render_props;
@@ -1519,6 +1520,12 @@ pub fn run(mut config: AppConfig) -> bool {
                     js_nodes:     std::collections::HashMap::with_capacity(256),
                     js_root:      None,
                     transitions: std::collections::HashMap::new(),
+                    scroll_springs: std::collections::HashMap::new(),
+                    canvas_tweens: std::collections::HashMap::new(),
+                    canvas_size: std::collections::HashMap::new(),
+                    canvas_cadence: std::collections::HashMap::new(),
+                    canvas_drawn: std::collections::HashMap::new(),
+                    precise_scroll_frames: 0,
                     animations:  std::collections::HashMap::new(),
                     motion_clock: Default::default(),
                     images:       std::collections::HashMap::with_capacity(32),
@@ -2054,8 +2061,11 @@ pub fn run(mut config: AppConfig) -> bool {
             }
 
             // ── Scroll ────────────────────────────────────────────────────
-            ShellEvent::Scroll { window_handle, delta_y } => {
+            ShellEvent::Scroll { window_handle, delta_y, precise } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    // The JS handler runs on the next frame, and React may commit
+                    // the new offset a frame after that: hold across a few frames.
+                    s.precise_scroll_frames = if precise { scene::PRECISE_SCROLL_FRAMES } else { 0 };
                     s.runtime.push_event(InputEvent::Scroll { delta_y });
                 }
             }
@@ -2168,13 +2178,18 @@ pub fn run(mut config: AppConfig) -> bool {
                 // 4. Post-frame commands (React re-renders from step 3 events).
                 let post_commands = s.runtime.drain_scene_commands();
                 let post_changed  = apply_scene_commands(s, post_commands);
+                s.precise_scroll_frames = s.precise_scroll_frames.saturating_sub(1);
 
                 // 4b. Advance any active property transitions and keyframe
                 // animations (@glyx-dev/motion) —
                 // Rust-owned interpolation, no JS re-entry. If any are still
                 // running after this tick, force this frame to render and
                 // schedule the next one (nothing else would wake the loop).
-                let transitions_active = tick_transitions(s);
+                // Smooth-scroll springs ride the same frame loop.
+                let scroll_active = scene::tick_scroll(s);
+                // Canvas tweens too (a chart easing toward its new data).
+                let canvas_active = scene::tick_canvas(s);
+                let transitions_active = tick_transitions(s) | scroll_active | canvas_active;
                 if transitions_active {
                     (s.request_redraw)();
                 }
@@ -2445,6 +2460,16 @@ pub fn run(mut config: AppConfig) -> bool {
                         }
                     }
                 }
+                // Canvases easing toward new data draw an interpolated command
+                // list instead of their own (the target); empty when none move.
+                let canvas_anim: std::collections::HashMap<u32, Vec<CanvasCmd>> = s.canvas_tweens
+                    .iter()
+                    .filter_map(|(&id, t)| s.canvas_cmds.get(&id).map(|to| (id, t.sample(to, now).0)))
+                    .collect();
+                // For each redrawn canvas, the part of it that actually changed
+                // since it was last drawn (so a moved crosshair doesn't repaint
+                // the whole chart); a canvas not listed is damaged whole.
+                let canvas_damage = canvas_damage::plan(s, &canvas_anim, &motion_overrides);
 
                 // ── Damage computation (soft present + TinySkia only) ─────────
                 // Redraw + push only the changed region.  Full frame when the
@@ -2463,7 +2488,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 let (app_damage, dirty_list): (Option<[f64; 4]>, Option<(Vec<u32>, usize)>) =
                     if (s.paint_flash || s.frame_details.is_some()) && !s.dirty_nodes.is_empty() {
                         let full = [0.0, 0.0, s.gpu.width() as f64, s.gpu.height() as f64];
-                        let area = scene::compute_frame_damage(s, &motion_overrides)
+                        let area = scene::compute_frame_damage(s, &motion_overrides, &canvas_damage)
                             .map(|(x, y, w, h)| [x, y, w, h]).unwrap_or(full);
                         if s.paint_flash { s.flashes.push((area, Instant::now())); }
                         let list = s.frame_details.is_some().then(|| {
@@ -2499,7 +2524,7 @@ pub fn run(mut config: AppConfig) -> bool {
                             if s.dirty_nodes.is_empty() {
                                 Some(None)
                             } else {
-                                match scene::compute_frame_damage(s, &motion_overrides) {
+                                match scene::compute_frame_damage(s, &motion_overrides, &canvas_damage) {
                                     Some(d) => Some(Some(d)),
                                     None    => None, // bail → full
                                 }
@@ -2583,6 +2608,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         text_sys:          &mut s.text_sys,
                         label_cache:       &mut s.label_cache,
                         canvas_cmds:       &s.canvas_cmds,
+                        canvas_anim:       &canvas_anim,
                         #[cfg(feature = "canvas3d")]
                         canvas3d_overlays: &mut canvas3d_overlays,
                         #[cfg(feature = "webview")]
@@ -3101,7 +3127,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 let render_ms = (render_start.elapsed().as_secs_f64() * 1000.0 - present_ms - pace_ms).max(0.0);
                 let (win_w, win_h) = (s.gpu.width() as u64, s.gpu.height() as u64);
                 let damage_px = frame_damage.map_or(win_w * win_h, |(_, _, w, h)| (w.max(0.0) * h.max(0.0)) as u64);
-                let animating = (s.transitions.len() + s.animations.values().filter(|a| !a.settled).count()) as u32;
+                let animating = (s.transitions.len() + s.canvas_tweens.len() + s.animations.values().filter(|a| !a.settled).count()) as u32;
 
                 // Pre-init splash handoff: the main window's first real frame
                 // has now actually rendered and presented (we just did it,

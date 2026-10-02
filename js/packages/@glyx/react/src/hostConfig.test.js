@@ -55,6 +55,32 @@ test('applyTransition keeps the v1 shape and ignores a missing duration', () => 
   expect(none).toEqual({});
 });
 
+test('applyTransition flattens a spring and needs no duration', () => {
+  const p = {};
+  applyTransition(p, { spring: { stiffness: 500, damping: 12 }, properties: ['transform'] });
+  expect(p).toEqual({ transitionStiffness: 500, transitionDamping: 12, transitionProperty: 'transform' });
+
+  const half = {};
+  applyTransition(half, { spring: { stiffness: 120 } });
+  expect(half).toEqual({ transitionStiffness: 120, transitionDamping: 30 });
+
+  const shorthand = {};
+  applyTransition(shorthand, { spring: true, properties: 'all' });
+  expect(shorthand).toEqual({ transitionStiffness: 300, transitionDamping: 30, transitionProperty: 'all' });
+});
+
+test('a spring wins over duration and easing, and false disables transitions', () => {
+  const p = {};
+  applyTransition(p, { spring: true, duration: 400, easing: 'linear' });
+  expect(p).toEqual({ transitionStiffness: 300, transitionDamping: 30 });
+
+  for (const off of [false, null, undefined]) {
+    const none = {};
+    applyTransition(none, off);
+    expect(none).toEqual({});
+  }
+});
+
 test('applyAnimation flattens keyframes keyed by percent / from / to', () => {
   const p = {};
   applyAnimation(p, {
@@ -155,4 +181,54 @@ test('component counts: elements per nearest app component', async () => {
     { component: 'App', elements: 1, instances: 1 },
   ]);
   delete globalThis.__glyx_devtools;
+});
+
+// ── Inline objects: compare by content, not identity ─────────────────────────
+
+test('an inline style object with the same content is not a change', () => {
+  // A parent re-render builds a fresh style literal every time.
+  const oldProps = { style: { padding: 8, backgroundColor: '#123', transform: 'translate(0, 4px)' }, pressable: true };
+  const newProps = { style: { padding: 8, backgroundColor: '#123', transform: 'translate(0, 4px)' }, pressable: true };
+  expect(oldProps.style).not.toBe(newProps.style);
+  expect(prepareUpdate({}, 'view', oldProps, newProps)).toBe(null);
+});
+
+test('a style object whose content changed, gained or lost a key is a change', () => {
+  const base = { style: { padding: 8, opacity: 1 } };
+  const changed = { style: { padding: 8, opacity: 0.5 } };
+  const added   = { style: { padding: 8, opacity: 1, margin: 2 } };
+  const removed = { style: { padding: 8 } };
+  for (const next of [changed, added, removed]) expect(prepareUpdate({}, 'view', base, next)).toBe(next);
+});
+
+test('inline transition and animation objects compare by content, nested keyframes included', () => {
+  const mk = (to) => ({
+    transition: { spring: { stiffness: 300, damping: 30 }, properties: ['opacity', 'transform'] },
+    animation: { duration: 400, keyframes: { from: { opacity: 0 }, to: { opacity: to } } },
+  });
+  expect(prepareUpdate({}, 'view', mk(1), mk(1))).toBe(null);
+  const next = mk(0.5);
+  expect(prepareUpdate({}, 'view', mk(1), next)).toBe(next);
+});
+
+test('functions, class instances and long arrays are still compared by identity', () => {
+  const f = () => {};
+  expect(prepareUpdate({}, 'view', { onThing: f }, { onThing: f })).toBe(null);
+  const g = { onThing: () => {} };
+  expect(prepareUpdate({}, 'view', { onThing: f }, g)).toBe(g);
+
+  class Thing { constructor(v) { this.v = v; } }
+  const a = { thing: new Thing(1) }, b = { thing: new Thing(1) };
+  expect(prepareUpdate({}, 'view', a, b)).toBe(b);
+
+  const long = () => ({ points: Array.from({ length: 200 }, (_, i) => i) });
+  const l2 = long();
+  expect(prepareUpdate({}, 'view', long(), l2)).toBe(l2);
+});
+
+test('a prop that is an object on one side and a primitive on the other is a change', () => {
+  const next = { style: undefined };
+  expect(prepareUpdate({}, 'view', { style: { a: 1 } }, next)).toBe(next);
+  const n2 = { style: { a: 1 } };
+  expect(prepareUpdate({}, 'view', { style: null }, n2)).toBe(n2);
 });

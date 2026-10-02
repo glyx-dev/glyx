@@ -129,7 +129,9 @@ pub enum ShellEvent {
     /// Cursor moved to physical pixel position.
     CursorMoved { window_handle: u32, x: f64, y: f64 },
     /// Vertical scroll (positive = scroll down).
-    Scroll { window_handle: u32, delta_y: f32 },
+    /// `precise`: a touchpad / pixel-delta device, whose deltas are already
+    /// smooth (a wheel's line notches are not).
+    Scroll { window_handle: u32, delta_y: f32, precise: bool },
     /// Window became occluded (hidden/minimised) or visible again.
     /// `occluded = true` means the window is no longer visible on screen.
     Occluded { window_handle: u32, occluded: bool },
@@ -797,11 +799,12 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                let precise = matches!(delta, MouseScrollDelta::PixelDelta(_));
                 let delta_y = match delta {
                     MouseScrollDelta::LineDelta(_, y)   => y * 40.0,
                     MouseScrollDelta::PixelDelta(pos)   => pos.y as f32,
                 };
-                (self.handler)(ShellEvent::Scroll { window_handle: handle, delta_y });
+                (self.handler)(ShellEvent::Scroll { window_handle: handle, delta_y, precise });
                 if let Some(w) = self.window_arcs.get(&handle) {
                     w.request_redraw();
                 }

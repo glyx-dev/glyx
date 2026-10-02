@@ -229,13 +229,29 @@ function flushSceneOps() {
 // `transition={{ duration, properties, easing }}` → flat props, since Rust
 // reads plain values, not nested objects (see NodeProps::transition_ms).
 // `properties` defaults to opacity only; `'all'` animates every supported one.
+//
+// `transition={{ spring: { stiffness, damping } }}` (or `spring: true`) swaps
+// the timed, eased tween for a spring: no `duration`, and it keeps its
+// velocity when a change interrupts it. `duration` and `easing` are then
+// ignored.
+const SPRING_STIFFNESS = 300;
+const SPRING_DAMPING = 30;
+
 function applyTransition(nodeProps, transition) {
-  if (!transition || typeof transition.duration !== 'number') return;
-  nodeProps.transitionMs = transition.duration;
-  const { properties, easing } = transition;
+  if (!transition) return;
+  const { spring, properties, easing } = transition;
+  if (spring) {
+    const s = typeof spring === 'object' ? spring : {};
+    nodeProps.transitionStiffness = typeof s.stiffness === 'number' ? s.stiffness : SPRING_STIFFNESS;
+    nodeProps.transitionDamping = typeof s.damping === 'number' ? s.damping : SPRING_DAMPING;
+  } else if (typeof transition.duration === 'number') {
+    nodeProps.transitionMs = transition.duration;
+    if (typeof easing === 'string') nodeProps.transitionEasing = easing;
+  } else {
+    return;
+  }
   if (Array.isArray(properties)) nodeProps.transitionProperty = properties.join(',');
   else if (typeof properties === 'string') nodeProps.transitionProperty = properties;
-  if (typeof easing === 'string') nodeProps.transitionEasing = easing;
 }
 
 // Animatable keyframe properties (the same set `transition` animates).
@@ -397,15 +413,43 @@ function detachDeletedInstance(instance) {
 // ── Updates ───────────────────────────────────────────────────────────────────
 
 // Return a payload to commit, or null to skip commitUpdate.
-// Shallow-compare old and new props so that parent re-renders don't cascade
-// a native updateNode call to every child whose visual props didn't change.
+// Whether two prop values are the same to the native side. Inline objects
+// (`style={{ … }}`, `transition={{ … }}`) are new on every render but usually
+// identical in content; comparing them by identity made every parent re-render
+// look like a change to every child, so each one went to Rust as an update, and
+// every updated node is repainted. Plain objects and short arrays are compared
+// by content; anything else (functions, refs, class instances) by identity.
+const MAX_COMPARE_DEPTH = 4;
+const MAX_COMPARE_ARRAY = 64;
+function propEqual(a, b, depth = 0) {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (depth >= MAX_COMPARE_DEPTH) return false;
+  const arr = Array.isArray(a);
+  if (arr !== Array.isArray(b)) return false;
+  if (arr) {
+    if (a.length !== b.length || a.length > MAX_COMPARE_ARRAY) return false;
+    for (let i = 0; i < a.length; i++) if (!propEqual(a[i], b[i], depth + 1)) return false;
+    return true;
+  }
+  if (Object.getPrototypeOf(a) !== Object.prototype || Object.getPrototypeOf(b) !== Object.prototype) return false;
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  for (const k of keys) {
+    if (!Object.prototype.hasOwnProperty.call(b, k) || !propEqual(a[k], b[k], depth + 1)) return false;
+  }
+  return true;
+}
+
+// Compare old and new props so that parent re-renders don't cascade a native
+// updateNode call to every child whose visual props didn't change.
 function prepareUpdate(_instance, _type, oldProps, newProps) {
   const skip = ['children', 'ref', '_glyxOnMount', 'glyxDraggable'];
   const oldKeys = Object.keys(oldProps).filter((k) => !skip.includes(k));
   const newKeys = Object.keys(newProps).filter((k) => !skip.includes(k));
   if (oldKeys.length !== newKeys.length) return newProps;
   for (const k of newKeys) {
-    if (oldProps[k] !== newProps[k]) return newProps;
+    if (!propEqual(oldProps[k], newProps[k])) return newProps;
   }
   return null; // no visual change — skip commitUpdate
 }

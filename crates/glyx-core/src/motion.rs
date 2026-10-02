@@ -355,12 +355,87 @@ impl MotionClock {
     }
 }
 
+/// A spring (mass 1) driving a transition's progress from 0 to 1. Unlike an
+/// eased tween it can overshoot, and it takes an initial velocity, so a
+/// transition retargeted mid-flight carries its momentum instead of restarting
+/// from rest. Solved in closed form, so it's a pure function of elapsed time
+/// (the devtools clock can pause or seek it).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Spring {
+    omega: f64,
+    zeta:  f64,
+    /// Initial progress velocity, in progress-units per second.
+    v0:    f64,
+}
+
+impl Spring {
+    pub(crate) const DEFAULT_STIFFNESS: f32 = 300.0;
+    pub(crate) const DEFAULT_DAMPING:   f32 = 30.0;
+    /// A spring that hasn't settled by now is cut off and snapped (an
+    /// undamped one never would).
+    const MAX_MS: u32 = 4000;
+
+    pub(crate) fn new(stiffness: f32, damping: f32) -> Self {
+        let omega = (stiffness.max(1.0) as f64).sqrt();
+        Spring { omega, zeta: damping.max(0.0) as f64 / (2.0 * omega), v0: 0.0 }
+    }
+
+    /// From the node's `transitionStiffness` / `transitionDamping`. `None`
+    /// when neither is set (a timed transition).
+    pub(crate) fn from_props(p: &glyx_runtime::bindings::NodeProps) -> Option<Self> {
+        if p.transition_stiffness.is_none() && p.transition_damping.is_none() { return None; }
+        Some(Spring::new(
+            p.transition_stiffness.unwrap_or(Self::DEFAULT_STIFFNESS),
+            p.transition_damping.unwrap_or(Self::DEFAULT_DAMPING),
+        ))
+    }
+
+    /// `(progress, velocity)` `t` seconds in. Progress starts at 0, aims at 1
+    /// and may pass it (underdamped); velocity is progress-units per second.
+    fn at(&self, t: f64) -> (f64, f64) {
+        let (w, z, v0) = (self.omega, self.zeta, self.v0);
+        let d0 = -1.0; // displacement from the target at t = 0
+        if (z - 1.0).abs() < 1e-6 {
+            let k = v0 + w * d0;
+            let e = (-w * t).exp();
+            (1.0 + (d0 + k * t) * e, (v0 - w * k * t) * e)
+        } else if z < 1.0 {
+            let wd = w * (1.0 - z * z).sqrt();
+            let b = (v0 + z * w * d0) / wd;
+            let e = (-z * w * t).exp();
+            let (s, c) = (wd * t).sin_cos();
+            (1.0 + e * (d0 * c + b * s), e * ((-z * w * d0 + wd * b) * c + (-z * w * b - wd * d0) * s))
+        } else {
+            let q = w * (z * z - 1.0).sqrt();
+            let (r1, r2) = (-w * z + q, -w * z - q);
+            let c2 = (v0 - r1 * d0) / (r2 - r1);
+            let c1 = d0 - c2;
+            let (e1, e2) = ((r1 * t).exp(), (r2 * t).exp());
+            (1.0 + c1 * e1 + c2 * e2, c1 * r1 * e1 + c2 * r2 * e2)
+        }
+    }
+
+    /// Milliseconds until it is at rest (within 0.1% of the target and slow),
+    /// capped at `MAX_MS`.
+    fn settle_ms(&self) -> u32 {
+        let mut ms = 8;
+        while ms < Self::MAX_MS {
+            let (x, v) = self.at(ms as f64 / 1000.0);
+            if (x - 1.0).abs() < 1e-3 && v.abs() < 1e-2 { return ms; }
+            ms += 8;
+        }
+        Self::MAX_MS
+    }
+}
+
 /// One node's in-flight transition: a shared clock plus a track per property.
 #[derive(Clone, Debug)]
 pub(crate) struct Transition {
     pub start:       Instant,
+    /// Length of a tween; for a spring, how long until it settles.
     pub duration_ms: u32,
     pub easing:      Easing,
+    spring:      Option<Spring>,
     opacity:      Option<(f32, f32)>,
     transform:    Option<(Vec<TfOp>, Vec<TfOp>)>,
     background:   Option<([u8; 4], [u8; 4])>,
@@ -376,7 +451,7 @@ impl Transition {
     pub(crate) fn between(from: &Visual, to: &Visual, mask: u8, duration_ms: u32, easing: Easing, start: Instant) -> Option<Self> {
         let on = |p: u8| mask & p != 0;
         let tr = Transition {
-            start, duration_ms, easing,
+            start, duration_ms, easing, spring: None,
             opacity: (on(P_OPACITY) && (from.opacity - to.opacity).abs() > f32::EPSILON)
                 .then_some((from.opacity, to.opacity)),
             transform: (on(P_TRANSFORM) && from.transform != to.transform)
@@ -396,9 +471,65 @@ impl Transition {
     }
 
     fn progress(&self, now: Instant) -> (f32, bool) {
-        let ms = now.saturating_duration_since(self.start).as_secs_f32() * 1000.0;
-        let t = (ms / self.duration_ms.max(1) as f32).clamp(0.0, 1.0);
-        (self.easing.apply(t), t >= 1.0)
+        pace_progress(self.spring.as_ref(), self.easing, self.duration_ms, self.start, now)
+    }
+
+    /// Make this a spring instead of a timed tween. The tracks are unchanged;
+    /// only how far along them it is differs.
+    pub(crate) fn into_spring(mut self, spring: Spring) -> Self {
+        self.duration_ms = spring.settle_ms();
+        self.spring = Some(spring);
+        self
+    }
+
+    pub(crate) fn is_spring(&self) -> bool { self.spring.is_some() }
+
+    /// Progress velocity (progress-units per second): zero for a tween and for
+    /// a spring that has settled.
+    fn velocity(&self, now: Instant) -> f64 {
+        let Some(sp) = &self.spring else { return 0.0 };
+        let ms = now.saturating_duration_since(self.start).as_secs_f64() * 1000.0;
+        if ms >= self.duration_ms as f64 { 0.0 } else { sp.at(ms / 1000.0).1 }
+    }
+
+    /// One signed number summarising how far this transition moves: the first
+    /// animating property, as `(which, from → to)`. Two transitions with the
+    /// same `which` can hand velocity to each other.
+    fn lead(&self) -> Option<(u8, f64)> {
+        let sum = |a: [u8; 4], b: [u8; 4]| a.iter().zip(&b).map(|(x, y)| *y as f64 - *x as f64).sum::<f64>() / 4.0;
+        if let Some((a, b)) = self.opacity { return Some((0, (b - a) as f64)); }
+        if let Some((a, b)) = &self.transform {
+            // The first component of the first function that actually moves.
+            for (x, y) in a.iter().zip(b) {
+                let span = match (x, y) {
+                    (TfOp::Translate(ax, ay), TfOp::Translate(bx, by)) => if bx != ax { bx - ax } else { by - ay },
+                    (TfOp::Rotate(a), TfOp::Rotate(b))                 => b - a,
+                    (TfOp::Scale(ax, ay), TfOp::Scale(bx, by))         => if bx != ax { bx - ax } else { by - ay },
+                    _ => 0.0,
+                };
+                if span != 0.0 { return Some((1, span)); }
+            }
+        }
+        if let Some((a, b)) = self.background   { return Some((2, sum(a, b))); }
+        if let Some((a, b)) = self.border_color { return Some((3, sum(a, b))); }
+        if let Some((a, b)) = self.radius       { return Some((4, (b - a) as f64)); }
+        if let Some((a, b)) = self.shadow       { return Some((5, if b.0 != a.0 { b.0 - a.0 } else { b.1 - a.1 })); }
+        None
+    }
+
+    /// Start this spring with the velocity `old` had when it was interrupted,
+    /// so a retarget (a hover that reverses mid-flight) keeps its momentum.
+    /// Both must be springs animating the same lead property; their spans
+    /// differ (this one runs from where `old` got to), so the old velocity is
+    /// converted through the lead property's distances. Anything else starts
+    /// from rest.
+    pub(crate) fn inherit_velocity(&mut self, old: &Transition, now: Instant) {
+        let (Some(mut sp), Some(_)) = (self.spring, old.spring) else { return };
+        let (Some((k_old, s_old)), Some((k_new, s_new))) = (old.lead(), self.lead()) else { return };
+        if k_old != k_new || s_new.abs() < 1e-6 { return; }
+        sp.v0 = (old.velocity(now) * s_old / s_new).clamp(-50.0, 50.0);
+        self.duration_ms = sp.settle_ms();
+        self.spring = Some(sp);
     }
 
     /// The properties this transition animates (camelCase, as in JSX).
@@ -418,14 +549,15 @@ impl Transition {
     pub(crate) fn sample(&self, now: Instant) -> (Overrides, bool) {
         let (e, done) = self.progress(now);
         let ov = Overrides {
-            opacity:      self.opacity.map(|(a, b)| lerp_f32(a, b, e)),
+            // A spring can overshoot, so keep opacity and radius in their valid range.
+            opacity:      self.opacity.map(|(a, b)| lerp_f32(a, b, e).clamp(0.0, 1.0)),
             transform:    self.transform.as_ref().map(|(a, b)| {
                 let ops: Vec<TfOp> = a.iter().zip(b).map(|(x, y)| x.lerp(*y, e as f64)).collect();
                 ops_affine(&ops)
             }),
             background:   self.background.map(|(a, b)| lerp_rgba(a, b, e)),
             border_color: self.border_color.map(|(a, b)| lerp_rgba(a, b, e)),
-            radius:       self.radius.map(|(a, b)| lerp_f32(a, b, e)),
+            radius:       self.radius.map(|(a, b)| lerp_f32(a, b, e).max(0.0)),
             shadow:       self.shadow.map(|(a, b)| {
                 let t = e as f64;
                 (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, rgba_to_vello(lerp_rgba(a.2, b.2, e)))
@@ -440,11 +572,11 @@ impl Transition {
     pub(crate) fn current(&self, base: &Visual, now: Instant) -> Visual {
         let (e, _) = self.progress(now);
         let mut v = base.clone();
-        if let Some((a, b)) = self.opacity      { v.opacity = lerp_f32(a, b, e); }
+        if let Some((a, b)) = self.opacity      { v.opacity = lerp_f32(a, b, e).clamp(0.0, 1.0); }
         if let Some((a, b)) = &self.transform   { v.transform = a.iter().zip(b).map(|(x, y)| x.lerp(*y, e as f64)).collect(); }
         if let Some((a, b)) = self.background   { v.background = Some(lerp_rgba(a, b, e)); }
         if let Some((a, b)) = self.border_color { v.border_color = Some(lerp_rgba(a, b, e)); }
-        if let Some((a, b)) = self.radius       { v.radius = lerp_f32(a, b, e); }
+        if let Some((a, b)) = self.radius       { v.radius = lerp_f32(a, b, e).max(0.0); }
         if let Some((a, b)) = self.shadow {
             let t = e as f64;
             v.shadow = Some((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, lerp_rgba(a.2, b.2, e)));
@@ -651,9 +783,344 @@ impl Animation {
     }
 }
 
+/// How far along a run is (`0..=1`, past 1 for a bouncy spring) and whether it
+/// has finished. A spring lands exactly on 1 once settled; a tween follows its
+/// easing over `duration_ms`.
+fn pace_progress(spring: Option<&Spring>, easing: Easing, duration_ms: u32, start: Instant, now: Instant) -> (f32, bool) {
+    let ms = now.saturating_duration_since(start).as_secs_f32() * 1000.0;
+    if let Some(sp) = spring {
+        if ms >= duration_ms as f32 { return (1.0, true); }
+        return (sp.at(ms as f64 / 1000.0).0 as f32, false);
+    }
+    let t = (ms / duration_ms.max(1) as f32).clamp(0.0, 1.0);
+    (easing.apply(t), t >= 1.0)
+}
+
+// ── Canvas tweens ─────────────────────────────────────────────────────────────
+
+/// What paces a canvas between two draws: a spring, or a timed, eased tween.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Pace {
+    Spring(Spring),
+    Timed { ms: u32, easing: Easing },
+}
+
+impl Pace {
+    /// From the canvas node's `transition` props: a spring wins over a duration.
+    /// `None` → the canvas redraws instantly, as every canvas did before.
+    pub(crate) fn from_props(p: &glyx_runtime::bindings::NodeProps) -> Option<Self> {
+        if let Some(sp) = Spring::from_props(p) { return Some(Pace::Spring(sp)); }
+        p.transition_ms.map(|ms| Pace::Timed { ms: ms.max(1), easing: Easing::parse(p.transition_easing.as_deref()) })
+    }
+}
+
+/// Pace a canvas by how fast it is being updated. A spring needs a moment to
+/// settle; a canvas fed updates faster than that never gets to rest. It trails
+/// the data by about the settle time and shows blends of states that never
+/// existed — on a fast stream the drawing is simply wrong. So when updates
+/// arrive more often than the spring can settle (`cadence_ms` is the average
+/// gap between them), glide linearly over that gap instead: each update is
+/// reached just as the next one lands, one update behind at most, with no lag
+/// building up. Slower updates, and canvases with an explicit duration, keep
+/// the pace they were given.
+pub(crate) fn adapt_pace(pace: Pace, cadence_ms: Option<f64>) -> Pace {
+    let (Pace::Spring(sp), Some(gap)) = (pace, cadence_ms) else { return pace };
+    if gap < sp.settle_ms() as f64 * 0.9 {
+        Pace::Timed { ms: (gap.round() as u32).max(16), easing: Easing::Linear }
+    } else {
+        pace
+    }
+}
+
+use glyx_runtime::bindings::CanvasCmd;
+
+/// Every number a command animates, in a fixed order (colours aside).
+fn cmd_nums(c: &CanvasCmd, out: &mut Vec<f32>) {
+    use CanvasCmd::*;
+    match c {
+        Clear | PopClip => {}
+        FillRect { x, y, w, h, .. } => out.extend([*x, *y, *w, *h]),
+        StrokeRect { x, y, w, h, line_width, .. } => out.extend([*x, *y, *w, *h, *line_width]),
+        FillCircle { cx, cy, r, .. } => out.extend([*cx, *cy, *r]),
+        StrokeCircle { cx, cy, r, line_width, .. } => out.extend([*cx, *cy, *r, *line_width]),
+        StrokeLine { x0, y0, x1, y1, line_width, .. } => out.extend([*x0, *y0, *x1, *y1, *line_width]),
+        FillText { x, y, font_size, .. } => out.extend([*x, *y, *font_size]),
+        FillPath { points, .. } => out.extend(points.iter().copied()),
+        StrokePath { points, line_width, .. } => { out.extend(points.iter().copied()); out.push(*line_width); }
+        FillPathGradient { points, x0, y0, x1, y1, stops, .. } => {
+            out.extend(points.iter().copied());
+            out.extend([*x0, *y0, *x1, *y1]);
+            out.extend(stops.iter().map(|(o, _)| *o));
+        }
+        PushClip { x, y, w, h } => out.extend([*x, *y, *w, *h]),
+    }
+}
+
+/// Whether `a` can ease into `b`: the same kind of command with the same
+/// number of points/stops. Text content may differ (a label's value changes;
+/// its position still moves).
+fn same_shape(a: &CanvasCmd, b: &CanvasCmd) -> bool {
+    use CanvasCmd::*;
+    match (a, b) {
+        (Clear, Clear) | (PopClip, PopClip) => true,
+        (FillRect { .. }, FillRect { .. }) | (StrokeRect { .. }, StrokeRect { .. })
+        | (FillCircle { .. }, FillCircle { .. }) | (StrokeCircle { .. }, StrokeCircle { .. })
+        | (StrokeLine { .. }, StrokeLine { .. }) | (FillText { .. }, FillText { .. })
+        | (PushClip { .. }, PushClip { .. }) => true,
+        (FillPath { points: p, .. }, FillPath { points: q, .. }) => p.len() == q.len(),
+        (StrokePath { points: p, .. }, StrokePath { points: q, .. }) => p.len() == q.len(),
+        (FillPathGradient { points: p, stops: s, .. }, FillPathGradient { points: q, stops: t, .. }) => p.len() == q.len() && s.len() == t.len(),
+        _ => false,
+    }
+}
+
+/// `a` → `b` at progress `t` (call only for same-shape pairs). Counts that
+/// can't go negative (radii, widths, sizes) stay in range while a spring
+/// overshoots; discrete fields (text, `closed`, `bold`) come from `b`.
+fn lerp_cmd(a: &CanvasCmd, b: &CanvasCmd, t: f32) -> CanvasCmd {
+    use CanvasCmd::*;
+    let l = |x: f32, y: f32| x + (y - x) * t;
+    let pos = |x: f32, y: f32| (x + (y - x) * t).max(0.0);
+    let pts = |p: &[f32], q: &[f32]| p.iter().zip(q).map(|(x, y)| x + (y - x) * t).collect::<Vec<f32>>();
+    match (a, b) {
+        (FillRect { x: ax, y: ay, w: aw, h: ah, color: ac }, FillRect { x, y, w, h, color }) =>
+            FillRect { x: l(*ax, *x), y: l(*ay, *y), w: pos(*aw, *w), h: pos(*ah, *h), color: lerp_rgba(*ac, *color, t) },
+        (StrokeRect { x: ax, y: ay, w: aw, h: ah, color: ac, line_width: alw }, StrokeRect { x, y, w, h, color, line_width }) =>
+            StrokeRect { x: l(*ax, *x), y: l(*ay, *y), w: pos(*aw, *w), h: pos(*ah, *h), color: lerp_rgba(*ac, *color, t), line_width: pos(*alw, *line_width) },
+        (FillCircle { cx: acx, cy: acy, r: ar, color: ac }, FillCircle { cx, cy, r, color }) =>
+            FillCircle { cx: l(*acx, *cx), cy: l(*acy, *cy), r: pos(*ar, *r), color: lerp_rgba(*ac, *color, t) },
+        (StrokeCircle { cx: acx, cy: acy, r: ar, color: ac, line_width: alw }, StrokeCircle { cx, cy, r, color, line_width }) =>
+            StrokeCircle { cx: l(*acx, *cx), cy: l(*acy, *cy), r: pos(*ar, *r), color: lerp_rgba(*ac, *color, t), line_width: pos(*alw, *line_width) },
+        (StrokeLine { x0: ax0, y0: ay0, x1: ax1, y1: ay1, color: ac, line_width: alw }, StrokeLine { x0, y0, x1, y1, color, line_width }) =>
+            StrokeLine { x0: l(*ax0, *x0), y0: l(*ay0, *y0), x1: l(*ax1, *x1), y1: l(*ay1, *y1), color: lerp_rgba(*ac, *color, t), line_width: pos(*alw, *line_width) },
+        (FillText { x: ax, y: ay, font_size: af, color: ac, .. }, FillText { text, x, y, font_size, color, bold }) =>
+            FillText { text: text.clone(), x: l(*ax, *x), y: l(*ay, *y), font_size: l(*af, *font_size).max(1.0), color: lerp_rgba(*ac, *color, t), bold: *bold },
+        (FillPath { points: p, color: ac }, FillPath { points: q, color }) =>
+            FillPath { points: pts(p, q), color: lerp_rgba(*ac, *color, t) },
+        (StrokePath { points: p, color: ac, line_width: alw, .. }, StrokePath { points: q, color, line_width, closed }) =>
+            StrokePath { points: pts(p, q), color: lerp_rgba(*ac, *color, t), line_width: pos(*alw, *line_width), closed: *closed },
+        (FillPathGradient { points: p, x0: ax0, y0: ay0, x1: ax1, y1: ay1, stops: s }, FillPathGradient { points: q, x0, y0, x1, y1, stops: u }) =>
+            FillPathGradient {
+                points: pts(p, q),
+                x0: l(*ax0, *x0), y0: l(*ay0, *y0), x1: l(*ax1, *x1), y1: l(*ay1, *y1),
+                stops: s.iter().zip(u).map(|((ao, ac), (o, c))| (l(*ao, *o), lerp_rgba(*ac, *c, t))).collect(),
+            },
+        (PushClip { x: ax, y: ay, w: aw, h: ah }, PushClip { x, y, w, h }) =>
+            PushClip { x: l(*ax, *x), y: l(*ay, *y), w: pos(*aw, *w), h: pos(*ah, *h) },
+        // Not same-shape: take the new command whole.
+        (_, b) => b.clone(),
+    }
+}
+
+/// A canvas easing from what it showed to a new command list.
+///
+/// JS draws the final state once per update; Rust moves the drawn commands
+/// toward it every frame, with no JS per frame. Only the starting list is
+/// stored: the target is the canvas's own `canvas_cmds` entry, passed in.
+#[derive(Clone, Debug)]
+pub(crate) struct CanvasTween {
+    from:        Vec<CanvasCmd>,
+    start:       Instant,
+    pub duration_ms: u32,
+    easing:      Easing,
+    spring:      Option<Spring>,
+}
+
+/// For each command of `to`, the command of `from` it eases from. Two draws
+/// whose command lists differ — an axis gained a tick, a label came or went —
+/// still ease wherever they line up: commands are matched in order, pairing
+/// only ones that can ease into each other (`same_shape`), by longest common
+/// subsequence. A command of `to` with no partner stands for itself (it
+/// appears at once); a command of `from` with no partner is dropped. Lists of
+/// the same shape (the common case) skip the search. `None` when the lists are
+/// too long to match without a noticeable cost.
+fn align(from: &[CanvasCmd], to: &[CanvasCmd]) -> Option<Vec<CanvasCmd>> {
+    if from.len() == to.len() && from.iter().zip(to).all(|(a, b)| same_shape(a, b)) {
+        return Some(from.to_vec());
+    }
+    let (n, m) = (from.len(), to.len());
+    if n * m > 250_000 { return None; }
+    // lcs[i][j]: the longest run of matches between from[i..] and to[j..].
+    let w = m + 1;
+    let mut lcs = vec![0u16; (n + 1) * w];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i * w + j] = if same_shape(&from[i], &to[j]) {
+                lcs[(i + 1) * w + j + 1] + 1
+            } else {
+                lcs[(i + 1) * w + j].max(lcs[i * w + j + 1])
+            };
+        }
+    }
+    let mut out = to.to_vec();
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if same_shape(&from[i], &to[j]) && lcs[i * w + j] == lcs[(i + 1) * w + j + 1] + 1 {
+            out[j] = from[i].clone();
+            i += 1;
+            j += 1;
+        } else if lcs[(i + 1) * w + j] >= lcs[i * w + j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    Some(out)
+}
+
+impl CanvasTween {
+    /// `None` when there is nothing to animate: the draws are identical, or
+    /// nothing in the old one can ease into anything in the new one, in which
+    /// case the new draw simply replaces the old. Commands present in only one
+    /// of them (see `align`) appear or disappear at once while the rest ease.
+    pub(crate) fn between(from: Vec<CanvasCmd>, to: &[CanvasCmd], pace: Pace, start: Instant) -> Option<Self> {
+        let from = align(&from, to)?;
+        if from == to { return None; }
+        let (duration_ms, easing, spring) = match pace {
+            Pace::Spring(sp)           => (sp.settle_ms(), Easing::Linear, Some(sp)),
+            Pace::Timed { ms, easing } => (ms, easing, None),
+        };
+        Some(CanvasTween { from, start, duration_ms, easing, spring })
+    }
+
+    fn progress(&self, now: Instant) -> (f32, bool) {
+        pace_progress(self.spring.as_ref(), self.easing, self.duration_ms, self.start, now)
+    }
+
+    pub(crate) fn is_spring(&self) -> bool { self.spring.is_some() }
+
+    pub(crate) fn start(&self) -> Instant { self.start }
+
+    /// The commands to draw at `now`, and whether it has arrived at `to`.
+    pub(crate) fn sample(&self, to: &[CanvasCmd], now: Instant) -> (Vec<CanvasCmd>, bool) {
+        let (e, done) = self.progress(now);
+        if done { return (to.to_vec(), true); }
+        (self.from.iter().zip(to).map(|(a, b)| lerp_cmd(a, b, e)).collect(), false)
+    }
+
+    fn velocity(&self, now: Instant) -> f64 {
+        let Some(sp) = &self.spring else { return 0.0 };
+        let ms = now.saturating_duration_since(self.start).as_secs_f64() * 1000.0;
+        if ms >= self.duration_ms as f64 { 0.0 } else { sp.at(ms / 1000.0).1 }
+    }
+
+    /// The first number that moves, as `(which, from → to)`: two tweens with the
+    /// same `which` can hand velocity to each other.
+    fn lead(&self, to: &[CanvasCmd]) -> Option<(usize, f64)> {
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for (x, y) in self.from.iter().zip(to) { cmd_nums(x, &mut a); cmd_nums(y, &mut b); }
+        a.iter().zip(&b).position(|(x, y)| (y - x).abs() > 1e-4).map(|i| (i, (b[i] - a[i]) as f64))
+    }
+
+    /// Start with the velocity `old` (running toward `old_to`) had when this
+    /// update interrupted it, so a stream of updates — a realtime chart
+    /// sliding along — keeps moving instead of stopping at every point. Only
+    /// between springs moving the same number; otherwise from rest.
+    pub(crate) fn inherit_velocity(&mut self, to: &[CanvasCmd], old: &CanvasTween, old_to: &[CanvasCmd], now: Instant) {
+        let (Some(mut sp), Some(_)) = (self.spring, old.spring) else { return };
+        // The "same number" test below compares positions in the two lists, which
+        // only mean the same thing when both draws have the same commands.
+        if old_to.len() != to.len() { return; }
+        let (Some((k_old, s_old)), Some((k_new, s_new))) = (old.lead(old_to), self.lead(to)) else { return };
+        if k_old != k_new || s_new.abs() < 1e-6 { return; }
+        sp.v0 = (old.velocity(now) * s_old / s_new).clamp(-50.0, 50.0);
+        self.duration_ms = sp.settle_ms();
+        self.spring = Some(sp);
+    }
+}
+
+// ── Smooth scrolling ──────────────────────────────────────────────────────────
+
+/// A scroll offset easing toward a target on a critically damped spring.
+///
+/// JS still decides *where* to scroll (`scrollOffsetY`); this decides what is
+/// drawn on the way there. Velocity survives a retarget, so a run of wheel
+/// notches accelerates smoothly instead of restarting an ease at each one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ScrollSpring {
+    pub pos:    f64,
+    vel:        f64,
+    pub target: f64,
+    last:       Instant,
+}
+
+impl ScrollSpring {
+    /// Natural frequency (rad/s). ~95% of the way in 140 ms, settled in ~0.3 s:
+    /// quick enough to feel direct, slow enough to read as smooth.
+    const OMEGA: f64 = 22.0;
+    /// At rest when this close (px) and this slow (px/s): snap to the target.
+    const REST_DIST: f64 = 0.25;
+    const REST_VEL:  f64 = 8.0;
+    /// A long frame (stall, breakpoint) must not fling the offset.
+    const MAX_DT: f64 = 0.05;
+
+    pub(crate) fn new(pos: f64, target: f64, now: Instant) -> Self {
+        Self { pos, vel: 0.0, target, last: now }
+    }
+
+    /// Aim at a new target, keeping the current position and velocity.
+    pub(crate) fn retarget(&mut self, target: f64) { self.target = target; }
+
+    /// Advance to `now`. Returns `true` while still moving; on the frame it
+    /// comes to rest `pos` is exactly `target`.
+    pub(crate) fn step(&mut self, now: Instant) -> bool {
+        let dt = now.saturating_duration_since(self.last).as_secs_f64().min(Self::MAX_DT);
+        self.last = now;
+        let w = Self::OMEGA;
+        let d = self.pos - self.target;
+        let k = self.vel + w * d;
+        let e = (-w * dt).exp();
+        self.pos = self.target + (d + k * dt) * e;
+        self.vel = (self.vel - w * k * dt) * e;
+        if (self.pos - self.target).abs() < Self::REST_DIST && self.vel.abs() < Self::REST_VEL {
+            self.pos = self.target;
+            self.vel = 0.0;
+            return false;
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scroll_spring_settles_exactly_on_its_target_without_overshoot() {
+        let t0 = Instant::now();
+        let mut s = ScrollSpring::new(0.0, 400.0, t0);
+        let (mut ms, mut max, mut running) = (0u64, 0.0f64, true);
+        while running && ms < 3000 {
+            ms += 8;
+            running = s.step(t0 + Duration::from_millis(ms));
+            max = max.max(s.pos);
+        }
+        assert!(!running, "settles");
+        assert!(ms < 1000, "settles quickly, took {ms} ms");
+        assert_eq!(s.pos, 400.0);
+        assert!(max <= 400.0, "critically damped: no overshoot, peaked at {max}");
+    }
+
+    #[test]
+    fn a_scroll_spring_keeps_its_velocity_when_retargeted() {
+        let t0 = Instant::now();
+        let mut s = ScrollSpring::new(0.0, 100.0, t0);
+        s.step(t0 + Duration::from_millis(50));
+        let pos = s.pos;
+        s.retarget(300.0);
+        assert_eq!(s.pos, pos, "retargeting does not jump");
+        let before = s.pos;
+        s.step(t0 + Duration::from_millis(66));
+        assert!(s.pos > before, "still moving forward toward the new target");
+    }
+
+    #[test]
+    fn a_scroll_spring_ignores_a_stalled_frame() {
+        let t0 = Instant::now();
+        let mut s = ScrollSpring::new(0.0, 1000.0, t0);
+        s.step(t0 + Duration::from_secs(5));
+        assert!(s.pos < 1000.0, "a 5 s hitch is clamped to one short step");
+    }
 
     #[test]
     fn the_motion_clock_scales_pauses_and_seeks_without_jumping() {
@@ -922,5 +1389,388 @@ mod tests {
         let (rdx, rdy, rc) = crate::render_props::parse_box_shadow(s).unwrap();
         assert_eq!((dx, dy), (rdx, rdy));
         assert_eq!(rgba_to_vello(c).to_rgba8(), rc.to_rgba8());
+    }
+
+    // ── Springs ───────────────────────────────────────────────────────────────
+
+    fn ms(n: u64) -> Duration { Duration::from_millis(n) }
+
+    #[test]
+    fn springs_start_at_zero_and_settle_on_one() {
+        for (k, c) in [(300.0, 30.0), (170.0, 26.0), (500.0, 10.0), (100.0, 40.0), (400.0, 40.0)] {
+            let s = Spring::new(k, c);
+            let (x0, v0) = s.at(0.0);
+            assert!(x0.abs() < 1e-9 && v0.abs() < 1e-9, "k={k} c={c}: starts at rest at 0");
+            let settle = s.settle_ms();
+            assert!(settle < Spring::MAX_MS, "k={k} c={c}: should settle, took {settle} ms");
+            let (x, v) = s.at(settle as f64 / 1000.0);
+            assert!((x - 1.0).abs() < 2e-3 && v.abs() < 2e-2, "k={k} c={c}: at rest at the end, x={x} v={v}");
+        }
+        assert!(Spring::new(300.0, 30.0).settle_ms() < 1000, "the default feels quick");
+    }
+
+    #[test]
+    fn a_damped_spring_never_overshoots_and_an_underdamped_one_does() {
+        let peak = |s: Spring| (0..500).map(|i| s.at(i as f64 / 250.0).0).fold(f64::MIN, f64::max);
+        // zeta = 1 and zeta > 1: monotonic approach.
+        assert!(peak(Spring::new(100.0, 20.0)) <= 1.0 + 1e-9, "critically damped");
+        assert!(peak(Spring::new(100.0, 40.0)) <= 1.0 + 1e-9, "overdamped");
+        // Bouncy: noticeably past the target.
+        assert!(peak(Spring::new(500.0, 10.0)) > 1.1, "underdamped overshoots");
+    }
+
+    #[test]
+    fn spring_velocity_is_the_derivative_of_its_progress() {
+        for s in [Spring::new(300.0, 30.0), Spring::new(500.0, 10.0), Spring::new(100.0, 20.0), Spring::new(100.0, 40.0)] {
+            let mut s = s;
+            s.v0 = 1.5; // also with an inherited velocity
+            for &t in &[0.02, 0.1, 0.3] {
+                let h = 1e-6;
+                let numeric = (s.at(t + h).0 - s.at(t - h).0) / (2.0 * h);
+                let (_, analytic) = s.at(t);
+                assert!((numeric - analytic).abs() < 1e-3, "{s:?} at {t}: {numeric} vs {analytic}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_spring_transition_samples_mid_flight_and_lands_exactly() {
+        let to = Visual { opacity: 0.0, radius: 20.0, ..vis() };
+        let start = Instant::now();
+        let tr = Transition::between(&vis(), &to, P_OPACITY | P_RADIUS, 1, Easing::Linear, start).unwrap()
+            .into_spring(Spring::new(300.0, 30.0));
+        assert!(tr.is_spring());
+        let (mid, done) = tr.sample(start + ms(60));
+        assert!(!done);
+        let (o, r) = (mid.opacity.unwrap(), mid.radius.unwrap());
+        assert!(o < 1.0 && o > 0.0 && r > 0.0 && r < 20.0, "partway: opacity {o}, radius {r}");
+        let (end, done) = tr.sample(start + ms(tr.duration_ms as u64 + 1));
+        assert!(done);
+        assert_eq!((end.opacity, end.radius), (Some(0.0), Some(20.0)), "exactly on target when settled");
+    }
+
+    #[test]
+    fn a_bouncy_spring_keeps_opacity_and_radius_in_range() {
+        let start = Instant::now();
+        let to   = Visual { opacity: 1.0, radius: 10.0, ..vis() };
+        let from = Visual { opacity: 0.0, radius: 0.0, ..vis() };
+        let tr = Transition::between(&from, &to, P_OPACITY | P_RADIUS, 1, Easing::Linear, start).unwrap()
+            .into_spring(Spring::new(600.0, 6.0));
+        for t in (0..tr.duration_ms as u64).step_by(5) {
+            let (ov, _) = tr.sample(start + ms(t));
+            assert!((0.0..=1.0).contains(&ov.opacity.unwrap()), "opacity out of range at {t} ms");
+            assert!(ov.radius.unwrap() >= 0.0, "negative radius at {t} ms");
+        }
+    }
+
+    #[test]
+    fn a_reversed_spring_carries_its_velocity() {
+        // Fade out; interrupt part-way and fade back in. The value must not
+        // change speed at the instant of the reversal.
+        let start = Instant::now();
+        let hidden = Visual { opacity: 0.0, ..vis() };
+        let spring = Spring::new(200.0, 22.0);
+        let out = Transition::between(&vis(), &hidden, P_OPACITY, 1, Easing::Linear, start).unwrap().into_spring(spring);
+
+        let t_rev = start + ms(70);
+        let at_rev = out.current(&hidden, t_rev);
+        let mut back = Transition::between(&at_rev, &vis(), P_OPACITY, 1, Easing::Linear, t_rev).unwrap().into_spring(spring);
+        back.inherit_velocity(&out, t_rev);
+
+        // Opacity speed (per second) just before, from the old spring...
+        let h = ms(1);
+        let op = |tr: &Transition, t: Instant| tr.sample(t).0.opacity.unwrap() as f64;
+        let before = (op(&out, t_rev) - op(&out, t_rev - h)) / 0.001;
+        // ...and just after, from the new one.
+        let after = (op(&back, t_rev + h) - op(&back, t_rev)) / 0.001;
+        assert!(before < -1.0, "heading down fast: {before}");
+        assert!((after - before).abs() < 0.35 * before.abs(), "velocity carried: before {before}, after {after}");
+
+        // Without the hand-over it would restart from rest.
+        let rested = Transition::between(&at_rev, &vis(), P_OPACITY, 1, Easing::Linear, t_rev).unwrap().into_spring(spring);
+        let from_rest = (op(&rested, t_rev + h) - op(&rested, t_rev)) / 0.001;
+        assert!(from_rest.abs() < 0.2 * before.abs(), "no hand-over starts from rest: {from_rest}");
+    }
+
+    #[test]
+    fn velocity_only_passes_between_springs_on_the_same_property() {
+        let start = Instant::now();
+        let spring = Spring::new(200.0, 22.0);
+        let faded = Transition::between(&vis(), &Visual { opacity: 0.0, ..vis() }, P_OPACITY, 1, Easing::Linear, start).unwrap().into_spring(spring);
+        let grown = Transition::between(&vis(), &Visual { radius: 9.0, ..vis() }, P_RADIUS, 1, Easing::Linear, start).unwrap().into_spring(spring);
+        let mut other = grown.clone();
+        other.inherit_velocity(&faded, start + ms(50));
+        assert_eq!(other.spring.unwrap().v0, 0.0, "different lead property: from rest");
+        // A tween has no velocity to give.
+        let tween = Transition::between(&vis(), &Visual { radius: 9.0, ..vis() }, P_RADIUS, 200, Easing::Linear, start).unwrap();
+        let mut s = grown.clone();
+        s.inherit_velocity(&tween, start + ms(50));
+        assert_eq!(s.spring.unwrap().v0, 0.0, "tween → spring: from rest");
+    }
+
+    // ── Canvas tweens ─────────────────────────────────────────────────────────
+
+    fn line(x0: f32, y: f32) -> CanvasCmd {
+        CanvasCmd::StrokePath { points: vec![x0, y, x0 + 10.0, y + 5.0, x0 + 20.0, y], color: [255, 0, 0, 255], line_width: 2.0, closed: false }
+    }
+    fn rect(w: f32, c: [u8; 4]) -> CanvasCmd { CanvasCmd::FillRect { x: 0.0, y: 0.0, w, h: 10.0, color: c } }
+    fn pts(c: &CanvasCmd) -> Vec<f32> { let mut v = Vec::new(); cmd_nums(c, &mut v); v }
+    const SPRING_PACE: Pace = Pace::Spring(Spring { omega: 17.320508, zeta: 1.0, v0: 0.0 });
+
+    /// A window of a sine sliding left by some samples per update, drawn as one
+    /// polyline whose points sit at fixed x positions (as the charts draw it).
+    fn sine_window(offset: usize, n: usize) -> Vec<CanvasCmd> {
+        let mut points = Vec::new();
+        for i in 0..n {
+            let k = (offset + i) as f32;
+            points.push(i as f32 * 7.0);
+            points.push(100.0 + 60.0 * (k / 40.0).sin() + 15.0 * (k * 0.092).sin());
+        }
+        vec![CanvasCmd::StrokePath { points, color: [255, 255, 255, 255], line_width: 2.0, closed: false }]
+    }
+
+    /// The worst vertical gap between two same-shape polylines.
+    fn y_error(shown: &[CanvasCmd], target: &[CanvasCmd]) -> f32 {
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        cmd_nums(&shown[0], &mut a);
+        cmd_nums(&target[0], &mut b);
+        // Odd slots are y.
+        a.iter().zip(&b).enumerate().filter(|(i, _)| i % 2 == 1).map(|(_, (x, y))| (x - y).abs()).fold(0.0, f32::max)
+    }
+
+    /// Chains canvas tweens the way the app does (retarget from what is on
+    /// screen, carry the velocity) and reports how far the drawing is from the
+    /// data it is heading for, a moment before the next update arrives.
+    #[test]
+    fn a_streamed_window_stays_close_to_its_data_at_any_update_rate() {
+        for (label, shift, tick_ms) in [
+            ("10 samples / 50 ms (200/s, 20 Hz)", 10usize, 50u64),
+            ("2 samples / 33 ms (60/s, 30 Hz)", 2, 33),
+            ("1 sample / 1000 ms (1/s)", 1, 1000),
+        ] {
+            let n = 120;
+            let t0 = Instant::now();
+            let mut target = sine_window(0, n);
+            let mut tw: Option<CanvasTween> = None;
+            let (mut worst, mut sum, mut count) = (0.0f32, 0.0f32, 0);
+            for step in 1..=60u64 {
+                let now = t0 + ms(step * tick_ms);
+                let next = sine_window(step as usize * shift, n);
+                let from = match &tw { Some(t) => t.sample(&target, now).0, None => target.clone() };
+                // Updates arrive every tick: pace the glide by that cadence.
+                let pace = adapt_pace(SPRING_PACE, if step > 1 { Some(tick_ms as f64) } else { None });
+                let mut new = CanvasTween::between(from, &next, pace, now);
+                if let (Some(n_), Some(o)) = (new.as_mut(), tw.as_ref()) { n_.inherit_velocity(&next, o, &target, now); }
+                tw = new;
+                target = next;
+                let end = now + ms(tick_ms.saturating_sub(1));
+                let shown = match &tw { Some(t) => t.sample(&target, end).0, None => target.clone() };
+                if step > 20 { let e = y_error(&shown, &target); worst = worst.max(e); sum += e; count += 1; }
+            }
+            // The signal swings about 150; the drawing may lag by a small part of that,
+            // not by half of it as a spring chasing a fast stream does.
+            assert!(worst < 15.0, "{label}: drawing is {worst} from its data (mean {})", sum / count as f32);
+        }
+    }
+
+
+    #[test]
+    fn a_canvas_tween_moves_path_points_and_lands_exactly() {
+        let (a, b) = (vec![line(0.0, 0.0)], vec![line(10.0, 40.0)]);
+        let t0 = Instant::now();
+        let tw = CanvasTween::between(a.clone(), &b, SPRING_PACE, t0).unwrap();
+        assert!(tw.is_spring());
+        let (mid, done) = tw.sample(&b, t0 + ms(80));
+        assert!(!done);
+        let (m, from, to) = (pts(&mid[0]), pts(&a[0]), pts(&b[0]));
+        assert!(m.iter().zip(from.iter().zip(&to)).all(|(m, (f, t))| m > f && m < t || (f == t && m == f)), "partway between: {m:?}");
+        let (end, done) = tw.sample(&b, t0 + ms(tw.duration_ms as u64 + 1));
+        assert!(done);
+        assert_eq!(end, b, "exactly the new draw once settled");
+    }
+
+    #[test]
+    fn nothing_eases_when_the_two_draws_differ_in_shape_or_are_identical() {
+        let t0 = Instant::now();
+        let two = |a: CanvasCmd, b: CanvasCmd| CanvasTween::between(vec![a], &[b], SPRING_PACE, t0);
+        assert!(two(line(0.0, 0.0), line(0.0, 0.0)).is_none(), "identical: nothing to do");
+        assert!(two(line(0.0, 0.0), CanvasCmd::StrokePath { points: vec![0.0, 0.0, 5.0, 5.0], color: [0; 4], line_width: 1.0, closed: false }).is_none(),
+                "another point count (a stream that grew)");
+        assert!(two(rect(5.0, [0; 4]), CanvasCmd::FillCircle { cx: 0.0, cy: 0.0, r: 1.0, color: [0; 4] }).is_none(), "different command");
+        assert!(CanvasTween::between(vec![rect(1.0, [0; 4])], &[rect(1.0, [0; 4]), rect(2.0, [0; 4])], SPRING_PACE, t0).is_none(), "another command count");
+    }
+
+    #[test]
+    fn a_canvas_tween_blends_colour_and_text_keeps_the_new_words() {
+        let t0 = Instant::now();
+        let a = vec![rect(10.0, [0, 0, 0, 255]), CanvasCmd::FillText { text: "1.2k".into(), x: 0.0, y: 0.0, font_size: 12.0, color: [0; 4], bold: false }];
+        let b = vec![rect(30.0, [200, 100, 50, 255]), CanvasCmd::FillText { text: "1.4k".into(), x: 20.0, y: 8.0, font_size: 12.0, color: [255; 4], bold: true }];
+        let tw = CanvasTween::between(a, &b, Pace::Timed { ms: 1000, easing: Easing::Linear }, t0).unwrap();
+        let (mid, _) = tw.sample(&b, t0 + ms(500));
+        assert_eq!(mid[0], rect(20.0, [100, 50, 25, 255]), "width and colour halfway");
+        match &mid[1] {
+            CanvasCmd::FillText { text, x, y, bold, color, .. } => {
+                assert_eq!((text.as_str(), *bold), ("1.4k", true), "the words come from the new draw");
+                assert_eq!((*x, *y), (10.0, 4.0), "but the position moves");
+                assert_eq!(color[0], 128);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bouncy_canvas_tween_keeps_sizes_in_range() {
+        let t0 = Instant::now();
+        let bouncy = Pace::Spring(Spring::new(600.0, 6.0));
+        let tw = CanvasTween::between(vec![rect(0.0, [0; 4])], &[rect(40.0, [9; 4])], bouncy, t0).unwrap();
+        let to = [rect(40.0, [9; 4])];
+        for t in (0..tw.duration_ms as u64).step_by(5) {
+            match &tw.sample(&to, t0 + ms(t)).0[0] {
+                CanvasCmd::FillRect { w, h, .. } => assert!(*w >= 0.0 && *h >= 0.0, "negative size at {t} ms"),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_canvas_retargeted_mid_flight_starts_from_what_was_on_screen() {
+        let t0 = Instant::now();
+        let (a, b, c) = (vec![line(0.0, 0.0)], vec![line(100.0, 0.0)], vec![line(0.0, 0.0)]);
+        let tw = CanvasTween::between(a, &b, SPRING_PACE, t0).unwrap();
+        let t1 = t0 + ms(90);
+        let on_screen = tw.sample(&b, t1).0;
+        let back = CanvasTween::between(on_screen.clone(), &c, SPRING_PACE, t1).unwrap();
+        assert_eq!(back.sample(&c, t1).0, on_screen, "no jump at the instant of the retarget");
+    }
+
+    #[test]
+    fn a_stream_of_updates_keeps_its_speed_instead_of_stopping_at_each_one() {
+        // A window sliding left by 10px per update. Each update arrives while
+        // the last is still moving.
+        let t0 = Instant::now();
+        let (w0, w1, w2) = (vec![line(0.0, 0.0)], vec![line(-10.0, 0.0)], vec![line(-20.0, 0.0)]);
+        let first = CanvasTween::between(w0, &w1, SPRING_PACE, t0).unwrap();
+        let t1 = t0 + ms(70);
+        let cur = first.sample(&w1, t1).0;
+        let mut second = CanvasTween::between(cur, &w2, SPRING_PACE, t1).unwrap();
+        second.inherit_velocity(&w2, &first, &w1, t1);
+        let mut from_rest = CanvasTween::between(first.sample(&w1, t1).0, &w2, SPRING_PACE, t1).unwrap();
+        from_rest.spring = from_rest.spring.map(|s| Spring { v0: 0.0, ..s });
+
+        let x = |tw: &CanvasTween, to: &[CanvasCmd], t: Instant| pts(&tw.sample(to, t).0[0])[0] as f64;
+        let h = ms(1);
+        let before = (x(&first, &w1, t1) - x(&first, &w1, t1 - h)) / 0.001;
+        let after  = (x(&second, &w2, t1 + h) - x(&second, &w2, t1)) / 0.001;
+        let rested = (x(&from_rest, &w2, t1 + h) - x(&from_rest, &w2, t1)) / 0.001;
+        assert!(before < -10.0, "moving left: {before}");
+        assert!((after - before).abs() < 0.35 * before.abs(), "speed carried across the update: {before} → {after}");
+        assert!(rested.abs() < 0.2 * before.abs(), "without it, each update starts from rest: {rested}");
+    }
+
+    #[test]
+    fn a_canvas_updated_faster_than_its_spring_settles_glides_at_the_update_rate() {
+        let spring = Pace::Spring(Spring::new(300.0, 35.0));
+        let settle = Spring::new(300.0, 35.0).settle_ms() as f64;
+        // 20 updates a second: a linear glide over the 50 ms between them.
+        assert_eq!(adapt_pace(spring, Some(50.0)), Pace::Timed { ms: 50, easing: Easing::Linear });
+        // Even a fast hover sweep is never shorter than a frame.
+        assert_eq!(adapt_pace(spring, Some(2.0)), Pace::Timed { ms: 16, easing: Easing::Linear });
+        // Just under the settle time still counts as "too fast for the spring"...
+        assert!(matches!(adapt_pace(spring, Some(settle * 0.8)), Pace::Timed { .. }));
+        // ...but a slow feed (one update a second) and an unknown cadence keep the spring.
+        assert_eq!(adapt_pace(spring, Some(1000.0)), spring);
+        assert_eq!(adapt_pace(spring, None), spring);
+    }
+
+    #[test]
+    fn an_explicit_duration_is_never_adapted() {
+        let timed = Pace::Timed { ms: 300, easing: Easing::parse(Some("ease-in-out")) };
+        assert_eq!(adapt_pace(timed, Some(20.0)), timed);
+        assert_eq!(adapt_pace(timed, None), timed);
+    }
+
+    fn label(text: &str, x: f32) -> CanvasCmd {
+        CanvasCmd::FillText { text: text.into(), x, y: 0.0, font_size: 11.0, color: [200; 4], bold: false }
+    }
+    fn grid(y: f32) -> CanvasCmd {
+        CanvasCmd::StrokeLine { x0: 0.0, y0: y, x1: 100.0, y1: y, color: [255, 255, 255, 30], line_width: 1.0 }
+    }
+
+    #[test]
+    fn a_draw_that_gains_an_axis_tick_still_eases_its_data() {
+        // Auto-scaled axes change their tick count as the data moves. The whole
+        // canvas used to snap when that happened; the data should still glide.
+        let old = vec![grid(10.0), grid(20.0), label("20", 0.0), line(0.0, 0.0)];
+        let new = vec![grid(10.0), grid(20.0), grid(30.0), label("0", 0.0), label("20", 0.0), line(10.0, 40.0)];
+        let t0 = Instant::now();
+        let tw = CanvasTween::between(old, &new, Pace::Timed { ms: 1000, easing: Easing::Linear }, t0)
+            .expect("the data path lines up, so there is something to ease");
+        let (mid, done) = tw.sample(&new, t0 + ms(500));
+        assert!(!done);
+        assert_eq!(mid.len(), new.len(), "it draws exactly the new commands");
+        // The data path is halfway between its old and new points.
+        let (want, got) = (pts(&new[5]), pts(&mid[5]));
+        let from = pts(&line(0.0, 0.0));
+        assert!(got.iter().zip(from.iter().zip(&want)).all(|(g, (f, w))| (g - (f + w) / 2.0).abs() < 1e-4), "{got:?}");
+        // The tick and label that only the new draw has stand for themselves.
+        assert_eq!(mid[2], new[2], "the new grid line appears at once");
+        assert_eq!(mid[3], new[3], "the new label appears at once");
+        // And it still lands exactly on the new draw.
+        assert_eq!(tw.sample(&new, t0 + ms(1001)).0, new);
+    }
+
+    #[test]
+    fn a_draw_that_loses_commands_eases_what_remains_and_drops_the_rest() {
+        let old = vec![grid(10.0), grid(20.0), grid(30.0), line(0.0, 0.0)];
+        let new = vec![grid(12.0), line(10.0, 40.0)];
+        let t0 = Instant::now();
+        let tw = CanvasTween::between(old, &new, Pace::Timed { ms: 1000, easing: Easing::Linear }, t0).unwrap();
+        let (mid, _) = tw.sample(&new, t0 + ms(500));
+        assert_eq!(mid.len(), 2);
+        assert_ne!(mid[1], new[1], "the line is still on its way");
+        assert!(matches!(mid[1], CanvasCmd::StrokePath { .. }));
+    }
+
+    #[test]
+    fn matching_is_in_order_and_pairs_only_commands_that_can_ease() {
+        // Nothing in the old draw can ease into anything in the new one.
+        let t0 = Instant::now();
+        let pace = Pace::Timed { ms: 100, easing: Easing::Linear };
+        assert!(CanvasTween::between(vec![rect(5.0, [0; 4])], &[line(0.0, 0.0)], pace, t0).is_none());
+        // A path with a different point count can't pair with the old path, so it just replaces it.
+        let short = CanvasCmd::StrokePath { points: vec![0.0, 0.0, 5.0, 5.0], color: [0; 4], line_width: 1.0, closed: false };
+        assert!(CanvasTween::between(vec![line(0.0, 0.0)], &[short], pace, t0).is_none());
+        // Same shape, same content: nothing to do.
+        assert!(CanvasTween::between(vec![grid(1.0), label("a", 0.0)], &[grid(1.0), label("a", 0.0)], pace, t0).is_none());
+    }
+
+    #[test]
+    fn a_very_long_mismatched_draw_just_replaces_instead_of_costing_a_search() {
+        let many = |n: usize| (0..n).map(|i| grid(i as f32)).collect::<Vec<_>>();
+        let (a, b) = (many(600), many(700));
+        assert!(align(&a, &b).is_none(), "600 x 700 commands is past the search cap");
+        // The same-length fast path needs no search at any size.
+        assert!(align(&many(2000), &many(2000)).is_some());
+    }
+
+    #[test]
+    fn canvas_pace_comes_from_the_transition_props() {
+        use glyx_runtime::bindings::NodeProps;
+        assert!(Pace::from_props(&NodeProps::default()).is_none(), "no transition prop: instant, as before");
+        assert!(matches!(Pace::from_props(&NodeProps { transition_stiffness: Some(200.0), ..Default::default() }), Some(Pace::Spring(_))));
+        assert_eq!(Pace::from_props(&NodeProps { transition_ms: Some(300), transition_easing: Some("linear".into()), ..Default::default() }),
+                   Some(Pace::Timed { ms: 300, easing: Easing::Linear }));
+        let both = NodeProps { transition_ms: Some(300), transition_damping: Some(20.0), ..Default::default() };
+        assert!(matches!(Pace::from_props(&both), Some(Pace::Spring(_))), "a spring wins over a duration");
+    }
+
+    #[test]
+    fn spring_props_make_a_spring_and_default_the_missing_half() {
+        use glyx_runtime::bindings::NodeProps;
+        assert!(Spring::from_props(&NodeProps::default()).is_none(), "no spring props: a timed transition");
+        let only_stiff = Spring::from_props(&NodeProps { transition_stiffness: Some(500.0), ..Default::default() }).unwrap();
+        assert_eq!(only_stiff, Spring::new(500.0, Spring::DEFAULT_DAMPING));
+        let only_damp = Spring::from_props(&NodeProps { transition_damping: Some(12.0), ..Default::default() }).unwrap();
+        assert_eq!(only_damp, Spring::new(Spring::DEFAULT_STIFFNESS, 12.0));
     }
 }

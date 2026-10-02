@@ -95,6 +95,18 @@
         "@glyx-dev/config": "workspace:*",
       },
     },
+    "examples/realtime-chart": {
+      "name": "realtime-chart",
+      "version": "0.1.0",
+      "dependencies": {
+        "@glyx-dev/charts": "workspace:*",
+        "@glyx-dev/react": "workspace:*",
+        "react": "^18",
+      },
+      "devDependencies": {
+        "@glyx-dev/config": "workspace:*",
+      },
+    },
     "examples/tasks": {
       "name": "tasks",
       "version": "0.1.0",
@@ -119,7 +131,7 @@
       "name": "@glyx-dev/charts",
       "version": "0.1.0",
       "peerDependencies": {
-        "@glyx-dev/react": "0.1.0",
+        "@glyx-dev/react": "^0.1.0",
         "react": "^18.2.0",
       },
     },
@@ -339,6 +351,8 @@
     "react-dom": ["react-dom@18.3.1", "", { "dependencies": { "loose-envify": "^1.1.0", "scheduler": "^0.23.2" }, "peerDependencies": { "react": "^18.3.1" } }, "sha512-5m4nQKp+rZRb09LNH59GM4BxTh9251/ylbKIbpe7TpGxfJ+9kv6BLkLBXIjjspbgbnIBNqlI23tRnTWT0snUIw=="],
 
     "react-reconciler": ["react-reconciler@0.29.2", "", { "dependencies": { "loose-envify": "^1.1.0", "scheduler": "^0.23.2" }, "peerDependencies": { "react": "^18.3.1" } }, "sha512-zZQqIiYgDCTP/f1N/mAR10nJGrPD2ZR+jDSEsKWJHYC7Cm2wodlwbR3upZRdC3cjIjSlTLNVyO7Iu0Yy7t2AYg=="],
+
+    "realtime-chart": ["realtime-chart@workspace:examples/realtime-chart"],
 
     "scheduler": ["scheduler@0.23.2", "", { "dependencies": { "loose-envify": "^1.1.0" } }, "sha512-UOShsPwz7NrMUqhR6t0hWjFduvOzbtv7toDH1/hIrfRNIDBnnBWd0CwJTGvTpngVlmwGCdP9/Zl/tVrDqcuYzQ=="],
 

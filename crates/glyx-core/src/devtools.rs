@@ -1028,7 +1028,7 @@ impl Devtools {
                 for s in windows.values_mut() {
                     s.motion_clock.seek_by(by);
                     // Paused animations don't request frames: draw the new moment.
-                    for id in s.transitions.keys().chain(s.animations.keys()).copied().collect::<Vec<_>>() { s.dirty_nodes.insert(id); }
+                    for id in s.transitions.keys().chain(s.animations.keys()).chain(s.canvas_tweens.keys()).chain(s.scroll_springs.keys()).copied().collect::<Vec<_>>() { s.dirty_nodes.insert(id); }
                     s.window.request_redraw();
                 }
                 Ok(json!({ "byMs": by }))
@@ -1126,7 +1126,11 @@ impl Devtools {
                     };
                     events.push(ShellEvent::CursorMoved { window_handle: win, x, y });
                 }
-                events.push(ShellEvent::Scroll { window_handle: win, delta_y: dy as f32 });
+                // Injected input applies instantly so inspection is deterministic,
+                // unless the caller passes `smooth: true` to exercise the same
+                // eased path a real mouse wheel takes.
+                let smooth = p.get("smooth").and_then(Value::as_bool).unwrap_or(false);
+                events.push(ShellEvent::Scroll { window_handle: win, delta_y: dy as f32, precise: !smooth });
                 self.inject(events);
                 Ok(json!({}))
             })().into(),
@@ -1348,7 +1352,7 @@ pub(crate) fn raw_input(win: u32, p: &Value) -> Result<ShellEvent, ErrorBody> {
         Some("pointerUp") => Ok(ShellEvent::MouseInput { window_handle: win, button: button()?, pressed: false }),
         Some("scroll") => {
             let dy = p.get("deltaY").and_then(Value::as_f64).ok_or_else(|| ErrorBody::invalid_params("deltaY is required"))?;
-            Ok(ShellEvent::Scroll { window_handle: win, delta_y: dy as f32 })
+            Ok(ShellEvent::Scroll { window_handle: win, delta_y: dy as f32, precise: true })
         }
         Some(t @ ("keyDown" | "keyUp")) => {
             let key = s("key").ok_or_else(|| ErrorBody::invalid_params("key is required"))?;

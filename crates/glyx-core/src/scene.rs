@@ -273,6 +273,132 @@ pub(crate) fn tick_transitions(state: &mut PerWindowState) -> bool {
     running || !state.transitions.is_empty()
 }
 
+/// Frames after a precision-device (touchpad) scroll event in which scroll
+/// updates apply instantly: the frame whose JS handles the event, one more for
+/// React to commit the new offset, and one of slack.
+pub(crate) const PRECISE_SCROLL_FRAMES: u8 = 3;
+
+/// A ScrollView's new `scrollOffsetY` becomes a spring target instead of a
+/// jump. `props.scroll_offset_y` is rewritten to the offset to *display* now,
+/// so everything downstream (render, hit-testing, damage, the scrollbar thumb)
+/// keeps reading one field and needs no idea a spring exists. Snaps when the
+/// scrollbar thumb is being dragged (it must track the pointer 1:1), when the
+/// input is from a touchpad, or while devtools has the motion clock paused.
+fn sync_scroll(state: &mut PerWindowState, id: u32, props: &mut NodeProps) {
+    if props.smooth_scroll != Some(true) {
+        state.scroll_springs.remove(&id);
+        return;
+    }
+    let Some(node) = state.js_nodes.get(&id) else { return };
+    let target = props.scroll_offset_y.unwrap_or(0.0) as f64;
+
+    if let Some(sp) = state.scroll_springs.get_mut(&id) {
+        if sp.target == target {
+            // Same target re-sent by an unrelated re-render: keep easing.
+            props.scroll_offset_y = Some(sp.pos as f32);
+            return;
+        }
+    }
+
+    let shown = state.scroll_springs.get(&id).map_or(node.props.scroll_offset_y.unwrap_or(0.0) as f64, |s| s.pos);
+    let dragging = state.scrollbar_drag.as_ref().map_or(false, |d| d.node_id == id);
+    let precise  = state.precise_scroll_frames > 0;
+    if dragging || precise || state.motion_clock.paused() || (shown - target).abs() < 0.5 {
+        state.scroll_springs.remove(&id);
+        return;
+    }
+
+    let now = state.motion_clock.now();
+    let sp = state.scroll_springs.entry(id).or_insert_with(|| motion::ScrollSpring::new(shown, target, now));
+    sp.retarget(target);
+    props.scroll_offset_y = Some(sp.pos as f32);
+    (state.request_redraw)();
+}
+
+/// Advance every smooth-scroll spring one frame, writing the displayed offset
+/// into the node and marking it (and, since leaf scenes bake in absolute
+/// y-positions, its descendants) dirty. `true` while any spring still moves.
+pub(crate) fn tick_scroll(state: &mut PerWindowState) -> bool {
+    if state.scroll_springs.is_empty() || state.motion_clock.paused() { return false; }
+    let now = state.motion_clock.now();
+    let (nodes, dirty, cascade) = (&mut state.js_nodes, &mut state.dirty_nodes, &mut state.descendant_cascade_nodes);
+    let mut running = false;
+    state.scroll_springs.retain(|&id, sp| {
+        let Some(node) = nodes.get_mut(&id) else { return false };
+        let moving = sp.step(now);
+        node.props.scroll_offset_y = Some(sp.pos as f32);
+        dirty.insert(id);
+        cascade.insert(id);
+        running |= moving;
+        moving
+    });
+    running
+}
+
+/// A canvas with a `transition` prop eases from what it was showing to its new
+/// command list instead of jumping (called with the new list, before it
+/// replaces `canvas_cmds[id]`, the previous target). JS draws the final state
+/// once per update; the frame loop moves the drawn commands toward it.
+///
+/// Nothing eases when the canvas was resized (it would trail the window) or on
+/// its first draw: those just replace. Otherwise the two lists are lined up
+/// (see `motion::CanvasTween::between`): what pairs eases, the rest appears or
+/// disappears at once.
+fn sync_canvas_tween(state: &mut PerWindowState, id: u32, to: &[CanvasCmd]) {
+    let Some(node) = state.js_nodes.get(&id) else { return };
+    let px = |v: &Option<LengthValue>| match v { Some(LengthValue::Px(p)) => Some(*p), _ => None };
+    let size = (px(&node.props.width), px(&node.props.height));
+    let pace = motion::Pace::from_props(&node.props);
+    let resized = state.canvas_size.insert(id, size).map_or(false, |prev| prev != size);
+
+    // How often this canvas is being redrawn: a running average of the gap
+    // between redraws. A long pause starts it over (the next gap is the new
+    // average), so one stray update after a quiet minute isn't a cadence.
+    let now = state.motion_clock.now();
+    // (A negative stored average means "none yet": there was no previous draw.)
+    let cadence = match state.canvas_cadence.get(&id) {
+        Some(&(last, avg)) => {
+            let gap = now.saturating_duration_since(last).as_secs_f64() * 1000.0;
+            Some(if avg < 0.0 || gap > 2000.0 { gap } else { avg * 0.6 + gap * 0.4 })
+        }
+        None => None,
+    };
+    state.canvas_cadence.insert(id, (now, cadence.unwrap_or(-1.0)));
+
+    let (Some(pace), false, Some(prev_to)) = (pace, resized, state.canvas_cmds.get(&id)) else {
+        state.canvas_tweens.remove(&id);
+        return;
+    };
+    let pace = motion::adapt_pace(pace, cadence);
+    // From what is on screen now, mid-flight included.
+    let old  = state.canvas_tweens.get(&id);
+    let from = match old { Some(t) => t.sample(prev_to, now).0, None => prev_to.clone() };
+    match motion::CanvasTween::between(from, to, pace, now) {
+        Some(mut t) => {
+            if let Some(old) = old { t.inherit_velocity(to, old, prev_to, now); }
+            state.canvas_tweens.insert(id, t);
+            (state.request_redraw)();
+        }
+        None => { state.canvas_tweens.remove(&id); }
+    }
+}
+
+/// Advance every canvas tween one frame, marking its node dirty so it redraws
+/// (the commands change with no new `CanvasUpdate` behind them), and dropping
+/// the ones that have arrived. `true` while any is still moving.
+pub(crate) fn tick_canvas(state: &mut PerWindowState) -> bool {
+    if state.canvas_tweens.is_empty() || state.motion_clock.paused() { return false; }
+    let now = state.motion_clock.now();
+    let (cmds, dirty) = (&state.canvas_cmds, &mut state.dirty_nodes);
+    state.canvas_tweens.retain(|&id, t| {
+        let Some(to) = cmds.get(&id) else { return false };
+        let done = t.sample(to, now).1;
+        dirty.insert(id);
+        !done
+    });
+    !state.canvas_tweens.is_empty()
+}
+
 /// Start, restart or stop node `id`'s keyframe animation to match `props`.
 /// Re-sent identical props (every React re-render) leave a running
 /// animation alone; a changed spec restarts it from the beginning.
@@ -400,7 +526,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 layout_changed   = true;
                 structure_changed = true;
             }
-            SceneCommand::UpdateNode { id, props } => {
+            SceneCommand::UpdateNode { id, mut props } => {
                 // Check layout-prop changes before mutating — need old props for comparison.
                 // Also detect prop changes that must cascade dirty state to all descendants:
                 //   • opacity  — child_opacity is a running product; parent change affects leaves
@@ -429,7 +555,10 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 // (or retargets) a Rust-owned interpolation instead of snapping.
                 // `from` is what's on screen NOW — mid-flight values included —
                 // read before the old props are overwritten below.
-                if let (Some(old), Some(ms)) = (state.js_nodes.get(&id), props.transition_ms) {
+                // A spring needs no duration (it settles when it settles); the
+                // `1` only satisfies `between`, which `into_spring` then replaces.
+                let spring = motion::Spring::from_props(&props);
+                if let (Some(old), Some(ms)) = (state.js_nodes.get(&id), props.transition_ms.or(spring.map(|_| 1))) {
                     let (old_v, new_v) = (motion::Visual::of(&old.props), motion::Visual::of(&props));
                     // Unrelated updates (text, layout, …) leave a running
                     // transition alone — restarting its clock would stall it.
@@ -442,7 +571,18 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         let mask   = motion::property_mask(props.transition_property.as_deref());
                         let easing = motion::Easing::parse(props.transition_easing.as_deref());
                         match motion::Transition::between(&from, &new_v, mask, ms, easing, now) {
-                            Some(t) => { state.transitions.insert(id, t); }
+                            Some(t) => {
+                                let t = match spring {
+                                    Some(sp) => {
+                                        // Interrupting a running spring keeps its momentum.
+                                        let mut t = t.into_spring(sp);
+                                        if let Some(prev) = state.transitions.get(&id) { t.inherit_velocity(prev, now); }
+                                        t
+                                    }
+                                    None => t,
+                                };
+                                state.transitions.insert(id, t);
+                            }
                             // Only non-transitioned properties changed: they snap.
                             None    => { state.transitions.remove(&id); }
                         }
@@ -462,6 +602,9 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         }
                     }
                 }
+
+                // Smooth scrolling: swap JS's scroll target for the offset to show now.
+                sync_scroll(state, id, &mut props);
 
                 if let Some(node) = state.js_nodes.get_mut(&id) {
                     node.props = props.clone();
@@ -521,6 +664,11 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 state.canvas_cmds.remove(&id);
                 state.transitions.remove(&id);
                 state.animations.remove(&id);
+                state.scroll_springs.remove(&id);
+                state.canvas_tweens.remove(&id);
+                state.canvas_size.remove(&id);
+                state.canvas_cadence.remove(&id);
+                state.canvas_drawn.remove(&id);
                 #[cfg(feature = "canvas3d")]
                 {
                     state.canvas3d_scenes.remove(&id);
@@ -652,8 +800,11 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
             SceneCommand::CanvasUpdate { id, cmds, append } => {
                 if append {
                     // Overflow continuation: extend the existing command list.
+                    // The frame is still being assembled, so nothing eases.
                     state.canvas_cmds.entry(id).or_default().extend(cmds);
+                    state.canvas_tweens.remove(&id);
                 } else {
+                    sync_canvas_tween(state, id, &cmds);
                     state.canvas_cmds.insert(id, cmds);
                 }
                 state.dirty_nodes.insert(id);
@@ -1250,8 +1401,9 @@ pub(crate) fn update_dirty_from_layout(state: &mut PerWindowState) -> bool {
 /// as the damage contribution — its own rect is absolute-correct and clips
 /// its content, so it bounds the node's old and new visual positions.
 pub(crate) fn compute_frame_damage(
-    state:     &PerWindowState,
-    overrides: &std::collections::HashMap<u32, crate::motion::Overrides>,
+    state:         &PerWindowState,
+    overrides:     &std::collections::HashMap<u32, crate::motion::Overrides>,
+    canvas_damage: &std::collections::HashMap<u32, [f64; 4]>,
 ) -> Option<(f64, f64, f64, f64)> {
     if state.dirty_nodes.is_empty() {
         return None;
@@ -1280,6 +1432,20 @@ pub(crate) fn compute_frame_damage(
 
     for &id in &state.dirty_nodes {
         if !state.js_nodes.contains_key(&id) { return None; }
+
+        // A canvas that changed only in part damages just that part (see
+        // `canvas_damage`) — but only while it is where it was, unscrolled and
+        // untransformed; anything else repaints the whole node as before.
+        if let Some(local) = canvas_damage.get(&id) {
+            let prev = state.prev_resolved.get(&id).map(|p| (p.x as f64, p.y as f64, p.width as f64, p.height as f64));
+            let scrolled = outermost_scrolled_ancestor(&state.js_nodes, id).is_some();
+            if let (Some(rect), Some((bl, bt, br, bb))) = (rect_of(id), visual_bounds(&state.js_nodes, &rect_of, overrides, id)) {
+                if let Some((x, y, w, h)) = crate::canvas_damage::partial_rect(rect, (bl, bt, br, bb), prev, scrolled, *local) {
+                    add(&mut ltrb, x, y, w, h);
+                    continue;
+                }
+            }
+        }
 
         // Outermost scrolled ancestor bounds this node's visual position.
         // Walks the persistent `parent` pointers maintained by

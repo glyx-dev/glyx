@@ -336,6 +336,10 @@ pub(super) fn handle_dev_build_events(state: &mut PerWindowState) {
                 state.layout = glyx_layout::LayoutTree::new();
                 state.runtime.layout_cache().lock().clear();
                 state.canvas_cmds.clear();
+                state.canvas_tweens.clear();
+                state.canvas_size.clear();
+                state.canvas_cadence.clear();
+                state.canvas_drawn.clear();
                 #[cfg(feature = "canvas3d")]
                 state.canvas3d_scenes.clear();
                 #[cfg(feature = "canvas3d")]

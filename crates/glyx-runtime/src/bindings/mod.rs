@@ -1096,6 +1096,12 @@ pub struct NodeProps {
     /// CSS easing: `linear`, `ease`, `ease-in`, `ease-out`, `ease-in-out` or
     /// `cubic-bezier(x1,y1,x2,y2)`. `None` → ease-out cubic.
     pub transition_easing: Option<String>,
+    /// Spring transition: stiffness / damping (mass 1). Setting either makes
+    /// the transition a spring (missing one takes its default) that keeps its
+    /// velocity when retargeted; `transition_ms` and `transition_easing` are
+    /// then ignored. `None` for both → a timed, eased transition.
+    pub transition_stiffness: Option<f32>,
+    pub transition_damping: Option<f32>,
     /// `@glyx-dev/motion` keyframe animation: JSON `[[offset, {props}], ...]`
     /// with offsets in 0..=1 (built by `@glyx-dev/react` from the
     /// `animation` prop). Animatable props as for transitions.
@@ -1145,9 +1151,13 @@ pub struct NodeProps {
     pub scrollbar_color: Option<String>,
     /// When false, the scrollbar is hidden entirely (default true).
     pub show_scrollbar: Option<bool>,
+    /// `Some(true)`: Rust eases the displayed `scroll_offset_y` toward each new
+    /// value instead of jumping. Set by `ScrollView` (opt out with
+    /// `smoothScroll={false}`); other scrolling nodes snap as before.
+    pub smooth_scroll: Option<bool>,
 }
 
-//  Canvas 2D draw commands 
+//  Canvas 2D draw commands
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -2455,6 +2465,8 @@ fn parse_props(
     props.transition_ms       = get_num_prop(scope, obj, "transitionMs").map(|n| n as u32);
     props.transition_property = get_str_prop(scope, obj, "transitionProperty");
     props.transition_easing   = get_str_prop(scope, obj, "transitionEasing");
+    props.transition_stiffness = get_num_prop(scope, obj, "transitionStiffness");
+    props.transition_damping   = get_num_prop(scope, obj, "transitionDamping");
     props.animation_keyframes  = get_str_prop(scope, obj, "animationKeyframes");
     props.animation_ms         = get_num_prop(scope, obj, "animationMs").map(|n| n as u32);
     props.animation_easing     = get_str_prop(scope, obj, "animationEasing");
@@ -2477,6 +2489,7 @@ fn parse_props(
     props.scrollbar_width  = get_num_prop(scope, obj, "scrollbarWidth");
     props.scrollbar_color  = get_str_prop(scope, obj, "scrollbarColor");
     props.show_scrollbar   = get_bool_prop(scope, obj, "showScrollbar");
+    props.smooth_scroll    = get_bool_prop(scope, obj, "smoothScroll");
 
     props
 }

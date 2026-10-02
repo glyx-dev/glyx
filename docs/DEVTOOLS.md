@@ -113,7 +113,7 @@ between them.
 | `click` | An element (by `id`, `testID`, `nodeId` or visible `text`) or a point. |
 | `type` / `press` / `scroll` | Keyboard and wheel input (`type` can click an element first). |
 | `wait_for` | Until an element exists, is visible, or is gone. |
-| `screenshot` | A PNG of the window or an element (CPU renderer, see [Limitations](#limitations)). |
+| `screenshot` | A PNG of the window or an element. |
 | `evaluate` | Run JavaScript in the app. |
 | `console` | Recent console output. |
 | `capabilities` | The app's capability report (see `Runtime.getCapabilities`). |
@@ -314,7 +314,7 @@ Input goes through the app's event loop into the same handlers as real input.
 | `press` | `key` (`Enter`, `Backspace`, `ArrowLeft`, `KeyS`, …), `modifiers?` (`Control`, `Shift`, `Alt`, `Super`) | Presses a key, with modifiers held around it. |
 | `scroll` | `deltaY` (negative scrolls down), element or `x` + `y`? | Moves the pointer there first when given, then scrolls. |
 | `dispatchInput` | `type`: `pointerMove` (`x`, `y`) · `pointerDown` / `pointerUp` (`button?`) · `scroll` (`deltaY`) · `keyDown` / `keyUp` (`key`, `text?`) | One raw event. |
-| `screenshot` | element? | `{ format: "png", width, height, data }` (base64): the window, or cropped to the element. CPU renderer only for now, see [Limitations](#limitations). |
+| `screenshot` | element? | `{ format: "png", width, height, data }` (base64): the window, or cropped to the element. Works on any renderer (CPU, wgpu, Direct2D; the last falls back, see [Limitations](#limitations)). |
 | `waitFor` | element or content fields, `condition?` (`exists`, the default · `visible` · `gone`), `timeoutMs?` (default 5000, max 60000) | Replies when the condition holds: `{ nodeIds }`. Error `-32005` on timeout. With `id`, the ID is looked up again on every check, so it works for elements that don't exist yet. |
 
 ### Performance
@@ -491,12 +491,13 @@ cached until the tree's structure changes:
 
 ## Limitations
 
-- **Screenshots need the CPU renderer**: start the app with
-  `GLYX_CPU_RENDER=1`. On a GPU renderer `Automation.screenshot` returns
-  `-32006` with the renderer's name and the restart command in the message,
-  and the same as data: `{ reason: "rendererNotSupported", renderer, fix: {
-  env, restart, command, powershell } }`. Reading frames back from the GPU is
-  planned.
+- **Screenshots on Direct2D need the CPU renderer**: start the app with
+  `GLYX_CPU_RENDER=1`. CPU and wgpu renderers (Vello, FemtoVG, TinySkia)
+  read the frame back directly — no restart needed. On Direct2D,
+  `Automation.screenshot` returns `-32006` with the renderer's name and the
+  restart command in the message, and the same as data:
+  `{ reason: "rendererNotSupported", renderer, fix: { env, restart, command,
+  powershell } }`.
 - **The accessibility tree needs the `a11y` feature** in the app's build.
 - **`component` names include `@file:line`** only when the bundle is built with
   development JSX (React's `_debugSource`). The examples aren't.

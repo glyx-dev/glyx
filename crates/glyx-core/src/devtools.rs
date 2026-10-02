@@ -83,6 +83,20 @@ struct Wait {
     deadline: Instant,
 }
 
+/// A `Automation.screenshot` on a wgpu-presented window, waiting for the
+/// render loop to capture a frame (see `PerWindowState::gpu_screenshot`).
+struct PendingScreenshot {
+    conn: ConnId,
+    id: Value,
+    window: u32,
+    crop: Option<[f32; 4]>,
+    deadline: Instant,
+}
+
+/// How long a GPU screenshot can take to capture before giving up — only
+/// hit if the window is minimized/occluded and stops rendering frames.
+const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The name the app bundle is evaluated under while devtools is on, so
 /// profiles can tell its frames from console snippets.
 pub(crate) const BUNDLE_URL: &str = "glyx://app/bundle.js";
@@ -139,9 +153,12 @@ fn bundle_source_map() -> Option<Value> {
     Some(map)
 }
 
-/// `Automation.screenshot` on a GPU renderer: say exactly how to get one.
-/// (Reading frames back from the GPU is planned; today only the CPU
-/// renderer keeps the last frame in memory.)
+/// `Automation.screenshot` when it can't read the frame back: say exactly
+/// how to get one. The wgpu path (`Present::Gpu`) usually reads the
+/// swapchain back directly (`GpuContext::read_texture_rgba`); this only
+/// fires when that surface didn't advertise `COPY_SRC` (checked via
+/// `supports_readback()`), or on Direct2D, which has no wgpu swapchain to
+/// read at all.
 fn screenshot_unsupported(present: &Present) -> ErrorBody {
     screenshot_error(match present {
         Present::Gpu(_) => "gpu",
@@ -212,6 +229,9 @@ pub(crate) struct Devtools {
     /// input takes.
     proxy: Mutex<EventLoopProxy<GlyxUserEvent>>,
     waits: Vec<Wait>,
+    /// `Automation.screenshot` on a wgpu-presented window, waiting for the
+    /// render loop to fill `PerWindowState::gpu_screenshot`.
+    screenshots: Vec<PendingScreenshot>,
     /// Clients that sent `Inspector.enableDamage`.
     damage: HashSet<ConnId>,
     /// Clients that sent `Performance.enableFrames`, and the last frame
@@ -296,7 +316,7 @@ impl Devtools {
             backlog: std::collections::VecDeque::new(), log_seq: 0,
             network: HashSet::new(), net_rx: Some(glyx_runtime::net_bus::subscribe()), net: Default::default(),
             profiling: None,
-            proxy: Mutex::new(proxy), waits: Vec::new(), damage: HashSet::new(),
+            proxy: Mutex::new(proxy), waits: Vec::new(), screenshots: Vec::new(), damage: HashSet::new(),
             frames: HashSet::new(), frames_sent: HashMap::new(),
             anim: HashSet::new(), anim_prev: HashMap::new(),
             inspecting: HashSet::new(), highlight_owner: None,
@@ -327,6 +347,7 @@ impl Devtools {
             self.anim.remove(&conn);
             self.tree_subs.remove(&conn);
             self.waits.retain(|w| w.conn != conn);
+            self.screenshots.retain(|w| w.conn != conn);
             if self.inspecting.remove(&conn) && self.inspecting.is_empty() {
                 set_inspect_mode(windows, false);
             }
@@ -384,6 +405,7 @@ impl Devtools {
             }
         }
         self.settle_waits(windows);
+        self.settle_screenshots(windows);
         self.forward_damage(windows);
         self.forward_frames(windows);
         self.forward_motion(windows);
@@ -462,6 +484,50 @@ impl Devtools {
             true
         });
         if !self.waits.is_empty() && !self.tick_scheduled.swap(true, Ordering::AcqRel) {
+            let flag = Arc::clone(&self.tick_scheduled);
+            let proxy = self.proxy.lock().clone();
+            self.tokio.spawn(async move {
+                tokio::time::sleep(WAIT_POLL).await;
+                flag.store(false, Ordering::Release);
+                let _ = proxy.send_event(GlyxUserEvent::Wake);
+            });
+        }
+    }
+
+    /// Answer every pending `Automation.screenshot` whose capture has
+    /// landed in `PerWindowState::gpu_screenshot`, or that's timed out —
+    /// the window stopped rendering frames (minimized/occluded).
+    fn settle_screenshots(&mut self, windows: &mut HashMap<u32, PerWindowState>) {
+        if self.screenshots.is_empty() { return; }
+        let now = Instant::now();
+        let server = &self.server;
+        self.screenshots.retain(|req| {
+            let Some(s) = windows.get_mut(&req.window) else {
+                server.respond(req.conn, &req.id, Err(ErrorBody::new(codes::NO_SUCH_WINDOW, "the window closed")));
+                return false;
+            };
+            let ready = s.gpu_screenshot.as_mut().and_then(|slot| slot.result.take());
+            if let Some((w, h, px)) = ready {
+                s.gpu_screenshot = None;
+                let result = inspect::png(w, h, &px, req.crop).map_err(ErrorBody::invalid_params).map(|(cw, ch, png)| json!({
+                    "format": "png",
+                    "width": cw,
+                    "height": ch,
+                    "data": base64::engine::general_purpose::STANDARD.encode(png),
+                }));
+                server.respond(req.conn, &req.id, result);
+                return false;
+            }
+            if now >= req.deadline {
+                s.gpu_screenshot = None;
+                server.respond(req.conn, &req.id, Err(ErrorBody::new(codes::TIMEOUT,
+                    "no frame rendered in time to capture — is the window minimized or occluded?")));
+                return false;
+            }
+            (s.request_redraw)();
+            true
+        });
+        if !self.screenshots.is_empty() && !self.tick_scheduled.swap(true, Ordering::AcqRel) {
             let flag = Arc::clone(&self.tick_scheduled);
             let proxy = self.proxy.lock().clone();
             self.tokio.spawn(async move {
@@ -1070,26 +1136,52 @@ impl Devtools {
                 self.inject(vec![ev]);
                 Ok(json!({}))
             })().into(),
-            ("Automation", "screenshot") => (|| {
-                let s = window(req, windows)?;
-                let crop = match p.get("nodeId").or(p.get("testID")) {
-                    Some(_) => Some(inspect::rect(s, resolve_target(s, p)?)
-                        .ok_or_else(|| ErrorBody::invalid_params("node has no rect"))?),
-                    None => None,
-                };
-                let Present::Soft(sp) = &s.gpu else {
-                    return Err(screenshot_unsupported(&s.gpu));
-                };
-                let (w, h, px) = sp.last_frame()
-                    .ok_or_else(|| ErrorBody::new(codes::UNSUPPORTED, "no frame presented yet"))?;
-                let (cw, ch, png) = inspect::png(w, h, px, crop).map_err(ErrorBody::invalid_params)?;
-                Ok(json!({
-                    "format": "png",
-                    "width": cw,
-                    "height": ch,
-                    "data": base64::engine::general_purpose::STANDARD.encode(png),
-                }))
-            })().into(),
+            ("Automation", "screenshot") => {
+                let prepared = (|| {
+                    let win = target_window(req.window_id, windows)?;
+                    let s = &windows[&win];
+                    let crop = match p.get("nodeId").or(p.get("testID")) {
+                        Some(_) => Some(inspect::rect(s, resolve_target(s, p)?)
+                            .ok_or_else(|| ErrorBody::invalid_params("node has no rect"))?),
+                        None => None,
+                    };
+                    Ok((win, crop))
+                })();
+                match prepared {
+                    Err(e) => Reply::Now(Err(e)),
+                    Ok((win, crop)) => {
+                        let s = windows.get_mut(&win).expect("target_window checked it");
+                        match &s.gpu {
+                            Present::Soft(sp) => Reply::Now((|| {
+                                let (w, h, px) = sp.last_frame()
+                                    .ok_or_else(|| ErrorBody::new(codes::UNSUPPORTED, "no frame presented yet"))?;
+                                let (cw, ch, png) = inspect::png(w, h, px, crop).map_err(ErrorBody::invalid_params)?;
+                                Ok(json!({
+                                    "format": "png",
+                                    "width": cw,
+                                    "height": ch,
+                                    "data": base64::engine::general_purpose::STANDARD.encode(png),
+                                }))
+                            })()),
+                            Present::Gpu(gpu) if gpu.supports_readback() => {
+                                // Captured by the render loop right before the next
+                                // present (see PerWindowState::gpu_screenshot);
+                                // settle_screenshots() answers once it lands.
+                                s.gpu_screenshot.get_or_insert_with(Default::default);
+                                (s.request_redraw)();
+                                self.screenshots.push(PendingScreenshot {
+                                    conn, id: req.id.clone(), window: win, crop,
+                                    deadline: Instant::now() + SCREENSHOT_TIMEOUT,
+                                });
+                                Reply::Later
+                            }
+                            Present::Gpu(_) => Reply::Now(Err(screenshot_unsupported(&s.gpu))),
+                            #[cfg(target_os = "windows")]
+                            Present::Direct2D(_) => Reply::Now(Err(screenshot_unsupported(&s.gpu))),
+                        }
+                    }
+                }
+            }
             ("Automation", "waitFor") => {
                 let prepared = (|| {
                     let win = target_window(req.window_id, windows)?;

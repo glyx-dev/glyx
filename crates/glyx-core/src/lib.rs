@@ -521,6 +521,21 @@ fn composite_splash_frame(
 /// Returns `true` if any descendant of `id` with `pressable=true` covers (cx, cy).
 /// Used by the drag check to yield window-drag priority to interactive children
 /// inside a `glyxDraggable` region (e.g. buttons inside a custom title bar).
+/// Fill `slot` with the just-rendered `texture`'s pixels, once, if a
+/// screenshot was requested (`slot.result` still empty). Call right before
+/// `texture.present()` on every wgpu present path — see `PerWindowState::gpu_screenshot`.
+#[cfg(feature = "dev")]
+fn capture_gpu_screenshot(
+    slot: &mut Option<GpuScreenshotSlot>,
+    gpu: &GpuContext,
+    texture: &glyx_gpu::wgpu::SurfaceTexture,
+) {
+    let Some(slot) = slot.as_mut() else { return };
+    if slot.result.is_some() { return; }
+    let (w, h) = (texture.texture.width(), texture.texture.height());
+    slot.result = Some((w, h, gpu.read_texture_rgba(&texture.texture, w, h)));
+}
+
 fn has_pressable_descendant_at(
     id:     u32,
     cx:     f32,
@@ -1618,6 +1633,8 @@ pub fn run(mut config: AppConfig) -> bool {
                     #[cfg(feature = "dev")]
                     frame_details: None,
                     #[cfg(feature = "dev")]
+                    gpu_screenshot: None,
+                    #[cfg(feature = "dev")]
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
                         start_dev_mode_worker(
@@ -2386,6 +2403,8 @@ pub fn run(mut config: AppConfig) -> bool {
                             if let Err(e) = s.renderer.blit_cached_frame(gpu, &texture) {
                                 log::warn!("blit_cached_frame: {e}");
                             } else {
+                                #[cfg(feature = "dev")]
+                                capture_gpu_screenshot(&mut s.gpu_screenshot, gpu, &texture);
                                 texture.present();
                                 gpu.poll();
                             }
@@ -2992,6 +3011,8 @@ pub fn run(mut config: AppConfig) -> bool {
                             }
                         }
 
+                        #[cfg(feature = "dev")]
+                        capture_gpu_screenshot(&mut s.gpu_screenshot, gpu, &texture);
                         let t = Instant::now();
                         texture.present();
                         present_ms = t.elapsed().as_secs_f64() * 1000.0;

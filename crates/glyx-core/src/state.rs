@@ -462,6 +462,20 @@ pub(super) struct PerWindowState {
     /// streams frames with detail (`Performance.enableFrames { detail }`).
     #[cfg(feature = "dev")]
     pub(super) frame_details: Option<std::collections::VecDeque<FrameDetail>>,
+    /// `Automation.screenshot` on a wgpu-presented window: set while a
+    /// capture is wanted, filled with the swapchain texture's pixels (0RGB,
+    /// same layout as `SoftPresent::last_frame`) by the render loop right
+    /// before `present()`, just once, then read and cleared by the devtools
+    /// pump. `None` the rest of the time — costs nothing when not screenshotting.
+    #[cfg(feature = "dev")]
+    pub(super) gpu_screenshot: Option<GpuScreenshotSlot>,
+}
+
+/// See `PerWindowState::gpu_screenshot`.
+#[cfg(feature = "dev")]
+#[derive(Default)]
+pub(super) struct GpuScreenshotSlot {
+    pub(super) result: Option<(u32, u32, Vec<u32>)>,
 }
 
 impl PerWindowState {

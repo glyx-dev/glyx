@@ -1136,6 +1136,9 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let f = Function::new(ctx.clone(), move || crate::quickjs_sys::deeplink_poll(Arc::clone(&dl)))?;
         globals.set("__glyx_deeplink_poll", f)?;
     }
+    globals.set("__glyx_autostart_isEnabled", Function::new(ctx.clone(), crate::quickjs_sys::autostart_is_enabled)?)?;
+    globals.set("__glyx_autostart_setEnabled", Function::new(ctx.clone(), crate::quickjs_sys::autostart_set_enabled)?)?;
+    globals.set("__glyx_autostart_wasOpenedAtLogin", Function::new(ctx.clone(), crate::quickjs_sys::autostart_was_opened_at_login)?)?;
     {
         let perf = Arc::clone(&reg.perf_state);
         let f = Function::new(ctx.clone(), move || crate::quickjs_sys::perf_snapshot(&perf))?;
@@ -2416,6 +2419,7 @@ mod tests {
             "__glyx_system_getInfo", "__glyx_system_getDarkMode", "__glyx_system_getBatterySaver",
             "__glyx_storage_getDrives", "__glyx_credentials_set", "__glyx_credentials_get",
             "__glyx_credentials_delete", "__glyx_deeplink_getInitialUrl", "__glyx_deeplink_poll",
+            "__glyx_autostart_isEnabled", "__glyx_autostart_setEnabled", "__glyx_autostart_wasOpenedAtLogin",
             "__glyx_perf_snapshot", "__glyx_perf_set_budget", "__glyx_perf_poll_violations",
             "__glyx_perf_poll_leak_warnings", "__glyx_quit", "__glyx_window_close", "__glyx_restart",
             "__glyx_platform", "__glyx_getEnv", "__glyx_collect_memory", "__glyx_open_external",

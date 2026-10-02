@@ -168,6 +168,10 @@
           "type": "boolean",
           "description": "Create system tray icons with menus."
         },
+        "autostart": {
+          "type": "boolean",
+          "description": "Launch the app at login (autostart.enable/disable/isEnabled)."
+        },
         "crash": {
           "type": "boolean",
           "description": "Crash reporting — collect JS and Rust panics to ~/.glyx/crashes/."

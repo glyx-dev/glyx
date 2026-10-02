@@ -132,6 +132,9 @@ globalThis.__glyx_open_external    = function() {};
 // Deep link bindings
 globalThis.__glyx_deeplink_getInitialUrl = function() { return ''; };
 globalThis.__glyx_deeplink_poll          = function() { return '[]'; };
+globalThis.__glyx_autostart_isEnabled        = function() { return false; };
+globalThis.__glyx_autostart_setEnabled       = function() { return false; };
+globalThis.__glyx_autostart_wasOpenedAtLogin = function() { return false; };
 
 // OS system API bindings
 globalThis.__glyx_battery_getStatus      = function() { return stubPromise('null'); };

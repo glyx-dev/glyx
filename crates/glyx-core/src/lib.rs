@@ -856,6 +856,13 @@ pub fn run(mut config: AppConfig) -> bool {
         glyx_security::init(caps);
     }
 
+    // ── Autostart: tell the app it was started at login, not by hand ──
+    if glyx_runtime::autostart::was_opened_at_login() {
+        #[allow(unused_unsafe)]
+        unsafe { std::env::set_var("GLYX_OPENED_AT_LOGIN", "1"); }
+        log::info!("glyx: started at login ({} on the command line)", glyx_runtime::autostart::AUTOSTART_ARG);
+    }
+
     // ── Deep link: check launch args for a URL matching the configured scheme ──
     //
     // M4: Single-instance deep-link IPC via named pipe (Windows) or Unix socket

@@ -21,7 +21,8 @@ const APIS: &[(&str, &str)] = &[
     ("credentials", "credentials"), ("audio", "audio"), ("ai", "ai"), ("camera", "camera"),
     ("microphone", "microphone"), ("hid", "hid"), ("updater", "updater"), ("video", "video"),
     ("Video", "video"), ("webview", "webview"), ("WebView", "webview"), ("deeplink", "deeplink"),
-    ("crash", "crash"), ("useGamepad", "gamepads"), ("useGamepads", "gamepads"),
+    ("crash", "crash"), ("autostart", "autostart"),
+    ("useGamepad", "gamepads"), ("useGamepads", "gamepads"),
     ("useGlobalShortcut", "globalShortcuts"), ("globalShortcut", "globalShortcuts"),
 ];
 

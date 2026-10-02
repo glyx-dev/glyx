@@ -139,6 +139,7 @@ pub fn window_registry_find_and_focus(key: &str) -> Option<u32> {
 // make_promise, etc.). See PromiseHandle's doc comment for why the queue
 // types are already engine-neutral; a QuickJS backend will need its own
 // registration glue but reuses the same data model unchanged.
+pub mod autostart;
 pub mod bindings;
 pub mod cap_loader;
 #[cfg(feature = "v8")]

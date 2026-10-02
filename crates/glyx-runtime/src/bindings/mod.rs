@@ -1782,6 +1782,9 @@ pub fn register_all(
     //  Deep links 
     register!("__glyx_deeplink_getInitialUrl", deeplink_get_initial_url_callback);
     register!("__glyx_deeplink_poll",          deeplink_poll_callback);
+    register!("__glyx_autostart_isEnabled",         autostart_is_enabled_callback);
+    register!("__glyx_autostart_setEnabled",        autostart_set_enabled_callback);
+    register!("__glyx_autostart_wasOpenedAtLogin",  autostart_was_opened_at_login_callback);
 
     //  Canvas 2D / 3D 
     register!("__glyx_canvas_update",   canvas_update_callback);

@@ -129,6 +129,26 @@ pub(crate) fn notification_send<'js>(
     })
 }
 
+// ── Autostart ────────────────────────────────────────────────────────────
+//
+// Same "sync but Promise-free" shape as __glyx_platform / deeplink_get_initial_url:
+// a registry query or file-existence check is fast enough not to need the
+// tokio/spawn_blocking machinery the clipboard bindings use for symmetry
+// with V8's main-thread requirement — these have no such requirement.
+
+pub(crate) fn autostart_is_enabled() -> bool {
+    crate::autostart::is_enabled()
+}
+
+pub(crate) fn autostart_set_enabled(enabled: bool) -> bool {
+    if !glyx_security::get().autostart { return false; }
+    crate::autostart::set_enabled(enabled).is_ok()
+}
+
+pub(crate) fn autostart_was_opened_at_login() -> bool {
+    crate::autostart::was_opened_at_login()
+}
+
 // ── System info / storage ────────────────────────────────────────────────
 
 pub(crate) fn system_get_info<'js>(

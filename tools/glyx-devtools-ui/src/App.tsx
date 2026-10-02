@@ -1,6 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { RelayClient, readLaunchParams, type AppEntry, type ConnStatus } from './relay';
 import { PANELS, type PanelId } from './panels';
+
+function initialPanel(fromLaunch: string | null): PanelId {
+  return (PANELS.find((p) => p.id === fromLaunch)?.id ?? 'overview') as PanelId;
+}
 import { Overview } from './Overview';
 import { Inspector } from './inspector/Inspector';
 import { Console } from './console/Console';
@@ -47,7 +51,7 @@ const STATE_TEXT: Record<ConnStatus['state'], string> = {
 
 export function App() {
   const { client, apps, status, params } = useRelay();
-  const [panel, setPanel] = useState<PanelId>('overview');
+  const [panel, setPanel] = useState<PanelId>(() => initialPanel(params.panel));
   const [theme, setTheme] = useState<Theme>(() => initialTheme(params.theme));
   const [windowId, setWindowId] = useState<number | undefined>(undefined);
 

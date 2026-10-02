@@ -56,6 +56,18 @@
         "title": "Open DevTools",
         "category": "Glyx",
         "icon": "$(inspect)"
+      },
+      {
+        "command": "glyx.openDevtoolsPanel",
+        "title": "Open DevTools on…",
+        "category": "Glyx",
+        "icon": "$(inspect)"
+      },
+      {
+        "command": "glyx.copyMcpConfig",
+        "title": "Copy MCP Server Config",
+        "category": "Glyx",
+        "icon": "$(copy)"
       }
     ],
     "menus": {

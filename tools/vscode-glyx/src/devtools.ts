@@ -40,17 +40,30 @@ function startRelay(cli: string, cwd: string): Promise<string> {
   });
 }
 
-function html(url: string, webview: vscode.Webview): string {
+function html(url: string, webview: vscode.Webview, panelId?: string): string {
   const origin = new URL(url).origin;
+  const extra = panelId ? `&panel=${encodeURIComponent(panelId)}` : '';
   return `<!doctype html>
 <html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; frame-src ${origin}; style-src ${webview.cspSource} 'unsafe-inline';">
 <style>html,body,iframe{margin:0;padding:0;border:0;width:100%;height:100%;overflow:hidden;background:transparent}</style>
-</head><body><iframe src="${url}&theme=${themeParam()}" title="Glyx DevTools"></iframe></body></html>`;
+</head><body><iframe src="${url}&theme=${themeParam()}${extra}" title="Glyx DevTools"></iframe></body></html>`;
 }
 
-export async function openDevtools(context: vscode.ExtensionContext, cli: string, cwd: string) {
-  if (panel) { panel.reveal(); return; }
+let lastPanelId: string | undefined;
+
+/** `panelId` (e.g. "console", "performance") opens straight to that DevTools
+ * panel — see PANELS in glyx-devtools-ui/src/panels.tsx for the valid ids. */
+export async function openDevtools(context: vscode.ExtensionContext, cli: string, cwd: string, panelId?: string) {
+  if (panel) {
+    panel.reveal();
+    if (panelId && panelId !== lastPanelId && pageUrl) {
+      lastPanelId = panelId;
+      panel.webview.html = html(pageUrl, panel.webview, panelId);
+    }
+    return;
+  }
+  lastPanelId = panelId;
   try {
     pageUrl = relay && pageUrl ? pageUrl : await startRelay(cli, cwd);
   } catch (e) {
@@ -62,15 +75,16 @@ export async function openDevtools(context: vscode.ExtensionContext, cli: string
     retainContextWhenHidden: true,
   });
   panel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'assets', 'glyx-activity.svg');
-  panel.webview.html = html(pageUrl, panel.webview);
+  panel.webview.html = html(pageUrl, panel.webview, panelId);
 
   // Follow the editor's theme (reloads the page; the chosen app is kept).
   const themeSub = vscode.window.onDidChangeActiveColorTheme(() => {
-    if (panel && pageUrl) panel.webview.html = html(pageUrl, panel.webview);
+    if (panel && pageUrl) panel.webview.html = html(pageUrl, panel.webview, lastPanelId);
   });
   panel.onDidDispose(() => {
     themeSub.dispose();
     panel = undefined;
+    lastPanelId = undefined;
     relay?.kill();
     relay = undefined;
     pageUrl = undefined;

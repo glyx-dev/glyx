@@ -225,5 +225,6 @@ export function readLaunchParams(loc: Location = location) {
     secret: frag.get('s') ?? '',
     app: frag.get('app') ?? saved,
     theme: frag.get('theme'), // set by the VS Code panel
+    panel: frag.get('panel'), // set by "Glyx: Open DevTools on <panel>"
   };
 }

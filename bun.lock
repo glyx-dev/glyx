@@ -31,6 +31,18 @@
         "react-reconciler": "^0.29.0",
       },
     },
+    "examples/chart-gallery": {
+      "name": "chart-gallery",
+      "version": "0.1.0",
+      "dependencies": {
+        "@glyx-dev/charts": "workspace:*",
+        "@glyx-dev/react": "workspace:*",
+        "react": "^18",
+      },
+      "devDependencies": {
+        "@glyx-dev/config": "workspace:*",
+      },
+    },
     "examples/dashboard": {
       "name": "dashboard",
       "version": "0.1.0",
@@ -327,6 +339,8 @@
     "@glyx-dev/testing": ["@glyx-dev/testing@workspace:js/packages/@glyx/testing"],
 
     "@glyx-dev/three": ["@glyx-dev/three@workspace:js/packages/@glyx/three"],
+
+    "chart-gallery": ["chart-gallery@workspace:examples/chart-gallery"],
 
     "dashboard": ["dashboard@workspace:examples/dashboard"],
 

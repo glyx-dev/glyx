@@ -1,0 +1,13 @@
+{
+  "name": "chart-gallery",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18",
+    "@glyx-dev/react": "workspace:*",
+    "@glyx-dev/charts": "workspace:*"
+  },
+  "devDependencies": {
+    "@glyx-dev/config": "workspace:*"
+  }
+}

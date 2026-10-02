@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, createContext, useCont
 import {
   registerPressable, unregisterPressable,
   registerScrollView, unregisterScrollView,
+  registerWheel, unregisterWheel,
   registerDraggable, unregisterDraggable,
   registerDisabledNode, unregisterDisabledNode,
   addWindowSizeListener, removeWindowSizeListener,
@@ -266,6 +267,23 @@ export function useDraggable(handlers) {
     });
   }, []);
   useEffect(() => () => { if (idRef.current !== null) unregisterDraggable(idRef.current); }, []);
+  return onMount;
+}
+
+// Low-level wheel hook. Returns an `_glyxOnMount` callback to spread onto a View;
+// wheel/trackpad scrolling over it is offered to `handler` first:
+//   handler({ deltaY, ctrl, shift, x, y }) → true to consume the event (a
+//   ScrollView underneath then doesn't scroll), anything else to let it through.
+// Used for Ctrl+wheel zoom; combine with other mounts by calling both.
+export function useWheel(handler) {
+  const idRef = useRef(null);
+  const hRef  = useRef(handler);
+  hRef.current = handler;
+  const onMount = useCallback((id) => {
+    idRef.current = id;
+    registerWheel(id, (e) => hRef.current?.(e));
+  }, []);
+  useEffect(() => () => { if (idRef.current !== null) unregisterWheel(idRef.current); }, []);
   return onMount;
 }
 

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added (chart types and sizing)
+- **Grouped and stacked bars:** `BarChart` takes `series`; several series sit side by side, or pile up with `stacked`. Stacked areas too: `AreaChart stacked`.
+- **New charts:** `ScatterChart` (bubbles when points have a `size`), `CandlestickChart`, `Sparkline`.
+- **Charts can follow their container:** `width="100%"` / `height="100%"` (any percentage string) measures the container and redraws at its size. Numeric sizes behave as before.
+- **Wheel zoom:** with `zoomPan`, Ctrl + wheel (or a trackpad pinch) zooms about the pointer; a plain wheel still scrolls the page.
+- `examples/chart-gallery` shows all of them.
+
 ### Changed
 - **A visual redesign of every chart.**
   - Axes use round tick values (0, 500, 1000…) instead of values like 449.5.

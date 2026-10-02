@@ -14,6 +14,36 @@ use crate::rgba_to_vello;
 use glyx_renderer::peniko::{self, kurbo::Affine};
 use std::time::Instant;
 
+/// Reduced motion: smoothing effects (property transitions, smooth scroll,
+/// canvas easing) jump to their end state instead of moving. On when
+/// `GLYX_REDUCE_MOTION` is set to anything but `0`, or when the OS has
+/// animation effects turned off (Windows: Settings > Accessibility > Visual
+/// effects). Keyframe `animation`s still run: spinners and the like usually
+/// carry meaning. Read once per process.
+pub fn reduced() -> bool {
+    static REDUCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *REDUCED.get_or_init(|| match std::env::var("GLYX_REDUCE_MOTION") {
+        Ok(v) => v != "0",
+        Err(_) => os_reduces_motion(),
+    })
+}
+
+#[cfg(windows)]
+fn os_reduces_motion() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn SystemParametersInfoW(action: u32, param: u32, pv: *mut core::ffi::c_void, win_ini: u32) -> i32;
+    }
+    const SPI_GETCLIENTAREAANIMATION: u32 = 0x1042;
+    let mut on: i32 = 1;
+    // SAFETY: the action writes one BOOL through `pv`, which points at `on`.
+    let ok = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &mut on as *mut i32 as *mut _, 0) };
+    ok != 0 && on == 0
+}
+
+#[cfg(not(windows))]
+fn os_reduces_motion() -> bool { false }
+
 // ── Properties ────────────────────────────────────────────────────────────────
 
 pub(crate) const P_OPACITY:      u8 = 1 << 0;

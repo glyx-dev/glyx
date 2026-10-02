@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { LineChart, AreaChart, BarChart, PieChart, Legend, DEFAULT_PALETTE, THEMES, _internals } from './index.js';
+import { LineChart, AreaChart, BarChart, PieChart, Sparkline, ScatterChart, CandlestickChart, Legend, DEFAULT_PALETTE, THEMES, _internals } from './index.js';
 
 const { _niceScale, _fmt, _fmtTick, _normSeries, _theme, _cartesianSummary } = _internals;
 
@@ -236,4 +236,169 @@ test('the coarser curve stays within about a quarter pixel of the fine one, even
     worst = Math.max(worst, dist([(coarse[i][0] + coarse[i + 1][0]) / 2, (coarse[i][1] + coarse[i + 1][1]) / 2]));
   }
   expect(worst).toBeLessThan(0.3); // measured 0.19 px at 7 segments per curve
+});
+
+// ── Grouped and stacked bars ────────────────────────────────────────────────
+
+const north = { name: 'North', data };
+const south = { name: 'South', data: data.map((d) => ({ ...d, y: d.y * 2 })) };
+
+test('a bar chart with several series is grouped by default and stacked on request', () => {
+  const grouped = renderToStaticMarkup(React.createElement(BarChart, { series: [north, south], width: 300, height: 200 }));
+  expect(grouped).toContain('accessibilityRoleDescription="bar chart"');
+  expect(grouped).toContain('North');
+  expect(grouped).toContain('South');
+  const stacked = renderToStaticMarkup(React.createElement(BarChart, { series: [north, south], stacked: true, width: 300, height: 200 }));
+  expect(stacked).toContain('accessibilityRoleDescription="stacked bar chart"');
+});
+
+test('stacked is ignored for a single series', () => {
+  const html = renderToStaticMarkup(React.createElement(BarChart, { data, stacked: true, width: 300, height: 200 }));
+  expect(html).toContain('accessibilityRoleDescription="bar chart"');
+});
+
+test('the bar scale covers the tallest stack when stacked and the tallest bar when grouped', () => {
+  const a = { data: [{ y: 10 }, { y: 4 }] }, b = { data: [{ y: 20 }, { y: -6 }] };
+  const stacked = _internals._barScale([a, b], true);
+  const grouped = _internals._barScale([a, b], false);
+  expect(stacked.hi).toBeGreaterThanOrEqual(30);
+  expect(stacked.lo).toBeLessThanOrEqual(-6);
+  expect(grouped.hi).toBeGreaterThanOrEqual(20);
+  expect(grouped.hi).toBeLessThan(stacked.hi);
+});
+
+test('stacked segments pile up from zero in both directions, and only outer ends are rounded', () => {
+  const series = [{ data: [{ y: 5 }] }, { data: [{ y: -2 }] }, { data: [{ y: 3 }] }, { data: [{ y: -1 }] }, { data: [{ y: 0 }] }];
+  const seg = _internals._barSegments(series, 0, true);
+  expect(seg.map((s) => [s.v0, s.v1])).toEqual([[0, 5], [0, -2], [5, 8], [-2, -3], [8, 8]]);
+  expect(seg.filter((s) => s.top).map((s) => s.k)).toEqual([2]);     // the last positive piece
+  expect(seg.filter((s) => s.bottom).map((s) => s.k)).toEqual([3]);  // the last negative piece
+  // Grouped bars all start at zero.
+  expect(_internals._barSegments(series, 0, false).map((s) => s.v0)).toEqual([0, 0, 0, 0, 0]);
+});
+
+test('grouped bars sit side by side inside the slot; a lone series keeps its old width', () => {
+  const lone = _internals._barSlots(100, 1, false);
+  expect(lone.w).toBeCloseTo(44);          // capped as before
+  expect(lone.offset(0)).toBeCloseTo(-lone.w / 2);
+  const g = _internals._barSlots(100, 3, false);
+  expect(g.total).toBeLessThanOrEqual(100 * 0.74 + 1e-9);
+  expect(g.offset(1)).toBeGreaterThan(g.offset(0));
+  expect(g.offset(2) + g.w).toBeCloseTo(g.total / 2);
+  // Stacked bars share one column.
+  const st = _internals._barSlots(100, 3, true);
+  expect(st.offset(0)).toBe(st.offset(2));
+});
+
+// ── Stacked area ────────────────────────────────────────────────────────────
+
+test('running totals add the series up, treating gaps as zero', () => {
+  const cum = _internals._cumulative([
+    { data: [{ y: 1 }, { y: 2 }, { y: NaN }] },
+    { data: [{ y: 10 }, { y: 20 }, { y: 30 }] },
+  ]);
+  expect(cum).toEqual([[1, 2, 0], [11, 22, 30]]);
+});
+
+test('an area chart can be stacked', () => {
+  const html = renderToStaticMarkup(React.createElement(AreaChart, { series: [north, south], stacked: true, width: 300, height: 200 }));
+  expect(html).toContain('accessibilityRoleDescription="stacked area chart"');
+  const plain = renderToStaticMarkup(React.createElement(AreaChart, { series: [north, south], width: 300, height: 200 }));
+  expect(plain).toContain('accessibilityRoleDescription="area chart"');
+});
+
+// ── Following the container ─────────────────────────────────────────────────
+
+test('a percentage size still renders (at the default size where nothing can measure it)', () => {
+  for (const Chart of [LineChart, AreaChart, BarChart, PieChart, ScatterChart, CandlestickChart, Sparkline]) {
+    const html = renderToStaticMarkup(React.createElement(Chart, { data, width: '100%', height: '100%' }));
+    expect(html).toContain('<canvas');
+  }
+});
+
+// ── Wheel zoom ──────────────────────────────────────────────────────────────
+
+test('zooming keeps the point under the pointer under the pointer', () => {
+  const { _zoomWindow } = _internals;
+  // 100 points, all visible, pointer a quarter of the way across.
+  const w = _zoomWindow(0, 100, 100, 4, 0.5, 0.25);
+  expect(w.count).toBe(50);
+  const before = 0 + 0.25 * 99, after = w.start + 0.25 * (w.count - 1);
+  expect(Math.abs(before - after)).toBeLessThan(1);
+  // Zooming back out cannot leave the data.
+  const out = _zoomWindow(w.start, w.count, 100, 4, 4, 0.25);
+  expect(out.start).toBeGreaterThanOrEqual(0);
+  expect(out.start + out.count).toBeLessThanOrEqual(100);
+});
+
+test('zooming always moves by at least a point and respects both limits', () => {
+  const { _zoomWindow } = _internals;
+  expect(_zoomWindow(0, 5, 100, 4, 0.99, 0.5).count).toBe(4);   // rounds to no change, so one step in
+  expect(_zoomWindow(0, 4, 100, 4, 0.5, 0.5).count).toBe(4);    // floor
+  expect(_zoomWindow(0, 100, 100, 4, 2, 0.5).count).toBe(100);  // ceiling
+  expect(_zoomWindow(0, 10, 100, 4, 1.01, 0.5).count).toBe(11); // one step out
+});
+
+// ── New chart types ─────────────────────────────────────────────────────────
+
+test('a sparkline is a labelled image with no axes', () => {
+  const html = renderToStaticMarkup(React.createElement(Sparkline, { data: [3, 5, 4, 8, 6], title: 'Visits' }));
+  expect(html).toContain('role="img"');
+  expect(html).toContain('ariaLabel="Visits, sparkline, 5 values, from 3 to 6');
+  expect(html).toContain('<canvas width="120" height="32"');
+  expect(renderToStaticMarkup(React.createElement(Sparkline, { data: [] }))).toContain('no data');
+});
+
+test('sparkline points fit the box, and a flat series sits in the middle', () => {
+  const pts = _internals._sparkPoints([0, 10], 100, 40, 4);
+  expect(pts[0]).toEqual([4, 36]);   // lowest value at the bottom
+  expect(pts[1]).toEqual([96, 4]);   // highest at the top
+  expect(_internals._sparkPoints([7, 7, 7], 100, 40).every((p) => p[1] === 20)).toBe(true);
+});
+
+test('a scatter chart is a figure; sizes make it a bubble chart', () => {
+  const pts = [{ x: 1, y: 2 }, { x: 3, y: 5 }, { x: 4, y: 1 }];
+  const sc = renderToStaticMarkup(React.createElement(ScatterChart, { data: pts, width: 300, height: 200 }));
+  expect(sc).toContain('accessibilityRoleDescription="scatter chart"');
+  const bubble = renderToStaticMarkup(React.createElement(ScatterChart, { data: pts.map((p) => ({ ...p, size: p.y })), width: 300, height: 200 }));
+  expect(bubble).toContain('accessibilityRoleDescription="bubble chart"');
+});
+
+test('scatter points keep their series and skip non-numeric values', () => {
+  const pts = _internals._scatterPoints([
+    { color: '#111', data: [{ x: 1, y: 1 }, { x: NaN, y: 2 }] },
+    { color: '#222', data: [{ x: 2, y: 3, color: '#333' }] },
+  ]);
+  expect(pts.map((p) => [p.s, p.i, p.color])).toEqual([[0, 0, '#111'], [1, 0, '#333']]);
+});
+
+test('bubbles grow with the square root of their size; dots keep their radius', () => {
+  const { _bubbleRadius } = _internals;
+  expect(_bubbleRadius(undefined, 0, 4)).toBe(4);
+  expect(_bubbleRadius(100, 100, 4)).toBeCloseTo(16);
+  expect(_bubbleRadius(25, 100, 4)).toBeCloseTo(3 + 0.5 * 13);
+  expect(_bubbleRadius(0, 100, 4)).toBe(3);
+});
+
+test('the nearest scatter point wins within reach, and nothing beyond it', () => {
+  const pos = [[10, 10], [50, 50], [52, 50]];
+  expect(_internals._nearestPoint(pos, 11, 11, 16)).toBe(0);
+  expect(_internals._nearestPoint(pos, 51, 50, 16)).toBe(2);  // equidistant: the later point
+  expect(_internals._nearestPoint(pos, 200, 200, 16)).toBe(null);
+});
+
+test('a candlestick chart reads open/high/low/close and says which way each moved', () => {
+  const ohlc = [
+    { x: 'Mon', open: 10, high: 14, low: 9, close: 13 },
+    { x: 'Tue', open: 13, high: 15, low: 8, close: 9 },
+  ];
+  const html = renderToStaticMarkup(React.createElement(CandlestickChart, { data: ohlc, width: 300, height: 200, title: 'ACME' }));
+  expect(html).toContain('accessibilityRoleDescription="candlestick chart"');
+  expect(html).toContain('ariaLabel="ACME, candlestick chart, 2 candles from Mon to Tue');
+  expect(_internals._candle(ohlc[0]).up).toBe(true);
+  expect(_internals._candle(ohlc[1]).up).toBe(false);
+  // A wick that does not reach the body is widened to include it; bad rows are skipped.
+  expect(_internals._candle({ open: 5, high: 4, low: 6, close: 7 })).toMatchObject({ high: 7, low: 5 });
+  expect(_internals._candle({ open: 1, high: 2, low: 0 })).toBe(null);
+  expect(() => renderToStaticMarkup(React.createElement(CandlestickChart, { data: [], width: 300, height: 200 }))).not.toThrow();
 });

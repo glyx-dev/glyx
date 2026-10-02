@@ -16,7 +16,7 @@
 //   <AreaChart series={[{ name:'Revenue', data, color:'#4090F0' }, …]} width={600} height={300} />
 
 import React from 'react';
-import { Canvas, View, Text, Pressable, useDraggable } from '@glyx-dev/react';
+import { Canvas, View, Text, Pressable, useDraggable, useWheel } from '@glyx-dev/react';
 
 const { useRef, useEffect, useState, useCallback, useMemo } = React;
 
@@ -196,6 +196,69 @@ function _ChartCanvas({ width, height, draw, deps, animate = true }) {
   return React.createElement(Canvas, { ref, width, height, ...(animate ? { transition: _DATA_TRANSITION } : null) });
 }
 
+// ── Following the container ─────────────────────────────────────────────────
+
+// A chart draws at a pixel size. `width`/`height` as a string ('100%', '50%')
+// instead makes the chart measure the box those resolve to and draw at that
+// size, re-measuring when the container changes. Numbers (and the 480×260
+// defaults) behave exactly as before: no wrapper, no measuring.
+const _FIT_POLL_MS = 250;
+const _FIT_DEFAULT = { width: 480, height: 260 };
+
+function _isFill(v) { return typeof v === 'string'; }
+
+function _fit(Inner, props) {
+  if (!_isFill(props.width) && !_isFill(props.height)) return React.createElement(Inner, props);
+  return React.createElement(_Fit, { Inner, props });
+}
+
+/**
+ * Wraps a chart in a box sized by the string `width`/`height`, reads the box's
+ * real size from the native layout, and renders the chart at it. Nothing tells
+ * JS when a layout changes, so the size is re-read a few times a second (one
+ * cheap lookup per chart); a window drag-resize therefore follows in steps, and
+ * the canvas redraws instantly at each new size rather than easing.
+ */
+function _Fit({ Inner, props }) {
+  const fillW = _isFill(props.width), fillH = _isFill(props.height);
+  const idRef = useRef(null);
+  const [size, setSize] = useState(null);
+  const measure = useCallback(() => {
+    if (idRef.current == null || typeof __glyx_getLayout === 'undefined') return;
+    const l = __glyx_getLayout(idRef.current);
+    if (!l) return;
+    const w = Math.floor(l.boxWidth ?? l.width), h = Math.floor(l.boxHeight ?? l.height);
+    if (w > 0 && h > 0) setSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
+  }, []);
+  useEffect(() => {
+    measure();
+    const first = setTimeout(measure, 50);
+    const poll = setInterval(measure, _FIT_POLL_MS);
+    return () => { clearTimeout(first); clearInterval(poll); };
+  }, [measure]);
+
+  const canMeasure = typeof __glyx_getLayout !== 'undefined';
+  // Without a layout engine (static rendering) fall back to the default size.
+  const at = size ?? (canMeasure ? null : { w: _FIT_DEFAULT.width, h: _FIT_DEFAULT.height });
+  const box = {
+    width: fillW ? props.width : (props.width ?? _FIT_DEFAULT.width),
+    height: fillH ? props.height : (props.height ?? _FIT_DEFAULT.height),
+  };
+  return React.createElement(
+    View,
+    { style: box, _glyxOnMount: (id) => { idRef.current = id; } },
+    at ? React.createElement(Inner, {
+      ...props,
+      width: fillW ? at.w : (props.width ?? _FIT_DEFAULT.width),
+      height: fillH ? at.h : (props.height ?? _FIT_DEFAULT.height),
+    }) : null,
+  );
+}
+
+export function LineChart(props) { return _fit(_LineChartInner, props); }
+export function AreaChart(props) { return _fit(_AreaChartInner, props); }
+function _PieChartInner(props) { return _fit(_PieChartInner, props); }
+
 // A soft fade-and-rise when a chart first appears. Native keyframes: no JS
 // runs per frame, and re-renders with the same spec don't restart it.
 const _ENTRANCE = {
@@ -214,6 +277,15 @@ const _ENTRANCE = {
  */
 function _curveSegments(gap) {
   return Math.max(4, Math.min(20, Math.ceil(Math.abs(gap))));
+}
+
+/** Running totals per series: `out[k][i]` = sum of series 0..k at x index i (gaps count as 0). */
+function _cumulative(series) {
+  const out = [];
+  series.forEach((s, k) => {
+    out.push(s.data.map((d, i) => (k ? out[k - 1][i] : 0) + (Number.isFinite(d.y) ? d.y : 0)));
+  });
+  return out;
 }
 
 /** Monotone cubic (Fritsch–Carlson) through `pts` — smooth, never overshoots the data. */
@@ -471,10 +543,31 @@ export function Legend({ items, onToggle, disabled = [], theme, style }) {
 
 // ── Zoom / pan (Line & Area) ────────────────────────────────────────────────
 
+/**
+ * New `[start, count]` window after zooming by `ratio` (< 1 zooms in) about the
+ * point `frac` (0–1) across the visible span: the data point under the pointer
+ * stays under the pointer. Always changes by at least one point, never past
+ * `[minVisible, n]`.
+ */
+function _zoomWindow(start, count, n, minVisible, ratio, frac) {
+  let next = Math.round(count * ratio);
+  if (next === count) next = count + (ratio < 1 ? -1 : 1);
+  next = Math.max(Math.min(minVisible, n), Math.min(n, next));
+  const anchor = start + frac * Math.max(0, count - 1);
+  const s = Math.round(anchor - frac * Math.max(0, next - 1));
+  return { start: Math.min(Math.max(0, n - next), Math.max(0, s)), count: next };
+}
+
+// One wheel notch (40px, see the shell) zooms by this much; a trackpad pinch
+// arrives as many small ctrl+wheel events and scales the same way.
+const _WHEEL_ZOOM_PER_NOTCH = 0.85;
+
 function _useZoomPan(dataLength, { minVisible = 4, trackWidth } = {}) {
   const [start, setStart] = useState(0);
   const [count, setCount] = useState(dataLength);
   const dragAnchor = useRef(0);
+  // Where the plot sits inside the chart (set by the chart once it has a layout).
+  const plot = useRef({ left: 0, width: Math.max(1, trackWidth || 1) });
 
   useEffect(() => {
     setCount((c) => Math.min(dataLength, Math.max(minVisible, c)));
@@ -487,7 +580,7 @@ function _useZoomPan(dataLength, { minVisible = 4, trackWidth } = {}) {
 
   const stateRef = useRef({ start, count, dataLength, trackWidth });
   stateRef.current = { start, count, dataLength, trackWidth };
-  const onMount = useDraggable({
+  const dragMount = useDraggable({
     onDragStart: () => { dragAnchor.current = stateRef.current.start; },
     onDragMove: ({ dx }) => {
       const { count: c, dataLength: n, trackWidth: tw } = stateRef.current;
@@ -496,8 +589,23 @@ function _useZoomPan(dataLength, { minVisible = 4, trackWidth } = {}) {
     },
   });
 
+  // Ctrl + wheel (or a trackpad pinch) zooms about the pointer. A plain wheel
+  // is left alone so a chart inside a ScrollView doesn't trap the page's scrolling.
+  const wheelMount = useWheel(({ deltaY, ctrl, x }) => {
+    if (!ctrl || !deltaY) return false;
+    const { start: s0, count: c0, dataLength: n } = stateRef.current;
+    const exp = Math.max(-3, Math.min(3, -deltaY / 40));
+    const frac = Math.min(1, Math.max(0, (x - plot.current.left) / Math.max(1, plot.current.width)));
+    const w = _zoomWindow(s0, c0, n, minVisible, Math.pow(_WHEEL_ZOOM_PER_NOTCH, exp), frac);
+    // Read again by the next event of this frame, before React re-renders.
+    stateRef.current = { ...stateRef.current, ...w };
+    setCount(w.count); setStart(w.start);
+    return true;
+  });
+  const onMount = useCallback((id) => { dragMount(id); wheelMount(id); }, [dragMount, wheelMount]);
+
   const maxStart = Math.max(0, dataLength - count);
-  return { start: Math.min(start, maxStart), count, zoomIn, zoomOut, reset, onMount };
+  return { start: Math.min(start, maxStart), count, zoomIn, zoomOut, reset, onMount, plot };
 }
 
 function _ZoomControls({ T, onZoomIn, onZoomOut, onReset }) {
@@ -538,7 +646,7 @@ function _cartesianLayout({ width, height, scale, showLabels, xCount, topPad = 1
 function _lineChart(kind, props) {
   const {
     width = 480, height = 260, lineWidth = 2.5, showGrid = true, showLabels = true,
-    showDots, showTooltip = true, tooltipMotion = true, animate = true, onPointPress, zoomPan = false, smooth = true,
+    showDots, showTooltip = true, tooltipMotion = true, animate = true, onPointPress, zoomPan = false, smooth = true, stacked = false,
     theme, palette, title, showLegend, formatValue = _fmt, formatLabel = (x) => String(x),
   } = props;
   const T = _theme(theme);
@@ -552,16 +660,22 @@ function _lineChart(kind, props) {
   const n = series[0].data.length;
   const [active, setActive] = useState(null);
   const activeIdx = active != null && active < n ? active : null;
+  // Stacked areas pile up: series k spans from the sum of the series before it
+  // (`lower[k][i]`) to its own running total (`upper[k][i]`).
+  const stack = stacked && area && series.length > 1;
+  const upper = stack ? _cumulative(series) : null;
+  const lower = stack ? upper.map((_, k) => (k === 0 ? series[0].data.map(() => 0) : upper[k - 1])) : null;
 
   const legend = (showLegend ?? series.length > 1) && series.length > 0;
   const chartH = legend ? height - 26 : height;
 
   const layout = useMemo(() => {
-    const ys = series.flatMap((s) => s.data.map((d) => d.y)).filter(Number.isFinite);
+    const ys = (stack ? upper.flat() : series.flatMap((s) => s.data.map((d) => d.y))).filter(Number.isFinite);
     const scale = _niceScale(Math.min(...ys), Math.max(...ys), { zero: area });
     return _cartesianLayout({ width, height: chartH, scale, showLabels, xCount: n, topPad: zoomPan ? 30 : 14 });
-  }, [series, width, chartH, showLabels, n, area, zoomPan]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [series, width, chartH, showLabels, n, area, zoomPan, stack]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  zp.plot.current = { left: layout.PAD.left, width: layout.W };
   const dots = showDots ?? n <= 14;
   const draw = (ctx) => {
     if (n === 0) return;
@@ -571,9 +685,19 @@ function _lineChart(kind, props) {
 
     ctx.pushClip(PAD.left - lineWidth * 2, PAD.top - lineWidth * 3, W + lineWidth * 4, H + lineWidth * 3 + 1);
     const baseY = toY(Math.max(layout.scale.lo, Math.min(0, layout.scale.hi)));
-    series.forEach((s) => {
-      const pts = s.data.map((d, i) => [toX(i), toY(d.y)]);
-      if (area) {
+    series.forEach((s, k) => {
+      const pts = s.data.map((d, i) => [toX(i), toY(stack ? upper[k][i] : d.y)]);
+      if (stack) {
+        const low = s.data.map((_, i) => [toX(i), toY(lower[k][i])]).reverse();
+        ctx.fillStyle = _rgba(s.color, 0.55);
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        if (smooth) _smoothPath(ctx, pts, false); else _polyline(ctx, pts, false);
+        ctx.lineTo(low[0][0], low[0][1]);
+        if (smooth) _smoothPath(ctx, low, false); else _polyline(ctx, low, false);
+        ctx.closePath();
+        ctx.fill();
+      } else if (area) {
         const minY = Math.min(...pts.map((p) => p[1]));
         const g = ctx.createLinearGradient(0, minY, 0, baseY);
         g.addColorStop(0, _rgba(s.color, series.length > 1 ? 0.22 : 0.32));
@@ -613,7 +737,7 @@ function _lineChart(kind, props) {
       series.forEach((s) => {
         const d = s.data[activeIdx];
         if (!d) return;
-        const y = toY(d.y);
+        const y = toY(stack ? upper[series.indexOf(s)][activeIdx] : d.y);
         ctx.fillStyle = _rgba(s.color, 0.22); ctx.fillCircle(x, y, lineWidth + 7);
         ctx.fillStyle = T.surface;            ctx.fillCircle(x, y, lineWidth + 3.5);
         ctx.fillStyle = s.color;              ctx.fillCircle(x, y, lineWidth + 1.5);
@@ -633,11 +757,12 @@ function _lineChart(kind, props) {
     return Math.max(0, Math.min(n - 1, Math.round(t)));
   };
 
-  const kindName = area ? 'area chart' : 'line chart';
+  const kindName = stack ? 'stacked area chart' : area ? 'area chart' : 'line chart';
   const summary = _cartesianSummary({ title, kindName, series, formatValue, formatLabel });
   const describe = (i) => {
     const x = formatLabel(series[0].data[i]?.x);
     const parts = series.map((s) => `${series.length > 1 ? s.name + ' ' : ''}${formatValue(s.data[i]?.y)}`);
+    if (stack) parts.push(`total ${formatValue(upper[upper.length - 1][i])}`);
     return `${x}: ${parts.join(', ')}. ${i + 1} of ${n}.`;
   };
 
@@ -647,7 +772,10 @@ function _lineChart(kind, props) {
         data: activeIdx != null && n > 0 ? {
           anchorX: layout.toX(activeIdx), top: layout.PAD.top,
           title: formatLabel(series[0].data[activeIdx].x),
-          rows: series.map((s) => ({ name: s.name || 'Value', color: s.color, value: formatValue(s.data[activeIdx]?.y) })),
+          rows: [
+            ...series.map((s) => ({ name: s.name || 'Value', color: s.color, value: formatValue(s.data[activeIdx]?.y) })),
+            ...(stack ? [{ name: 'Total', color: T.label, value: formatValue(upper[upper.length - 1][activeIdx]) }] : []),
+          ],
         } : null,
       })
     : null;
@@ -657,7 +785,7 @@ function _lineChart(kind, props) {
     { style: { width, height: chartH, position: 'relative' }, _glyxOnMount: zoomPan ? zp.onMount : undefined },
     React.createElement(_ChartCanvas, {
       width, height: chartH, draw, animate,
-      deps: [series, width, chartH, lineWidth, showGrid, showLabels, dots, smooth, activeIdx, T],
+      deps: [series, width, chartH, lineWidth, showGrid, showLabels, dots, smooth, activeIdx, stack, T],
     }),
     React.createElement(_Interaction, {
       width, height: chartH, T, count: n, pick, active: activeIdx, setActive,
@@ -702,53 +830,125 @@ function _cartesianSummary({ title, kindName, series, formatValue, formatLabel }
  * Line chart. Single series via `data` (+ `color`, `name`), or several via
  * `series={[{ name, data, color }]}` sharing the same x values.
  */
-export function LineChart(props) { return _lineChart('line', props); }
+function _LineChartInner(props) { return _lineChart('line', props); }
 
 /** Area chart: a line chart with a gradient fill down to the baseline. */
-export function AreaChart(props) { return _lineChart('area', props); }
+function _AreaChartInner(props) { return _lineChart('area', props); }
 
 // ── Bar ─────────────────────────────────────────────────────────────────────
 
-export function BarChart(props) {
+/**
+ * Y scale covering every bar: the tallest stack when `stacked`, else the
+ * tallest single bar, always including zero.
+ */
+function _barScale(series, stacked) {
+  const n = series[0] ? series[0].data.length : 0;
+  let lo = 0, hi = 0;
+  for (let i = 0; i < n; i++) {
+    let pos = 0, neg = 0;
+    for (const s of series) {
+      const y = s.data[i] ? s.data[i].y : NaN;
+      if (!Number.isFinite(y)) continue;
+      if (stacked) { if (y >= 0) pos += y; else neg += y; } else { pos = Math.max(pos, y); neg = Math.min(neg, y); }
+    }
+    hi = Math.max(hi, pos); lo = Math.min(lo, neg);
+  }
+  return _niceScale(lo, hi, { zero: true });
+}
+
+/**
+ * The bars of category `i` as value ranges: `{ k, v0, v1, top, bottom }` where
+ * `v0`→`v1` is the bar's extent on the Y axis (grouped: from zero; stacked: from
+ * where the stack below it ends) and `top`/`bottom` say whether it is the outer
+ * end of its stack, which is the only place a stacked bar gets rounded corners.
+ */
+function _barSegments(series, i, stacked) {
+  const out = [];
+  let pos = 0, neg = 0;
+  series.forEach((s, k) => {
+    const y = s.data[i] ? s.data[i].y : NaN;
+    if (!Number.isFinite(y)) return;
+    if (!stacked) { out.push({ k, v0: 0, v1: y, top: y >= 0, bottom: y < 0 }); return; }
+    if (y >= 0) { out.push({ k, v0: pos, v1: pos + y, top: false, bottom: false }); pos += y; }
+    else { out.push({ k, v0: neg, v1: neg + y, top: false, bottom: false }); neg += y; }
+  });
+  if (stacked) {
+    // Only the last non-empty segment in each direction is an outer end.
+    const lastPos = out.filter((o) => o.v1 > o.v0).pop();
+    const lastNeg = out.filter((o) => o.v1 < o.v0).pop();
+    for (const o of out) { o.top = o === lastPos; o.bottom = o === lastNeg; }
+  }
+  return out;
+}
+
+/** Bar width and the x offset of each series' bar within a category slot. */
+function _barSlots(slot, count, stacked) {
+  const k = stacked ? 1 : Math.max(1, count);
+  const gap = k > 1 ? 3 : 0;
+  const frac = k > 1 ? 0.74 : 0.64;
+  const w = Math.max(2, Math.min(44, (slot * frac - gap * (k - 1)) / k));
+  const total = w * k + gap * (k - 1);
+  return { w, total, offset: (j) => -total / 2 + (stacked ? 0 : j * (w + gap)) };
+}
+
+function _sumAt(series, i) {
+  return series.reduce((t, s) => t + (Number.isFinite(s.data[i]?.y) ? s.data[i].y : 0), 0);
+}
+
+function _BarChartInner(props) {
   const {
-    data, width = 480, height = 260, color = DEFAULT_PALETTE[0],
-    showGrid = true, showLabels = true, showTooltip = true, tooltipMotion = true, animate = true, onPointPress,
-    theme, title, name = 'Value', formatValue = _fmt, formatLabel = (x) => String(x),
+    width = 480, height = 260, showGrid = true, showLabels = true, showTooltip = true, tooltipMotion = true, animate = true,
+    onPointPress, theme, palette, title, name = 'Value', stacked = false, showLegend,
+    formatValue = _fmt, formatLabel = (x) => String(x),
   } = props;
   const T = _theme(theme);
-  const rows = data || [];
+  const series = _normSeries({ ...props, palette, name, color: props.color || DEFAULT_PALETTE[0] });
+  const multi = series.length > 1;
+  const stack = stacked && multi;
+  const rows = series[0].data;
   const n = rows.length;
   const [active, setActive] = useState(null);
   const activeIdx = active != null && active < n ? active : null;
 
-  const layout = useMemo(() => {
-    const ys = rows.map((d) => d.y).filter(Number.isFinite);
-    const scale = _niceScale(Math.min(0, ...ys), Math.max(0, ...ys), { zero: true });
-    return _cartesianLayout({ width, height, scale, showLabels, xCount: n, band: true });
-  }, [rows, width, height, showLabels, n]); // eslint-disable-line react-hooks/exhaustive-deps
+  const legend = (showLegend ?? multi) && multi;
+  const chartH = legend ? height - 26 : height;
 
-  const barW = Math.max(2, Math.min(44, layout.slot * 0.64));
+  const layout = useMemo(() => {
+    const scale = _barScale(series, stack);
+    return _cartesianLayout({ width, height: chartH, scale, showLabels, xCount: n, band: true });
+  }, [series, width, chartH, showLabels, n, stack]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const slots = _barSlots(layout.slot, series.length, stack);
   const draw = (ctx) => {
     if (n === 0) return;
     const L = layout;
     const { toX, toY } = L;
     _drawYAxis(ctx, L, T, { showGrid, showLabels });
     const zeroY = toY(0);
-    rows.forEach((d, i) => {
-      const c = d.color || color;
-      const x = toX(i) - barW / 2;
-      const yv = toY(d.y);
-      const top = Math.min(yv, zeroY), h = Math.max(1, Math.abs(zeroY - yv));
+    rows.forEach((_, i) => {
       const dim = activeIdx != null && i !== activeIdx;
-      const base = activeIdx === i ? _lighten(c, 0.12) : _rgba(c, dim ? 0.45 : 1);
-      const g = ctx.createLinearGradient(0, top, 0, top + h);
-      g.addColorStop(0, d.y >= 0 ? _lighten(base, 0.18) : base);
-      g.addColorStop(1, d.y >= 0 ? base : _lighten(base, 0.18));
-      ctx.fillStyle = g;
-      const r = Math.min(6, barW / 2);
-      if (d.y >= 0) _roundRectPath(ctx, x, top, barW, h, r, 0);
-      else _roundRectPath(ctx, x, top, barW, h, 0, r);
-      ctx.fill();
+      for (const seg of _barSegments(series, i, stack)) {
+        const c = (!multi && rows[i].color) || series[seg.k].color;
+        const x = toX(i) + slots.offset(seg.k);
+        const yA = toY(seg.v0), yB = toY(seg.v1);
+        const top = Math.min(yA, yB);
+        let h = Math.abs(yA - yB);
+        if (stack && h < 0.5) continue;
+        h = Math.max(1, h);
+        const base = activeIdx === i ? _lighten(c, 0.12) : _rgba(c, dim ? 0.45 : 1);
+        const up = seg.v1 >= seg.v0;
+        if (stack) {
+          ctx.fillStyle = base;
+        } else {
+          const g = ctx.createLinearGradient(0, top, 0, top + h);
+          g.addColorStop(0, up ? _lighten(base, 0.18) : base);
+          g.addColorStop(1, up ? base : _lighten(base, 0.18));
+          ctx.fillStyle = g;
+        }
+        const r = Math.min(6, slots.w / 2);
+        _roundRectPath(ctx, x, top, slots.w, h, seg.top ? r : 0, seg.bottom ? r : 0);
+        ctx.fill();
+      }
     });
     if (showGrid) {
       ctx.strokeStyle = T.baseline; ctx.lineWidth = 1;
@@ -765,35 +965,63 @@ export function BarChart(props) {
     return Math.max(0, Math.min(n - 1, Math.floor((lx - PAD.left) / slot)));
   };
 
-  const summary = _cartesianSummary({ title, kindName: 'bar chart', series: [{ name, data: rows }], formatValue, formatLabel });
-  const describe = (i) => `${formatLabel(rows[i].x)}: ${formatValue(rows[i].y)}. ${i + 1} of ${n}.`;
+  const kindName = stack ? 'stacked bar chart' : 'bar chart';
+  const summary = _cartesianSummary({ title, kindName, series, formatValue, formatLabel });
+  const describe = (i) => {
+    const parts = series.map((s) => `${multi ? s.name + ' ' : ''}${formatValue(s.data[i]?.y)}`);
+    if (stack) parts.push(`total ${formatValue(_sumAt(series, i))}`);
+    return `${formatLabel(rows[i].x)}: ${parts.join(', ')}. ${i + 1} of ${n}.`;
+  };
 
+  const tipRows = (i) => {
+    const r = series.map((s) => ({
+      name: s.name || name, color: (!multi && rows[i].color) || s.color, value: formatValue(s.data[i]?.y),
+    }));
+    if (stack) r.push({ name: 'Total', color: T.label, value: formatValue(_sumAt(series, i)) });
+    return r;
+  };
   const tooltip = showTooltip
     ? React.createElement(_Tooltip, {
         T, chartW: width, motion: tooltipMotion,
         data: activeIdx != null ? {
-          anchorX: layout.toX(activeIdx) + barW / 2 - 8, top: layout.PAD.top,
+          anchorX: layout.toX(activeIdx) + slots.total / 2 - 8, top: layout.PAD.top,
           title: formatLabel(rows[activeIdx].x),
-          rows: [{ name, color: rows[activeIdx].color || color, value: formatValue(rows[activeIdx].y) }],
+          rows: tipRows(activeIdx),
         } : null,
       })
     : null;
 
   return React.createElement(
     View,
-    { style: { width, height, position: 'relative' }, animation: _ENTRANCE },
-    React.createElement(_ChartCanvas, {
-      width, height, draw, animate, deps: [rows, width, height, color, showGrid, showLabels, activeIdx, T],
-    }),
-    React.createElement(_Interaction, {
-      width, height, T, count: n, pick, active: activeIdx, setActive,
-      onActivate: (i) => onPointPress?.(rows[i], i),
-      summary, describe, roleDescription: 'bar chart',
-      hint: 'Use the arrow keys to move between bars.',
-    }),
-    tooltip,
+    { style: { width, height }, animation: _ENTRANCE },
+    React.createElement(
+      View,
+      { style: { width, height: chartH, position: 'relative' } },
+      React.createElement(_ChartCanvas, {
+        width, height: chartH, draw, animate, deps: [series, width, chartH, showGrid, showLabels, activeIdx, stack, T],
+      }),
+      React.createElement(_Interaction, {
+        width, height: chartH, T, count: n, pick, active: activeIdx, setActive,
+        onActivate: (i) => onPointPress?.(rows[i], i),
+        summary, describe, roleDescription: kindName,
+        hint: 'Use the arrow keys to move between bars.',
+      }),
+      tooltip,
+    ),
+    legend ? React.createElement(Legend, {
+      theme, items: series.map((s) => ({ label: s.name, color: s.color })),
+      style: { marginTop: 8, marginLeft: layout.PAD.left },
+    }) : null,
   );
 }
+
+/**
+ * Bar chart. One series via `data` (`[{ x, y, color? }]`), or several via
+ * `series={[{ name, data, color }]}` sharing the same x values: side by side
+ * (grouped) by default, piled up with `stacked`. `width`/`height` can be
+ * `'100%'` to follow the container.
+ */
+export function BarChart(props) { return _fit(_BarChartInner, props); }
 
 // ── Pie / Donut ─────────────────────────────────────────────────────────────
 
@@ -1035,4 +1263,338 @@ export function useChartStream({ capacity = 120, maxHz = 30, initial } = {}) {
 export { DEFAULT_PALETTE, THEMES };
 
 // Internals exported for unit tests only.
-export const _internals = { _niceScale, _niceStep, _fmt, _fmtTick, _normSeries, _theme, _cartesianSummary, _ChartStream, _smoothPath, _curveSegments };
+// ── Sparkline ───────────────────────────────────────────────────────────────
+
+/** `[1, 2, 3]` or `[{ y }]` → finite numbers. */
+function _sparkValues(data) {
+  return (data || []).map((d) => (typeof d === 'number' ? d : d && d.y)).filter(Number.isFinite);
+}
+
+/** Point positions for a sparkline: x spread evenly, y fitted to the box with `pad` around it. */
+function _sparkPoints(ys, width, height, pad = 3) {
+  const n = ys.length;
+  const lo = Math.min(...ys), hi = Math.max(...ys);
+  const span = hi - lo;
+  const w = width - 2 * pad, h = height - 2 * pad;
+  return ys.map((v, i) => [
+    pad + (n <= 1 ? w / 2 : (i / (n - 1)) * w),
+    span === 0 ? height / 2 : height - pad - ((v - lo) / span) * h,
+  ]);
+}
+
+function _SparklineInner(props) {
+  const {
+    data, width = 120, height = 32, color, lineWidth = 1.5, fill = true, smooth = true, showLast = true,
+    animate = true, theme, title, formatValue = _fmt,
+  } = props;
+  const T = _theme(theme);
+  const c = color || DEFAULT_PALETTE[0];
+  const ys = _sparkValues(data);
+  const n = ys.length;
+  const draw = (ctx) => {
+    if (n === 0) return;
+    const pts = _sparkPoints(ys, width, height);
+    if (fill && n > 1) {
+      const g = ctx.createLinearGradient(0, 0, 0, height);
+      g.addColorStop(0, _rgba(c, 0.28));
+      g.addColorStop(1, _rgba(c, 0.01));
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], height);
+      if (smooth) _smoothPath(ctx, pts, false); else _polyline(ctx, pts, false);
+      ctx.lineTo(pts[n - 1][0], height);
+      ctx.closePath();
+      ctx.fill();
+    }
+    if (n > 1) {
+      ctx.beginPath();
+      if (smooth) _smoothPath(ctx, pts); else _polyline(ctx, pts);
+      ctx.strokeStyle = c; ctx.lineWidth = lineWidth;
+      ctx.stroke();
+    }
+    if (showLast) {
+      const [x, y] = pts[n - 1];
+      ctx.fillStyle = T.surface; ctx.fillCircle(x, y, lineWidth + 2);
+      ctx.fillStyle = c;         ctx.fillCircle(x, y, lineWidth + 0.5);
+    }
+  };
+  const label = n === 0
+    ? `${title ? title + ', ' : ''}sparkline, no data.`
+    : `${title ? title + ', ' : ''}sparkline, ${n} values, from ${formatValue(ys[0])} to ${formatValue(ys[n - 1])}, ` +
+      `low ${formatValue(Math.min(...ys))}, high ${formatValue(Math.max(...ys))}.`;
+  return React.createElement(
+    View,
+    { style: { width, height, position: 'relative' }, role: 'img', ariaLabel: label },
+    React.createElement(_ChartCanvas, { width, height, draw, animate, deps: [ys.join(','), width, height, c, lineWidth, fill, smooth, showLast, T] }),
+  );
+}
+
+/**
+ * Sparkline: a small line with no axes, labels or hover, to sit next to a
+ * number or inside a table row. `data` is numbers or `{ y }` objects.
+ */
+export function Sparkline(props) { return _fit(_SparklineInner, props); }
+
+// ── Scatter / bubble ────────────────────────────────────────────────────────
+
+/** Every point of every series as one list, in a fixed order: `{ s, i, x, y, size, color }`. */
+function _scatterPoints(series) {
+  const out = [];
+  series.forEach((s, k) => s.data.forEach((d, i) => {
+    if (Number.isFinite(d.x) && Number.isFinite(d.y)) out.push({ s: k, i, x: d.x, y: d.y, size: d.size, color: d.color || s.color });
+  }));
+  return out;
+}
+
+/** Radius of a point: `radius` for plain dots, or √-scaled between 3 and 16 by `size` for bubbles. */
+function _bubbleRadius(size, maxSize, radius) {
+  if (!Number.isFinite(size) || !(maxSize > 0)) return radius;
+  return 3 + Math.sqrt(Math.max(0, size) / maxSize) * 13;
+}
+
+/** The point nearest (px, py) within `reach` pixels, or null. Ties go to the earlier point. */
+function _nearestPoint(pos, px, py, reach) {
+  let best = null, bestD = reach * reach;
+  for (let j = 0; j < pos.length; j++) {
+    const dx = pos[j][0] - px, dy = pos[j][1] - py, d = dx * dx + dy * dy;
+    if (d <= bestD) { best = j; bestD = d; }
+  }
+  return best;
+}
+
+function _ScatterChartInner(props) {
+  const {
+    width = 480, height = 260, radius = 4, showGrid = true, showLabels = true, showTooltip = true, tooltipMotion = true,
+    animate = true, onPointPress, theme, palette, title, showLegend,
+    formatValue = _fmt, formatX = _fmt,
+  } = props;
+  const T = _theme(theme);
+  const series = _normSeries({ ...props, palette });
+  const pts = _scatterPoints(series);
+  const n = pts.length;
+  const [active, setActive] = useState(null);
+  const activeIdx = active != null && active < n ? active : null;
+
+  const legend = (showLegend ?? series.length > 1) && series.length > 0;
+  const chartH = legend ? height - 26 : height;
+  const maxSize = Math.max(0, ...pts.map((p) => (Number.isFinite(p.size) ? p.size : 0)));
+
+  const layout = useMemo(() => {
+    const ys = pts.map((p) => p.y), xs = pts.map((p) => p.x);
+    const yScale = _niceScale(Math.min(...ys), Math.max(...ys));
+    const xScale = _niceScale(Math.min(...xs), Math.max(...xs));
+    const L = _cartesianLayout({ width, height: chartH, scale: yScale, showLabels, xCount: 1 });
+    const spanX = xScale.hi - xScale.lo || 1;
+    const toXv = (v) => L.PAD.left + ((v - xScale.lo) / spanX) * L.W;
+    return { ...L, xScale, toXv };
+  }, [pts, width, chartH, showLabels]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const pos = pts.map((p) => [layout.toXv(p.x), layout.toY(p.y)]);
+  const draw = (ctx) => {
+    if (n === 0) return;
+    const L = layout;
+    const { PAD, W, H, xScale } = L;
+    _drawYAxis(ctx, L, T, { showGrid, showLabels });
+    // X axis: ticks, optional vertical grid, labels.
+    ctx.lineWidth = 1;
+    for (const v of xScale.ticks) {
+      const x = Math.round(L.toXv(v)) + 0.5;
+      if (showGrid) { ctx.strokeStyle = T.grid; ctx.strokeLine(x, PAD.top, x, PAD.top + H); }
+      if (showLabels) {
+        const label = formatX(v);
+        ctx.fillStyle = T.label; ctx.textBaseline = 'top';
+        ctx.fillText(label, Math.min(L.width - 2 - _textW(label, 11), Math.max(2, x - _textW(label, 11) / 2)), PAD.top + H + 9, 11);
+      }
+    }
+    if (showGrid) {
+      ctx.strokeStyle = T.baseline;
+      const y = Math.round(PAD.top + H) + 0.5;
+      ctx.strokeLine(PAD.left, y, PAD.left + W, y);
+    }
+    ctx.pushClip(PAD.left - 8, PAD.top - 8, W + 16, H + 16);
+    pts.forEach((p, j) => {
+      const r = _bubbleRadius(p.size, maxSize, radius);
+      const hot = j === activeIdx;
+      const dim = activeIdx != null && !hot;
+      ctx.fillStyle = _rgba(p.color, hot ? 0.95 : dim ? 0.3 : maxSize > 0 ? 0.55 : 0.8);
+      ctx.fillCircle(pos[j][0], pos[j][1], hot ? r + 1.5 : r);
+      if (maxSize > 0 || hot) { ctx.strokeStyle = p.color; ctx.lineWidth = 1.5; ctx.strokeCircle(pos[j][0], pos[j][1], hot ? r + 1.5 : r); }
+    });
+    ctx.popClip();
+    ctx.textBaseline = 'top';
+  };
+
+  const pick = (lx, ly) => _nearestPoint(pos, lx, ly, Math.max(16, radius * 3));
+  const kindName = maxSize > 0 ? 'bubble chart' : 'scatter chart';
+  const xs = pts.map((p) => p.x), ysAll = pts.map((p) => p.y);
+  const summary = n === 0
+    ? `${title ? title + ', ' : ''}${kindName}, no data.`
+    : `${title ? title + ', ' : ''}${kindName}, ${n} points, x from ${formatX(Math.min(...xs))} to ${formatX(Math.max(...xs))}, ` +
+      `y from ${formatValue(Math.min(...ysAll))} to ${formatValue(Math.max(...ysAll))}.`;
+  const describe = (j) => {
+    const p = pts[j];
+    const who = series.length > 1 ? `${series[p.s].name}: ` : '';
+    return `${who}x ${formatX(p.x)}, y ${formatValue(p.y)}${Number.isFinite(p.size) ? `, size ${formatValue(p.size)}` : ''}. ${j + 1} of ${n}.`;
+  };
+
+  const hot = activeIdx != null ? pts[activeIdx] : null;
+  const tooltip = showTooltip
+    ? React.createElement(_Tooltip, {
+        T, chartW: width, motion: tooltipMotion,
+        data: hot ? {
+          anchorX: pos[activeIdx][0], top: Math.max(layout.PAD.top, pos[activeIdx][1] - 34),
+          title: series.length > 1 ? series[hot.s].name || 'Series' : 'Point',
+          rows: [
+            { name: 'x', color: hot.color, value: formatX(hot.x) },
+            { name: 'y', color: hot.color, value: formatValue(hot.y) },
+            ...(Number.isFinite(hot.size) ? [{ name: 'size', color: hot.color, value: formatValue(hot.size) }] : []),
+          ],
+        } : null,
+      })
+    : null;
+
+  return React.createElement(
+    View,
+    { style: { width, height }, animation: _ENTRANCE },
+    React.createElement(
+      View,
+      { style: { width, height: chartH, position: 'relative' } },
+      React.createElement(_ChartCanvas, {
+        width, height: chartH, draw, animate, deps: [pts, width, chartH, radius, showGrid, showLabels, activeIdx, T],
+      }),
+      React.createElement(_Interaction, {
+        width, height: chartH, T, count: n, pick, active: activeIdx, setActive,
+        onActivate: (j) => onPointPress?.(series[pts[j].s].data[pts[j].i], j),
+        summary, describe, roleDescription: kindName,
+        hint: 'Use the arrow keys to move between points.',
+      }),
+      tooltip,
+    ),
+    legend ? React.createElement(Legend, {
+      theme, items: series.map((s) => ({ label: s.name, color: s.color })),
+      style: { marginTop: 8, marginLeft: layout.PAD.left },
+    }) : null,
+  );
+}
+
+/**
+ * Scatter plot. Points are `{ x, y, size?, color? }` (numeric x and y), as
+ * `data` or several `series`. Give points a `size` to make it a bubble chart.
+ */
+export function ScatterChart(props) { return _fit(_ScatterChartInner, props); }
+
+// ── Candlestick ─────────────────────────────────────────────────────────────
+
+const _CANDLE_UP = '#22C29B', _CANDLE_DOWN = '#EC5D78';
+
+/** A candle's direction and its y values from `{ open, high, low, close }`; null when any is missing. */
+function _candle(d) {
+  if (!d || ![d.open, d.high, d.low, d.close].every(Number.isFinite)) return null;
+  return { up: d.close >= d.open, open: d.open, high: Math.max(d.high, d.open, d.close), low: Math.min(d.low, d.open, d.close), close: d.close };
+}
+
+function _CandlestickChartInner(props) {
+  const {
+    data, width = 480, height = 260, showGrid = true, showLabels = true, showTooltip = true, tooltipMotion = true,
+    animate = true, onPointPress, theme, title, upColor = _CANDLE_UP, downColor = _CANDLE_DOWN,
+    formatValue = _fmt, formatLabel = (x) => String(x),
+  } = props;
+  const T = _theme(theme);
+  const rows = data || [];
+  const n = rows.length;
+  const candles = rows.map(_candle);
+  const [active, setActive] = useState(null);
+  const activeIdx = active != null && active < n ? active : null;
+
+  const layout = useMemo(() => {
+    const lows = candles.filter(Boolean).map((c) => c.low), highs = candles.filter(Boolean).map((c) => c.high);
+    const scale = _niceScale(Math.min(...lows), Math.max(...highs));
+    return _cartesianLayout({ width, height, scale, showLabels, xCount: n, band: true });
+  }, [rows, width, height, showLabels, n]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const bodyW = Math.max(2, Math.min(18, layout.slot * 0.6));
+  const draw = (ctx) => {
+    if (n === 0) return;
+    const L = layout;
+    const { toX, toY } = L;
+    _drawYAxis(ctx, L, T, { showGrid, showLabels });
+    candles.forEach((c, i) => {
+      if (!c) return;
+      const col = c.up ? upColor : downColor;
+      const dim = activeIdx != null && i !== activeIdx;
+      const base = activeIdx === i ? _lighten(col, 0.12) : _rgba(col, dim ? 0.4 : 1);
+      const x = toX(i);
+      const wx = Math.round(x) + 0.5;
+      ctx.strokeStyle = base; ctx.lineWidth = 1.5;
+      ctx.strokeLine(wx, toY(c.high), wx, toY(c.low));
+      const yTop = toY(Math.max(c.open, c.close)), yBot = toY(Math.min(c.open, c.close));
+      ctx.fillStyle = base;
+      _roundRectPath(ctx, x - bodyW / 2, yTop, bodyW, Math.max(1.5, yBot - yTop), Math.min(2, bodyW / 2), Math.min(2, bodyW / 2));
+      ctx.fill();
+    });
+    if (showGrid) {
+      ctx.strokeStyle = T.baseline; ctx.lineWidth = 1;
+      const y = Math.round(L.PAD.top + L.H) + 0.5;
+      ctx.strokeLine(L.PAD.left, y, L.PAD.left + L.W, y);
+    }
+    if (showLabels) _drawXLabels(ctx, rows.map((d) => formatLabel(d.x)), rows.map((_, i) => toX(i)), L, T);
+  };
+
+  const pick = (lx) => {
+    if (n === 0) return null;
+    const { PAD, W, slot } = layout;
+    if (lx < PAD.left || lx > PAD.left + W) return null;
+    return Math.max(0, Math.min(n - 1, Math.floor((lx - PAD.left) / slot)));
+  };
+
+  const summary = n === 0
+    ? `${title ? title + ', ' : ''}candlestick chart, no data.`
+    : `${title ? title + ', ' : ''}candlestick chart, ${n} candles from ${formatLabel(rows[0].x)} to ${formatLabel(rows[n - 1].x)}, ` +
+      `low ${formatValue(Math.min(...candles.filter(Boolean).map((c) => c.low)))}, high ${formatValue(Math.max(...candles.filter(Boolean).map((c) => c.high)))}.`;
+  const describe = (i) => {
+    const c = candles[i];
+    return c
+      ? `${formatLabel(rows[i].x)}: open ${formatValue(c.open)}, high ${formatValue(c.high)}, low ${formatValue(c.low)}, close ${formatValue(c.close)}, ${c.up ? 'up' : 'down'}. ${i + 1} of ${n}.`
+      : `${formatLabel(rows[i].x)}: no data. ${i + 1} of ${n}.`;
+  };
+
+  const tc = activeIdx != null ? candles[activeIdx] : null;
+  const tooltip = showTooltip
+    ? React.createElement(_Tooltip, {
+        T, chartW: width, motion: tooltipMotion,
+        data: tc ? {
+          anchorX: layout.toX(activeIdx) + bodyW / 2 - 8, top: layout.PAD.top,
+          title: formatLabel(rows[activeIdx].x),
+          rows: [
+            { name: 'Open', color: tc.up ? upColor : downColor, value: formatValue(tc.open) },
+            { name: 'High', color: tc.up ? upColor : downColor, value: formatValue(tc.high) },
+            { name: 'Low', color: tc.up ? upColor : downColor, value: formatValue(tc.low) },
+            { name: 'Close', color: tc.up ? upColor : downColor, value: formatValue(tc.close) },
+          ],
+        } : null,
+      })
+    : null;
+
+  return React.createElement(
+    View,
+    { style: { width, height, position: 'relative' }, animation: _ENTRANCE },
+    React.createElement(_ChartCanvas, {
+      width, height, draw, animate, deps: [rows, width, height, showGrid, showLabels, activeIdx, upColor, downColor, T],
+    }),
+    React.createElement(_Interaction, {
+      width, height, T, count: n, pick, active: activeIdx, setActive,
+      onActivate: (i) => onPointPress?.(rows[i], i),
+      summary, describe, roleDescription: 'candlestick chart',
+      hint: 'Use the arrow keys to move between candles.',
+    }),
+    tooltip,
+  );
+}
+
+/**
+ * Candlestick (OHLC) chart: one candle per `{ x, open, high, low, close }`,
+ * `upColor` when it closed at or above its open, `downColor` below.
+ */
+export function CandlestickChart(props) { return _fit(_CandlestickChartInner, props); }
+
+export const _internals = { _sparkPoints, _scatterPoints, _bubbleRadius, _nearestPoint, _candle, _barScale, _barSegments, _barSlots, _niceScale, _niceStep, _fmt, _fmtTick, _normSeries, _theme, _cartesianSummary, _ChartStream, _smoothPath, _curveSegments, _zoomWindow, _cumulative };

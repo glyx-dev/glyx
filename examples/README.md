@@ -16,6 +16,7 @@ These are the same apps showcased on the docs site
 | [`tasks`](./tasks) | JS-only | Persistent to-do manager. `db` (SQLite) CRUD, `@glyx-dev/router`, `@glyx-dev/design`, `@glyx-dev/store`. Zero Rust. |
 | [`dashboard`](./dashboard) | JS-only | Analytics dashboard: live `@glyx-dev/charts` (line/area/bar/pie), design system, `fs`/`dialog`/`window`. |
 | [`realtime-chart`](./realtime-chart) | JS-only | A chart fed up to 1000 values a second with `useChartStream`: bounded updates, eased between draws. |
+| [`chart-gallery`](./chart-gallery) | JS-only | Every `@glyx-dev/charts` type: grouped/stacked bars, stacked area, scatter/bubble, candlestick, sparklines, container-sized charts, Ctrl+wheel zoom. |
 | [`files`](./files) | Native | File explorer + Markdown editor using `@glyx-dev/split-pane`, `@glyx-dev/markdown`, `fs`/`dialog`. |
 | [`model-viewer`](./model-viewer) | Native | Interactive 3D scene with `@glyx-dev/three` (geometry, lights, auto-rotate) on the GPU `Canvas3D`. |
 | [`log-viewer`](./log-viewer) | JS-only | Log file viewer: `fs`/`dialog` + `@glyx-dev/design` to open and display log files. |

@@ -30,6 +30,9 @@ const inputRegistry = new Map();
 // ScrollViews register here so scroll events can be routed to whichever
 // scroll view the cursor is currently over.
 const scrollRegistry = new Map();
+// nodeId -> (e: { deltaY, ctrl, shift, x, y }) => boolean. Offered each wheel event
+// before any ScrollView; returning true consumes it.
+const wheelRegistry = new Map();
 
 // Map from nodeId -> { onDragStart?, onDragMove?, onDragEnd? }
 // Draggable nodes (e.g. Slider thumb) register here.
@@ -214,6 +217,24 @@ export function registerScrollView(nodeId, handlers) {
  */
 export function unregisterScrollView(nodeId) {
   scrollRegistry.delete(nodeId);
+}
+
+/**
+ * Offer wheel/trackpad scrolling over `nodeId` to `handler` before the ScrollView
+ * underneath. `handler({ deltaY, ctrl, shift, x, y })` gets the delta, the held
+ * modifiers and the pointer position relative to the node; return `true` to
+ * consume the event (the ScrollView then doesn't scroll), anything else to let
+ * it through. The deepest registered node under the pointer is asked first.
+ * @param {number} nodeId
+ * @param {(e: { deltaY: number, ctrl: boolean, shift: boolean, x: number, y: number }) => boolean | void} handler
+ */
+export function registerWheel(nodeId, handler) {
+  wheelRegistry.set(nodeId, handler);
+}
+
+/** Remove a handler added with `registerWheel`. */
+export function unregisterWheel(nodeId) {
+  wheelRegistry.delete(nodeId);
 }
 
 /**
@@ -760,6 +781,20 @@ export function dispatchEvents() {
       }
 
       case 'scroll': {
+        // Wheel handlers (e.g. Ctrl+wheel zoom on a chart) get the first offer.
+        let wheelNode = null;
+        for (const nodeId of wheelRegistry.keys()) {
+          if (!hitTest(nodeId, cursorX, cursorY) || isDisabled(nodeId)) continue;
+          if (wheelNode === null || isAncestorOf(wheelNode, nodeId)) wheelNode = nodeId;
+        }
+        if (wheelNode !== null) {
+          const l = __glyx_getLayout(wheelNode);
+          const consumed = wheelRegistry.get(wheelNode)({
+            deltaY: ev.deltaY, ctrl: ctrlHeld, shift: shiftHeld,
+            x: l ? cursorX - boxOriginX(l) : 0, y: l ? cursorY - boxOriginY(l) : 0,
+          });
+          if (consumed === true) break;
+        }
         // Route the scroll delta to the DEEPEST ScrollView the cursor is over.
         // Registration order is unreliable for nesting (children mount before
         // parents, and side-by-side panes can re-register in any order): a

@@ -285,7 +285,7 @@ pub(crate) const PRECISE_SCROLL_FRAMES: u8 = 3;
 /// scrollbar thumb is being dragged (it must track the pointer 1:1), when the
 /// input is from a touchpad, or while devtools has the motion clock paused.
 fn sync_scroll(state: &mut PerWindowState, id: u32, props: &mut NodeProps) {
-    if props.smooth_scroll != Some(true) {
+    if props.smooth_scroll != Some(true) || motion::reduced() {
         state.scroll_springs.remove(&id);
         return;
     }
@@ -365,6 +365,7 @@ fn sync_canvas_tween(state: &mut PerWindowState, id: u32, to: &[CanvasCmd]) {
     };
     state.canvas_cadence.insert(id, (now, cadence.unwrap_or(-1.0)));
 
+    let pace = if motion::reduced() { None } else { pace };
     let (Some(pace), false, Some(prev_to)) = (pace, resized, state.canvas_cmds.get(&id)) else {
         state.canvas_tweens.remove(&id);
         return;
@@ -558,7 +559,8 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 // A spring needs no duration (it settles when it settles); the
                 // `1` only satisfies `between`, which `into_spring` then replaces.
                 let spring = motion::Spring::from_props(&props);
-                if let (Some(old), Some(ms)) = (state.js_nodes.get(&id), props.transition_ms.or(spring.map(|_| 1))) {
+                let declared = if motion::reduced() { None } else { props.transition_ms.or(spring.map(|_| 1)) };
+                if let (Some(old), Some(ms)) = (state.js_nodes.get(&id), declared) {
                     let (old_v, new_v) = (motion::Visual::of(&old.props), motion::Visual::of(&props));
                     // Unrelated updates (text, layout, …) leave a running
                     // transition alone — restarting its clock would stall it.

@@ -101,7 +101,7 @@ pub(super) fn build_snapshot_mode(target: Option<&str>, project_name: &str, p: p
 
     // 1. Build the app bundle (embedded in binary, eval'd at runtime)
     println!("Bundling JS: {} → {}", entry, output);
-    pm::js_bundle(p, &entry, &output, /*minify=*/false, /*source_map=*/true, !super::read_keep_test_ids())
+    pm::js_bundle(p, &entry, &output, /*minify=*/false, pm::SourceMap::Kept, !super::read_keep_test_ids())
         .context("JS build failed")?;
     println!("✓ JS bundled (dev output)");
     let bundle = build_app_bundle(project_name, &entry, p).context("app bundle build failed")?;
@@ -185,7 +185,7 @@ pub(super) fn build_portable_mode(target: Option<&str>, project_name: &str, p: p
 
     if let Some((entry, output)) = read_dev_config() {
         println!("Bundling JS: {} → {}", entry, output);
-        pm::js_bundle(p, &entry, &output, /*minify=*/false, /*source_map=*/true, !super::read_keep_test_ids())
+        pm::js_bundle(p, &entry, &output, /*minify=*/false, pm::SourceMap::Kept, !super::read_keep_test_ids())
             .context("JS build failed")?;
         println!("✓ JS built: {}", output);
     } else {
@@ -448,11 +448,21 @@ pub(super) fn cargo_build_release(
     let status = cmd.status().context("Failed to run `cargo build`")?;
     if !status.success() { bail!("cargo build failed"); }
 
-    Ok(if let Some(ref t) = rust_target {
+    let rel = if let Some(ref t) = rust_target {
         PathBuf::from(format!("target/{}/release/{}", t, binary_name(project_name)))
     } else {
         PathBuf::from(format!("target/release/{}", binary_name(project_name)))
-    })
+    };
+    // In a cargo workspace (e.g. the examples) the binary lands in the
+    // workspace's target/, not the app folder's: return where it really is,
+    // so the ICU data and capability modules go next to it.
+    if !rel.exists() {
+        if let Some(root) = super::find_workspace_root()? {
+            let in_ws = root.join(&rel);
+            if in_ws.exists() { return Ok(in_ws); }
+        }
+    }
+    Ok(rel)
 }
 
 /// Build all capability DLLs declared in glyx.config and copy them next to `dest`.
@@ -519,8 +529,12 @@ pub fn build_cap_dlls(caps: &[String], target: Option<&str>, dest: &Path) -> Res
         std::fs::create_dir_all(dest)?;
         // Named the way the runtime's loader looks for it (no `lib` prefix).
         let dst = dest.join(cap_file_name(cap, cap_os(rust_target.as_deref())));
-        std::fs::copy(&src, &dst)
-            .with_context(|| format!("copy {} → {}", src.display(), dst.display()))?;
+        // cargo may have put it there already (workspace target = dest).
+        let same = std::fs::canonicalize(&src).ok().zip(std::fs::canonicalize(&dst).ok()).is_some_and(|(a, b)| a == b);
+        if !same {
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("copy {} → {}", src.display(), dst.display()))?;
+        }
         println!("  ✓ {} → {}", src.display(), dst.display());
     }
     Ok(())

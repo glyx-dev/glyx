@@ -65,7 +65,7 @@ pub(super) fn cmd_dev(inspect: Option<u16>, devtools: Option<u16>, open: bool, p
         println!("Building JS: {} → {}", entry, output);
         // With DevTools, React's development build (profiling, warnings).
         let react = if devtools.is_some() { pm::ReactBuild::Development } else { pm::ReactBuild::Production };
-        pm::js_bundle_with_react(p, entry, output, /*minify=*/false, /*source_map=*/true, /*strip_test_ids=*/false, react)
+        pm::js_bundle_with_react(p, entry, output, /*minify=*/false, pm::SourceMap::Inline, /*strip_test_ids=*/false, react)
             .context("Initial JS build failed")?;
         println!("✓ JS built");
     } else if config_json.is_empty() {

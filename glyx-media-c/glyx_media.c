@@ -207,6 +207,50 @@ struct VmEncoder {
     uint8_t*          rgba_buf;
 };
 
+/* H.264 encoders to try, best first. `libx264` exists only in GPL FFmpeg
+ * builds (Glyx ships LGPL); the OS / hardware encoders need no GPL code.
+ * FFmpeg's own MPEG-4 encoder is the last resort: always present, and still
+ * plays in .mp4 files everywhere. */
+static const char* const ENCODERS[] = {
+    "libx264", "h264_mf", "h264_nvenc", "h264_qsv", "h264_amf",
+    "h264_videotoolbox", "h264_vaapi", "libopenh264", "mpeg4", NULL
+};
+
+/* The pixel format to feed `codec`: YUV420P when it takes it, else NV12,
+ * else its first. */
+static enum AVPixelFormat pick_pix_fmt(const AVCodec* codec) {
+    const enum AVPixelFormat* fmts = NULL;
+    int n = 0;
+    if (avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0, (const void**)&fmts, &n) < 0 || !fmts || n == 0)
+        return AV_PIX_FMT_YUV420P;
+    for (int i = 0; i < n; i++) if (fmts[i] == AV_PIX_FMT_YUV420P) return AV_PIX_FMT_YUV420P;
+    for (int i = 0; i < n; i++) if (fmts[i] == AV_PIX_FMT_NV12) return AV_PIX_FMT_NV12;
+    return fmts[0];
+}
+
+/* Open the first encoder in ENCODERS that works on this machine. */
+static AVCodecContext* open_encoder(const AVFormatContext* fmt, int width, int height, int fps, const AVCodec** out_codec) {
+    for (int i = 0; ENCODERS[i]; i++) {
+        const AVCodec* codec = avcodec_find_encoder_by_name(ENCODERS[i]);
+        if (!codec) continue;
+        AVCodecContext* c = avcodec_alloc_context3(codec);
+        if (!c) continue;
+        c->width     = width;
+        c->height    = height;
+        c->time_base = (AVRational){1, fps};
+        c->framerate = (AVRational){fps, 1};
+        c->pix_fmt   = pick_pix_fmt(codec);
+        c->bit_rate  = 2000000;
+        c->gop_size  = fps; /* one I-frame per second */
+        av_opt_set(c->priv_data, "preset", "fast", 0);  /* x264 / nvenc; ignored elsewhere */
+        if (fmt->oformat->flags & AVFMT_GLOBALHEADER)
+            c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        if (avcodec_open2(c, codec, NULL) == 0) { *out_codec = codec; return c; }
+        avcodec_free_context(&c);   /* e.g. no such GPU: try the next */
+    }
+    return NULL;
+}
+
 VmEncoder* vm_encoder_open(const char* output_path, int width, int height, int fps) {
     VmEncoder* enc = (VmEncoder*)calloc(1, sizeof(VmEncoder));
     if (!enc) return NULL;
@@ -216,27 +260,11 @@ VmEncoder* vm_encoder_open(const char* output_path, int width, int height, int f
         free(enc); return NULL;
     }
 
-    const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_H264);
-    if (!codec) { avformat_free_context(enc->fmt_ctx); free(enc); return NULL; }
-
-    enc->stream    = avformat_new_stream(enc->fmt_ctx, codec);
-    enc->codec_ctx = avcodec_alloc_context3(codec);
-    if (!enc->stream || !enc->codec_ctx) {
-        avformat_free_context(enc->fmt_ctx); free(enc); return NULL;
-    }
-
-    enc->codec_ctx->width     = width;
-    enc->codec_ctx->height    = height;
-    enc->codec_ctx->time_base = (AVRational){1, fps};
-    enc->codec_ctx->pix_fmt   = AV_PIX_FMT_YUV420P;
-    enc->codec_ctx->bit_rate  = 2000000;
-    enc->codec_ctx->gop_size  = fps; /* one I-frame per second */
-    av_opt_set(enc->codec_ctx->priv_data, "preset", "fast", 0);
-
-    if (enc->fmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)
-        enc->codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-
-    if (avcodec_open2(enc->codec_ctx, codec, NULL) < 0) {
+    const AVCodec* codec = NULL;
+    enc->codec_ctx = open_encoder(enc->fmt_ctx, width, height, fps, &codec);
+    if (!enc->codec_ctx) { avformat_free_context(enc->fmt_ctx); free(enc); return NULL; }
+    enc->stream = avformat_new_stream(enc->fmt_ctx, codec);
+    if (!enc->stream) {
         avcodec_free_context(&enc->codec_ctx);
         avformat_free_context(enc->fmt_ctx); free(enc); return NULL;
     }
@@ -258,14 +286,14 @@ VmEncoder* vm_encoder_open(const char* output_path, int width, int height, int f
 
     /* RGBA → YUV420P scaler */
     enc->sws_ctx = sws_getContext(width, height, AV_PIX_FMT_RGBA,
-                                  width, height, AV_PIX_FMT_YUV420P,
+                                  width, height, enc->codec_ctx->pix_fmt,
                                   SWS_BILINEAR, NULL, NULL, NULL);
 
     enc->yuv_frame  = av_frame_alloc();
     enc->rgba_frame = av_frame_alloc();
     enc->packet     = av_packet_alloc();
 
-    enc->yuv_frame->format = AV_PIX_FMT_YUV420P;
+    enc->yuv_frame->format = enc->codec_ctx->pix_fmt;
     enc->yuv_frame->width  = width;
     enc->yuv_frame->height = height;
     av_frame_get_buffer(enc->yuv_frame, 0);

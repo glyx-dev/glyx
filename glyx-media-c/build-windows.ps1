@@ -27,12 +27,15 @@ $OutputPath = Join-Path $ScriptDir $OutputName
 # -- 1. Locate or download ffmpeg ---------------------------------------------
 
 if ($FfmpegDir -eq "") {
-    $FfmpegDir = Join-Path $ScriptDir "ffmpeg-windows-x64"
+    # LGPL build: GPL builds (with libx264 etc.) would put GPL obligations on
+    # every app that ships them. Separate folder so an old GPL download is
+    # never reused.
+    $FfmpegDir = Join-Path $ScriptDir "ffmpeg-windows-x64-lgpl"
 }
 
 if (-not (Test-Path $FfmpegDir)) {
     Write-Host "Downloading ffmpeg shared build (BtbN)..." -ForegroundColor Cyan
-    $ZipUrl  = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+    $ZipUrl  = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip"
     $ZipPath = Join-Path $env:TEMP "ffmpeg-shared.zip"
     $TmpDir  = Join-Path $env:TEMP "ffmpeg-extract"
 
@@ -104,7 +107,8 @@ $ObjDir = Join-Path $ScriptDir "obj-windows"
 New-Item $ObjDir -ItemType Directory -Force | Out-Null
 
 # Import libraries for the shared ffmpeg build.
-$Libs    = @("avformat", "avcodec", "avfilter", "swscale", "swresample", "avutil") |
+# Only what glyx_media.c uses (no avfilter / avdevice: ~100 MB we never call).
+$Libs    = @("avformat", "avcodec", "swscale", "swresample", "avutil") |
     ForEach-Object { Join-Path $LibDir "$_.lib" }
 $LibList = ($Libs | ForEach-Object { "`"$_`"" }) -join " "
 
@@ -121,9 +125,18 @@ Write-Host "`nBuilt: $OutputPath" -ForegroundColor Green
 
 # -- 4. Copy ffmpeg DLLs alongside our DLL ------------------------------------
 
+# ffmpeg DLLs from earlier builds (other versions, or avfilter / avdevice /
+# postproc we no longer ship) must not linger next to the new ones.
+function Remove-OldFfmpegDlls([string]$Dir) {
+    Get-ChildItem (Join-Path $Dir "*.dll") -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "^(avformat|avcodec|avfilter|swscale|swresample|avutil|avdevice|postproc)-\d+\.dll$" } |
+        Remove-Item -Force
+}
+Remove-OldFfmpegDlls $ScriptDir
+
 Write-Host "Copying ffmpeg runtime DLLs ..." -ForegroundColor Cyan
 $FfmpegDlls = Get-ChildItem (Join-Path $BinDir "*.dll") |
-    Where-Object { $_.Name -match "^(avformat|avcodec|avfilter|swscale|swresample|avutil|avdevice|postproc)" }
+    Where-Object { $_.Name -match "^(avformat|avcodec|swscale|swresample|avutil)-" }
 foreach ($dll in $FfmpegDlls) {
     Copy-Item $dll.FullName (Join-Path $ScriptDir $dll.Name) -Force
     Write-Host "  $($dll.Name)"
@@ -137,6 +150,7 @@ Copy-Item $OutputPath (Join-Path $CacheDir $OutputName) -Force
 Write-Host "`nCached: $CacheDir\$OutputName" -ForegroundColor Green
 
 # Also copy ffmpeg DLLs to cache so they're found when the DLL is loaded from there.
+Remove-OldFfmpegDlls $CacheDir
 Write-Host "Copying ffmpeg runtime DLLs to cache..." -ForegroundColor Cyan
 foreach ($dll in $FfmpegDlls) {
     Copy-Item $dll.FullName (Join-Path $CacheDir $dll.Name) -Force

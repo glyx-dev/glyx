@@ -12,6 +12,7 @@ import {
   setFocus,
 } from './events.js';
 import { glyxWindow, clipboard, input } from './api.js';
+import { flattenStyle } from './style.js';
 
 // ── Host components ───────────────────────────────────────────────────────────
 
@@ -51,7 +52,8 @@ export function textLineLimit(numberOfLines, style) {
   return undefined;
 }
 
-export function Text({ children, style, showCursor, numberOfLines, ...props }) {
+export function Text({ children, style: styleProp, showCursor, numberOfLines, ...props }) {
+  const style = flattenStyle(styleProp);
   // Flatten mixed children (strings + expressions) to a single string,
   // matching browser behaviour where <Text>= {val}</Text> just works.
   const text = Array.isArray(children)
@@ -64,7 +66,8 @@ export function Text({ children, style, showCursor, numberOfLines, ...props }) {
   });
 }
 
-export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', onError, style, ...props }) {
+export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', onError, style: styleProp, ...props }) {
+  const style = flattenStyle(styleProp);
   // Display-size hint: lets the engine rasterize SVGs at the rendered size
   // (bitmaps ignore it). style.width/height win over the props, matching layout.
   const hintW = typeof style?.width  === 'number' ? style.width  : (typeof width  === 'number' ? width  : 0);
@@ -217,7 +220,7 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
   //   style={({ pressed, hovered }) => ({ ... })}
   // Function styles handle their own feedback, so opacity feedback is skipped.
   const styleIsFn = typeof style === 'function';
-  const resolvedStyle = styleIsFn ? style({ pressed, hovered, focused }) : style;
+  const resolvedStyle = flattenStyle(styleIsFn ? style({ pressed, hovered, focused }) : style);
   const baseOpacity = resolvedStyle?.opacity ?? 1;
   const feedbackStyle = (!styleIsFn && feedback && pressed && !disabled)
     ? { ...resolvedStyle, opacity: baseOpacity * 0.65 }
@@ -306,7 +309,7 @@ export function useWheel(handler) {
 
 export function ScrollView({
   children,
-  style,
+  style: styleProp,
   height,               // layout height — only set if you need a fixed height
   contentHeight,        // explicit content height override (more reliable than auto-detect)
   showScrollbar   = true,
@@ -315,6 +318,7 @@ export function ScrollView({
   smoothScroll    = true,
   ...props
 }) {
+  const style = flattenStyle(styleProp);
   const nodeIdRef    = useRef(null);
   const maxScrollRef = useRef(0);
   const [scrollY, setScrollY] = useState(0);
@@ -409,7 +413,7 @@ export function ScrollView({
     showScrollbar,
     scrollbarWidth,
     scrollbarColor,
-    ...style,
+    ...flattenStyle(style),
   };
 
   const finalStyle = height != null ? { ...viewStyle, height } : viewStyle;
@@ -546,7 +550,7 @@ export function VirtualizedList({
     scrollbarWidth,
     scrollbarColor,
     scrollContentH: totalContentH,
-    ...style,
+    ...flattenStyle(style),
   };
 
   return React.createElement(
@@ -860,13 +864,13 @@ export function WindowControls({ style } = {}) {
       _wc_mac(maximized ? '⊡' : '⊞', toggleMax, '#28c840'),
     ];
     return React.createElement(View, {
-      style: { flexDirection: 'row', gap: 6, alignItems: 'center', marginLeft: 8, ...style },
+      style: { flexDirection: 'row', gap: 6, alignItems: 'center', marginLeft: 8, ...flattenStyle(style) },
     }, ...buttons);
   }
 
   // Windows / Linux: icon-only buttons, no gap (touch), close on far right
   return React.createElement(View, {
-    style: { flexDirection: 'row', alignItems: 'center', ...style },
+    style: { flexDirection: 'row', alignItems: 'center', ...flattenStyle(style) },
   },
     React.createElement(_WcWin, { label: '─', onPress: minimize }),
     React.createElement(_WcWin, { label: maximized ? '❐' : '☐', onPress: toggleMax }),

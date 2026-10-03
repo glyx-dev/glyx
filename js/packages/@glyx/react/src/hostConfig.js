@@ -11,6 +11,7 @@ import { DefaultEventPriority } from 'react-reconciler/constants';
 import { setNodeParent, removeNodeFromTree } from './events.js';
 import { computeIds } from './devIds.js';
 import { isRecording, recordCommit, startRecording, stopRecording } from './devProfile.js';
+import { flattenStyle } from './style.js';
 
 // Release builds drop `testID` before it reaches native: `glyx build` defines
 // __GLYX_STRIP_TEST_IDS__ = true unless the app sets `keepTestIds` (for
@@ -310,7 +311,7 @@ function createInstance(type, props, _rootContainer, _hostContext, fiber) {
   // Strip `_glyxOnMount` — a callback that components use to learn their
   // native node ID synchronously, without relying on ref forwarding.
   const { children, style, ref: _ref, _glyxOnMount, glyxDraggable, transition, animation, ...rest } = props;
-  const nodeProps = { ...rest, ...style };
+  const nodeProps = { ...rest, ...flattenStyle(style) };
   if (STRIP_TEST_IDS) delete nodeProps.testID;
   if (glyxDraggable) nodeProps.draggable = true;
   applyTransition(nodeProps, transition);
@@ -457,7 +458,7 @@ function prepareUpdate(_instance, _type, oldProps, newProps) {
 function commitUpdate(instance, updatePayload, _type, oldProps, newProps) {
   if (oldProps && newProps && oldProps.testID !== newProps.testID) idsChanged();
   const { children, style, ref: _ref, _glyxOnMount, glyxDraggable, transition, animation, ...rest } = updatePayload;
-  const nodeProps = { ...rest, ...style };
+  const nodeProps = { ...rest, ...flattenStyle(style) };
   if (STRIP_TEST_IDS) delete nodeProps.testID;
   if (glyxDraggable) nodeProps.draggable = true;
   applyTransition(nodeProps, transition);

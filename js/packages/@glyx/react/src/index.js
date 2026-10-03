@@ -23,6 +23,7 @@ import { PopoverHost } from './popover.js';
 // Re-export from sub-modules
 export * from './api.js';
 export * from './core.js';
+export { StyleSheet, flattenStyle } from './style.js';
 export * from './popover.js';
 export * from './controls.js';
 export * from './canvas.js';

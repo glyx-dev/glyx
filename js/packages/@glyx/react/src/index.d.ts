@@ -2,6 +2,20 @@ import * as React from 'react';
 
 // ── Style prop ────────────────────────────────────────────────────────────────
 
+/** A style, `false`/`null`/`undefined` (skipped), or a nested array of those. Later entries win. */
+export type StyleProp = GlyxStyle | false | null | undefined | readonly StyleProp[];
+
+/** Merge a style or array of styles into one object. */
+export function flattenStyle(style: StyleProp): GlyxStyle | undefined;
+
+export const StyleSheet: {
+  /** Returns `styles` unchanged; define styles once, outside render, with their keys type-checked. */
+  create<T extends { [name: string]: GlyxStyle }>(styles: T): T;
+  flatten: typeof flattenStyle;
+  compose(a: StyleProp, b: StyleProp): StyleProp;
+  readonly absoluteFill: GlyxStyle;
+};
+
 /** A length: pixels as a number, or a percentage of the parent such as `'50%'`. */
 export type GlyxLength = number | `${number}%`;
 
@@ -79,7 +93,7 @@ export interface GlyxStyle {
   borderRadius?:     number;
   borderWidth?:      number;
   borderColor?:      string;
-  boxShadow?:        string;
+  boxShadow?:        string;   // 'x y blur colour', e.g. '0 2 4 #00000044'
   transform?:        string;
 
   // Text
@@ -98,7 +112,7 @@ export interface GlyxStyle {
 // ── Host components ───────────────────────────────────────────────────────────
 
 export interface ViewProps {
-  style?:    GlyxStyle;
+  style?:    StyleProp;
   width?:    number;
   height?:   number;
   children?: React.ReactNode;
@@ -106,7 +120,7 @@ export interface ViewProps {
 }
 
 export interface TextProps {
-  style?:      GlyxStyle;
+  style?:      StyleProp;
   fontSize?:   number;
   width?:      number;
   height?:     number;
@@ -120,7 +134,7 @@ export interface ImageProps {
   width?:      number;
   height?:     number;
   resizeMode?: 'cover' | 'contain' | 'stretch';
-  style?:      GlyxStyle;
+  style?:      StyleProp;
 }
 
 /** Properties a `transition` can animate (`'all'` for every one). Default: opacity only. */
@@ -139,14 +153,14 @@ export interface PressableProps {
   onHoverOut?: () => void;
   /** Hover/press/focus changes ease on a spring by default; `false` snaps like before. */
   transition?: false | TransitionConfig;
-  style?:      GlyxStyle;
+  style?:      StyleProp;
   width?:      number;
   height?:     number;
   children?:   React.ReactNode;
 }
 
 export interface ScrollViewProps {
-  style?:          GlyxStyle;
+  style?:          StyleProp;
   width?:          number;
   height?:         number;
   contentHeight?:  number;
@@ -176,7 +190,7 @@ export interface TextInputProps {
   secureTextEntry?: boolean;
   /** Input filter: 'numeric' = integers, 'decimal' = numbers with one dot. */
   keyboardType?:    'default' | 'numeric' | 'decimal';
-  style?:           GlyxStyle;
+  style?:           StyleProp;
 }
 
 export declare const View:       React.FC<ViewProps>;
@@ -196,7 +210,7 @@ export declare const DatePicker: React.FC<{
   value?: Date | string | null;
   onValueChange?: (d: Date) => void;
   disabled?: boolean;
-  style?: GlyxStyle;
+  style?: StyleProp;
 }>;
 
 export declare const TimePicker: React.FC<{
@@ -208,7 +222,7 @@ export declare const TimePicker: React.FC<{
   /** Minute column granularity (default 5). */
   minuteStep?: number;
   disabled?: boolean;
-  style?: GlyxStyle;
+  style?: StyleProp;
 }>;
 
 export declare const DateTimePicker: React.FC<{
@@ -217,7 +231,7 @@ export declare const DateTimePicker: React.FC<{
   use24Hour?: boolean;
   minuteStep?: number;
   disabled?: boolean;
-  style?: GlyxStyle;
+  style?: StyleProp;
 }>;
 
 // ── WebView (native OS-embedded webview; requires the `webview` capability) ──
@@ -242,7 +256,7 @@ export interface WebViewProps {
   assetsRoot?: string;
   /** Called when the page posts a message via `window.ipc.postMessage(str)`. */
   onMessage?: (message: string) => void;
-  style?:  GlyxStyle;
+  style?:  StyleProp;
   [key: string]: unknown;
 }
 

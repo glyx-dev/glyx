@@ -317,6 +317,7 @@ pub(super) fn package_windows(name: &str, bin: &Path) -> Result<()> {
     copy_app_payload(&app_dir, bin)?;
     let win_meta = read_app_metadata();
     install_license_files(&app_dir.join("LICENSES"), win_meta.license.as_deref())?;
+    crate::ffmpeg_notice::install_and_report(&app_dir.join("LICENSES"), &app_dir)?;
 
     // Generate icon.ico — use the app's configured icon, or fall back to the
     // embedded Glyx logo so every package always has a proper icon.
@@ -467,6 +468,7 @@ pub(super) fn package_macos(name: &str, bin: &Path) -> Result<()> {
     copy_app_payload(&app_dir, bin)?;
     let macos_meta = read_app_metadata();
     install_license_files(&res_dir.join("LICENSES"), macos_meta.license.as_deref())?;
+    crate::ffmpeg_notice::install_and_report(&res_dir.join("LICENSES"), &app_dir)?;
     println!("✓ Package: {}", bundle_root.display());
     Ok(())
 }
@@ -510,6 +512,7 @@ pub(super) fn package_linux(name: &str, bin: &Path) -> Result<()> {
 
     let linux_meta = read_app_metadata();
     install_license_files(&app_dir.join("LICENSES"), linux_meta.license.as_deref())?;
+    crate::ffmpeg_notice::install_and_report(&app_dir.join("LICENSES"), &app_dir)?;
 
     let archive = format!("target/glyx/dist/{name}-linux.tar.gz");
     println!("Packaging for Linux: {archive}");

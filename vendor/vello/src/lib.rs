@@ -363,7 +363,7 @@ struct PendingBump {
     rx: std::sync::mpsc::Receiver<std::result::Result<(), wgpu::BufferAsyncError>>,
     /// The capacities the frame was drawn with, and its scene signature.
     used: adaptive::BumpCapacity,
-    sig: u64,
+    sig: adaptive::SceneSig,
 }
 
 /// How adaptive frames were drawn (see [`Renderer::adaptive_stats`]).
@@ -580,7 +580,7 @@ impl Renderer {
         texture: &TextureView,
         params: &RenderParams,
     ) -> Result<()> {
-        let sig = adaptive::scene_signature(scene.encoding());
+        let sig = adaptive::SceneSig::new(scene.encoding(), scene.tile_estimate());
         // What the previous frame's counters say (this may grow the buffers).
         let may_request = self.harvest_bump(device);
         if self.sync.needs_sync(sig, (params.width, params.height)) {
@@ -599,7 +599,7 @@ impl Renderer {
         scene: &Scene,
         texture: &TextureView,
         params: &RenderParams,
-        sig: u64,
+        sig: adaptive::SceneSig,
         request_counters: bool,
     ) -> Result<()> {
         let mut render = Render::new();
@@ -663,7 +663,7 @@ impl Renderer {
         scene: &Scene,
         texture: &TextureView,
         params: &RenderParams,
-        sig: u64,
+        sig: adaptive::SceneSig,
     ) -> Result<()> {
         // Each failed stage can hide the next one's needs, so a few rounds may be needed.
         const MAX_ATTEMPTS: u32 = 6;
@@ -742,7 +742,7 @@ impl Renderer {
             }
 
             self.demand.record(&bump);
-            self.sync.measured(sig);
+            self.sync.measured(sig, self.bump_capacity.fill(&bump));
             self.sync.frame_drawn(sig, true);
             self.stats.waited_frames += 1;
             self.review_capacity();
@@ -771,7 +771,7 @@ impl Renderer {
                 self.engine.free_download(pending.proxy);
                 if let Some(bump) = bump {
                     self.demand.record(&bump);
-                    self.sync.measured(pending.sig);
+                    self.sync.measured(pending.sig, pending.used.fill(&bump));
                     if pending.used.overflowed(&bump) {
                         self.stats.late_overflows += 1;
                         log::debug!("vello: a frame was drawn with scratch buffers too small for it ({bump:?})");

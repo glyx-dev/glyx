@@ -19,6 +19,7 @@ mod cmd_mcp;
 mod cmd_build;
 mod cmd_package;
 mod icu_trim;
+mod ffmpeg_notice;
 mod cmd_check;
 mod cmd_test;
 mod cmd_generate;

@@ -273,10 +273,10 @@ fn a_jump_in_the_number_of_paths_is_caught_before_drawing() {
 }
 
 #[test]
-fn a_scene_that_only_covers_more_area_recovers_within_a_frame() {
-    // The documented blind spot: path and segment counts do not change, so the frame
-    // is drawn in one pass and its overflow is found a frame late. At most that one
-    // frame may be wrong; the next must match the fixed-size render.
+fn a_scene_that_only_covers_more_area_is_caught_before_drawing() {
+    // Path and segment counts do not change, only how much area the shapes cover. The
+    // scene's tile estimate sees it, so the frame waits for its counters and re-runs its
+    // coarse pass larger, and no frame is drawn with content missing.
     let Some(g) = gpu() else { eprintln!("no GPU adapter: skipped"); return; };
     let small = rects(800, 6.0, 6.0);
     let large = rects(800, 600.0, 400.0);
@@ -286,14 +286,41 @@ fn a_scene_that_only_covers_more_area_recovers_within_a_frame() {
 
     let mut r = renderer(&g);
     for _ in 0..8 { render(&g, &mut r, &small); }
+    let before = r.adaptive_stats();
     let mut wrong = 0;
-    let mut last_wrong = false;
     for _ in 0..4 {
-        last_wrong = diff(&want, &render(&g, &mut r, &large), 1).0 != 0;
-        if last_wrong { wrong += 1; }
+        if diff(&want, &render(&g, &mut r, &large), 1).0 != 0 { wrong += 1; }
     }
     let st = r.adaptive_stats();
-    eprintln!("blind spot: {wrong} wrong frame(s); {st:?}; buffers {} MiB", r.bump_buffer_bytes() / MIB);
-    assert!(wrong <= 1, "more than one frame drew with missing content: {st:?}");
-    assert!(!last_wrong, "it must have recovered: {st:?}");
+    eprintln!("more area: {wrong} wrong frame(s); {st:?}; buffers {} MiB", r.bump_buffer_bytes() / MIB);
+    assert_eq!(wrong, 0, "a frame was drawn with content missing: {st:?}");
+    assert_eq!(st.late_overflows, 0, "nothing should have been found out a frame late: {st:?}");
+    assert!(st.waited_frames > before.waited_frames && st.retries > before.retries, "the jump should have waited and re-run: {before:?} -> {st:?}");
+}
+
+#[test]
+fn a_card_scaling_up_gradually_never_draws_a_bad_frame() {
+    // The animation case: the same shapes at growing size, a step at a time.
+    let Some(g) = gpu() else { eprintln!("no GPU adapter: skipped"); return; };
+    let mut r = renderer(&g);
+    let mut fixed = renderer(&g);
+    fixed.set_adaptive_buffers(false);
+    let mut wrong = 0;
+    for step in 0..24 {
+        let side = 12.0 * 1.18f64.powi(step); // +18% per frame, 12 px up to ~600 px
+        let scene = rects(700, side.min(600.0), (side * 0.66).min(400.0));
+        let want = render(&g, &mut fixed, &scene);
+        let before = r.adaptive_stats();
+        let bad = diff(&want, &render(&g, &mut r, &scene), 1).0 != 0;
+        if bad { wrong += 1; }
+        let after = r.adaptive_stats();
+        eprintln!("  step {step:2} side {:6.1} tiles~{:8} {} waited+{} piped+{} retries+{} late+{} buffers {} MiB",
+            side.min(600.0), scene.tile_estimate(), if bad { "WRONG" } else { "ok   " },
+            after.waited_frames - before.waited_frames, after.pipelined_frames - before.pipelined_frames,
+            after.retries - before.retries, after.late_overflows - before.late_overflows, r.bump_buffer_bytes() / MIB);
+    }
+    let st = r.adaptive_stats();
+    eprintln!("scaling: {wrong} wrong frame(s); {st:?}");
+    assert_eq!(wrong, 0, "{st:?}");
+    assert_eq!(st.late_overflows, 0, "{st:?}");
 }

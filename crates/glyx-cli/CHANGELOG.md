@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- **`glyx package` writes FFmpeg's licence notice.** When an app ships FFmpeg libraries, `LICENSES/ffmpeg/` gets a `NOTICE.txt` (which libraries, the licence and version they report, and that they are separate replaceable libraries) plus the matching licence texts (LGPL 3 also adds the GPL 3 it refers to). The licence is read from the libraries themselves and the strictest one wins; GPL or unrecognised builds print a warning. Covers Windows, macOS and Linux packages.
+- **Glyx DevTools.** `glyx dev --devtools [port]` serves the Glyx DevTools Protocol on both JS engines (default port 9228; the address and a session token go to `target/glyx/devtools.json`), and `--open` opens the UI attached to the app. `glyx inspect [--port <p>] [--no-open]` serves the DevTools UI on `127.0.0.1` (default port 9227) and lists the dev apps running in the project, its subfolders, or anywhere with `GLYX_DEVTOOLS_PORT` set. Panels: Overview, Inspector, Console, Performance, Animations, Memory, Layout, Network, CPU profiler. Dev builds only.
+- **`glyx mcp`** serves running dev apps to AI agents over MCP (stdio): list apps, read the UI as an outline, click, type, scroll, wait, screenshot, evaluate JavaScript, read the console. The VS Code extension has **Open DevTools on…** and **Copy MCP Server Config** commands.
 - Cached `glyx-runner` binaries (`~/.glyx/runners/<engine>/<profile>/`) are now
   stamped with the `glyx-cli` version that produced them. `glyx dev`/`glyx build`
   print a one-line notice when a cached runner's stamp doesn't match the CLI
@@ -15,6 +18,10 @@
   `glyx-cli` while a runner was already cached meant every subsequent command
   silently kept using the old cached runner indefinitely, with no signal that a
   newer one existed.
+
+### Changed
+- **The Windows media library is built against LGPL FFmpeg.** The build script downloads an LGPL shared FFmpeg build, so apps that ship it take on no GPL obligations (the libraries stay separate DLLs next to the app). Only the five libraries the wrapper links to (`avcodec`, `avformat`, `avutil`, `swresample`, `swscale`) are used; `avfilter` and `avdevice` are gone. Video encoding picks the best H.264 encoder the machine has (hardware first) and falls back to MPEG-4 instead of requiring the GPL-only `libx264`. On Linux and macOS the media library uses the system FFmpeg, so its licence is whatever that build carries.
+- `glyx build` and `glyx dev` keep a debug bundle's source map separate (`pm::SourceMap`) instead of inlining it in release output (see Fixed).
 
 ### Fixed
 - `glyx package` shipped the app's own `js/` source folder (including `.jsx`

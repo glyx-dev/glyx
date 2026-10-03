@@ -102,6 +102,23 @@ impl BumpCapacity {
         gpu.binning_size = sizes.bin_data.len() - layout.bin_data_start;
     }
 
+    /// How full the fullest buffer was for a pass that reported `bump`: 0.0 empty,
+    /// 1.0 exactly full, above 1.0 overflowed.
+    pub fn fill(&self, bump: &BumpAllocators) -> f64 {
+        let r = |used: u32, cap: u32| used as f64 / cap.max(1) as f64;
+        let mut f = r(bump.lines, self.lines)
+            .max(r(bump.tile, self.tiles))
+            .max(r(bump.seg_counts, self.seg_counts))
+            .max(r(bump.segments, self.segments))
+            .max(r(bump.blend, self.blend))
+            .max(r(bump.ptcl, self.ptcl))
+            .max(r(bump.binning, self.binning));
+        if bump.failed != 0 {
+            f = f.max(1.0);
+        }
+        f
+    }
+
     /// Whether a pass that reported `bump` did not fit in these buffers.
     pub fn overflowed(&self, bump: &BumpAllocators) -> bool {
         bump.failed != 0
@@ -251,12 +268,44 @@ impl DemandTracker {
     }
 }
 
-/// A cheap measure of how much a scene asks of the GPU, from what the encoding
-/// already counts: path segments (the flattened lines and tile segments follow
-/// from them), paths, and clips. Not exact (the area a path covers is not in it),
-/// which is why the counters are still read back.
-pub fn scene_signature(e: &vello_encoding::Encoding) -> u64 {
-    e.n_path_segments as u64 + 4 * e.n_paths as u64 + 4 * e.n_clips as u64
+/// A cheap measure of how much a scene asks of the GPU, in two parts that are
+/// compared separately: `items` (what there is to flatten: path segments, paths,
+/// clips, glyphs) and `tiles` (how much area it covers, from the shapes' bounding
+/// boxes, see `Scene::tile_estimate`). A scene can grow in either without growing in
+/// the other: a card scaling up covers far more tiles with the same paths. Neither is
+/// exact, which is why the counters are still read back.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SceneSig {
+    pub items: u64,
+    pub tiles: u64,
+}
+
+impl SceneSig {
+    pub fn new(e: &vello_encoding::Encoding, tiles: u64) -> Self {
+        Self {
+            // Glyph outlines are only added at resolve time, so count the glyphs.
+            items: e.n_path_segments as u64
+                + 4 * e.n_paths as u64
+                + 4 * e.n_clips as u64
+                + 8 * e.resources.glyphs.len() as u64,
+            tiles,
+        }
+    }
+
+    /// Whether this scene is bigger than `anchor` by more than `percent` in either part.
+    fn outgrows(&self, anchor: &SceneSig, percent: u64) -> bool {
+        grew(self.items, anchor.items, percent, 16) || grew(self.tiles, anchor.tiles, percent, 64)
+    }
+
+    /// The larger of each part.
+    fn max(self, other: SceneSig) -> SceneSig {
+        SceneSig { items: self.items.max(other.items), tiles: self.tiles.max(other.tiles) }
+    }
+}
+
+/// `now` is more than `percent` (plus a little slack for noise) above `anchor`.
+fn grew(now: u64, anchor: u64, percent: u64, slack: u64) -> bool {
+    now > anchor + anchor * percent / 100 + slack
 }
 
 /// When a frame has to wait for its allocation counters before drawing.
@@ -271,38 +320,55 @@ pub fn scene_signature(e: &vello_encoding::Encoding) -> u64 {
 #[derive(Default)]
 pub struct SyncPolicy {
     /// Signature of the largest scene whose counters have been seen this window.
-    anchor: u64,
+    anchor: SceneSig,
+    /// How full the fullest buffer was at its fullest in that window.
+    anchor_fill: f64,
     last_size: Option<(u32, u32)>,
     force: bool,
     frames: u32,
 }
 
-/// A scene may be this much bigger (in percent) than the one last measured before
-/// a frame waits for its counters.
+/// A scene may be at most this much bigger (in percent) than the one last measured
+/// before a frame waits for its counters, if the buffers had plenty of room.
 const SYNC_GROWTH_PERCENT: u64 = 25;
+/// How full the buffers may be allowed to get from one frame's growth: a scene that
+/// was measured at 80% full may grow by 12%, one at 90% or more by nothing, because
+/// a frame that grows into a buffer's last tenth would overflow.
+const TARGET_FILL: f64 = 0.9;
 
 impl SyncPolicy {
     /// Whether the frame with this scene signature and output size must read its
     /// counters before drawing.
-    pub fn needs_sync(&mut self, sig: u64, size: (u32, u32)) -> bool {
+    pub fn needs_sync(&mut self, sig: SceneSig, size: (u32, u32)) -> bool {
         let resized = self.last_size != Some(size);
         self.last_size = Some(size);
         self.force
             || resized
-            || self.anchor == 0
-            || sig > self.anchor + self.anchor * SYNC_GROWTH_PERCENT / 100
+            || self.anchor == SceneSig::default()
+            || sig.outgrows(&self.anchor, self.allowed_growth_percent())
+    }
+
+    /// How much bigger than the measured scene a frame may be before it waits: up to
+    /// 25%, less as the buffers were nearer full when it was measured.
+    fn allowed_growth_percent(&self) -> u64 {
+        if self.anchor_fill <= 0.0 {
+            return SYNC_GROWTH_PERCENT;
+        }
+        let room = TARGET_FILL / self.anchor_fill - 1.0;
+        ((room * 100.0).clamp(0.0, SYNC_GROWTH_PERCENT as f64)) as u64
     }
 
     /// The counters of a frame with signature `sig` have been seen (while waiting
     /// for them, or a frame late).
-    pub fn measured(&mut self, sig: u64) {
+    pub fn measured(&mut self, sig: SceneSig, fill: f64) {
         self.anchor = self.anchor.max(sig);
+        self.anchor_fill = self.anchor_fill.max(fill);
     }
 
     /// Call once per frame drawn. `waited` says the frame waited for its counters,
     /// which settles a forced wait. Once a window of frames has passed the anchor
     /// is forgotten, so it follows a scene that got smaller.
-    pub fn frame_drawn(&mut self, sig: u64, waited: bool) {
+    pub fn frame_drawn(&mut self, sig: SceneSig, waited: bool) {
         if waited {
             self.force = false;
         }
@@ -310,6 +376,7 @@ impl SyncPolicy {
         if self.frames >= REVIEW_FRAMES {
             self.frames = 0;
             self.anchor = sig;
+            self.anchor_fill = 0.0;
         }
     }
 
@@ -397,6 +464,18 @@ mod tests {
     }
 
     #[test]
+    fn fill_is_the_fullest_buffer_and_a_failure_counts_as_full() {
+        let c = BumpCapacity::FLOOR;
+        let b = bump(c.lines / 2, c.tiles / 4, 0, 0, 0, c.ptcl * 9 / 10, 0);
+        assert!((c.fill(&b) - 0.9).abs() < 1e-3);
+        assert!(c.fill(&bump(0, 0, 0, 0, 0, 0, 0)) < 1e-9);
+        let mut failed = bump(1, 1, 1, 1, 1, 1, 1);
+        failed.failed = 2;
+        assert!(c.fill(&failed) >= 1.0);
+        assert!(c.fill(&bump(c.lines * 2, 0, 0, 0, 0, 0, 0)) > 1.0);
+    }
+
+    #[test]
     fn rounding_up_never_overshoots_by_more_than_a_quarter() {
         for x in [5u64, 100, 4097, 65_537, 100_000, 524_289, 3_000_001, u32::MAX as u64 / 2] {
             let r = round_up_quarter(x);
@@ -463,27 +542,73 @@ mod tests {
         assert!(t.review(&cap).is_none());
     }
 
+    fn sig(items: u64) -> SceneSig {
+        SceneSig { items, tiles: items * 10 }
+    }
+
     #[test]
     fn the_first_frame_waits_then_a_steady_scene_never_does() {
         let mut p = SyncPolicy::default();
-        assert!(p.needs_sync(1000, (1280, 800)), "nothing measured yet");
-        p.measured(1000);
-        p.frame_drawn(1000, true);
+        assert!(p.needs_sync(sig(1000), (1280, 800)), "nothing measured yet");
+        p.measured(sig(1000), 0.1);
+        p.frame_drawn(sig(1000), true);
         for _ in 0..100 {
-            assert!(!p.needs_sync(1000, (1280, 800)));
-            p.frame_drawn(1000, false);
+            assert!(!p.needs_sync(sig(1000), (1280, 800)));
+            p.frame_drawn(sig(1000), false);
         }
     }
 
     #[test]
     fn a_new_size_or_a_bigger_scene_waits() {
         let mut p = SyncPolicy::default();
-        p.needs_sync(1000, (1280, 800));
-        p.measured(1000);
-        assert!(!p.needs_sync(1100, (1280, 800)), "10% bigger is within the margin");
-        assert!(p.needs_sync(1100, (1920, 1080)), "a resize waits");
-        assert!(!p.needs_sync(1100, (1920, 1080)), "and only once");
-        assert!(p.needs_sync(1300, (1920, 1080)), "30% bigger than the last measured scene waits");
+        p.needs_sync(sig(1000), (1280, 800));
+        p.measured(sig(1000), 0.1);
+        assert!(!p.needs_sync(sig(1100), (1280, 800)), "10% bigger is within the margin");
+        assert!(p.needs_sync(sig(1100), (1920, 1080)), "a resize waits");
+        assert!(!p.needs_sync(sig(1100), (1920, 1080)), "and only once");
+        assert!(p.needs_sync(sig(1300), (1920, 1080)), "30% bigger than the last measured scene waits");
+    }
+
+    #[test]
+    fn covering_much_more_area_with_the_same_paths_waits() {
+        // The case counting paths alone could not see: a card scaling up.
+        let mut p = SyncPolicy::default();
+        let small = SceneSig { items: 1000, tiles: 2_000 };
+        p.needs_sync(small, (1280, 800));
+        p.measured(small, 0.1);
+        assert!(!p.needs_sync(SceneSig { items: 1000, tiles: 2_300 }, (1280, 800)), "15% more area is within the margin");
+        assert!(p.needs_sync(SceneSig { items: 1000, tiles: 20_000 }, (1280, 800)), "ten times the area must wait");
+    }
+
+    #[test]
+    fn the_nearer_the_buffers_were_to_full_the_less_growth_is_allowed() {
+        let base = SceneSig { items: 10_000, tiles: 10_000 };
+        let grown = SceneSig { items: 12_200, tiles: 12_200 }; // +22%
+        let mut roomy = SyncPolicy::default();
+        roomy.needs_sync(base, (1, 1));
+        roomy.measured(base, 0.2);
+        assert!(!roomy.needs_sync(grown, (1, 1)), "plenty of room: +22% is fine");
+
+        let mut tight = SyncPolicy::default();
+        tight.needs_sync(base, (1, 1));
+        tight.measured(base, 0.88);
+        assert!(tight.needs_sync(grown, (1, 1)), "88% full: +22% would overflow, so it must wait");
+
+        let mut full = SyncPolicy::default();
+        full.needs_sync(base, (1, 1));
+        full.measured(base, 0.95);
+        assert!(full.needs_sync(SceneSig { items: 10_400, tiles: 10_400 }, (1, 1)), "nearly full: even +4% waits");
+        assert!(!full.needs_sync(base, (1, 1)), "but the same scene does not");
+    }
+
+    #[test]
+    fn a_handful_of_tiles_of_noise_is_not_growth() {
+        let mut p = SyncPolicy::default();
+        let s = SceneSig { items: 1000, tiles: 100 };
+        p.needs_sync(s, (1, 1));
+        p.measured(s, 0.1);
+        // 40 more tiles on a base of 100 is +40%, but absolute slack keeps it from waiting.
+        assert!(!p.needs_sync(SceneSig { items: 1000, tiles: 140 }, (1, 1)));
     }
 
     #[test]
@@ -491,14 +616,14 @@ mod tests {
         // Each frame is only 20% bigger than the last, but nothing has been measured
         // since the first: the comparison is with the measured scene, not the last frame.
         let mut p = SyncPolicy::default();
-        p.needs_sync(1000, (1, 1));
-        p.measured(1000);
+        p.needs_sync(sig(1000), (1, 1));
+        p.measured(sig(1000), 0.1);
         let mut waited = false;
-        let mut sig = 1000u64;
+        let mut items = 1000u64;
         for _ in 0..4 {
-            sig = sig * 12 / 10;
-            if p.needs_sync(sig, (1, 1)) { waited = true; break; }
-            p.frame_drawn(sig, false);
+            items = items * 12 / 10;
+            if p.needs_sync(sig(items), (1, 1)) { waited = true; break; }
+            p.frame_drawn(sig(items), false);
         }
         assert!(waited, "four 20% steps is 2x the measured scene; some frame must have waited");
     }
@@ -506,23 +631,23 @@ mod tests {
     #[test]
     fn a_late_overflow_makes_the_next_frame_wait_once() {
         let mut p = SyncPolicy::default();
-        p.needs_sync(1000, (1, 1));
-        p.measured(1000);
-        assert!(!p.needs_sync(1000, (1, 1)));
+        p.needs_sync(sig(1000), (1, 1));
+        p.measured(sig(1000), 0.1);
+        assert!(!p.needs_sync(sig(1000), (1, 1)));
         p.force_next_sync();
-        assert!(p.needs_sync(1000, (1, 1)));
-        p.frame_drawn(1000, true);
-        assert!(!p.needs_sync(1000, (1, 1)));
+        assert!(p.needs_sync(sig(1000), (1, 1)));
+        p.frame_drawn(sig(1000), true);
+        assert!(!p.needs_sync(sig(1000), (1, 1)));
     }
 
     #[test]
     fn the_anchor_follows_a_scene_that_got_smaller() {
         let mut p = SyncPolicy::default();
-        p.needs_sync(10_000, (1, 1));
-        p.measured(10_000);
-        for _ in 0..REVIEW_FRAMES { p.frame_drawn(500, false); }
+        p.needs_sync(sig(10_000), (1, 1));
+        p.measured(sig(10_000), 0.1);
+        for _ in 0..REVIEW_FRAMES { p.frame_drawn(sig(500), false); }
         // After a window of small scenes, a scene of 700 is a jump from 500, not a drop from 10,000.
-        assert!(p.needs_sync(700, (1, 1)));
+        assert!(p.needs_sync(sig(700), (1, 1)));
     }
 
     #[test]

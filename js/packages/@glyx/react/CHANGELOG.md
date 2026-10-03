@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- **Complete `GlyxStyle` typings.** `style` now types every key the runtime reads, not just 15: margins and paddings (per side and horizontal/vertical), `width`/`height` and min/max (pixels or `'50%'`, via the new `GlyxLength`), `position`/`top`/`right`/`bottom`/`left`, `zIndex`, `overflow`, `opacity`, `transform`, `boxShadow`, `backgroundGradient`, font props, `lineHeight`, `flexWrap`/`flexGrow`/`flexShrink`/`flexBasis`, align/justify variants, grid, and scrollbar props. `textAlign` now includes `'right'`, and `flexDirection`, `justifyContent` and `alignItems` list their reverse, `space-evenly` and `baseline` values.
+- **Smooth scrolling.** `ScrollView` eases wheel and keyboard scrolling on a critically damped spring owned by the native runtime (no JS per frame). `smoothScroll` is on by default; `smoothScroll={false}` opts out. Dragging the scrollbar and touchpad scrolling are never eased.
+- **Spring transitions.** `transition={{ spring: { stiffness, damping }, properties }}` animates on a spring instead of a fixed duration. The spring settles when it settles, and interrupting one keeps its momentum. Optional `properties` works as for timed transitions.
+- **`Pressable` `transition` prop.** Hover, press and focus feedback now ease on a spring by default. `transition={false}` restores the old instant change; pass your own config to change it.
+- **`<Canvas transition>`.** Eases from the previous drawing to each new one, natively, instead of jumping: rects, circles, lines, paths and text positions move, colours blend. Commands are lined up in order, so a drawing that gains an axis tick still eases the data; a canvas redrawn faster than its spring settles (a live stream) glides over the gap between redraws. `@glyx-dev/charts` uses it.
+- `ctx.arc(..., segments)` and `ctx.bezierCurveTo(..., segments)` take an optional segment count. The default is unchanged; fewer segments make long smooth curves cheaper, and a fixed count keeps a shape's point count stable so canvas easing can match it.
+- **`useWheel(handler)`**, `registerWheel` and `unregisterWheel`: offer wheel and trackpad scrolling over a view to a handler before any `ScrollView` underneath (`handler({ deltaY, ctrl, shift, x, y })`, return `true` to consume the event). Ctrl + wheel zoom in charts is built on it.
+- **Reduced motion.** When the OS has animation effects off, or `GLYX_REDUCE_MOTION=1` is set, transitions (including springs and the `Pressable` easing), smooth scrolling and canvas easing jump to their end state. Keyframe `animation`s keep running.
 - `autostart` API: `isEnabled()`, `setEnabled(boolean)`, `wasOpenedAtLogin()`. Registers the app to launch at login (Windows Run key, Linux `.desktop` autostart file, macOS LaunchAgents plist — macOS not yet verified on real hardware) and lets the app tell a login-triggered launch apart from a normal one, via a `--glyx-autostart` flag. Gated by a new `autostart` capability.
 - `print` API: `listPrinters()`, `getDefaultPrinter()`, `file(path, { printer? })`. Sends a file to a printer via the OS's own print handling (no new dependency — PowerShell's print verb on Windows, CUPS's `lp` on macOS/Linux, macOS/Linux not yet verified on real hardware). Choosing a specific printer is honored on macOS/Linux only; Windows always uses the default. Gated by a new `print` capability.
 - Canvas 2D:
@@ -30,6 +38,7 @@
 - `TextInput` accepts `textAlign` (`'left'` | `'center'` | `'right'`), applied to rendering and hit-testing alike.
 
 ### Fixed
+- A parent re-render no longer marked every child dirty. `prepareUpdate` compared inline `style`, `transition` and `animation` objects by identity, and a new object literal each render always looked changed, so every child repainted. They are now compared by content. This was most of the CPU renderer's cost on a re-rendering dashboard.
 - Changing a `Text`'s `fontWeight`, `fontStyle`, `lineHeight` or `textScrollX` now re-measures it. Before, only a text or size change did, so restyling text in place kept its old width.
 - Single-line text (`textScrollX` set, as in inputs and rich-text spans) now counts trailing spaces in its width.
 - `Text` with `numberOfLines={1}` now ends in an ellipsis (…) when it doesn't fit, instead of wrapping. The limit can also be set in the style, as `numberOfLines`, or the web way with `textOverflow: 'ellipsis'` (usually alongside `whiteSpace: 'nowrap'`).
@@ -51,6 +60,8 @@
 - Multiline `TextInput` PageUp/PageDown keeps the caret's column instead of jumping to the start of the line.
 
 ### Changed
+- `Pressable` now eases hover, press and focus feedback by default (a spring on all properties). Use `transition={false}` for the previous instant behaviour.
+- Wheel scrolling in a `ScrollView` now eases by default. Use `smoothScroll={false}` for the previous behaviour.
 - `ipc.on('message', ...)` listeners now receive messages without an internal JSON round trip on the native side — no behavior change, but inter-window IPC polling is cheaper per frame.
 - The internal host config (`hostConfig.js`) now batches append/insertBefore/update/remove/setRoot operations from one React commit into a single native call instead of one call per operation, encoded as one flat array instead of nested per-op arrays. No API or behavior change — purely a native-bridge efficiency change (see the project performance changelog for the numbers).
 - Click and hover hit-testing (`findTopmostSolid` in `events.js`) is no longer computed in JS at all — it's resolved natively when an input event is captured and attached to the event before JS ever sees it, instead of JS calling a native layout query once per candidate element on every click and every cursor move. As a result, the JS-side bookkeeping that only existed to support that lookup (the solid-node registry and the per-node z-index map, along with `registerSolid`/`unregisterSolid`/`setNodeZIndex`) has been removed entirely — one fewer Map write on every node's creation, update, and removal. (An earlier point release in this same cycle had fixed an O(n²) bug in that registry's removal path; this change removes the registry altogether, superseding that fix.) No public API changed — these were internal to `hostConfig.js`/`events.js`, never re-exported.

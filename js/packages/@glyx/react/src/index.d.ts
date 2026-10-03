@@ -2,21 +2,97 @@ import * as React from 'react';
 
 // ── Style prop ────────────────────────────────────────────────────────────────
 
+/** A length: pixels as a number, or a percentage of the parent such as `'50%'`. */
+export type GlyxLength = number | `${number}%`;
+
+/**
+ * Every style key the runtime reads. Lengths take pixels or a percentage;
+ * anything not listed here is ignored.
+ */
 export interface GlyxStyle {
+  // Size
+  width?:            GlyxLength;
+  height?:           GlyxLength;
+  minWidth?:         GlyxLength;
+  minHeight?:        GlyxLength;
+  maxWidth?:         GlyxLength;
+  maxHeight?:        GlyxLength;
+  boxSizing?:        'border-box' | 'content-box';
+
+  // Spacing
+  margin?:           GlyxLength;
+  marginHorizontal?: GlyxLength;
+  marginVertical?:   GlyxLength;
+  marginTop?:        GlyxLength;
+  marginRight?:      GlyxLength;
+  marginBottom?:     GlyxLength;
+  marginLeft?:       GlyxLength;
+  padding?:          GlyxLength;
+  paddingHorizontal?: GlyxLength;
+  paddingVertical?:  GlyxLength;
+  paddingTop?:       GlyxLength;
+  paddingRight?:     GlyxLength;
+  paddingBottom?:    GlyxLength;
+  paddingLeft?:      GlyxLength;
+  gap?:              GlyxLength;
+
+  // Flex layout
+  display?:          'flex' | 'grid' | 'none';
+  flex?:             number;
+  flexGrow?:         number;
+  flexShrink?:       number;
+  flexBasis?:        GlyxLength;
+  flexDirection?:    'row' | 'column' | 'row-reverse' | 'column-reverse';
+  flexWrap?:         'nowrap' | 'wrap' | 'wrap-reverse';
+  justifyContent?:   'flex-start' | 'center' | 'flex-end' | 'space-between' | 'space-around' | 'space-evenly';
+  alignItems?:       'flex-start' | 'center' | 'flex-end' | 'stretch' | 'baseline';
+  alignSelf?:        'auto' | 'flex-start' | 'center' | 'flex-end' | 'stretch' | 'baseline';
+  alignContent?:     'flex-start' | 'center' | 'flex-end' | 'stretch' | 'space-between' | 'space-around' | 'space-evenly';
+  justifySelf?:      'flex-start' | 'center' | 'flex-end' | 'stretch';
+  justifyItems?:     'flex-start' | 'center' | 'flex-end' | 'stretch';
+
+  // Grid layout (with display: 'grid')
+  gridTemplateColumns?: string;
+  gridTemplateRows?:    string;
+  gridColumn?:       string;
+  gridRow?:          string;
+
+  // Position
+  position?:         'relative' | 'absolute';
+  top?:              GlyxLength;
+  right?:            GlyxLength;
+  bottom?:           GlyxLength;
+  left?:             GlyxLength;
+  zIndex?:           number;
+
+  // Overflow and scrolling
+  overflow?:         'visible' | 'hidden' | 'scroll';
+  clip?:             boolean;
+  scrollOffsetY?:    number;
+  scrollbarWidth?:   number;
+  scrollbarColor?:   string;
+
+  // Appearance
   backgroundColor?:  string;
-  color?:            string;
+  backgroundGradient?: string;
+  opacity?:          number;
   borderRadius?:     number;
   borderWidth?:      number;
   borderColor?:      string;
-  flex?:             number;
-  flexDirection?:    'row' | 'column';
-  justifyContent?:   'flex-start' | 'center' | 'flex-end' | 'space-between' | 'space-around';
-  alignItems?:       'flex-start' | 'center' | 'flex-end' | 'stretch';
-  padding?:          number;
-  gap?:              number;
-  clip?:             boolean;
-  scrollOffsetY?:    number;
-  textAlign?:        'left' | 'center';
+  boxShadow?:        string;
+  transform?:        string;
+
+  // Text
+  color?:            string;
+  fontSize?:         number;
+  fontWeight?:       'normal' | 'bold' | `${number}`;
+  fontStyle?:        'normal' | 'italic';
+  lineHeight?:       number;
+  textAlign?:        'left' | 'center' | 'right';
+  textDecorationLine?: 'none' | 'underline';
+
+  // Input
+  pointerEvents?:    'auto' | 'none';
 }
 
 // ── Host components ───────────────────────────────────────────────────────────
@@ -192,6 +268,16 @@ export declare function useScreenSize(): { width: number; height: number };
 
 /** True when window width >= minWidth. Equivalent to CSS min-width media query. */
 export declare function useMediaQuery(minWidth: number): boolean;
+
+/** A wheel or trackpad event offered to a `useWheel` handler. `deltaY` is positive when scrolling down; `x` and `y` are relative to the view. */
+export interface WheelEvent { deltaY: number; ctrl: boolean; shift: boolean; x: number; y: number }
+
+/**
+ * Offer wheel/trackpad scrolling over a view to `handler` before any `ScrollView` underneath.
+ * Return `true` to consume the event; anything else lets the scroll through.
+ * Returns an `_glyxOnMount` callback for the `View`.
+ */
+export declare function useWheel(handler: (e: WheelEvent) => boolean | void): (nodeId: number) => void;
 
 // ── Secure env access ─────────────────────────────────────────────────────────
 

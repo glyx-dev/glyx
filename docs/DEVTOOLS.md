@@ -312,7 +312,7 @@ Input goes through the app's event loop into the same handlers as real input.
 | `click` | element, or `x` + `y`; `button?` (`left` / `right` / `middle`) | Moves the pointer to the element's centre (or the point), presses and releases. `{ x, y }`. The element must be on screen. |
 | `type` | `text` | A key press and release per character; `\n` is Enter, `\t` is Tab. Goes to the focused element. |
 | `press` | `key` (`Enter`, `Backspace`, `ArrowLeft`, `KeyS`, …), `modifiers?` (`Control`, `Shift`, `Alt`, `Super`) | Presses a key, with modifiers held around it. |
-| `scroll` | `deltaY` (negative scrolls down), element or `x` + `y`? | Moves the pointer there first when given, then scrolls. |
+| `scroll` | `deltaY` (negative scrolls down), element or `x` + `y`?, `smooth?` | Moves the pointer there first when given, then scrolls. By default the scroll applies at once, like a touchpad; with `smooth: true` it takes the eased path a mouse wheel does, for a `ScrollView` with `smoothScroll`. |
 | `dispatchInput` | `type`: `pointerMove` (`x`, `y`) · `pointerDown` / `pointerUp` (`button?`) · `scroll` (`deltaY`) · `keyDown` / `keyUp` (`key`, `text?`) | One raw event. |
 | `screenshot` | element? | `{ format: "png", width, height, data }` (base64): the window, or cropped to the element. Works on any renderer (CPU, wgpu, Direct2D; the last falls back, see [Limitations](#limitations)). |
 | `waitFor` | element or content fields, `condition?` (`exists`, the default · `visible` · `gone`), `timeoutMs?` (default 5000, max 60000) | Replies when the condition holds: `{ nodeIds }`. Error `-32005` on timeout. With `id`, the ID is looked up again on every check, so it works for elements that don't exist yet. |
@@ -331,11 +331,11 @@ Input goes through the app's event loop into the same handlers as real input.
 
 ### Animation
 
-Covers CSS-style `transition`s and keyframe `animation`s.
+Covers CSS-style `transition`s (timed and spring), keyframe `animation`s, and canvas tweens (a `<Canvas transition>` easing between draws).
 
 | Method | Params | Result |
 |---|---|---|
-| `list` | | `running: [{ nodeId, id, component, kind: "transition" / "animation", durationMs, iterations, elapsedMs, progress, easing, properties? (transitions), keyframes?, alternate?, iteration? }]` (times on the motion clock; `iterations` is `"infinite"` for endless ones), `rate`. |
+| `list` | | `running: [{ nodeId, id, component, kind: "transition" / "animation" / "canvas", durationMs, iterations, elapsedMs, progress, easing, spring? (true for spring transitions and canvas tweens, whose `easing` is `"spring"` and `durationMs` the time to settle), properties? (transitions), keyframes?, alternate?, iteration? }]` (times on the motion clock; `iterations` is `"infinite"` for endless ones), `rate`. |
 | `setPlaybackRate` | `rate` (0–4) | The motion clock's speed for every window: `1` normal, `0.25` slow motion, `0` paused (paused animations stop requesting frames). Changing it never makes an animation jump. Back to `1` when the client that changed it disconnects. |
 | `seek` | `byMs` | Move the motion clock (negative = back), e.g. to step through a paused animation. Finished transitions are gone and don't come back. |
 | `getPlayback` | | `{ rate, paused }` |
@@ -349,6 +349,8 @@ Covers CSS-style `transition`s and keyframe `animation`s.
 | `sample` | | A live reading (no frame needed): `timestamp`, `heapUsed`, `heapTotal`, `rss` (working set, including shared pages such as DLLs and fonts), `privateBytes` (private working set: memory only this app uses, the number Task Manager shows; Windows only, otherwise null), `gpuBuffers`, `gpuTextures`, `gpuReserved`, `nodes`. |
 | `collectGarbage` | | Runs a garbage collection (V8: low-memory notification; QuickJS: full GC), then a sample plus `heapBefore` and `gcMs`. |
 | `snapshot` | | A sample plus `elements` (on screen), `detached` (created but not in the tree: inactive screens, caches, or leaks), `byType`, and `byComponent: [{ component, elements, instances }]` (per nearest app component, most first). Take two and compare to find what grows. |
+
+`gpuBuffers`, `gpuTextures` and `gpuReserved` are wgpu's own counts (dev builds only) and are zero on the CPU renderer. Vello's scratch buffers are most of `gpuBuffers`: about 8 MiB now that they are sized from the scene, about 168 MiB with `GLYX_VELLO_FIXED_BUFFERS=1`.
 
 ### Profiler
 

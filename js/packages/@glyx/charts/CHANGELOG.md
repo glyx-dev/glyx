@@ -15,6 +15,10 @@
 - **`useChartStream({ capacity, maxHz, initial })`** keeps a fixed-length window over a live feed and hands it to the charts at most `maxHz` times a second, so the UI does the same work whether 20 or 1000 values arrive per second. A window that keeps its length is what lets the chart ease between updates. `examples/realtime-chart` shows it.
 - Curves use about one segment per pixel instead of twenty per point (roughly a third less stroke cost, no visible change), and pie arcs use a fixed segment count so a slice keeps its point count while it eases.
 
+### Fixed
+- `PieChart` ignored a percentage `width`/`height`, the one chart that didn't follow its container. It now does, like the others.
+- Axis and legend labels are a little brighter in the dark theme (they measured 4.06:1 against a card, below the 4.5:1 WCAG AA asks for).
+
 ### Changed
 - **A visual redesign of every chart.**
   - Axes use round tick values (0, 500, 1000…) instead of values like 449.5.

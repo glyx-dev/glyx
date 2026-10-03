@@ -203,7 +203,7 @@ function ChartWidget({ config, timeseries, deviceData, width, scheme }) {
     // widget's fixed height budget instead of letting it overflow the card.
     chart = (
       <PieChart
-        data={deviceData} width={cw} height={h - 36} innerRadius={0.62} theme={scheme} title={config.title}
+        data={deviceData} width={cw} height={h - 36} innerRadius={0.62} theme={scheme} title={config.title} centerLabel="Sessions" formatValue={(v) => String(Math.round(v))}
         onPointPress={onPointPress} showLegend
       />
     );
@@ -268,7 +268,7 @@ function Dashboard({ scheme, onToggleTheme }) {
       }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
           <View style={{ width: 32, height: 32, borderRadius: 8, backgroundColor: COLORS.sky, alignItems: 'center', justifyContent: 'center' }}>
-            <Text fontSize={15} style={{ color: '#fff', fontWeight: '700' }}>N</Text>
+            <Text fontSize={15} style={{ color: '#0B1220', fontWeight: '700' }}>N</Text>
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             <Text fontSize={18} style={{ color: C.text, fontWeight: '700' }}>Nexus Analytics</Text>

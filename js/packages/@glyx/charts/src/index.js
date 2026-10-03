@@ -31,7 +31,7 @@ const THEMES = {
   dark: {
     grid:        [255, 255, 255, 15],
     baseline:    [255, 255, 255, 40],
-    label:       '#8C92A6',
+    label:       '#A9AFC2',
     text:        '#E8EAF2',
     muted:       '#6B7185',
     crosshair:   [255, 255, 255, 70],
@@ -257,7 +257,6 @@ function _Fit({ Inner, props }) {
 
 export function LineChart(props) { return _fit(_LineChartInner, props); }
 export function AreaChart(props) { return _fit(_AreaChartInner, props); }
-function _PieChartInner(props) { return _fit(_PieChartInner, props); }
 
 // A soft fade-and-rise when a chart first appears. Native keyframes: no JS
 // runs per frame, and re-renders with the same spec don't restart it.
@@ -1025,7 +1024,9 @@ export function BarChart(props) { return _fit(_BarChartInner, props); }
 
 // ── Pie / Donut ─────────────────────────────────────────────────────────────
 
-export function PieChart(props) {
+export function PieChart(props) { return _fit(_PieChartInner, props); }
+
+function _PieChartInner(props) {
   const {
     data, width = 260, height = 260, palette = DEFAULT_PALETTE,
     innerRadius = 0, // > 0 → donut (fraction of the radius, 0–1)

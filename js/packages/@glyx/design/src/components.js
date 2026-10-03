@@ -164,7 +164,8 @@ export function Heading({ children, level = 1, style }) {
 //   size     — button diameter in px (default 36)
 //   variant  — 'secondary' | 'primary' | 'ghost' | 'danger' (default 'secondary')
 //   disabled — grays out and blocks interaction
-//   label    — accessibility label (not rendered)
+//   label    — accessibility label for screen readers (not rendered). Give every
+//              icon-only button one.
 
 export function IconButton({ icon, onPress, size = 36, variant = 'secondary', disabled = false, label, style }) {
   const { colors, radius } = useTheme();
@@ -182,6 +183,7 @@ export function IconButton({ icon, onPress, size = 36, variant = 'secondary', di
   return (
     <Pressable
       onPress={disabled ? undefined : onPress}
+      ariaLabel={label}
       style={{
         width:           size,
         height:          size,

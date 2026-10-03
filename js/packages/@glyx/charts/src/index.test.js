@@ -310,9 +310,16 @@ test('an area chart can be stacked', () => {
 // ── Following the container ─────────────────────────────────────────────────
 
 test('a percentage size still renders (at the default size where nothing can measure it)', () => {
-  for (const Chart of [LineChart, AreaChart, BarChart, PieChart, ScatterChart, CandlestickChart, Sparkline]) {
-    const html = renderToStaticMarkup(React.createElement(Chart, { data, width: '100%', height: '100%' }));
-    expect(html).toContain('<canvas');
+  // Other test files install a layout stub (`@glyx/testing`); this one needs the bare, unmeasurable case.
+  const stub = globalThis.__glyx_getLayout;
+  delete globalThis.__glyx_getLayout;
+  try {
+    for (const Chart of [LineChart, AreaChart, BarChart, PieChart, ScatterChart, CandlestickChart, Sparkline]) {
+      const html = renderToStaticMarkup(React.createElement(Chart, { data, width: '100%', height: '100%' }));
+      expect(html).toContain('<canvas');
+    }
+  } finally {
+    if (stub !== undefined) globalThis.__glyx_getLayout = stub;
   }
 });
 

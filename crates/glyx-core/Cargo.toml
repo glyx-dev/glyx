@@ -16,7 +16,7 @@ default = ["v8", "dev", "camera", "canvas3d", "audio", "gamepad", "hid", "ai", "
 # mobile or lightweight-desktop build.
 v8       = ["glyx-runtime/v8"]
 quickjs  = ["glyx-runtime/quickjs"]
-dev      = ["notify", "glyx-runtime/dev", "dep:glyx-devtools", "ffmpeg-sidecar", "arboard"]
+dev      = ["notify", "glyx-runtime/dev", "dep:glyx-devtools", "ffmpeg-sidecar", "arboard", "glyx-gpu/counters"]
 camera   = ["dep:nokhwa", "glyx-runtime/camera"]
 canvas3d = ["dep:glyx-3d", "glyx-runtime/canvas3d", "glyx-renderer/canvas3d"]
 audio    = ["glyx-runtime/audio", "dep:rodio"]

@@ -296,7 +296,8 @@ impl GpuContext {
     /// for the total reserved heap block size.  The difference between
     /// `allocator_reserved_bytes` and `buffer_bytes + texture_bytes` reveals
     /// how much wgpu's DX12/Vulkan allocator is over-reserving in heap blocks.
-    /// Returns zeros on backends that do not expose counters.
+    /// Returns zeros on backends that do not expose counters, and in builds
+    /// without the `counters` feature (everything but dev builds).
     /// Returns `(buffer_bytes, texture_bytes, allocator_reserved_bytes, buffer_count, texture_count)`.
     pub fn memory_counters(&self) -> (u64, u64, u64, u32, u32) {
         let c = self.device.get_internal_counters();
@@ -321,7 +322,7 @@ impl GpuContext {
     ///
     /// - `None`          → TinySkia  (~97 MB RSS, no GPU allocation at all)
     /// - `Integrated`    → TinySkia  (~97 MB RSS, avoids iGPU buffer pool cost)
-    /// - `DiscreteIntel` → FemtoVG   (~103–153 MB RSS, OpenGL triangle path)
+    /// - `DiscreteIntel` → Vello     (same GPU-compute path as `Discrete`)
     /// - `Discrete`      → Vello     (~285–328 MB RSS, full GPU compute)
     pub fn gpu_tier(&self) -> GpuTier {
         tier_from_info(&self.adapter.get_info())
@@ -345,7 +346,7 @@ fn tier_from_info(info: &wgpu::AdapterInfo) -> GpuTier {
         wgpu::DeviceType::IntegratedGpu                           => GpuTier::Integrated,
         wgpu::DeviceType::DiscreteGpu => {
             // Intel PCI vendor ID 0x8086 — covers Arc (Alchemist/Battlemage).
-            // Lighter VRAM budget than NVIDIA/AMD flagships; FemtoVG fits better.
+            // Lighter VRAM budget than NVIDIA/AMD flagships, so it is a tier of its own.
             if info.vendor == 0x8086 {
                 GpuTier::DiscreteIntel
             } else {
@@ -406,7 +407,7 @@ pub enum GpuTier {
     /// TinySkia uses zero GPU memory.
     Integrated,
     /// Intel Arc discrete GPU. Capable but lighter VRAM budget than NVIDIA/AMD.
-    /// FemtoVG (OpenGL tessellation) is the best balance of quality and footprint.
+    /// Runs the Vello GPU-compute path, like `Discrete`.
     DiscreteIntel,
     /// NVIDIA or AMD discrete GPU. Full Vello GPU-compute path justified.
     Discrete,

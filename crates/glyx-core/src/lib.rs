@@ -2440,8 +2440,8 @@ pub fn run(mut config: AppConfig) -> bool {
                 }
 
                 // 9. Render JS scene graph.
-                // Sync renderer dims before begin_frame — TinySkia/FemtoVG create
-                // their per-frame buffer at their stored size; if the window was
+                // Sync renderer dims before begin_frame — TinySkia creates
+                // its per-frame buffer at their stored size; if the window was
                 // just maximized/resized, Resized only updated gpu, not the renderer.
                 s.renderer.notify_resize(s.gpu.width().max(1), s.gpu.height().max(1));
 

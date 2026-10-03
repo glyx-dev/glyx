@@ -155,6 +155,15 @@ impl GlyxRenderer {
             // Our `pipeline_cache` field retains a handle for get_data() + save.
             pipeline_cache:       pipeline_cache.clone(),
         }).map_err(|e| RendererError::Init(e.to_string()))?;
+        // Vello's scratch buffers are sized from the scene (a few MiB for a window of
+        // UI, grown on demand) instead of upstream's fixed ~165 MiB.
+        // GLYX_VELLO_FIXED_BUFFERS=1 goes back to the fixed sizes, to rule the change
+        // out when something looks wrong and to compare memory.
+        let mut renderer = renderer;
+        if std::env::var_os("GLYX_VELLO_FIXED_BUFFERS").is_some() {
+            renderer.set_adaptive_buffers(false);
+            log::info!("glyx-renderer: Vello scratch buffers fixed at upstream sizes (GLYX_VELLO_FIXED_BUFFERS)");
+        }
 
         // Pipeline format must match the raw (non-sRGB) view render_frame blits
         // into below — Vello's output is already final-encoded bytes, and a

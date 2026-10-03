@@ -20,7 +20,7 @@ use crate::d2d_present::D2DPresent;
 
 /// How rendered pixels reach the window.
 ///
-/// `Gpu` — wgpu device + swapchain (Vello / FemtoVG, or TinySkia when soft
+/// `Gpu` — wgpu device + swapchain (Vello, or TinySkia when soft
 /// present is disabled via `GLYX_NO_SOFT_PRESENT=1`).
 /// `Soft` — softbuffer OS blit (TinySkia only). No wgpu objects exist at all.
 pub(super) enum Present {

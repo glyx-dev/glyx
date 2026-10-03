@@ -3,6 +3,7 @@
 
 //! Take an encoded scene and create a graph to render it
 
+use crate::adaptive::BumpCapacity;
 use crate::recording::{BufferProxy, ImageFormat, ImageProxy, Recording, ResourceProxy};
 use crate::shaders::FullShaders;
 use crate::{AaConfig, RenderParams};
@@ -105,7 +106,7 @@ pub(crate) fn render_encoding_full(
 ) -> (Recording, ResourceProxy) {
     let mut render = Render::new();
     let mut recording =
-        render.render_encoding_coarse(encoding, resolver, shaders, image_atlas, params, false);
+        render.render_encoding_coarse(encoding, resolver, shaders, image_atlas, params, false, None);
     let out_image = render.out_image();
     render.record_fine(shaders, &mut recording);
     (recording, out_image.into())
@@ -132,6 +133,9 @@ impl Render {
     ///
     /// The `robust` parameter controls whether we're preparing for readback
     /// of the atomic bump buffer, for robust dynamic memory.
+    ///
+    /// `capacity` (Glyx patch) overrides the sizes of the bump-allocated buffers
+    /// (see `adaptive`); `None` keeps upstream's fixed sizes.
     pub fn render_encoding_coarse(
         &mut self,
         encoding: &Encoding,
@@ -140,6 +144,7 @@ impl Render {
         persistent_image_atlas: &mut Option<ImageProxy>,
         params: &RenderParams,
         robust: bool,
+        capacity: Option<&BumpCapacity>,
     ) -> Recording {
         use vello_encoding::RenderConfig;
         let mut recording = Recording::default();
@@ -201,8 +206,11 @@ impl Render {
         for image in images.images {
             recording.write_image(image_atlas, image.1, image.2, image.0.clone());
         }
-        let cpu_config =
+        let mut cpu_config =
             RenderConfig::new(&layout, params.width, params.height, &params.base_color);
+        if let Some(capacity) = capacity {
+            capacity.apply(&mut cpu_config, &layout);
+        }
         // HACK: The coarse workgroup counts is the number of active bins.
         if (cpu_config.workgroup_counts.coarse.0
             * cpu_config.workgroup_counts.coarse.1
@@ -554,6 +562,25 @@ impl Render {
         }
 
         recording
+    }
+
+    /// Give back the buffers a coarse pass left for fine rasterization, for a pass
+    /// that is being thrown away (Glyx patch: its bump buffers were too small, so
+    /// it is run again larger). Nothing has been drawn at this point.
+    pub fn discard_fine(&mut self, recording: &mut Recording) {
+        self.fine_wg_count = None;
+        if let Some(fine) = self.fine_resources.take() {
+            recording.free_resource(fine.config_buf);
+            recording.free_resource(fine.tile_buf);
+            recording.free_resource(fine.segments_buf);
+            recording.free_resource(fine.ptcl_buf);
+            recording.free_resource(fine.gradient_image);
+            recording.free_resource(fine.info_bin_data_buf);
+            recording.free_resource(fine.blend_spill_buf);
+        }
+        if let Some(mask_buf) = self.mask_buf.take() {
+            recording.free_resource(mask_buf);
+        }
     }
 
     /// Run fine rasterization assuming the coarse phase succeeded.

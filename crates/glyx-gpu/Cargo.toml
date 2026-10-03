@@ -3,6 +3,11 @@ name    = "glyx-gpu"
 version = "0.1.0"
 edition = "2021"
 
+# wgpu's memory counters cost a little on every allocation and only feed the
+# devtools memory panel, so they are on for dev builds only (glyx-core's `dev`).
+[features]
+counters = ["wgpu/counters"]
+
 [dependencies]
 wgpu      = { workspace = true }
 winit     = { workspace = true }

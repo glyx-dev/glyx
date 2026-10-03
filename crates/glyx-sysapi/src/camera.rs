@@ -9,6 +9,7 @@ pub struct CameraDevice {
 }
 
 /// Enumerate available camera devices.
+#[cfg(feature = "camera")]
 pub fn list_cameras() -> Vec<CameraDevice> {
     use nokhwa::utils::ApiBackend;
     nokhwa::query(ApiBackend::Auto)
@@ -20,4 +21,11 @@ pub fn list_cameras() -> Vec<CameraDevice> {
             name:  info.human_name().to_string(),
         })
         .collect()
+}
+
+/// Without the `camera` feature there is no camera backend in the binary, so
+/// there is nothing to enumerate.
+#[cfg(not(feature = "camera"))]
+pub fn list_cameras() -> Vec<CameraDevice> {
+    Vec::new()
 }

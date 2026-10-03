@@ -1,4 +1,4 @@
-//! Cached fullscreen blit helper — shared between TinySkia and FemtoVG backends.
+//! Cached fullscreen blit helper — shared by the TinySkia upload path.
 //!
 //! `wgpu::util::TextureBlitter::copy()` creates a new `BindGroup` on **every
 //! call** (confirmed in wgpu 29 texture_blitter.rs:183).  At 60 fps that

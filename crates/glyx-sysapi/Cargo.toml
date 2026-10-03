@@ -3,12 +3,20 @@ name    = "glyx-sysapi"
 version = "0.1.0"
 edition = "2021"
 
+# Camera enumeration pulls in nokhwa. A build without glyx-runtime's `camera`
+# feature (whose bindings are stubbed out anyway) leaves it out. The microphone
+# helpers (cpal + hound) stay unconditional: `microphone.record()` is available
+# in every runtime build that grants the capability.
+[features]
+default = []
+camera  = ["dep:nokhwa"]
+
 [dependencies]
 battery    = { workspace = true }
 sysinfo    = { workspace = true }
 keepawake  = { workspace = true }
 dark-light = { workspace = true }
-nokhwa     = { workspace = true }
+nokhwa     = { workspace = true, optional = true }
 cpal       = { workspace = true }
 hound      = { workspace = true }
 log        = { workspace = true }

@@ -28,7 +28,7 @@ tokio-tungstenite   = { workspace = true, optional = true }
 futures-util        = { workspace = true, optional = true }
 mdns-sd             = { workspace = true }
 glyx-perf          = { path = "../glyx-perf" }
-glyx-sysapi        = { path = "../glyx-sysapi" }
+glyx-sysapi        = { path = "../glyx-sysapi", default-features = false }
 glyx-text          = { path = "../glyx-text" }
 battery             = { workspace = true }
 sysinfo             = { workspace = true }
@@ -98,7 +98,7 @@ gamepad  = ["dep:gilrs", "dep:glyx-cap-gamepad"]
 canvas3d = ["dep:glyx-3d"]
 ai       = ["dep:glyx-ai", "dep:glyx-cap-ai"]
 hid      = ["dep:hidapi", "dep:glyx-cap-hid"]
-camera   = ["dep:glyx-cap-camera"]
+camera   = ["dep:glyx-cap-camera", "glyx-sysapi/camera"]
 webview  = ["dep:glyx-cap-webview"]
 # No accesskit dependency here — glyx-runtime only needs to know whether to
 # register __glyx_hasA11y (a JS-facing capability query), the actual

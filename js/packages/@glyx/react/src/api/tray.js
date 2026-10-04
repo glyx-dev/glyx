@@ -4,6 +4,8 @@
 //
 // Requires `tray: true` capability in glyx.config.json.
 
+import { addTrayListener, removeTrayListener, trayListenerCount } from '../events.js';
+
 export const tray = {
   /**
    * Create a system tray icon from raw RGBA pixel data, or from the app's own icon.
@@ -55,7 +57,28 @@ export const tray = {
   },
 
   /**
+   * Called for every tray event, pushed by the runtime as it happens (no polling).
+   * The event is `{ Click: { tray_id } }`, `{ DoubleClick: { tray_id } }` or
+   * `{ MenuItemClick: { tray_id, item_id } }`. While anything is subscribed here,
+   * events are delivered to it and `pollEvents` stays empty. Returns an unsubscribe function.
+   * @param {(ev: object) => void} handler
+   * @returns {() => void}
+   */
+  onEvent(handler) {
+    addTrayListener(handler);
+    if (trayListenerCount() === 1 && typeof __glyx_tray_listen !== 'undefined') __glyx_tray_listen(true);
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      removeTrayListener(handler);
+      if (trayListenerCount() === 0 && typeof __glyx_tray_listen !== 'undefined') __glyx_tray_listen(false);
+    };
+  },
+
+  /**
    * Poll for pending tray events. Returns JSON array string or empty string.
+   * Prefer `onEvent`, which needs no timer.
    * @returns {string}
    */
   pollEvents() {

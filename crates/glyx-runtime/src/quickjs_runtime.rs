@@ -1546,6 +1546,10 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_tray_update_menu", Function::new(ctx.clone(), crate::quickjs_tray::tray_update_menu)?)?;
         globals.set("__glyx_tray_set_tooltip", Function::new(ctx.clone(), crate::quickjs_tray::tray_set_tooltip)?)?;
         globals.set("__glyx_tray_poll_events", Function::new(ctx.clone(), crate::quickjs_tray::tray_poll_events)?)?;
+        let (events, redraw) = (reg.events.clone(), reg.redraw.clone());
+        globals.set("__glyx_tray_listen", Function::new(ctx.clone(), move |on: bool| {
+            crate::menubar_api::tray_listen(on, Arc::clone(&events), redraw.clone())
+        })?)?;
         globals.set("__glyx_menubar_set_enabled", Function::new(ctx.clone(), |id: String, on: bool| crate::menubar_api::set_enabled(&id, on))?)?;
         globals.set("__glyx_menubar_set_checked", Function::new(ctx.clone(), |id: String, on: bool| crate::menubar_api::set_checked(&id, on))?)?;
         globals.set("__glyx_menubar_supported", Function::new(ctx.clone(), crate::menubar_api::supported)?)?;
@@ -1720,6 +1724,10 @@ fn input_events_to_array<'js>(
                 obj.set("type", "menuBar")?;
                 obj.set("id", id.as_str())?;
                 if let Some(c) = checked { obj.set("checked", *c)?; }
+            }
+            InputEvent::Tray { json } => {
+                obj.set("type", "tray")?;
+                obj.set("json", json.as_str())?;
             }
             InputEvent::AccessibilityFocus { node_id } => {
                 obj.set("type", "accessibilityFocus")?;

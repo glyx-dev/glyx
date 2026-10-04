@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, render, menubar, glyxWindow } from '@glyx-dev/react';
+import { View, Text, Pressable, TextInput, MenuBar, render, menubar, glyxWindow } from '@glyx-dev/react';
 
-// A native menu bar. `menubar.set` describes it once; `onSelect` hears every
-// choice, whether it came from the mouse, the keyboard (Alt+F) or an
-// accelerator (Ctrl+N). Checkable items report their new state.
+// A menu bar, two ways. `menubar.set` shows the native bar (Windows, macOS);
+// `<MenuBar>` draws the same menu itself, for Linux and frameless windows.
+// Both take the same description and report choices the same way. The Edit
+// items use `role`, so Copy, Paste and Select All act on the text field below.
 
 const MENU = [
   { label: '&File', children: [
@@ -13,8 +14,11 @@ const MENU = [
     { id: 'file.quit', label: 'Quit',     accelerator: 'Ctrl+Q' },
   ] },
   { label: '&Edit', children: [
-    { id: 'edit.undo', label: 'Undo', accelerator: 'Ctrl+Z', enabled: false },
-    { id: 'edit.redo', label: 'Redo', accelerator: 'Ctrl+Shift+Z', enabled: false },
+    { role: 'cut' },
+    { role: 'copy' },
+    { role: 'paste' },
+    { separator: true },
+    { role: 'selectAll' },
   ] },
   { label: '&View', children: [
     { id: 'view.grid',     label: 'Show grid', checked: true, accelerator: 'Ctrl+G' },
@@ -27,63 +31,74 @@ const MENU = [
   ] },
 ];
 
-const COLOR = { bg: '#0D0D14', panel: '#12131A', text: '#E6E8EF', muted: '#8A90A2', amber: '#F59E0B' };
+const COLOR = { bg: '#0D0D14', panel: '#12131A', text: '#E6E8EF', muted: '#8A90A2', amber: '#F59E0B', field: '#1B1C26' };
 
 function App() {
+  const nativeOk = menubar.supported;
+  const [inApp, setInApp] = useState(!nativeOk);
   const [log, setLog] = useState([]);
   const [error, setError] = useState(null);
   const [checks, setChecks] = useState({ 'view.grid': true, 'view.autosave': false });
-  const [edits, setEdits] = useState(0);
+  const [note, setNote] = useState('');
 
+  const onSelect = ({ id, checked, role }) => {
+    if (id === 'file.quit') { glyxWindow.quit(); return; }
+    if (checked !== undefined) setChecks((c) => ({ ...c, [id]: checked }));
+    const suffix = role ? '  (edit: ' + role + ')' : checked === undefined ? '' : checked ? '  (checked)' : '  (unchecked)';
+    setLog((l) => [id + suffix, ...l].slice(0, 6));
+  };
+
+  // The native bar is set here; the in-app one is rendered below.
   useEffect(() => {
+    if (inApp) { try { menubar.clear(); } catch (e) { /* none set */ } return undefined; }
     try {
       menubar.set(MENU);
+      setError(null);
     } catch (e) {
       setError(String(e.message || e));
       return undefined;
     }
-    return menubar.onSelect(({ id, checked }) => {
-      if (id === 'file.quit') { glyxWindow.quit(); return; }
-      if (checked !== undefined) setChecks((c) => ({ ...c, [id]: checked }));
-      if (id === 'file.new') {
-        // Give Undo something to do once there is a change.
-        setEdits((n) => n + 1);
-        menubar.setEnabled('edit.undo', true);
-      }
-      if (id === 'edit.undo') {
-        setEdits((n) => {
-          const next = Math.max(0, n - 1);
-          if (next === 0) menubar.setEnabled('edit.undo', false);
-          return next;
-        });
-      }
-      setLog((l) => [`${id}${checked === undefined ? '' : checked ? '  (checked)' : '  (unchecked)'}`, ...l].slice(0, 8));
-    });
-  }, []);
+    return menubar.onSelect(onSelect);
+  }, [inApp]);
 
   return (
-    <View style={{ flex: 1, backgroundColor: COLOR.bg, padding: 24 }}>
-      <Text fontSize={22} style={{ color: COLOR.text, fontWeight: '600' }}>Menu bar demo</Text>
-      <Text fontSize={13} style={{ color: COLOR.muted, marginTop: 4 }}>
-        Use the menus above, Alt+F / Alt+E / Alt+V, or the accelerators (Ctrl+N, Ctrl+G, Ctrl+1).
-      </Text>
-      {error ? (
-        <Text fontSize={14} style={{ color: '#f87171', marginTop: 20 }}>{error}</Text>
-      ) : (
-        <>
-          <Text fontSize={13} style={{ color: COLOR.muted, marginTop: 18 }}>
-            Grid {checks['view.grid'] ? 'on' : 'off'}  |  Autosave {checks['view.autosave'] ? 'on' : 'off'}  |  Changes {edits}
-          </Text>
-          <View style={{ marginTop: 14, backgroundColor: COLOR.panel, borderRadius: 10, padding: 14, flex: 1 }}>
-            <Text fontSize={12} style={{ color: COLOR.amber, marginBottom: 8 }}>LAST CHOICES</Text>
-            {log.length === 0
-              ? <Text fontSize={13} style={{ color: COLOR.muted }}>Nothing chosen yet.</Text>
-              : log.map((line, i) => (
-                <Text key={i} fontSize={13} style={{ color: i === 0 ? COLOR.text : COLOR.muted, marginBottom: 4 }}>{line}</Text>
-              ))}
-          </View>
-        </>
-      )}
+    <View style={{ flex: 1, backgroundColor: COLOR.bg }}>
+      {inApp ? <MenuBar items={MENU} onSelect={onSelect} /> : null}
+      <View style={{ flex: 1, padding: 24 }}>
+        <Text fontSize={22} style={{ color: COLOR.text, fontWeight: '600' }}>Menu bar demo</Text>
+        <Text fontSize={13} style={{ color: COLOR.muted, marginTop: 4 }}>
+          {inApp ? 'Drawn by Glyx (MenuBar).' : 'Native menu bar.'} Try Alt+F, Ctrl+N, Ctrl+G, and Edit with the field below selected.
+        </Text>
+        <View style={{ flexDirection: 'row', marginTop: 14 }}>
+          <Pressable
+            ariaLabel="Switch menu bar"
+            onPress={() => setInApp((v) => !v)}
+            style={{ paddingHorizontal: 12, paddingVertical: 7, borderRadius: 7, backgroundColor: COLOR.field }}
+          >
+            <Text fontSize={13} style={{ color: COLOR.text }}>{inApp ? 'Use the native bar' : 'Use the in-app bar'}</Text>
+          </Pressable>
+        </View>
+        {error ? (
+          <Text fontSize={14} style={{ color: '#f87171', marginTop: 16 }}>{error}</Text>
+        ) : null}
+        <Text fontSize={13} style={{ color: COLOR.muted, marginTop: 16 }}>
+          Grid {checks['view.grid'] ? 'on' : 'off'}  |  Autosave {checks['view.autosave'] ? 'on' : 'off'}
+        </Text>
+        <TextInput
+          value={note}
+          onChangeText={setNote}
+          placeholder="Type here, then use the Edit menu"
+          style={{ marginTop: 14, width: 420 }}
+        />
+        <View style={{ marginTop: 14, backgroundColor: COLOR.panel, borderRadius: 10, padding: 14, flex: 1 }}>
+          <Text fontSize={12} style={{ color: COLOR.amber, marginBottom: 8 }}>LAST CHOICES</Text>
+          {log.length === 0
+            ? <Text fontSize={13} style={{ color: COLOR.muted }}>Nothing chosen yet.</Text>
+            : log.map((line, i) => (
+              <Text key={i} fontSize={13} style={{ color: i === 0 ? COLOR.text : COLOR.muted, marginBottom: 4 }}>{line}</Text>
+            ))}
+        </View>
+      </View>
     </View>
   );
 }

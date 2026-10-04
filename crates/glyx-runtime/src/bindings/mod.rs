@@ -325,6 +325,10 @@ pub enum InputEvent {
     /// menu navigation). `checked` is the new state of a checkable item.
     /// Pushed by the click itself, so JS never polls for menus.
     MenuBar { id: String, checked: Option<bool> },
+    /// A tray icon or tray menu event, as the JSON `TrayEvent` serializes to
+    /// (`{"MenuItemClick":{"tray_id":1,"item_id":"quit"}}`). Pushed only while
+    /// something listens, so JS does not poll for the tray.
+    Tray { json: String },
     /// IME composition event, routed only to the currently-focused node
     /// (see `PerWindowState.focused_node`). `kind` is one of "enabled" /
     /// "preedit" / "commit" / "disabled"; `cursor` is a byte-offset (start,
@@ -1722,6 +1726,7 @@ pub fn register_all(
     register!("__glyx_tray_update_menu",   tray_update_menu_callback);
     register!("__glyx_tray_set_tooltip",   tray_set_tooltip_callback);
     register!("__glyx_tray_poll_events",   tray_poll_events_callback);
+    register!("__glyx_tray_listen",        tray_listen_callback);
 
     // Native window menu bar
     register!("__glyx_menubar_set",         menubar_set_callback);

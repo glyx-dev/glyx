@@ -72,11 +72,15 @@ const systemWatchRegistry = new Map();
 // Listeners notified on window resize: Array<(size: {width, height}) => void>
 const windowSizeListeners = [];
 
-// Listeners notified on every key event: Array<(ev: {key, ctrl, shift, pressed}) => void>
+// Listeners notified on every key event: Array<(ev: {key, ctrl, shift, alt, super, pressed}) => boolean|void>
+// (returning true consumes the key)
 const keyListeners = [];
 
 // Listeners notified when a native menu bar item is chosen: Array<(ev: {id, checked?}) => void>
 const menuBarListeners = [];
+
+// Listeners notified of tray icon and tray menu events (parsed): Array<(ev: object) => void>
+const trayListeners = [];
 
 // Listeners called on every mouse-button press, regardless of which node was hit.
 // Used by dropdowns / overlays to close on outside click.
@@ -118,6 +122,8 @@ let hoveredPressableId = null;
 // Modifier key state — updated on every keyInput (pressed AND released).
 let ctrlHeld  = false;
 let shiftHeld = false;
+let altHeld   = false;
+let superHeld = false;
 
 // Last cursor position seen this frame (updated by cursorMoved events).
 let cursorX = 0;
@@ -366,6 +372,48 @@ export function removeKeyListener(fn) {
   if (idx >= 0) keyListeners.splice(idx, 1);
 }
 
+const EDIT_CHORDS = { copy: 'KeyC', cut: 'KeyX', paste: 'KeyV', selectAll: 'KeyA' };
+
+/**
+ * Run an editing command (`copy`, `cut`, `paste`, `selectAll`) on the focused text field, by replaying
+ * its Ctrl chord through the same dispatcher real keys use, so the field handles it exactly as typed.
+ * Returns false for an unknown command or without a runtime.
+ * @param {'copy'|'cut'|'paste'|'selectAll'} role
+ */
+export function runEditCommand(role) {
+  const key = EDIT_CHORDS[role];
+  if (!key || typeof globalThis.__glyx_pollEvents === 'undefined') return false;
+  const chord = [
+    { type: 'keyInput', key: 'ControlLeft', pressed: true },
+    { type: 'keyInput', key, pressed: true },
+    { type: 'keyInput', key, pressed: false },
+    { type: 'keyInput', key: 'ControlLeft', pressed: false },
+  ];
+  const prev = globalThis.__glyx_pollEvents;
+  globalThis.__glyx_pollEvents = () => chord;
+  try { dispatchEvents(); } finally { globalThis.__glyx_pollEvents = prev; }
+  return true;
+}
+
+/**
+ * Subscribe to tray events (pushed by the runtime). Returns nothing; use removeTrayListener.
+ * @param {(ev: object) => void} fn  e.g. `{ MenuItemClick: { tray_id, item_id } }`
+ */
+export function addTrayListener(fn) {
+  trayListeners.push(fn);
+}
+
+/** Unsubscribe from tray events. */
+export function removeTrayListener(fn) {
+  const idx = trayListeners.indexOf(fn);
+  if (idx >= 0) trayListeners.splice(idx, 1);
+}
+
+/** How many tray listeners there are, so the first and last can switch the runtime push on and off. */
+export function trayListenerCount() {
+  return trayListeners.length;
+}
+
 /**
  * Subscribe to native menu bar choices (pushed by the runtime when an item is clicked).
  * @param {(ev: {id: string, checked?: boolean}) => void} fn
@@ -399,6 +447,11 @@ export function addGlobalClickListener(fn) {
 export function removeGlobalClickListener(fn) {
   const idx = globalClickListeners.indexOf(fn);
   if (idx >= 0) globalClickListeners.splice(idx, 1);
+}
+
+/** The id of the text input that has focus right now, or null. */
+export function getFocusedInput() {
+  return focusedNodeId;
 }
 
 /**
@@ -560,6 +613,7 @@ export function dispatchEvents() {
         // fallthrough to pressables/inputs rendered beneath it in z-order.
         const topmostId = ev.target;
         let inputTarget;
+        let keepFocusPress = false;   // the press landed on a `keepFocus` Pressable (a menu bar item)
 
         if (topmostId !== null) {
           // Walk up the parent chain to find the nearest pressable ancestor
@@ -572,6 +626,7 @@ export function dispatchEvents() {
           }
           if (pressableTarget !== undefined) {
             const ph = pressableRegistry.get(pressableTarget);
+            if (ph && ph.keepFocus) keepFocusPress = true;
             if (ph && !isDisabled(pressableTarget)) {
               const layout = __glyx_getLayout(pressableTarget);
               const pev = {
@@ -629,7 +684,7 @@ export function dispatchEvents() {
         // longer touches `__glyx_setFocus` — see its comment) since this
         // path bypasses `setFocus()` entirely (there's no new input target
         // to focus, just a plain click on non-input ground).
-        if (focusedNodeId !== null && focusedNodeId !== inputTarget) {
+        if (focusedNodeId !== null && focusedNodeId !== inputTarget && !keepFocusPress) {
           inputRegistry.get(focusedNodeId)?.onBlur?.();
           focusedNodeId = null;
           if (typeof __glyx_setFocus !== 'undefined') {
@@ -649,11 +704,22 @@ export function dispatchEvents() {
           shiftHeld = ev.pressed;
           break;
         }
+        if (ev.key === 'AltLeft' || ev.key === 'AltRight') {
+          altHeld = ev.pressed;
+          break;
+        }
+        if (ev.key === 'SuperLeft' || ev.key === 'SuperRight') {
+          superHeld = ev.pressed;
+          break;
+        }
 
         // Notify global key listeners (used for app-focused shortcuts).
         if (keyListeners.length > 0) {
-          const kev = { key: ev.key, ctrl: ctrlHeld, shift: shiftHeld, pressed: ev.pressed };
-          for (const fn of keyListeners) try { fn(kev); } catch {}
+          const kev = { key: ev.key, ctrl: ctrlHeld, shift: shiftHeld, alt: altHeld, super: superHeld, pressed: ev.pressed };
+          // A listener that returns true has consumed the key: nothing else (a focused field, scrolling) sees it.
+          let consumed = false;
+          for (const fn of keyListeners) try { if (fn(kev) === true) consumed = true; } catch {}
+          if (consumed) break;
         }
 
         if (!ev.pressed) break;
@@ -859,6 +925,13 @@ export function dispatchEvents() {
       case 'resize': {
         const size = { width: ev.width, height: ev.height };
         for (const fn of windowSizeListeners) fn(size);
+        break;
+      }
+
+      case 'tray': {
+        let tev = null;
+        try { tev = JSON.parse(ev.json); } catch { /* ignore a malformed event */ }
+        if (tev) for (const fn of trayListeners.slice()) try { fn(tev); } catch {}
         break;
       }
 

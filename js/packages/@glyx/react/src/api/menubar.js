@@ -1,10 +1,11 @@
 // @glyx-dev/react: native window menu bar (File / Edit / View under the title bar).
 //
-// Requires `menubar: true` in the app's capabilities. Windows only for now;
-// see `menubar.supported`. The menu shape is described in ./menuSchema.js.
+// Requires `menubar: true` in the app's capabilities. Windows and macOS; see
+// `menubar.supported` (the macOS bar has not run on a Mac yet). The menu shape
+// is described in ./menuSchema.js.
 
-import { addKeyListener, removeKeyListener, addMenuBarListener, removeMenuBarListener } from '../events.js';
-import { validateMenu, flattenItems, parseAccelerator, matchesAccelerator } from './menuSchema.js';
+import { addKeyListener, removeKeyListener, addMenuBarListener, removeMenuBarListener, runEditCommand } from '../events.js';
+import { validateMenu, normalizeMenu, flattenItems, parseAccelerator, matchesAccelerator, currentPlatform } from './menuSchema.js';
 
 let handlers = [];
 let items = new Map();       // id -> { checkable, checked, enabled, accel }
@@ -23,13 +24,15 @@ function emit(ev) {
 function onNative(ev) {
   const known = items.get(ev.id);
   if (known && known.checkable && typeof ev.checked === 'boolean') known.checked = ev.checked;
+  // An editing item acts on the focused field first, then is reported like any other choice.
+  if (known && known.role) { runEditCommand(known.role); emit({ ...ev, role: known.role }); return; }
   emit(ev);
 }
 
 // Win32 does not trigger accelerators for us (the event loop is not ours), so
 // the key chords are matched here. The menu still shows them.
 function onKey(ev) {
-  if (!ev.pressed) return;
+  if (!ev.pressed || currentPlatform() === 'macos') return;
   for (const [id, it] of items) {
     if (!it.accel || !it.enabled || !matchesAccelerator(it.accel, ev)) continue;
     if (it.checkable) {
@@ -47,7 +50,8 @@ function sync() {
   const wantNative = items.size > 0 && handlers.length > 0;
   if (wantNative && !nativeListener) { nativeListener = onNative; addMenuBarListener(nativeListener); }
   if (!wantNative && nativeListener) { removeMenuBarListener(nativeListener); nativeListener = null; }
-  const wantKeys = handlers.length > 0 && [...items.values()].some((i) => i.accel && i.accel.triggers);
+  // On macOS the menu's own key equivalents fire the items; matching keys here too would run them twice.
+  const wantKeys = handlers.length > 0 && currentPlatform() !== 'macos' && [...items.values()].some((i) => i.accel);
   if (wantKeys && !keyListener) { keyListener = onKey; addKeyListener(keyListener); }
   if (!wantKeys && keyListener) { removeKeyListener(keyListener); keyListener = null; }
 }
@@ -59,13 +63,15 @@ function register(menu) {
       checkable: typeof it.checked === 'boolean',
       checked: it.checked === true,
       enabled: it.enabled !== false,
-      accel: it.accelerator ? parseAccelerator(it.accelerator) : null,
+      role: it.role || null,
+      // A role's accelerator is only shown: the text field handles those keys itself.
+      accel: it.accelerator && !it.role ? parseAccelerator(it.accelerator) : null,
     });
   }
 }
 
 export const menubar = {
-  /** True when this platform can show a native menu bar (Windows for now). */
+  /** True when this platform can show a native menu bar (Windows and macOS). */
   get supported() {
     return has('__glyx_menubar_supported') ? !!globalThis.__glyx_menubar_supported() : false;
   },
@@ -79,9 +85,10 @@ export const menubar = {
     const problem = validateMenu(menu);
     if (problem) throw new Error('menubar.set: ' + problem);
     if (!has('__glyx_menubar_set')) throw new Error('menubar.set: not available in this runtime');
-    const err = globalThis.__glyx_menubar_set(JSON.stringify(menu));
+    const full = normalizeMenu(menu);
+    const err = globalThis.__glyx_menubar_set(JSON.stringify(full));
     if (err) throw new Error('menubar.set: ' + err);
-    register(menu);
+    register(full);
     sync();
   },
 

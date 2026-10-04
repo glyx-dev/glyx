@@ -19,7 +19,7 @@ export default defineConfig({
     menubar:      true,
     db:           false,
     dialog:       false,
-    clipboard:    false,
+    clipboard:    true,
     notification: false,
     system:       false,
     battery:      false,

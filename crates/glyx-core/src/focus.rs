@@ -17,6 +17,7 @@ fn is_focusable(node: &JsNode) -> bool {
         return matches!(
             role,
             "button" | "textbox" | "checkbox" | "radio" | "switch" | "link" | "combobox" | "slider"
+                | "menuitem" | "menuitemcheckbox"
         );
     }
     node.props.show_cursor.is_some() || node.props.pressable == Some(true)

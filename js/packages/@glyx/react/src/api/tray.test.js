@@ -23,3 +23,23 @@ test('null pixels ask the runtime for the app icon', () => {
 test('without a runtime create returns 0', () => {
   expect(tray.create(null, 0, 0, 'App')).toBe(0);
 });
+
+test('onEvent switches runtime delivery on for the first listener and off for the last', () => {
+  const calls = [];
+  globalThis.__glyx_tray_listen = (on) => { calls.push(on); return true; };
+  const a = tray.onEvent(() => {});
+  const b = tray.onEvent(() => {});
+  expect(calls).toEqual([true]);
+  a();
+  expect(calls).toEqual([true]);
+  b();
+  b(); // unsubscribing twice does nothing more
+  expect(calls).toEqual([true, false]);
+  delete globalThis.__glyx_tray_listen;
+});
+
+test('onEvent works without a runtime (nothing to switch on)', () => {
+  const off = tray.onEvent(() => {});
+  expect(typeof off).toBe('function');
+  off();
+});

@@ -112,7 +112,7 @@ export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', 
 // per Pressable with `transition={false}`, or pass your own `transition`.
 const PRESSABLE_TRANSITION = { spring: { stiffness: 600, damping: 48 }, properties: 'all' };
 
-export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, onPointerMove, onKeyDown, disabled, feedback = true, transition = PRESSABLE_TRANSITION, style, _glyxOnMount: externalOnMount, ...props }) {
+export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, onPointerMove, onKeyDown, disabled, keepFocus, feedback = true, transition = PRESSABLE_TRANSITION, style, _glyxOnMount: externalOnMount, ...props }) {
   const nodeIdRef    = useRef(null);
   const handlersRef  = useRef(null);
   const [pressed, setPressed] = useState(false);
@@ -153,6 +153,7 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
     onHoverOut: () => { setHovered(false); onHoverOut?.(); },
     onPointerMove: (e) => onPointerMove?.(e),
     onKeyDown: (e) => onKeyDown?.(e),
+    keepFocus: !!keepFocus,
   };
 
   // Called synchronously by createInstance the moment the native node exists.
@@ -167,6 +168,8 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
       onHoverIn:  () => handlersRef.current.onHoverIn(),
       onHoverOut: () => handlersRef.current.onHoverOut(),
       onPointerMove: (e) => handlersRef.current.onPointerMove(e),
+      // Read at press time: a press on a `keepFocus` Pressable does not blur the focused text field.
+      get keepFocus() { return handlersRef.current.keepFocus; },
     });
     registerDisabledNode(id, !!disabled);
     // Keyboard-focus-visible only — NOT `registerInput` (that registry is

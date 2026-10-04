@@ -44,6 +44,10 @@ fn infer_role(node: &JsNode) -> Role {
             "listitem"      => Role::ListItem,
             "combobox"      => Role::ComboBox,
             "slider"        => Role::Slider,
+            "menubar"       => Role::MenuBar,
+            "menu"          => Role::Menu,
+            "menuitem"      => Role::MenuItem,
+            "menuitemcheckbox" => Role::MenuItemCheckBox,
             // accesskit has no separate `Role::Presentation` (still true in 0.24) — its own
             // doc comment on `GenericContainer` says this variant IS the
             // ARIA `none`/`presentation` equivalent (nodes get filtered from
@@ -69,6 +73,7 @@ fn is_focusable(node: &JsNode) -> bool {
         infer_role(node),
         Role::Button | Role::TextInput | Role::CheckBox | Role::RadioButton
             | Role::Switch | Role::Link | Role::ComboBox | Role::Slider
+            | Role::MenuItem | Role::MenuItemCheckBox
     )
 }
 
@@ -430,6 +435,8 @@ mod tests {
             ("image", Role::Image), ("heading", Role::Heading),
             ("list", Role::List), ("listitem", Role::ListItem),
             ("combobox", Role::ComboBox), ("slider", Role::Slider),
+            ("menubar", Role::MenuBar), ("menu", Role::Menu),
+            ("menuitem", Role::MenuItem), ("menuitemcheckbox", Role::MenuItemCheckBox),
             ("none", Role::GenericContainer), ("presentation", Role::GenericContainer),
             ("bogus", Role::Unknown),
         ];

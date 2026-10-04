@@ -395,6 +395,12 @@ export interface TrayHandle {
   readonly id: number;
 }
 
+/** A tray icon or tray menu event. */
+export type TrayEvent =
+  | { Click: { tray_id: number } }
+  | { DoubleClick: { tray_id: number } }
+  | { MenuItemClick: { tray_id: number; item_id: string } };
+
 /** System tray icon API (requires `tray: true` capability). */
 export const tray: {
   /**
@@ -420,7 +426,13 @@ export const tray: {
   /** Update the tooltip text. */
   setTooltip(trayId: number, tooltip: string): void;
 
-  /** Poll for pending tray events (menu clicks, double-clicks). Call each frame. Returns JSON array. */
+  /**
+   * Called for every tray event, pushed as it happens (no polling). While anything is subscribed,
+   * events come here and `pollEvents` stays empty. Returns an unsubscribe function.
+   */
+  onEvent(handler: (ev: TrayEvent) => void): () => void;
+
+  /** Poll for pending tray events (menu clicks, double-clicks) as a JSON array. Prefer `onEvent`. */
   pollEvents(): string;
 };
 
@@ -434,14 +446,39 @@ export interface MenuItem {
   label?:       string;
   /** Default true. */
   enabled?:     boolean;
+  /**
+   * A ready-made editing item acting on the focused text field: `{ role: 'copy' }` is "Copy" with
+   * Ctrl+C shown. It needs no `id` or `label` (the id is `'role:copy'`). Undo and redo are not
+   * offered because text fields have no undo yet.
+   */
+  role?:        'copy' | 'cut' | 'paste' | 'selectAll';
   /** Present (true or false) makes the item checkable. */
   checked?:     boolean;
-  /** A key combination such as `'Ctrl+N'` or `'CmdOrCtrl+Shift+S'`. Shown in the menu and triggered by Glyx; Alt and Super combinations are shown but do not trigger. */
+  /** A key combination such as `'Ctrl+N'` or `'CmdOrCtrl+Shift+S'`. Shown in the menu and triggered by Glyx, with Ctrl, Shift, Alt and Super. */
   accelerator?: string;
   separator?:   boolean;
   /** Makes this a submenu. At the top level every entry must have it. */
   children?:    MenuItem[];
 }
+
+export interface MenuBarProps {
+  /** The menu description, the same shape `menubar.set` takes. */
+  items: MenuItem[];
+  /** Called with `{ id, checked? }` when an item is chosen by mouse, keyboard or accelerator. */
+  onSelect?: (ev: { id: string; checked?: boolean; role?: string }) => void;
+  /** Use the native menu bar where one exists (Windows) and draw this one everywhere else. Default false. */
+  native?: boolean;
+  /** Override the colours: bar, panel, border, text, muted, disabled, hover, accent. */
+  colors?: Partial<Record<'bar' | 'panel' | 'border' | 'text' | 'muted' | 'disabled' | 'hover' | 'accent', string>>;
+  style?: StyleProp;
+}
+
+/**
+ * A menu bar drawn by Glyx itself, for Linux and for frameless windows. Open a menu with the
+ * mouse or Alt+letter (the letter after `&` in a label), move with the arrow keys, choose with
+ * Enter, close with Escape. Accelerators work with or without a menu open.
+ */
+export const MenuBar: React.FC<MenuBarProps>;
 
 /** Native window menu bar (requires `menubar: true`). Windows only for now. */
 export const menubar: {
@@ -456,5 +493,5 @@ export const menubar: {
   /** Returns false when there is no such checkable item. */
   setChecked(id: string, checked: boolean): boolean;
   /** Called when an item is chosen by mouse, keyboard or accelerator. Returns an unsubscribe function. */
-  onSelect(handler: (ev: { id: string; checked?: boolean }) => void): () => void;
+  onSelect(handler: (ev: { id: string; checked?: boolean; role?: string }) => void): () => void;
 };

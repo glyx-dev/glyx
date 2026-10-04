@@ -11,6 +11,31 @@
 // The top level must be menus (`children` required). `checked` present, true
 // or false, makes an item checkable. `&` before a letter marks its mnemonic.
 // Ids are unique across the whole bar.
+//
+// `role` makes a ready-made editing item: `{ role: 'copy' }` is "Copy" (Ctrl+C)
+// and acts on the focused text field. Roles: copy, cut, paste, selectAll. An item
+// with a role needs no id or label, and its accelerator is shown but never matched
+// here, because the text field already handles the keys itself.
+
+/** Ready-made editing items: label and the accelerator shown beside it. */
+export const EDIT_ROLES = {
+  copy:      { label: 'Copy',       accelerator: 'Ctrl+C' },
+  cut:       { label: 'Cut',        accelerator: 'Ctrl+X' },
+  paste:     { label: 'Paste',      accelerator: 'Ctrl+V' },
+  selectAll: { label: 'Select All', accelerator: 'Ctrl+A' },
+};
+
+/** Fill in what a `role` implies (id, label, accelerator). Everything else is left as given. */
+export function normalizeMenu(items) {
+  const norm = (item) => {
+    if (!item || item.separator) return item;
+    if (Array.isArray(item.children) && item.children.length > 0) return { ...item, children: item.children.map(norm) };
+    const def = item.role ? EDIT_ROLES[item.role] : null;
+    if (!def) return item;
+    return { ...item, id: item.id ?? 'role:' + item.role, label: item.label ?? def.label, accelerator: item.accelerator ?? def.accelerator };
+  };
+  return Array.isArray(items) ? items.map(norm) : items;
+}
 
 /** Check a menu bar description. Returns an error message, or null when it is fine. */
 export function validateMenu(items) {
@@ -32,16 +57,22 @@ function validateChildren(path, items, seen) {
   for (const item of items) {
     if (!item) return `${path}: an entry is empty`;
     if (item.separator) continue;
-    if (!String(item.label ?? '').trim()) return `${path}: an item has no label`;
-    const here = `${path} > ${item.label}`;
+    if (item.role !== undefined && !EDIT_ROLES[item.role]) {
+      return `${path}: unknown role "${item.role}" (use copy, cut, paste or selectAll)`;
+    }
+    const def = item.role ? EDIT_ROLES[item.role] : null;
+    const label = item.label ?? def?.label;
+    if (!String(label ?? '').trim()) return `${path}: an item has no label`;
+    const here = `${path} > ${label}`;
     if (Array.isArray(item.children) && item.children.length > 0) {
       const err = validateChildren(here, item.children, seen);
       if (err) return err;
       continue;
     }
-    if (!item.id) return `${here}: an item needs an \`id\` so its clicks can be told apart`;
-    if (seen.has(item.id)) return `${here}: id "${item.id}" is used more than once`;
-    seen.add(item.id);
+    const id = item.id ?? (item.role ? 'role:' + item.role : '');
+    if (!id) return `${here}: an item needs an \`id\` so its clicks can be told apart`;
+    if (seen.has(id)) return `${here}: id "${id}" is used more than once`;
+    seen.add(id);
     if (item.accelerator != null && !parseAccelerator(item.accelerator)) {
       return `${here}: "${item.accelerator}" is not a valid accelerator (try "Ctrl+N" or "CmdOrCtrl+Shift+S")`;
     }
@@ -59,10 +90,15 @@ export function flattenItems(items, out = []) {
   return out;
 }
 
+/** 'windows', 'macos' or 'linux' from the runtime; 'unknown' without one. */
+export function currentPlatform() {
+  return typeof globalThis.__glyx_platform !== 'undefined' ? String(globalThis.__glyx_platform()) : 'unknown';
+}
+
 const MODIFIERS = {
-  ctrl: 'ctrl', control: 'ctrl', cmdorctrl: 'ctrl', cmdorcontrol: 'ctrl', commandorcontrol: 'ctrl',
+  // `cmdorctrl` is resolved per platform below: Cmd on macOS, Ctrl everywhere else.
+  ctrl: 'ctrl', control: 'ctrl', cmdorctrl: 'cmdorctrl', cmdorcontrol: 'cmdorctrl', commandorcontrol: 'cmdorctrl',
   shift: 'shift',
-  // Valid, shown in the menu, but key events do not report these, so they never trigger.
   alt: 'alt', option: 'alt', super: 'super', cmd: 'super', command: 'super', meta: 'super',
 };
 
@@ -73,22 +109,19 @@ const NAMED_KEYS = {
   up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight',
 };
 
-/**
- * "Ctrl+Shift+S" → `{ ctrl, shift, alt, super, key: 'KeyS', triggers }`, or null when it is not
- * a key combination. `triggers` is false when it uses a modifier key events cannot report.
- */
-export function parseAccelerator(text) {
+/** "Ctrl+Shift+S" → `{ ctrl, shift, alt, super, key: 'KeyS' }`, or null when it is not a key combination. */
+export function parseAccelerator(text, platform = currentPlatform()) {
   if (typeof text !== 'string' || !text.trim()) return null;
   const parts = text.split('+').map((p) => p.trim()).filter(Boolean);
   if (parts.length === 0) return null;
-  const acc = { ctrl: false, shift: false, alt: false, super: false, key: '', triggers: true };
+  const acc = { ctrl: false, shift: false, alt: false, super: false, key: '' };
   for (let i = 0; i < parts.length; i++) {
     const p = parts[i];
     const lower = p.toLowerCase();
     if (i < parts.length - 1) {
       const m = MODIFIERS[lower];
       if (!m) return null;
-      acc[m] = true;
+      acc[m === 'cmdorctrl' ? (platform === 'macos' ? 'super' : 'ctrl') : m] = true;
     } else if (MODIFIERS[lower]) {
       return null;
     } else if (/^[a-z]$/i.test(p)) acc.key = 'Key' + p.toUpperCase();
@@ -97,11 +130,11 @@ export function parseAccelerator(text) {
     else if (NAMED_KEYS[lower]) acc.key = NAMED_KEYS[lower];
     else return null;
   }
-  acc.triggers = !acc.alt && !acc.super;
   return acc;
 }
 
-/** Does this raw key event (`{ key, ctrl, shift, pressed }`) press this accelerator? */
+/** Does this raw key event (`{ key, ctrl, shift, alt, super, pressed }`) press this accelerator? */
 export function matchesAccelerator(acc, ev) {
-  return !!acc && acc.triggers && ev.pressed === true && ev.key === acc.key && !!ev.ctrl === acc.ctrl && !!ev.shift === acc.shift;
+  return !!acc && ev.pressed === true && ev.key === acc.key
+    && !!ev.ctrl === acc.ctrl && !!ev.shift === acc.shift && !!ev.alt === acc.alt && !!ev.super === acc.super;
 }

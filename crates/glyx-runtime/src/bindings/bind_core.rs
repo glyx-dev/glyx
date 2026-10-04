@@ -207,6 +207,10 @@ pub fn poll_events_callback(
                 set_str!("id", &id);
                 if let Some(c) = checked { set_bool!("checked", c); }
             }
+            InputEvent::Tray { json } => {
+                set_str!("type", "tray");
+                set_str!("json", &json);
+            }
             InputEvent::AccessibilityFocus { node_id } => {
                 set_str!("type", "accessibilityFocus");
                 set_num!("nodeId", node_id);

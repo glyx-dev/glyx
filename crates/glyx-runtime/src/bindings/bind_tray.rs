@@ -132,6 +132,20 @@ pub fn tray_set_tooltip_callback(
     });
 }
 
+/// `__glyx_tray_listen(on: bool) -> bool`: push tray events instead of queueing them.
+pub fn tray_listen_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let state = window_state(&args);
+    let on = args.get(0).boolean_value(scope);
+    let redraw = state.request_redraw.as_ref().map(Arc::clone);
+    rv.set_bool(crate::menubar_api::tray_listen(on, Arc::clone(&state.events), redraw));
+}
+
 /// `__glyx_tray_poll_events() -> string` (JSON array)
 pub fn tray_poll_events_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,

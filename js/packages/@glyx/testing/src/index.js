@@ -388,6 +388,8 @@ async function _getReconciler() {
 
     createInstance(type, props) {
       const id = _mkNode(type, props);
+      // The real host tells a component its native node id; Pressable registers its handlers with it.
+      if (typeof props._glyxOnMount === 'function') props._glyxOnMount(id);
       return id;
     },
     createTextInstance(text) {
@@ -509,14 +511,14 @@ export async function render(element) {
 
   if (reconciler) {
     const container = { rootId: null };
+    // A legacy (synchronous) root: a concurrent root waits on a scheduler this in-memory host
+    // does not have, so `render` never finished. Updates land as soon as they are made.
     const root = reconciler.createContainer(
-      container, /* tag=Concurrent */ 1, null, false, null, '', {}, null,
+      container, /* tag=Legacy */ 0, null, false, null, '', {}, null,
     );
-    await new Promise((resolve) => {
-      reconciler.updateContainer(element, root, null, resolve);
+    reconciler.flushSync(() => {
+      reconciler.updateContainer(element, root, null, null);
     });
-    // Flush sync work
-    reconciler.flushSync(() => {});
 
     const rootId = container.rootId;
     const queries = _buildQueries(rootId);

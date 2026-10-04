@@ -31,7 +31,7 @@ test('flattenItems lists the actionable items in order', () => {
 });
 
 test('accelerators parse', () => {
-  expect(parseAccelerator('Ctrl+N')).toMatchObject({ ctrl: true, shift: false, key: 'KeyN', triggers: true });
+  expect(parseAccelerator('Ctrl+N')).toMatchObject({ ctrl: true, shift: false, key: 'KeyN' });
   expect(parseAccelerator('CmdOrCtrl+Shift+S')).toMatchObject({ ctrl: true, shift: true, key: 'KeyS' });
   expect(parseAccelerator('ctrl+1')).toMatchObject({ key: 'Digit1' });
   expect(parseAccelerator('F5')).toMatchObject({ key: 'F5', ctrl: false });
@@ -39,10 +39,25 @@ test('accelerators parse', () => {
   expect(parseAccelerator('Ctrl+Left')).toMatchObject({ key: 'ArrowLeft' });
 });
 
-test('combinations key events cannot report are valid but never trigger', () => {
+test('CmdOrCtrl is Cmd on macOS and Ctrl everywhere else', () => {
+  expect(parseAccelerator('CmdOrCtrl+S', 'macos')).toMatchObject({ super: true, ctrl: false, key: 'KeyS' });
+  expect(parseAccelerator('CmdOrCtrl+S', 'windows')).toMatchObject({ ctrl: true, super: false });
+  expect(parseAccelerator('CmdOrCtrl+S', 'linux')).toMatchObject({ ctrl: true, super: false });
+  expect(parseAccelerator('Cmd+S', 'windows')).toMatchObject({ super: true, ctrl: false });
+  globalThis.__glyx_platform = () => 'macos';
+  expect(parseAccelerator('CmdOrCtrl+S')).toMatchObject({ super: true });
+  delete globalThis.__glyx_platform;
+});
+
+test('Alt and Super combinations parse and match like any other', () => {
   const alt = parseAccelerator('Alt+F4');
-  expect(alt).toMatchObject({ alt: true, key: 'F4', triggers: false });
+  expect(alt).toMatchObject({ alt: true, key: 'F4' });
+  expect(matchesAccelerator(alt, { key: 'F4', ctrl: false, shift: false, alt: true, pressed: true })).toBe(true);
   expect(matchesAccelerator(alt, { key: 'F4', ctrl: false, shift: false, pressed: true })).toBe(false);
+  const win = parseAccelerator('Super+E');
+  expect(win).toMatchObject({ super: true, key: 'KeyE' });
+  expect(matchesAccelerator(win, { key: 'KeyE', super: true, pressed: true })).toBe(true);
+  expect(matchesAccelerator(win, { key: 'KeyE', pressed: true })).toBe(false);
 });
 
 test('things that are not key combinations are rejected', () => {
@@ -55,4 +70,25 @@ test('matching needs the exact modifiers and a key press', () => {
   expect(matchesAccelerator(acc, { key: 'KeyS', ctrl: true, shift: false, pressed: true })).toBe(false);
   expect(matchesAccelerator(acc, { key: 'KeyS', ctrl: true, shift: true, pressed: false })).toBe(false);
   expect(matchesAccelerator(acc, { key: 'KeyD', ctrl: true, shift: true, pressed: true })).toBe(false);
+});
+
+import { normalizeMenu, EDIT_ROLES } from './menuSchema.js';
+
+test('a role fills in its id, label and accelerator and needs none of them', () => {
+  const bar = [{ label: 'Edit', children: [{ role: 'copy' }, { role: 'selectAll', label: 'Everything' }] }];
+  expect(validateMenu(bar)).toBeNull();
+  const full = normalizeMenu(bar);
+  expect(full[0].children[0]).toMatchObject({ role: 'copy', id: 'role:copy', label: 'Copy', accelerator: 'Ctrl+C' });
+  expect(full[0].children[1]).toMatchObject({ id: 'role:selectAll', label: 'Everything', accelerator: 'Ctrl+A' });
+  expect(Object.keys(EDIT_ROLES).sort()).toEqual(['copy', 'cut', 'paste', 'selectAll']);
+});
+
+test('an unknown role is an error, and a repeated role is a repeated id', () => {
+  expect(validateMenu([{ label: 'Edit', children: [{ role: 'undo' }] }])).toMatch(/unknown role "undo"/);
+  expect(validateMenu([{ label: 'Edit', children: [{ role: 'copy' }, { role: 'copy' }] }])).toMatch(/used more than once/);
+});
+
+test('normalizing leaves everything else alone', () => {
+  const bar = [{ label: 'File', children: [{ id: 'a', label: 'A' }, { separator: true }] }];
+  expect(normalizeMenu(bar)).toEqual(bar);
 });

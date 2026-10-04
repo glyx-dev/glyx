@@ -105,3 +105,28 @@ test('accelerators ignore releases, other keys, and disabled items', () => {
   _handleKey({ key: 'KeyN', ctrl: true, shift: false, pressed: true });
   expect(seen).toEqual([]);
 });
+
+test('on macOS the native menu fires accelerators, so keys are not matched a second time', () => {
+  globalThis.__glyx_platform = () => 'macos';
+  const seen = [];
+  menubar.set([{ label: 'File', children: [{ id: 'new', label: 'New', accelerator: 'CmdOrCtrl+N' }] }]);
+  menubar.onSelect((e) => seen.push(e));
+  _handleKey({ key: 'KeyN', ctrl: false, shift: false, super: true, pressed: true });
+  expect(seen).toEqual([]);
+  delete globalThis.__glyx_platform;
+});
+
+test('an editing role acts on the field and is reported with its role', () => {
+  const seen = [];
+  const sent = [];
+  globalThis.__glyx_menubar_set = (json) => { sent.push(JSON.parse(json)); return ''; };
+  menubar.set([{ label: 'Edit', children: [{ role: 'copy' }, { id: 'x', label: 'Other', accelerator: 'Ctrl+K' }] }]);
+  // The native bar is given the filled-in item, with the accelerator to show.
+  expect(sent.at(-1)[0].children[0]).toMatchObject({ id: 'role:copy', label: 'Copy', accelerator: 'Ctrl+C', role: 'copy' });
+  menubar.onSelect((e) => seen.push(e));
+  _handleNative({ id: 'role:copy' });
+  expect(seen).toEqual([{ id: 'role:copy', role: 'copy' }]);
+  // The role's accelerator is only displayed, so Ctrl+C does not fire it a second time.
+  _handleKey({ key: 'KeyC', ctrl: true, shift: false, pressed: true });
+  expect(seen.filter((e) => e.id === 'role:copy').length).toBe(1);
+});

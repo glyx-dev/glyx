@@ -1,6 +1,11 @@
-//! Native window menu bar (the File / Edit / View row under a window's title
-//! bar). Windows only for now: `muda` can attach a menu to a Win32 window, but
-//! not to Glyx's winit windows on Linux, and the macOS app menu is unverified.
+//! Native menu bar: the File / Edit / View row under a window's title bar on
+//! Windows, and the app menu at the top of the screen on macOS. `muda` cannot
+//! attach one to Glyx's winit windows on Linux, so there `supported()` is false
+//! and an app uses the in-app `<MenuBar>` instead.
+//!
+//! The macOS path compiles and follows `muda`'s documented use, but has not run
+//! on a Mac. It adds the conventional application menu (About, Services, Hide,
+//! Quit) in front of the app's own menus, and lets AppKit fire accelerators.
 //!
 //! The description is the same JSON shape the tray menu uses, with two
 //! differences: the top level must be submenus (`children` is required there),
@@ -64,8 +69,9 @@ static CHECKED: LazyLock<Mutex<HashMap<String, bool>>> = LazyLock::new(|| Mutex:
 /// handler can tell a menu-bar click from a tray click.
 static IDS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
-/// True where a native menu bar can be attached to a Glyx window.
-pub fn supported() -> bool { cfg!(target_os = "windows") }
+/// True where a native menu bar can be attached.
+pub fn supported() -> bool { cfg!(any(target_os = "windows", target_os = "macos")) }
+
 
 fn collect_checked(items: &[MenuBarItem], out: &mut HashMap<String, bool>) {
     for item in items {
@@ -134,7 +140,7 @@ pub(crate) fn dispatch(id: &str) -> bool {
     true
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 mod imp {
     use super::*;
     use std::cell::RefCell;
@@ -192,23 +198,65 @@ mod imp {
         Ok(())
     }
 
-    pub(super) fn install(hwnd: isize, items: &[MenuBarItem]) -> Result<(), String> {
+    /// Windows: the menu belongs to one window. macOS: there is one app menu, so the key is always 0.
+    pub(super) fn install(key: isize, items: &[MenuBarItem]) -> Result<(), String> {
         crate::ensure_event_handler();
         let (menu, entries) = build(items)?;
+        #[cfg(target_os = "macos")]
+        add_app_menu(&menu)?;
         INSTALLED.with(|all| {
             let mut all = all.borrow_mut();
-            if let Some(old) = all.remove(&hwnd) {
+            if let Some(old) = all.remove(&key) {
                 forget(&old);
-                // SAFETY: `hwnd` was valid when it was installed and the menu is still ours.
-                let _ = unsafe { old.menu.remove_for_hwnd(hwnd) };
+                detach(&old.menu, key);
             }
-            // SAFETY: the caller passes the window's own HWND, on the window's thread.
-            unsafe { menu.init_for_hwnd(hwnd) }.map_err(|e| format!("could not attach the menu bar: {e}"))?;
+            attach(&menu, key)?;
             IDS.lock().unwrap().extend(entries.keys().cloned());
             collect_checked(items, &mut CHECKED.lock().unwrap());
-            all.insert(hwnd, Installed { menu, entries });
+            all.insert(key, Installed { menu, entries });
             Ok(())
         })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn attach(menu: &Menu, hwnd: isize) -> Result<(), String> {
+        // SAFETY: the caller passes the window's own HWND, on the window's thread.
+        unsafe { menu.init_for_hwnd(hwnd) }.map_err(|e| format!("could not attach the menu bar: {e}"))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn detach(menu: &Menu, hwnd: isize) {
+        // SAFETY: `hwnd` was valid when it was installed and the menu is still ours.
+        let _ = unsafe { menu.remove_for_hwnd(hwnd) };
+    }
+
+    #[cfg(target_os = "macos")]
+    fn attach(menu: &Menu, _key: isize) -> Result<(), String> {
+        menu.init_for_nsapp();
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn detach(menu: &Menu, _key: isize) {
+        menu.remove_for_nsapp();
+    }
+
+    /// The menu macOS puts first, named after the app: About, Services, Hide, Quit.
+    #[cfg(target_os = "macos")]
+    fn add_app_menu(menu: &Menu) -> Result<(), String> {
+        let app = Submenu::new("App", true);
+        app.append_items(&[
+            &PredefinedMenuItem::about(None, None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::services(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::hide(None),
+            &PredefinedMenuItem::hide_others(None),
+            &PredefinedMenuItem::show_all(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::quit(None),
+        ]).map_err(|e| e.to_string())?;
+        menu.insert(&app, 0).map_err(|e| e.to_string())
     }
 
     fn forget(old: &Installed) {
@@ -217,12 +265,11 @@ mod imp {
         for id in old.entries.keys() { ids.remove(id); checked.remove(id); }
     }
 
-    pub(super) fn remove(hwnd: isize) -> bool {
-        INSTALLED.with(|all| match all.borrow_mut().remove(&hwnd) {
+    pub(super) fn remove(key: isize) -> bool {
+        INSTALLED.with(|all| match all.borrow_mut().remove(&key) {
             Some(old) => {
                 forget(&old);
-                // SAFETY: as in `install`.
-                let _ = unsafe { old.menu.remove_for_hwnd(hwnd) };
+                detach(&old.menu, key);
                 true
             }
             None => false,
@@ -256,10 +303,10 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod imp {
     use super::*;
-    const NOT_YET: &str = "a native menu bar is only available on Windows for now";
+    const NOT_YET: &str = "a native menu bar is only available on Windows and macOS: use <MenuBar> here";
     pub(super) fn install(_hwnd: isize, _items: &[MenuBarItem]) -> Result<(), String> { Err(NOT_YET.into()) }
     pub(super) fn remove(_hwnd: isize) -> bool { false }
     pub(super) fn set_enabled(_id: &str, _enabled: bool) -> bool { false }

@@ -202,6 +202,11 @@ pub fn poll_events_callback(
                 set_num!("id", id);
                 set_str!("payload", &payload);
             }
+            InputEvent::MenuBar { id, checked } => {
+                set_str!("type", "menuBar");
+                set_str!("id", &id);
+                if let Some(c) = checked { set_bool!("checked", c); }
+            }
             InputEvent::AccessibilityFocus { node_id } => {
                 set_str!("type", "accessibilityFocus");
                 set_num!("nodeId", node_id);

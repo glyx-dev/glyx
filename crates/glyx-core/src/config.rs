@@ -404,6 +404,10 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
     } else {
         cfg.icon_rgba = load_icon_from_bytes(DEFAULT_ICON_BYTES);
     }
+    // The tray uses the same icon when an app creates one without pixels of its own.
+    if let Some((rgba, w, h)) = &cfg.icon_rgba {
+        glyx_runtime::set_app_icon(rgba.clone(), *w, *h);
+    }
 
     let app_caps = file.as_ref().and_then(|f| f.capabilities.as_ref());
 

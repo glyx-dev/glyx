@@ -22,7 +22,7 @@ export interface Report {
 /** Human names, in display order. Keys are glyx.config.json's. */
 export const CAPABILITIES: [string, string][] = [
   ['network', 'Network'], ['fs', 'Files'], ['db', 'Database'], ['dbPath', 'Database path'],
-  ['dialog', 'Dialogs'], ['clipboard', 'Clipboard'], ['notification', 'Notifications'], ['tray', 'Tray'],
+  ['dialog', 'Dialogs'], ['clipboard', 'Clipboard'], ['notification', 'Notifications'], ['tray', 'Tray'], ['menubar', 'Menu bar'],
   ['shellExec', 'Run programs'], ['shellAgent', 'Agent shell'], ['shell', 'Shell (open)'], ['env', 'Environment'],
   ['mdns', 'mDNS'], ['system', 'System info'], ['power', 'Power'], ['battery', 'Battery'], ['storage', 'Storage'],
   ['credentials', 'Credentials'], ['audio', 'Audio'], ['video', 'Video'], ['camera', 'Camera'], ['microphone', 'Microphone'],
@@ -33,7 +33,7 @@ export const CAPABILITIES: [string, string][] = [
 /** Capabilities grouped for display. */
 export const CATEGORIES: { title: string; keys: string[] }[] = [
   { title: 'Network & data', keys: ['network', 'fs', 'db', 'dbPath', 'storage', 'credentials', 'env'] },
-  { title: 'Desktop', keys: ['dialog', 'clipboard', 'notification', 'tray', 'globalShortcuts', 'deeplink', 'webview', 'shell', 'shellExec', 'shellAgent'] },
+  { title: 'Desktop', keys: ['dialog', 'clipboard', 'notification', 'tray', 'menubar', 'globalShortcuts', 'deeplink', 'webview', 'shell', 'shellExec', 'shellAgent'] },
   { title: 'Devices & media', keys: ['camera', 'microphone', 'audio', 'video', 'gamepads', 'hid', 'usb', 'battery', 'power', 'system', 'mdns'] },
   { title: 'AI & app', keys: ['ai', 'aiModelDownload', 'updater', 'crash'] },
 ];

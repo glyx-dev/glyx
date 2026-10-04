@@ -3913,6 +3913,7 @@ dependencies = [
  "log",
  "muda",
  "serde",
+ "serde_json",
  "tray-icon",
 ]
 

@@ -94,6 +94,17 @@
         "@glyx-dev/config": "workspace:*",
       },
     },
+    "examples/menubar-demo": {
+      "name": "menubar-demo",
+      "version": "0.1.0",
+      "dependencies": {
+        "@glyx-dev/react": "workspace:*",
+        "react": "^18",
+      },
+      "devDependencies": {
+        "@glyx-dev/config": "workspace:*",
+      },
+    },
     "examples/model-viewer": {
       "name": "model-viewer",
       "version": "0.1.0",
@@ -357,6 +368,8 @@
     "loose-envify": ["loose-envify@1.4.0", "", { "dependencies": { "js-tokens": "^3.0.0 || ^4.0.0" }, "bin": { "loose-envify": "cli.js" } }, "sha512-lyuxPGr/Wfhrlem2CL/UcnUc1zcqKAImBDzukY7Y5F/yQiNdko6+fRLevlw1HgMySw7f611UIY408EtxRSoK3Q=="],
 
     "media-player": ["media-player@workspace:examples/media-player"],
+
+    "menubar-demo": ["menubar-demo@workspace:examples/menubar-demo"],
 
     "model-viewer": ["model-viewer@workspace:examples/model-viewer"],
 

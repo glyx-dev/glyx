@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- **`tray.create(null, 0, 0, tooltip, menu)` uses the app's own icon.** Before, a tray icon needed pixels from the app and never carried its logo. With `null` it reuses the window icon (the `icon` in `glyx.config`, else the Glyx default). Pixels still work as before.
+- **`menubar`: a native window menu bar** (requires `menubar: true`). `menubar.set([...])` builds a File / Edit / View bar from one description, with `&` mnemonics, separators, submenus, checkable items (`checked: false` is an unchecked check item), and accelerators; `menubar.onSelect` reports `{ id, checked? }` for mouse, Alt-key and accelerator choices; `setEnabled`, `setChecked`, `clear` and `supported` round it out. Windows only for now (`set` throws elsewhere). Ctrl and Shift accelerators trigger, because Win32 will not do it for a Glyx window, so Glyx matches the keys itself; Alt and Super combinations are shown but do not trigger. A frameless window shows no native menu bar. Choices are pushed through the native event stream, so there is no polling timer. Typed as `MenuItem` and `menubar`; see `examples/menubar-demo`.
 - **Array styles and `StyleSheet`.** `style` accepts an array, as in React Native: `style={[base, active && highlighted]}`. Later entries win, falsy entries are skipped, arrays nest. Every built-in component handles it, not only the host elements (before, an array spread into numeric keys and applied nothing). New `StyleSheet.create` / `flatten` / `compose` / `absoluteFill`, `flattenStyle`, and a `StyleProp` type for every `style` prop.
 - **Complete `GlyxStyle` typings.** `style` now types every key the runtime reads, not just 15: margins and paddings (per side and horizontal/vertical), `width`/`height` and min/max (pixels or `'50%'`, via the new `GlyxLength`), `position`/`top`/`right`/`bottom`/`left`, `zIndex`, `overflow`, `opacity`, `transform`, `boxShadow`, `backgroundGradient`, font props, `lineHeight`, `flexWrap`/`flexGrow`/`flexShrink`/`flexBasis`, align/justify variants, grid, and scrollbar props. `textAlign` now includes `'right'`, and `flexDirection`, `justifyContent` and `alignItems` list their reverse, `space-evenly` and `baseline` values.
 - **Smooth scrolling.** `ScrollView` eases wheel and keyboard scrolling on a critically damped spring owned by the native runtime (no JS per frame). `smoothScroll` is on by default; `smoothScroll={false}` opts out. Dragging the scrollbar and touchpad scrolling are never eased.
@@ -39,6 +41,8 @@
 - `TextInput` accepts `textAlign` (`'left'` | `'center'` | `'right'`), applied to rendering and hit-testing alike.
 
 ### Fixed
+- The first tray icon's handle was `0`, the same value `tray.create` returns on failure, so an app checking the result treated a working tray as failed. Handles now start at 1.
+- Passing a zero-length `ArrayBuffer` to `tray.create` crashed the V8 runtime; it now means "no pixels" (the app icon).
 - A parent re-render no longer marked every child dirty. `prepareUpdate` compared inline `style`, `transition` and `animation` objects by identity, and a new object literal each render always looked changed, so every child repainted. They are now compared by content. This was most of the CPU renderer's cost on a re-rendering dashboard.
 - Changing a `Text`'s `fontWeight`, `fontStyle`, `lineHeight` or `textScrollX` now re-measures it. Before, only a text or size change did, so restyling text in place kept its old width.
 - Single-line text (`textScrollX` set, as in inputs and rich-text spans) now counts trailing spaces in its width.

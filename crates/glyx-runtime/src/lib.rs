@@ -140,6 +140,8 @@ pub fn window_registry_find_and_focus(key: &str) -> Option<u32> {
 // types are already engine-neutral; a QuickJS backend will need its own
 // registration glue but reuses the same data model unchanged.
 pub mod autostart;
+mod menubar_api;
+pub use glyx_tray::set_app_icon;
 pub mod bindings;
 pub mod print;
 pub mod cap_loader;

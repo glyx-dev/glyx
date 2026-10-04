@@ -356,6 +356,9 @@ pub struct Capabilities {
     /// System tray icon and menu.
     #[serde(default)]
     pub tray: bool,
+    /// Native window menu bar: `menubar.set()` and friends.
+    #[serde(default)]
+    pub menubar: bool,
     #[serde(default)]
     pub battery:          bool,
     #[serde(default)]
@@ -527,7 +530,7 @@ impl Capabilities {
             | "battery" | "usb" | "shell" | "mdns" | "system" | "power" | "storage"
             | "gamepads" | "globalShortcuts" | "credentials" | "audio" | "ai"
             | "camera" | "microphone" | "hid" | "updater" | "video" | "crash" | "deeplink"
-            | "tray" | "webview" | "autostart" | "print"
+            | "tray" | "menubar" | "webview" | "autostart" | "print"
         )
     }
 
@@ -568,6 +571,7 @@ impl Capabilities {
             "crash"            => self.crash,
             "deeplink"         => self.deeplink.is_some(),
             "tray"             => self.tray,
+            "menubar"          => self.menubar,
             "webview"          => self.webview,
             _                  => false,
         }

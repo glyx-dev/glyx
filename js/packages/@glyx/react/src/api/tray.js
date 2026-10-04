@@ -6,16 +6,19 @@
 
 export const tray = {
   /**
-   * Create a system tray icon from raw RGBA pixel data.
-   * @param {ArrayBuffer} rgba           RGBA pixel buffer (width×height×4 bytes).
-   * @param {number}      width          Icon width in pixels.
-   * @param {number}      height         Icon height in pixels.
+   * Create a system tray icon from raw RGBA pixel data, or from the app's own icon.
+   * @param {ArrayBuffer|null} rgba      RGBA pixel buffer (width×height×4 bytes), or null to use the app icon
+   *                                     (the `icon` in glyx.config, else the Glyx default).
+   * @param {number}      width          Icon width in pixels (ignored when `rgba` is null).
+   * @param {number}      height         Icon height in pixels (ignored when `rgba` is null).
    * @param {string}      tooltip        Tooltip text.
    * @param {Array<{id:string,label:string,enabled?:boolean,checked?:boolean,separator?:boolean,accelerator?:string,children?:Array}>} [menu]
    * @returns {number} Tray handle ID, or 0 on failure.
    */
   create(rgba, width, height, tooltip, menu = []) {
     if (typeof __glyx_tray_create === 'undefined') return 0;
+    // No pixels: the runtime uses the app icon.
+    if (rgba == null) return __glyx_tray_create(null, 0, 0, tooltip, JSON.stringify(menu));
     return __glyx_tray_create(rgba, width, height, tooltip, JSON.stringify(menu));
   },
 

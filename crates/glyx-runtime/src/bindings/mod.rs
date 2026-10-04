@@ -321,6 +321,10 @@ pub enum InputEvent {
     /// A Rust-side system watcher (battery/memory/darkMode/…) detected a
     /// CHANGE.  Pushed only on deltas — JS stays idle between changes.
     SystemWatch { id: u32, payload: String },
+    /// A native menu bar item was chosen (mouse, mnemonic or accelerator-less
+    /// menu navigation). `checked` is the new state of a checkable item.
+    /// Pushed by the click itself, so JS never polls for menus.
+    MenuBar { id: String, checked: Option<bool> },
     /// IME composition event, routed only to the currently-focused node
     /// (see `PerWindowState.focused_node`). `kind` is one of "enabled" /
     /// "preedit" / "commit" / "disabled"; `cursor` is a byte-offset (start,
@@ -1718,6 +1722,13 @@ pub fn register_all(
     register!("__glyx_tray_update_menu",   tray_update_menu_callback);
     register!("__glyx_tray_set_tooltip",   tray_set_tooltip_callback);
     register!("__glyx_tray_poll_events",   tray_poll_events_callback);
+
+    // Native window menu bar
+    register!("__glyx_menubar_set",         menubar_set_callback);
+    register!("__glyx_menubar_clear",       menubar_clear_callback);
+    register!("__glyx_menubar_set_enabled", menubar_set_enabled_callback);
+    register!("__glyx_menubar_set_checked", menubar_set_checked_callback);
+    register!("__glyx_menubar_supported",   menubar_supported_callback);
 
     //  Shell (Tier 1: scoped exec)
     #[cfg(feature = "shell")]

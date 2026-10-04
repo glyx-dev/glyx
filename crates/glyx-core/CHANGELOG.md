@@ -5,6 +5,8 @@ Changes to the native runtime and renderer (`glyx-core`, and the crates it drive
 ## [Unreleased]
 
 ### Added
+- **The app icon is available to the tray.** The window icon decoded at startup is registered with `glyx-tray`, so a tray icon created without pixels uses it, on both JS engines.
+- **Native window menu bar (Windows).** A `menubar` capability and `__glyx_menubar_*` bindings on both JS engines (shared logic in `glyx-runtime`'s `menubar_api`), built on `muda` in `glyx-tray`. The tray and the menu bar share one `muda` event handler, which now routes a click to the menu bar when its id belongs there and to the tray otherwise. A click is pushed into the window's JS event queue (`InputEvent::MenuBar`) and wakes the frame loop, so nothing polls. Linux and macOS report that a native menu bar is unavailable.
 - **Native keyboard focus.** Tab and Shift+Tab move focus across every focusable element (this works without the `a11y` feature), focus scrolls into view when it lands outside its nearest scroll container, and focus moves to the next valid node when the focused element is removed. The logic lives in its own `focus.rs`.
 - **Accessibility hints and disclosure state.** `accessibilityHint` adds a supplementary description beyond the label, and `expanded` exposes Expand and Collapse actions for accordions and tree items.
 - **`window.maxFps`** caps the frame rate of animations and drags, mainly for software renderers.

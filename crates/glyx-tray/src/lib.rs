@@ -1,3 +1,6 @@
+mod menubar;
+pub use menubar::*;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{atomic::AtomicBool, atomic::Ordering, LazyLock, Mutex};
 
@@ -6,6 +9,14 @@ use muda::{CheckMenuItem, ContextMenu, Menu, MenuItem, PredefinedMenuItem, Subme
 use tray_icon::{menu::MenuEvent, Icon, TrayIconBuilder, TrayIconEvent, TrayIconId};
 
 static HANDLER_SET: AtomicBool = AtomicBool::new(false);
+/// The app's own icon (the window icon), registered at startup, used when a
+/// tray icon is created without pixels of its own.
+static APP_ICON: std::sync::OnceLock<(Vec<u8>, u32, u32)> = std::sync::OnceLock::new();
+
+/// Register the app icon as raw RGBA pixels. Only the first call counts.
+pub fn set_app_icon(rgba: Vec<u8>, width: u32, height: u32) {
+    let _ = APP_ICON.set((rgba, width, height));
+}
 static EVENT_QUEUE: LazyLock<Mutex<VecDeque<TrayEvent>>> =
     LazyLock::new(|| Mutex::new(VecDeque::new()));
 static TRAY_MAP: LazyLock<Mutex<HashMap<u32, TrayIconId>>> =
@@ -72,6 +83,13 @@ fn ensure_event_handler() {
 
     MenuEvent::set_event_handler(Some(|event: MenuEvent| {
         let item_id = event.id.0.clone();
+        // One handler serves both: window menu bar clicks first, the rest are the tray's.
+        // The handler runs inside the window procedure, where a panic cannot unwind
+        // and would abort the app, so nothing here may be allowed to panic outward.
+        let ours = std::panic::catch_unwind(|| menubar::dispatch(&item_id)).unwrap_or(true);
+        if ours {
+            return;
+        }
         let map = MENU_ITEM_TO_TRAY.lock().unwrap();
         let tray_id = map.get(&item_id).copied();
 
@@ -175,7 +193,8 @@ fn append_submenu_items(
 
 // Remove the old MenuParent trait and append_items function
 
-static NEXT_ID: Mutex<u32> = Mutex::new(0);
+// Handles start at 1: 0 is what `tray.create` returns for a failure.
+static NEXT_ID: Mutex<u32> = Mutex::new(1);
 
 fn next_id() -> u32 {
     let mut id = NEXT_ID.lock().unwrap();
@@ -193,6 +212,15 @@ pub fn create_tray(
 ) -> Result<TrayHandle, String> {
     ensure_event_handler();
 
+    // No pixels given: use the app's own icon.
+    let (icon_rgba, width, height) = if icon_rgba.is_empty() {
+        match APP_ICON.get() {
+            Some((rgba, w, h)) => (rgba.as_slice(), *w, *h),
+            None => return Err("this app has no icon to use: pass pixels to tray.create".to_string()),
+        }
+    } else {
+        (icon_rgba, width, height)
+    };
     let icon = Icon::from_rgba(icon_rgba.to_vec(), width, height)
         .map_err(|e| format!("bad icon data: {e:?}"))?;
 
@@ -248,4 +276,21 @@ pub fn destroy_tray(handle: TrayHandle) {
 pub fn poll_events() -> Vec<TrayEvent> {
     let mut q = EVENT_QUEUE.lock().unwrap();
     q.drain(..).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tray_without_pixels_or_an_app_icon_says_why() {
+        // Nothing registers an app icon in this test binary, so there is nothing to fall back to.
+        let err = create_tray(&[], 0, 0, "x", &[]).err().expect("no icon available");
+        assert!(err.contains("no icon"), "{err}");
+    }
+
+    #[test]
+    fn handles_never_collide_with_the_failure_value() {
+        assert_ne!(next_id(), 0);
+    }
 }

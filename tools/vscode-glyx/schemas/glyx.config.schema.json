@@ -168,6 +168,10 @@
           "type": "boolean",
           "description": "Create system tray icons with menus."
         },
+        "menubar": {
+          "type": "boolean",
+          "description": "Set the native window menu bar (menubar.set)."
+        },
         "autostart": {
           "type": "boolean",
           "description": "Launch the app at login (autostart.enable/disable/isEnabled)."

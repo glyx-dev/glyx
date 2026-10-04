@@ -75,6 +75,9 @@ const windowSizeListeners = [];
 // Listeners notified on every key event: Array<(ev: {key, ctrl, shift, pressed}) => void>
 const keyListeners = [];
 
+// Listeners notified when a native menu bar item is chosen: Array<(ev: {id, checked?}) => void>
+const menuBarListeners = [];
+
 // Listeners called on every mouse-button press, regardless of which node was hit.
 // Used by dropdowns / overlays to close on outside click.
 // Array<(ev: {x, y, pressed}) => void>
@@ -361,6 +364,23 @@ export function addKeyListener(fn) {
 export function removeKeyListener(fn) {
   const idx = keyListeners.indexOf(fn);
   if (idx >= 0) keyListeners.splice(idx, 1);
+}
+
+/**
+ * Subscribe to native menu bar choices (pushed by the runtime when an item is clicked).
+ * @param {(ev: {id: string, checked?: boolean}) => void} fn
+ */
+export function addMenuBarListener(fn) {
+  menuBarListeners.push(fn);
+}
+
+/**
+ * Unsubscribe from native menu bar choices.
+ * @param {(ev: {id: string, checked?: boolean}) => void} fn
+ */
+export function removeMenuBarListener(fn) {
+  const idx = menuBarListeners.indexOf(fn);
+  if (idx >= 0) menuBarListeners.splice(idx, 1);
 }
 
 /**
@@ -839,6 +859,12 @@ export function dispatchEvents() {
       case 'resize': {
         const size = { width: ev.width, height: ev.height };
         for (const fn of windowSizeListeners) fn(size);
+        break;
+      }
+
+      case 'menuBar': {
+        const mev = ev.checked === undefined ? { id: ev.id } : { id: ev.id, checked: ev.checked };
+        for (const fn of menuBarListeners.slice()) try { fn(mev); } catch {}
         break;
       }
 

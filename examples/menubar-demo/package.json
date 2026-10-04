@@ -1,0 +1,12 @@
+{
+  "name": "menubar-demo",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18",
+    "@glyx-dev/react": "workspace:*"
+  },
+  "devDependencies": {
+    "@glyx-dev/config": "workspace:*"
+  }
+}

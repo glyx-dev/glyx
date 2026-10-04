@@ -13,6 +13,7 @@ export * from './db.js';
 export * from './dialog.js';
 export * from './clipboard.js';
 export * from './tray.js';
+export { menubar } from './menubar.js';
 export * from './notification.js';
 export * from './fetch.js';
 export * from './shell.js';

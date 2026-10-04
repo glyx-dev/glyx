@@ -398,7 +398,8 @@ export interface TrayHandle {
 /** System tray icon API (requires `tray: true` capability). */
 export const tray: {
   /**
-   * Create a system tray icon from raw RGBA pixel data.
+   * Create a system tray icon from raw RGBA pixel data, or pass `null` to use the app's own
+   * icon (the `icon` in glyx.config, else the Glyx default). `width` and `height` are then ignored.
    * @returns A handle (0 on failure).
    * @example
    * const icon = ... // RGBA bytes from an <img> canvas
@@ -408,7 +409,7 @@ export const tray: {
    *   { id: 'quit', label: 'Quit' },
    * ]);
    */
-  create(rgba: ArrayBuffer, width: number, height: number, tooltip: string, menu?: TrayMenuItem[]): number;
+  create(rgba: ArrayBuffer | null, width: number, height: number, tooltip: string, menu?: TrayMenuItem[]): number;
 
   /** Destroy a tray icon. */
   destroy(trayId: number): boolean;
@@ -421,4 +422,39 @@ export const tray: {
 
   /** Poll for pending tray events (menu clicks, double-clicks). Call each frame. Returns JSON array. */
   pollEvents(): string;
+};
+
+// ── Menu bar ──────────────────────────────────────────────────────────────────
+
+/** One entry of an application menu. Separators have only `separator: true`. */
+export interface MenuItem {
+  /** Required on every item that does something. Unique across the whole bar. */
+  id?:          string;
+  /** Text shown. `&` before a letter marks its mnemonic (`'&File'`). */
+  label?:       string;
+  /** Default true. */
+  enabled?:     boolean;
+  /** Present (true or false) makes the item checkable. */
+  checked?:     boolean;
+  /** A key combination such as `'Ctrl+N'` or `'CmdOrCtrl+Shift+S'`. Shown in the menu and triggered by Glyx; Alt and Super combinations are shown but do not trigger. */
+  accelerator?: string;
+  separator?:   boolean;
+  /** Makes this a submenu. At the top level every entry must have it. */
+  children?:    MenuItem[];
+}
+
+/** Native window menu bar (requires `menubar: true`). Windows only for now. */
+export const menubar: {
+  /** True when this platform can show a native menu bar. */
+  readonly supported: boolean;
+  /** Replace the window's menu bar. Throws when the menu is invalid, the capability is missing, or the platform cannot show one. */
+  set(menu: MenuItem[]): void;
+  /** Remove the menu bar. */
+  clear(): void;
+  /** Returns false when there is no such item. */
+  setEnabled(id: string, enabled: boolean): boolean;
+  /** Returns false when there is no such checkable item. */
+  setChecked(id: string, checked: boolean): boolean;
+  /** Called when an item is chosen by mouse, keyboard or accelerator. Returns an unsubscribe function. */
+  onSelect(handler: (ev: { id: string; checked?: boolean }) => void): () => void;
 };

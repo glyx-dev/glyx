@@ -32,15 +32,18 @@ pub fn tray_create_callback(
         if v.is_array_buffer() {
             let ab = v8::Local::<v8::ArrayBuffer>::try_from(v).unwrap();
             let store = ab.get_backing_store();
-            let raw = store.data().unwrap();
-            let data = unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const u8, store.byte_length()) };
-            data.to_vec()
+            // A zero-length buffer has no backing data: that is "no pixels", not a crash.
+            match store.data() {
+                Some(raw) => unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const u8, store.byte_length()) }.to_vec(),
+                None => vec![],
+            }
         } else {
             vec![]
         }
     };
 
-    if rgba.is_empty() || width == 0 || height == 0 {
+    // No pixels means "use the app's own icon"; given pixels need a size.
+    if !rgba.is_empty() && (width == 0 || height == 0) {
         rv.set_uint32(0);
         return;
     }
@@ -146,4 +149,77 @@ pub fn tray_poll_events_callback(
     let json = serde_json::to_string(&events).unwrap_or_default();
     let s = v8::String::new(scope, &json).unwrap();
     rv.set(s.into());
+}
+
+// ── Native window menu bar (crate::menubar_api) ─────────────────────────────
+
+fn window_state<'a>(args: &v8::FunctionCallbackArguments) -> &'a AsyncState {
+    let ext = v8::Local::<v8::External>::try_from(args.data()).unwrap();
+    unsafe { &*(ext.value() as *const AsyncState) }
+}
+
+/// `__glyx_menubar_set(items_json: string) -> string` ("" on success, else an error message)
+pub fn menubar_set_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let state = window_state(&args);
+    let hwnd = state.window.as_ref().and_then(|w| w.hwnd);
+    let json = v8_arg_to_string(scope, &args, 0);
+    let sink = crate::menubar_api::sink(Arc::clone(&state.events), state.request_redraw.as_ref().map(Arc::clone));
+    let reply = crate::menubar_api::set(hwnd, &json, sink);
+    let s = v8::String::new(scope, &reply).unwrap();
+    rv.set(s.into());
+}
+
+/// `__glyx_menubar_clear() -> bool`
+pub fn menubar_clear_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let _scope = &mut v8::ContextScope::new(scope, ctx);
+    let hwnd = window_state(&args).window.as_ref().and_then(|w| w.hwnd);
+    rv.set_bool(crate::menubar_api::clear(hwnd));
+}
+
+/// `__glyx_menubar_set_enabled(id: string, enabled: bool) -> bool`
+pub fn menubar_set_enabled_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let id = v8_arg_to_string(scope, &args, 0);
+    let on = args.get(1).boolean_value(scope);
+    rv.set_bool(crate::menubar_api::set_enabled(&id, on));
+}
+
+/// `__glyx_menubar_set_checked(id: string, checked: bool) -> bool`
+pub fn menubar_set_checked_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let id = v8_arg_to_string(scope, &args, 0);
+    let on = args.get(1).boolean_value(scope);
+    rv.set_bool(crate::menubar_api::set_checked(&id, on));
+}
+
+/// `__glyx_menubar_supported() -> bool`
+pub fn menubar_supported_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let _scope = &mut v8::ContextScope::new(scope, ctx);
+    rv.set_bool(crate::menubar_api::supported());
 }

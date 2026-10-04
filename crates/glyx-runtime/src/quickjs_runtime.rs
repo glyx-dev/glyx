@@ -832,6 +832,14 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_setTitle", Function::new(ctx.clone(), move |v: String| setter(v))?)?;
         let setter = w.set_cursor.clone();
         globals.set("__glyx_setCursor", Function::new(ctx.clone(), move |v: String| setter(v))?)?;
+
+        // Native window menu bar: the window handle comes from this window's controller.
+        let hwnd = w.hwnd;
+        let (events, redraw) = (reg.events.clone(), reg.redraw.clone());
+        globals.set("__glyx_menubar_set", Function::new(ctx.clone(), move |json: String| {
+            crate::menubar_api::set(hwnd, &json, crate::menubar_api::sink(Arc::clone(&events), redraw.clone()))
+        })?)?;
+        globals.set("__glyx_menubar_clear", Function::new(ctx.clone(), move || crate::menubar_api::clear(hwnd))?)?;
     }
 
     // `__glyx_battery_getStatus() -> Promise<JSON | null>` — real
@@ -1529,7 +1537,7 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
 
     // ── System tray (crate::quickjs_tray) ────────────────────────────────
     {
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, rgba: rquickjs::TypedArray<'js, u8>, width: u32, height: u32, tooltip: String, menu_json: Opt<Option<String>>| {
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, rgba: Option<rquickjs::TypedArray<'js, u8>>, width: u32, height: u32, tooltip: String, menu_json: Opt<Option<String>>| {
             crate::quickjs_tray::tray_create(ctx, rgba, width, height, tooltip, menu_json.0.flatten().unwrap_or_default())
         })?;
         globals.set("__glyx_tray_create", f)?;
@@ -1538,6 +1546,9 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_tray_update_menu", Function::new(ctx.clone(), crate::quickjs_tray::tray_update_menu)?)?;
         globals.set("__glyx_tray_set_tooltip", Function::new(ctx.clone(), crate::quickjs_tray::tray_set_tooltip)?)?;
         globals.set("__glyx_tray_poll_events", Function::new(ctx.clone(), crate::quickjs_tray::tray_poll_events)?)?;
+        globals.set("__glyx_menubar_set_enabled", Function::new(ctx.clone(), |id: String, on: bool| crate::menubar_api::set_enabled(&id, on))?)?;
+        globals.set("__glyx_menubar_set_checked", Function::new(ctx.clone(), |id: String, on: bool| crate::menubar_api::set_checked(&id, on))?)?;
+        globals.set("__glyx_menubar_supported", Function::new(ctx.clone(), crate::menubar_api::supported)?)?;
     }
 
     // ── Canvas / webview messaging (crate::quickjs_canvas) ──────────────
@@ -1704,6 +1715,11 @@ fn input_events_to_array<'js>(
                 obj.set("type", "systemWatch")?;
                 obj.set("id", *id as f64)?;
                 obj.set("payload", payload.as_str())?;
+            }
+            InputEvent::MenuBar { id, checked } => {
+                obj.set("type", "menuBar")?;
+                obj.set("id", id.as_str())?;
+                if let Some(c) = checked { obj.set("checked", *c)?; }
             }
             InputEvent::AccessibilityFocus { node_id } => {
                 obj.set("type", "accessibilityFocus")?;

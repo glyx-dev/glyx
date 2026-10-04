@@ -11,10 +11,11 @@ thread_local! {
     static TRAY_HANDLES: RefCell<HashMap<u32, glyx_tray::TrayHandle>> = RefCell::new(HashMap::new());
 }
 
-pub(crate) fn tray_create(ctx: Ctx<'_>, rgba: TypedArray<'_, u8>, width: u32, height: u32, tooltip: String, menu_json: String) -> u32 {
+pub(crate) fn tray_create(ctx: Ctx<'_>, rgba: Option<TypedArray<'_, u8>>, width: u32, height: u32, tooltip: String, menu_json: String) -> u32 {
     let _ = &ctx;
-    let rgba = rgba.as_bytes().unwrap_or(&[]);
-    if rgba.is_empty() || width == 0 || height == 0 { return 0; }
+    // No pixels means "use the app's own icon"; given pixels need a size.
+    let rgba = rgba.as_ref().and_then(|a| a.as_bytes()).unwrap_or(&[]);
+    if !rgba.is_empty() && (width == 0 || height == 0) { return 0; }
     if !glyx_security::get().tray { return 0; }
 
     let menu_items: Vec<glyx_tray::TrayMenuItem> = if menu_json.is_empty() {

@@ -30,6 +30,8 @@ This document describes how the pieces fit together.
 20. [Local AI](#20-local-ai)
 21. [JS Package Ecosystem](#21-js-package-ecosystem)
 22. [Key Design Decisions](#22-key-design-decisions)
+23. [Devtools Protocol (GDP)](#23-devtools-protocol-gdp)
+24. [Motion Engine](#24-motion-engine)
 
 ---
 
@@ -205,6 +207,13 @@ Every frame, glyx-core executes this sequence on the main thread:
    - Else: incremental mark_dirty on changed nodes only
    - compute() runs Taffy flex algorithm
    - update_scroll_positions() applies ScrollView offsets to layout cache
+
+6b. Motion ticks (Rust-owned animation, no JS)
+   - tick_transitions() advances property transitions (tween or spring) and keyframe animations
+   - tick_scroll() advances smooth-scroll springs and writes the displayed scroll offset
+   - tick_canvas() advances canvas tweens
+   - Each marks its nodes dirty so they repaint; with reduced motion on they snap instead (see 24)
+   - On the CPU renderer, compute_frame_damage() then turns the dirty nodes into a few damage rects (see 11)
 
 7. Acquire GPU swapchain texture (surface.get_current_texture())
 
@@ -580,6 +589,14 @@ After `render_frame()` composites the Vello scene onto the off-screen texture, `
 
 The off-screen Vello texture is not the swapchain surface directly — this allows Vello to always render at a stable format (`rgba8unorm`) regardless of the swapchain's preferred format. The blit pipeline is a single-quad wgpu render pass that samples the off-screen texture and writes to the swapchain surface.
 
+**Partial redraw (CPU renderer)**
+
+With soft present, a frame repaints only what changed. `compute_frame_damage()` (`scene.rs`) collects a rect per dirty node, for where it is now and where it was drawn last frame, through its transforms and shadows. `damage_rects::coalesce` merges them into at most 8 disjoint rects: two merge when the box around them wastes under 25%, or when both are tiny. A redrawn canvas is first diffed against its last draw (`canvas_damage.rs`), so a moved crosshair damages a thin strip rather than the whole chart. `TinySkiaFrame` repaints a `RectSet`: it clears and masks to those rects, culls draws outside them, and cuts large filled paths and long strokes to the damage before rasterizing (tiny-skia scan-converts a whole path before the clip mask trims it). Rectangular clips stay lazy, so no window-sized mask is built unless a draw crosses an edge, and an existing mask is narrowed in place when a rect clip is pushed inside it. The present step converts and pushes each rect. On the `dashboard` example a hover frame went from about 22 ms to about 8 ms of render time. `GLYX_SINGLE_DAMAGE_RECT=1` and `GLYX_FULL_CANVAS_DAMAGE=1` switch parts of this off.
+
+**Vello scratch buffers**
+
+Vello's compute passes write into bump-allocated buffers (flattened lines, tiles, path segments, per-tile command lists). Upstream sizes them with constants picked for a 30,000-path map, about 165 MiB for every scene, and cannot recover when a scene outgrows them. `vendor/vello` (`adaptive.rs`) sizes them from the scene instead: they start near 5 MiB, grow when a frame needs more, and shrink after 240 frames of low demand. A frame normally draws in one pass and its allocation counters are read a frame later; a frame waits for its counters, and re-runs a pass that did not fit before drawing anything, when overflow is likely (the first frame, a resize, or a scene whose path count or tile coverage grew past a margin that shrinks as the buffers fill). `GLYX_VELLO_FIXED_BUFFERS=1` restores the fixed sizes. See `vendor/README.md`.
+
 ---
 
 ## 12. Text System
@@ -767,7 +784,7 @@ Main thread (handle_dev_build_events, called each frame):
 
 **Windows Bun invocation**: Bun installed via winget or scoop creates a `.cmd` shim rather than a native `.exe`. `Command::new("bun")` fails because Windows does not run `.cmd` files without a shell. Glyx first tries `bun` directly, then falls back to `cmd /C bun ...` if the first attempt fails.
 
-**Error overlay**: When a JS exception occurs (from `frame_tick`) or a build error (from HMR), a 140px red panel is drawn at the bottom of the window using `FrameBuilder` directly (bypassing the JS scene tree). It shows the exception message and stack trace with line wrapping.
+**Error overlay**: When a JS exception occurs (from `frame_tick`) or a build error (from HMR), a red panel is drawn at the bottom of the window using `FrameBuilder` directly (bypassing the JS scene tree). It sizes itself to the message, up to 60% of the window, wraps the message, and shows as many stack frames as fit; its title and footer shorten on narrow windows. The full error is also logged to the terminal once, and Ctrl+C copies it.
 
 **Dev feature gate**: HMR code is compiled only when the `dev` Cargo feature is enabled. The production glyx-runner binary is built with `--no-default-features`, which excludes `notify`, the file watcher, the error overlay, and the dev overlay. This removes ~2MB from the production binary.
 
@@ -1068,3 +1085,50 @@ The most expensive part of a UI framework is layout. Glyx distinguishes three di
 **ControlFlow::Wait**
 
 winit's `Wait` mode puts the process to sleep when no events are pending. A static Glyx app consumes 0% CPU. An animated app (Canvas, rotating 3D scene) must call `window.request_redraw()` each frame to keep the loop alive. This is a deliberate energy-efficiency tradeoff.
+
+---
+
+## 23. Devtools Protocol (GDP)
+
+**Files**: `crates/glyx-devtools/` (protocol + WebSocket server), `crates/glyx-core/src/devtools.rs` (request handling), `devtools_inspect.rs` (tree, queries, input, screenshots), `devtools_perf.rs` (perf + animation), `js/packages/@glyx/react/src/devIds.js` (element IDs). Reference: [DEVTOOLS.md](DEVTOOLS.md).
+
+GDP lets tests, editors and agents inspect and drive a running app over a local WebSocket. It is compiled only with the `dev` feature and started only when `GLYX_DEVTOOLS_PORT` is set (`glyx dev --devtools`).
+
+```
+client ──ws://127.0.0.1──▶ glyx-devtools server (tokio task)
+                             • Origin check, token handshake
+                             • queues requests, sends GlyxUserEvent::Wake
+                                         │
+                                         ▼
+                           event-loop thread: Devtools::pump(windows)
+                             (on Wake and on every redraw)
+                             • answers requests against PerWindowState,
+                               no locks on window state
+                             • settles waitFor / waitForSettled
+                             • streams console, damage, frame, animation events
+```
+
+- **Threading**: the server never touches window state. Requests queue up and the event loop drains them in `pump`, woken by `GlyxUserEvent::Wake`, so an idle app answers in milliseconds and a busy one between frames.
+- **Input**: `Automation.click/type/press/scroll` build `ShellEvent`s and send them back through the event loop as `GlyxUserEvent::Inject`, so synthetic input takes the same path as real input (hit-testing, focus, IME, React handlers).
+- **JavaScript side**: `Runtime.evaluate` wraps the snippet so its value returns as JSON on both engines. Component names and element IDs come from the React host config, which keeps a node → fiber map and the fiber root only when `globalThis.__glyx_devtools` is set before the bundle runs; devtools asks for them with one JS call per response.
+- **Element IDs**: one depth-first pass over React's current fiber tree builds code-structure IDs (`App#0 › Btn#0 › Pressable#0`); cached above `devtools.autoIdCacheThreshold` nodes until an append / insert / remove or `testID` change.
+- **Motion clock**: transitions and keyframe animations read `PerWindowState::motion_clock` (`motion.rs`), the real clock at rate 1; devtools can slow, pause or move it (`Animation.setPlaybackRate` / `seek`).
+- **Performance and animation**: `PerfFrame` records render, present (pacing sleep excluded), redrawn area and running animations per frame; violations and leak warnings get a numbered history that devtools reads without draining the app's own queues. Animation events come from diffing each window's running transitions / keyframe animations between pumps, keyed by start time so restarts show as ended + started.
+- **Cost when unused**: nothing is recorded or computed for events nobody subscribed to; the console feed, damage log and frame stream exist only while a client listens.
+
+---
+
+## 24. Motion Engine
+
+**Files**: `crates/glyx-core/src/motion.rs`, `scene.rs` (`sync_*`, `tick_*`), `js/packages/@glyx/react/src/hostConfig.js`
+
+Animation is owned by Rust, so nothing in JavaScript runs per frame. JS only declares intent (a `transition`, `animation` or `smoothScroll` prop, a `<Canvas transition>`); the frame loop moves the values.
+
+- **Declaration**: `hostConfig.js` flattens `transition` and `animation` props onto the node (duration, easing, spring stiffness and damping, properties). `apply_scene_commands` compares a node's visual values before and after an update and starts or retargets a `Transition` from what is on screen now, mid-flight values included.
+- **Property transitions**: a `Transition` is a tween (CSS easings, `cubic-bezier`) or a critically damped `Spring` solved in closed form (`at(t) -> (progress, velocity)`). A retargeted spring inherits the current velocity. Overshoot is clamped where it would be invalid (opacity stays in 0 to 1, radius stays at or above 0).
+- **Keyframe animations**: `Animation` samples stops by percentage, with iterations, direction and fill. Re-sent identical props leave a running or finished animation alone.
+- **Smooth scroll**: JS keeps the scroll target. `sync_scroll` turns each new `scrollOffsetY` into a `ScrollSpring` and rewrites the offset to the one to display this frame, so rendering, hit testing and the scrollbar read one field. Scrollbar drags and touchpad events (precise deltas, held for 3 frames) snap.
+- **Canvas easing**: `CanvasTween` eases between consecutive command lists. Commands are lined up in order (longest common subsequence over pairable commands), so an axis gaining a tick still eases the data; points are matched by index. A canvas redrawn faster than its spring can settle glides linearly over the update gap (`adapt_pace`), so a live stream never trails its data.
+- **Clock**: everything reads `PerWindowState::motion_clock`, which devtools can slow, pause or step.
+- **Reduced motion**: `motion::reduced()` (`GLYX_REDUCE_MOTION`, or the Windows animation-effects setting) makes transitions, smooth scroll and canvas tweens snap; keyframe animations still run. Read once per process.
+- **Repainting**: each tick marks nodes dirty; on the CPU renderer only their damage rects repaint (see 11).

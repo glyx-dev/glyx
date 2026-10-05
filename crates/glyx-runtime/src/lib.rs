@@ -139,17 +139,27 @@ pub fn window_registry_find_and_focus(key: &str) -> Option<u32> {
 // make_promise, etc.). See PromiseHandle's doc comment for why the queue
 // types are already engine-neutral; a QuickJS backend will need its own
 // registration glue but reuses the same data model unchanged.
+pub mod autostart;
+mod menubar_api;
+pub use glyx_tray::set_app_icon;
 pub mod bindings;
+pub mod print;
 pub mod cap_loader;
 #[cfg(feature = "v8")]
 pub mod runtime;
 pub mod runtime_trait;
+pub mod log_bus;
+pub mod net_bus;
+pub mod console_js;
+pub mod text_props;
 // V8-only: QuickJS has no equivalent to V8 heap snapshots (see
 // memory/quickjs-plan-status.md) — a quickjs-only build has no use for this.
 #[cfg(feature = "v8")]
 pub mod snapshot;
 #[cfg(all(feature = "dev", feature = "v8"))]
 pub mod inspector;
+#[cfg(all(feature = "dev", feature = "v8"))]
+pub mod profiler;
 #[cfg(feature = "v8")]
 pub mod icu;
 #[cfg(feature = "quickjs")]

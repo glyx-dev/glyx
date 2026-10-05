@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use rquickjs::Ctx;
+use rquickjs::{Ctx, IntoJs, Value};
 use tokio::runtime::Handle;
 
 use crate::bindings::{validate_external_url, CompletionQueue, RedrawRequest, WindowController};
@@ -127,6 +127,60 @@ pub(crate) fn notification_send<'js>(
             Ok::<String, String>(String::new())
         }).await.map_err(|e| e.to_string()).and_then(|r| r)
     })
+}
+
+// ── Printing ─────────────────────────────────────────────────────────────
+//
+// Ported from bind_print.rs. The capability check lives in crate::print
+// itself (shared with V8), not here — see its `require_cap`.
+
+pub(crate) fn print_list_printers<'js>(
+    ctx: Ctx<'js>, queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>,
+) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, async move {
+        let names = crate::print::list_printers().await?;
+        serde_json::to_string(&names).map_err(|e| e.to_string())
+    })
+}
+
+pub(crate) fn print_get_default_printer<'js>(
+    ctx: Ctx<'js>, queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>,
+) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, async move {
+        let name = crate::print::default_printer().await?;
+        serde_json::to_string(&name).map_err(|e| e.to_string())
+    })
+}
+
+/// `printer`: empty string means "use the default printer".
+pub(crate) fn print_file<'js>(
+    ctx: Ctx<'js>, path: String, printer: String,
+    queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>,
+) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, async move {
+        let printer_ref = if printer.is_empty() { None } else { Some(printer.as_str()) };
+        crate::print::print_file(&path, printer_ref).await.map(|()| String::new())
+    })
+}
+
+// ── Autostart ────────────────────────────────────────────────────────────
+//
+// Same "sync but Promise-free" shape as __glyx_platform / deeplink_get_initial_url:
+// a registry query or file-existence check is fast enough not to need the
+// tokio/spawn_blocking machinery the clipboard bindings use for symmetry
+// with V8's main-thread requirement — these have no such requirement.
+
+pub(crate) fn autostart_is_enabled() -> bool {
+    crate::autostart::is_enabled()
+}
+
+pub(crate) fn autostart_set_enabled(enabled: bool) -> bool {
+    if !glyx_security::get().autostart { return false; }
+    crate::autostart::set_enabled(enabled).is_ok()
+}
+
+pub(crate) fn autostart_was_opened_at_login() -> bool {
+    crate::autostart::was_opened_at_login()
 }
 
 // ── System info / storage ────────────────────────────────────────────────
@@ -268,6 +322,15 @@ pub(crate) fn restart(window: &Option<WindowController>) {
 
 pub(crate) fn platform() -> &'static str {
     if cfg!(target_os = "windows") { "windows" } else if cfg!(target_os = "macos") { "macos" } else { "linux" }
+}
+
+pub(crate) fn get_env<'js>(ctx: Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
+    if glyx_security::get().can_get_env(&name) {
+        if let Ok(val) = std::env::var(&name) {
+            return val.into_js(&ctx);
+        }
+    }
+    Ok(Value::new_null(ctx))
 }
 
 pub(crate) fn collect_memory() {

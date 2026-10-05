@@ -37,6 +37,10 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
+      - name: Versions match the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: bun scripts/release/check.mjs "${{ github.ref_name }}"
+
       - name: Update npm (OIDC trusted publishing needs >= 11.5.1)
         run: npm install -g npm@latest
 

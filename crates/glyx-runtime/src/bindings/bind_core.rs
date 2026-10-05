@@ -9,7 +9,9 @@ pub fn get_time(
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as f64;
+        // Fractional ms: the `performance.now()` polyfill is built on this,
+        // and React's render timings need sub-millisecond resolution.
+        .as_secs_f64() * 1000.0;
     rv.set(v8::Number::new(scope, ms).into());
 }
 
@@ -41,6 +43,21 @@ pub fn request_frame_callback(
     }
 }
 
+/// `__glyx_devNet(json)`: one network event for the DevTools Network panel
+/// (see `net_bus`). Only called when the app runs with devtools on.
+pub fn js_dev_net(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:  v8::FunctionCallbackArguments,
+    _rv:   v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let Some(json) = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())) else { return };
+    let ext   = v8::Local::<v8::External>::try_from(args.data()).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+    crate::net_bus::publish(Some(state.my_handle), json);
+}
+
 pub fn js_log(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
@@ -58,6 +75,7 @@ pub fn js_log(
     // Forward to CDP inspector console if connected.
     let ext   = v8::Local::<v8::External>::try_from(args.data()).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
+    crate::log_bus::publish(Some(state.my_handle), &msg);
     if let Some(tx) = state.cdp_log_tx.lock().as_ref() {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -71,7 +89,7 @@ pub fn js_log(
     }
 }
 
-// â”€â”€ __glyx_pollEvents â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// __glyx_pollEvents
 //
 // Returns a JS Array of event objects. Each object has a `type` string
 // plus type-specific fields:
@@ -123,17 +141,29 @@ pub fn poll_events_callback(
         }
 
         match ev {
-            InputEvent::MouseButton { x, y, button, pressed } => {
+            InputEvent::MouseButton { x, y, button, pressed, target } => {
                 set_str!("type", "mouseButton");
                 set_num!("x", x);
                 set_num!("y", y);
                 set_num!("button", button);
                 set_bool!("pressed", pressed);
+                let k = v8::String::new(scope, "target").unwrap();
+                let v: v8::Local<v8::Value> = match target {
+                    Some(id) => v8::Number::new(scope, id as f64).into(),
+                    None => v8::null(scope).into(),
+                };
+                obj.set(scope, k.into(), v);
             }
-            InputEvent::CursorMoved { x, y } => {
+            InputEvent::CursorMoved { x, y, target } => {
                 set_str!("type", "cursorMoved");
                 set_num!("x", x);
                 set_num!("y", y);
+                let k = v8::String::new(scope, "target").unwrap();
+                let v: v8::Local<v8::Value> = match target {
+                    Some(id) => v8::Number::new(scope, id as f64).into(),
+                    None => v8::null(scope).into(),
+                };
+                obj.set(scope, k.into(), v);
             }
             InputEvent::KeyInput { key, text, pressed } => {
                 set_str!("type", "keyInput");
@@ -152,6 +182,11 @@ pub fn poll_events_callback(
                 set_num!("nodeId", node_id);
                 set_num!("scrollY", scroll_y);
             }
+            InputEvent::ScrollIntoView { node_id, scroll_y } => {
+                set_str!("type", "scrollIntoView");
+                set_num!("nodeId", node_id);
+                set_num!("scrollY", scroll_y);
+            }
             InputEvent::Resize { width, height } => {
                 set_str!("type", "resize");
                 set_num!("width", width);
@@ -167,9 +202,24 @@ pub fn poll_events_callback(
                 set_num!("id", id);
                 set_str!("payload", &payload);
             }
+            InputEvent::MenuBar { id, checked } => {
+                set_str!("type", "menuBar");
+                set_str!("id", &id);
+                if let Some(c) = checked { set_bool!("checked", c); }
+            }
+            InputEvent::Tray { json } => {
+                set_str!("type", "tray");
+                set_str!("json", &json);
+            }
             InputEvent::AccessibilityFocus { node_id } => {
                 set_str!("type", "accessibilityFocus");
                 set_num!("nodeId", node_id);
+            }
+            InputEvent::AccessibilityTextSelection { node_id, anchor, focus } => {
+                set_str!("type", "accessibilityTextSelection");
+                set_num!("nodeId", node_id);
+                set_num!("anchor", anchor);
+                set_num!("focus", focus);
             }
             InputEvent::AccessibilityValueChange { node_id, action, numeric_value } => {
                 set_str!("type", "accessibilityValueChange");
@@ -217,10 +267,19 @@ pub fn poll_events_callback(
     rv.set(array.into());
 }
 
-// â”€â”€ __glyx_getLayout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── __glyx_getLayout ──────────────────────────────────────────────────────────
 //
-// Returns `{ x, y, width, height }` for the given node id,
-// or `null` if the node has not been laid out yet.
+// Returns `{ x, y, width, height, boxX, boxY, boxWidth, boxHeight }` for the
+// given node id, or `null` if the node has not been laid out yet.
+//
+// `x/y/width/height` are the on-screen rect INTERSECTED with the node's clip
+// ancestor (what's actually visible/clickable — used for hit-testing). `box*`
+// is the node's full box, scroll-adjusted but NOT clipped: measure from these
+// when the math needs the node's real origin/size (text hit-testing, caret
+// placement) — for a node half-scrolled out of a ScrollView the clipped `y`
+// is the clip edge, not where its content starts. Identical when unclipped.
+// See glyx-core layout.rs UNCLIPPED_KEY (mirrored here as a literal).
+const UNCLIPPED_KEY: u32 = 0x4000_0000;
 
 pub fn get_layout_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -249,6 +308,11 @@ pub fn get_layout_callback(
         set_num!("y",      y);
         set_num!("width",  w);
         set_num!("height", h);
+        let [bx, by, bw, bh] = cache.get(&(id | UNCLIPPED_KEY)).copied().unwrap_or([x, y, w, h]);
+        set_num!("boxX",      bx);
+        set_num!("boxY",      by);
+        set_num!("boxWidth",  bw);
+        set_num!("boxHeight", bh);
         // Clip (scroll) nodes publish measured content height under the
         // high-bit key (see glyx-core layout.rs CONTENT_HEIGHT_KEY).
         if let Some(&[_, _, _, ch]) = cache.get(&(id | 0x8000_0000)) {
@@ -260,7 +324,7 @@ pub fn get_layout_callback(
     }
 }
 
-// â”€â”€ __glyx_measure_text â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// __glyx_measure_text
 //
 // Returns `{ width, height }` (logical px) for `text` shaped at `fontSize`,
 // wrapped to `maxWidth` (pass a large value like 1e6 for single-line). Used for
@@ -306,7 +370,7 @@ pub fn measure_text_callback(
     rv.set(obj.into());
 }
 
-// â”€â”€ __glyx_text_char_at_x â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// __glyx_text_char_at_x
 //
 // Returns the character index (0-based) nearest to `x` pixels from the left
 // edge of `text` shaped at `fontSize` / `maxWidth`. Used by SelectableText for
@@ -374,11 +438,39 @@ pub fn text_cursor_x_callback(
     rv.set(v8::Number::new(scope, x as f64).into());
 }
 
-// 2-D caret hit-test for WRAPPED text: returns the character index nearest to
-// point (x, y) in `text` shaped at `fontSize` and wrapped to `maxWidth`.
-// Handles soft wraps and '\n' — used by multiline TextInput click/drag.
+// ── Text hit-testing: __glyx_text_pos_at / __glyx_text_caret_at ──────────────
 //
-// Signature: __glyx_text_pos_at(text, fontSize, maxWidth, x, y) → number
+// `opts` is the Text node's OWN props object — the same keys passed to the
+// `text` host element (`fontSize`, `fontWeight`, `fontStyle`, `lineHeight`,
+// `textAlign`, `textScrollX`, `showCursor`) — plus `boxWidth`/`boxHeight`, the
+// node's box size. It's parsed by the regular prop parser and mapped through
+// `text_props` exactly like render.rs maps the node, so a hit-test resolves to
+// the glyph actually drawn: no JS-side alignment, centering, scroll or
+// wrap-width compensation (the previous positional signature needed callers
+// to replicate those rules, and each consumer got a different subset wrong).
+//
+// Coordinates are relative to the text box's top-left, in screen space.
+//
+//   __glyx_text_pos_at(text, x, y, opts)       → character offset
+//   __glyx_text_caret_at(text, offset, opts)   → { x, y, height } (box-relative)
+
+fn text_geometry_from_opts(
+    scope: &mut v8::ContextScope<'_, '_, v8::HandleScope<'_>>,
+    opts:  v8::Local<v8::Value>,
+) -> (glyx_text::TextStyle, glyx_text::TextBox) {
+    let props = parse_props(scope, opts);
+    let (w, h) = match opts.to_object(scope) {
+        Some(o) => (
+            get_num_prop(scope, o, "boxWidth").unwrap_or(0.0),
+            get_num_prop(scope, o, "boxHeight").unwrap_or(0.0),
+        ),
+        None => (0.0, 0.0),
+    };
+    (
+        crate::text_props::text_style(&props),
+        crate::text_props::text_box(&props, w, h),
+    )
+}
 
 pub fn text_pos_at_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -391,18 +483,42 @@ pub fn text_pos_at_callback(
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
-    let text      = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
-    let font_size = args.get(1).number_value(scope).unwrap_or(16.0) as f32;
-    let mw        = args.get(2).number_value(scope).unwrap_or(0.0);
-    let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
-    let x         = args.get(3).number_value(scope).unwrap_or(0.0) as f32;
-    let y         = args.get(4).number_value(scope).unwrap_or(0.0) as f32;
+    let text = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
+    let x    = args.get(1).number_value(scope).unwrap_or(0.0) as f32;
+    let y    = args.get(2).number_value(scope).unwrap_or(0.0) as f32;
+    let (style, bx) = text_geometry_from_opts(scope, args.get(3));
 
-    let idx = state.text_measure.borrow_mut().pos_at_point(&text, font_size, max_width, x, y);
-    rv.set(v8::Number::new(scope, idx as f64).into());
+    let pos = state.text_measure.borrow_mut().hit_test(&text, &style, &bx, x, y);
+    rv.set(v8::Number::new(scope, pos.offset as f64).into());
 }
 
-// â”€â”€ Sync binding: __glyx_getEnv â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+pub fn text_caret_at_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let text   = args.get(0).to_string(scope).map(|s| s.to_rust_string_lossy(scope.as_ref())).unwrap_or_default();
+    let offset = args.get(1).number_value(scope).unwrap_or(0.0).max(0.0) as usize;
+    let (style, bx) = text_geometry_from_opts(scope, args.get(2));
+
+    let c = state.text_measure.borrow_mut()
+        .caret_rect(&text, &style, &bx, glyx_text::TextPosition::new(offset));
+    let obj = v8::Object::new(scope);
+    for (key, val) in [("x", c.x), ("y", c.y), ("height", c.height)] {
+        let k = v8::String::new(scope, key).unwrap();
+        let v = v8::Number::new(scope, val as f64);
+        obj.set(scope, k.into(), v.into());
+    }
+    rv.set(obj.into());
+}
+
+// Sync binding: __glyx_getEnv
 //
 // Returns the value of an environment variable as a string, or JS `null` if
 // the variable is absent OR the name is not in the `env.allow` capability list.
@@ -435,7 +551,7 @@ pub fn get_env_callback(
     }
 }
 
-// â”€â”€ Async binding: __glyx_readFile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Async binding: __glyx_readFile
 
 pub fn read_file_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -476,7 +592,7 @@ pub fn read_file_callback(
     });
 }
 
-// â”€â”€ Async binding: __glyx_readFileBytes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Async binding: __glyx_readFileBytes
 //
 // Reads a file as raw bytes and returns a base64-encoded string.
 // Used for binary files (images, PDFs, etc.) before uploading via fetch multipart.
@@ -517,7 +633,7 @@ pub fn read_file_bytes_callback(
     });
 }
 
-// â”€â”€ Scene graph bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Scene graph bindings
 
 pub fn create_node_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -534,8 +650,7 @@ pub fn create_node_callback(
     let node_type = parse_node_type(scope, args.get(0));
     let props = parse_props(scope, args.get(1));
 
-    state.scene.lock()
-        .push_back(SceneCommand::CreateNode { id, node_type, props });
+    state.frame_scene.borrow_mut().push(SceneCommand::CreateNode { id, node_type, props });
 
     rv.set(v8::Number::new(scope, id as f64).into());
 }
@@ -576,8 +691,7 @@ pub fn create_image_callback(
     let height = args.get(2).number_value(scope).filter(|v| *v > 0.0).map(|v| v as f32);
 
     let id = state.next_image_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state.scene.lock()
-        .push_back(SceneCommand::CreateImage { id, path, width, height });
+    state.frame_scene.borrow_mut().push(SceneCommand::CreateImage { id, path, width, height });
 
     rv.set(v8::Number::new(scope, id as f64).into());
 }
@@ -596,8 +710,7 @@ pub fn append_child_callback(
     let parent_id = args.get(0).number_value(scope).unwrap_or_default() as u32;
     let child_id  = args.get(1).number_value(scope).unwrap_or_default() as u32;
 
-    state.scene.lock()
-        .push_back(SceneCommand::AppendChild { parent_id, child_id });
+    state.frame_scene.borrow_mut().push(SceneCommand::AppendChild { parent_id, child_id });
 
     rv.set(v8::Boolean::new(scope, true).into());
 }
@@ -617,8 +730,7 @@ pub fn insert_before_callback(
     let child_id  = args.get(1).number_value(scope).unwrap_or_default() as u32;
     let before_id = args.get(2).number_value(scope).unwrap_or_default() as u32;
 
-    state.scene.lock()
-        .push_back(SceneCommand::InsertBefore { parent_id, child_id, before_id });
+    state.frame_scene.borrow_mut().push(SceneCommand::InsertBefore { parent_id, child_id, before_id });
 
     rv.set(v8::Boolean::new(scope, true).into());
 }
@@ -637,7 +749,7 @@ pub fn update_node_callback(
     let id    = args.get(0).number_value(scope).unwrap_or_default() as u32;
     let props = parse_props(scope, args.get(1));
 
-    state.scene.lock().push_back(SceneCommand::UpdateNode { id, props });
+    state.frame_scene.borrow_mut().push(SceneCommand::UpdateNode { id, props });
     rv.set(v8::Boolean::new(scope, true).into());
 }
 
@@ -653,7 +765,7 @@ pub fn remove_node_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let id = args.get(0).number_value(scope).unwrap_or_default() as u32;
-    state.scene.lock().push_back(SceneCommand::RemoveNode { id });
+    state.frame_scene.borrow_mut().push(SceneCommand::RemoveNode { id });
     rv.set(v8::Boolean::new(scope, true).into());
 }
 
@@ -669,7 +781,98 @@ pub fn set_root_callback(
     let state = unsafe { &*(ext.value() as *const AsyncState) };
 
     let id = args.get(0).number_value(scope).unwrap_or_default() as u32;
-    state.scene.lock().push_back(SceneCommand::SetRoot { id });
+    state.frame_scene.borrow_mut().push(SceneCommand::SetRoot { id });
+    rv.set(v8::Boolean::new(scope, true).into());
+}
+
+/// `__glyx_flushSceneOps(ops)` — sync. Batches append/insertBefore/update/
+/// remove/setRoot into ONE JS→native call per React commit instead of one
+/// call per op (`hostConfig.js`'s `resetAfterCommit` flush point).
+///
+/// `createNode` is deliberately NOT part of this batch — it must stay a
+/// synchronous, immediate call because React needs the new node's id back
+/// right away (`createInstance` returns `{id}` synchronously, and later
+/// host-config calls within the same commit reference that id). Every other
+/// op's return value is unused by JS today, so those are safe to defer.
+///
+/// `ops` is ONE FLAT array — `[opcode, ...args, opcode, ...args, ...]` — not
+/// an array of per-op arrays:
+///   0 append(parentId, childId) · 1 insertBefore(parentId, childId, beforeId)
+///   2 update(id, props)         · 3 remove(id)      · 4 setRoot(id)
+///
+/// Added after the FFI-overhead benchmark in `examples/bench-app` showed
+/// QuickJS's virtualized-list ratio (2.3x slower than V8) matched almost
+/// exactly its raw per-call native-crossing overhead ratio (also 2.3x) —
+/// i.e. the remaining QuickJS gap on small, frequent-update workloads was
+/// dominated by call COUNT, not by anything already fixed (JSON, locking).
+///
+/// Flattened (rather than an array of per-op arrays) after a follow-up
+/// measurement: fixing an unrelated O(n²) removal-loop bug (`scene.rs`)
+/// sped up V8's mass-teardown case (~8,000 removes in one commit) by ~64%
+/// but QuickJS's by only ~28% — the *remaining* QuickJS-specific cost was
+/// the per-op nested-array marshalling itself (`Array::iter::<Array>()`/
+/// `get_index` per sub-array), not the Rust-side algorithm. One flat array
+/// is a single JS allocation instead of N, and native reads it as one
+/// buffer with a known per-opcode stride instead of unwrapping N arrays.
+pub fn flush_scene_ops_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let Ok(ops) = v8::Local::<v8::Array>::try_from(args.get(0)) else {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    };
+    let len = ops.length();
+    let mut frame = state.frame_scene.borrow_mut();
+    let get_u32 = |scope: &mut v8::PinScope<'_, '_, v8::Context>, arr: v8::Local<v8::Array>, idx: u32| -> u32 {
+        arr.get_index(scope, idx).and_then(|v| v.number_value(scope)).unwrap_or_default() as u32
+    };
+    let mut i = 0u32;
+    while i < len {
+        let opcode = get_u32(scope, ops, i);
+        match opcode {
+            0 => {
+                let parent_id = get_u32(scope, ops, i + 1);
+                let child_id  = get_u32(scope, ops, i + 2);
+                frame.push(SceneCommand::AppendChild { parent_id, child_id });
+                i += 3;
+            }
+            1 => {
+                let parent_id = get_u32(scope, ops, i + 1);
+                let child_id  = get_u32(scope, ops, i + 2);
+                let before_id = get_u32(scope, ops, i + 3);
+                frame.push(SceneCommand::InsertBefore { parent_id, child_id, before_id });
+                i += 4;
+            }
+            2 => {
+                let id = get_u32(scope, ops, i + 1);
+                let props_val = ops.get_index(scope, i + 2).unwrap_or_else(|| v8::undefined(scope).into());
+                let props = parse_props(scope, props_val);
+                frame.push(SceneCommand::UpdateNode { id, props });
+                i += 3;
+            }
+            3 => {
+                let id = get_u32(scope, ops, i + 1);
+                frame.push(SceneCommand::RemoveNode { id });
+                i += 2;
+            }
+            4 => {
+                let id = get_u32(scope, ops, i + 1);
+                frame.push(SceneCommand::SetRoot { id });
+                i += 2;
+            }
+            // Unknown opcode — stop rather than risk misreading the rest of
+            // the buffer with a wrong stride.
+            _ => break,
+        }
+    }
     rv.set(v8::Boolean::new(scope, true).into());
 }
 
@@ -694,7 +897,7 @@ pub fn set_focus_callback(
     } else {
         Some(arg.number_value(scope).unwrap_or_default() as u32)
     };
-    state.scene.lock().push_back(SceneCommand::SetFocus { id });
+    state.frame_scene.borrow_mut().push(SceneCommand::SetFocus { id });
     rv.set(v8::Boolean::new(scope, true).into());
 }
 
@@ -714,7 +917,7 @@ pub fn has_a11y_callback(
     rv.set(v8::Boolean::new(scope, true).into());
 }
 
-// â”€â”€ Window control bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Window control bindings
 
 pub fn get_window_size_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,

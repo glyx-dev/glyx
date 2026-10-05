@@ -30,16 +30,21 @@ const inputRegistry = new Map();
 // ScrollViews register here so scroll events can be routed to whichever
 // scroll view the cursor is currently over.
 const scrollRegistry = new Map();
+// nodeId -> (e: { deltaY, ctrl, shift, x, y }) => boolean. Offered each wheel event
+// before any ScrollView; returning true consumes it.
+const wheelRegistry = new Map();
 
 // Map from nodeId -> { onDragStart?, onDragMove?, onDragEnd? }
 // Draggable nodes (e.g. Slider thumb) register here.
 const dragRegistry = new Map();
 
-// Map from nodeId -> { onIncrement?, onDecrement?, onSetValue? }
-// Numeric controls (e.g. Slider) register here so a screen reader's
-// Increment/Decrement/SetValue actions (Narrator arrow keys on a focused
-// slider, etc.) can actually change the value — Rust has no concept of the
-// control's own min/max/step, so it just forwards the action here.
+// Map from nodeId -> { onIncrement?, onDecrement?, onSetValue?, onExpand?,
+// onCollapse? } Numeric controls (e.g. Slider) register here so a screen
+// reader's Increment/Decrement/SetValue actions (Narrator arrow keys on a
+// focused slider, etc.) can actually change the value — Rust has no concept
+// of the control's own min/max/step, so it just forwards the action here.
+// Disclosure controls (accordions, tree items) register onExpand/onCollapse
+// the same way for Action::Expand/Collapse.
 const a11yValueRegistry = new Map();
 
 // Map from nodeId -> true/false — prevents event dispatch to the node.
@@ -50,19 +55,9 @@ const disabledRegistry = new Map();
 // hit-testing; events pass through them to nodes underneath.
 const pointerEventsNoneRegistry = new Set();
 
-// Map from nodeId -> zIndex (integer).  Only nodes with an explicit zIndex
-// prop are stored here; absent = 0.  Used by findTopmostSolid to prefer
-// higher-z-index nodes over later-registered ones when both cover a point.
-const zIndexMap = new Map();
-
-// Ordered array of all solid (click-opaque) node ids, in creation order.
-// Later entries were rendered later (on top in z-order).
-// Every 'view' native node is solid by default.  Nodes with pointerEvents:'none'
-// are still in this list but are excluded at lookup time via pointerEventsNoneRegistry.
-const solidRegistry = [];
-
 // Map from childId → parentId, populated by hostConfig on every tree mutation.
-// Used by findTopmostSolid to determine ancestor relationships.
+// Used by isAncestorOf/findScrollTarget and the pressable-ancestor bubbling
+// walk (click/hover) to determine ancestor relationships.
 const parentMap = new Map();
 
 // Currently dragged node id (or null). Set on dragStart, cleared on dragEnd.
@@ -77,8 +72,15 @@ const systemWatchRegistry = new Map();
 // Listeners notified on window resize: Array<(size: {width, height}) => void>
 const windowSizeListeners = [];
 
-// Listeners notified on every key event: Array<(ev: {key, ctrl, shift, pressed}) => void>
+// Listeners notified on every key event: Array<(ev: {key, ctrl, shift, alt, super, pressed}) => boolean|void>
+// (returning true consumes the key)
 const keyListeners = [];
+
+// Listeners notified when a native menu bar item is chosen: Array<(ev: {id, checked?}) => void>
+const menuBarListeners = [];
+
+// Listeners notified of tray icon and tray menu events (parsed): Array<(ev: object) => void>
+const trayListeners = [];
 
 // Listeners called on every mouse-button press, regardless of which node was hit.
 // Used by dropdowns / overlays to close on outside click.
@@ -87,6 +89,18 @@ const globalClickListeners = [];
 
 // Currently focused input node id (or null).
 let focusedNodeId = null;
+
+// ── Keyboard-focus-visible registry ──────────────────────────────────────────
+// Deliberately separate from `inputRegistry` above. `inputRegistry`/
+// `focusedNodeId` model TEXT-EDIT focus: driven by both mouse clicks (see the
+// 'mouseButton' case's `inputTarget` walk-up) and Tab, because clicking into
+// a text field legitimately should focus it. A `Pressable`/button registering
+// there would ALSO pick up that click-driven `setFocus` call, showing a
+// focus ring on every click — not what a focus-visible ring is for. This
+// registry only ever gets driven from the 'accessibilityFocus' case below
+// (Tab/Shift+Tab or AT-driven focus), never from a mouse click.
+const focusVisualRegistry = new Map(); // nodeId -> { onFocus, onBlur }
+let visualFocusedNodeId = null;
 // Input node currently being drag-selected (left button held after pressing
 // on a TextInput); cursorMoved extends its selection until release.
 let inputDragNodeId = null;
@@ -108,10 +122,16 @@ let hoveredPressableId = null;
 // Modifier key state — updated on every keyInput (pressed AND released).
 let ctrlHeld  = false;
 let shiftHeld = false;
+let altHeld   = false;
+let superHeld = false;
 
 // Last cursor position seen this frame (updated by cursorMoved events).
 let cursorX = 0;
 let cursorY = 0;
+// Topmost solid node at the last cursor position — resolved NATIVELY at
+// input-event-construction time (glyx-core's `hit_test_solid`), not by JS
+// calling `findTopmostSolid` itself. See `findTopmostSolid`'s doc comment.
+let cursorTarget = null;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -163,6 +183,26 @@ export function registerInput(nodeId, handlers) {
 }
 
 /**
+ * Register a node for keyboard-focus-visible styling only (Tab/Shift+Tab or
+ * AT-driven focus) — see `focusVisualRegistry`'s comment above for why this
+ * is separate from `registerInput`. Used by `Pressable`.
+ * @param {number} nodeId
+ * @param {{ onFocus?: () => void, onBlur?: () => void }} handlers
+ */
+export function registerFocusable(nodeId, handlers) {
+  focusVisualRegistry.set(nodeId, handlers);
+}
+
+/**
+ * Unregister a keyboard-focus-visible node (called on unmount).
+ * @param {number} nodeId
+ */
+export function unregisterFocusable(nodeId) {
+  if (visualFocusedNodeId === nodeId) visualFocusedNodeId = null;
+  focusVisualRegistry.delete(nodeId);
+}
+
+/**
  * Unregister a TextInput node.
  * @param {number} nodeId
  */
@@ -189,6 +229,24 @@ export function unregisterScrollView(nodeId) {
 }
 
 /**
+ * Offer wheel/trackpad scrolling over `nodeId` to `handler` before the ScrollView
+ * underneath. `handler({ deltaY, ctrl, shift, x, y })` gets the delta, the held
+ * modifiers and the pointer position relative to the node; return `true` to
+ * consume the event (the ScrollView then doesn't scroll), anything else to let
+ * it through. The deepest registered node under the pointer is asked first.
+ * @param {number} nodeId
+ * @param {(e: { deltaY: number, ctrl: boolean, shift: boolean, x: number, y: number }) => boolean | void} handler
+ */
+export function registerWheel(nodeId, handler) {
+  wheelRegistry.set(nodeId, handler);
+}
+
+/** Remove a handler added with `registerWheel`. */
+export function unregisterWheel(nodeId) {
+  wheelRegistry.delete(nodeId);
+}
+
+/**
  * Register a draggable node (e.g. a Slider thumb).
  * @param {number} nodeId
  * @param {{ onDragStart?: (e:{x,y})=>void, onDragMove?: (e:{x,y,dx,dy})=>void, onDragEnd?: (e:{x,y})=>void }} handlers
@@ -207,9 +265,11 @@ export function unregisterDraggable(nodeId) {
 }
 
 /**
- * Register a node's screen-reader value actions (Increment/Decrement/SetValue).
+ * Register a node's screen-reader value/state actions
+ * (Increment/Decrement/SetValue for numeric controls, Expand/Collapse for
+ * disclosure controls).
  * @param {number} nodeId
- * @param {{ onIncrement?: () => void, onDecrement?: () => void, onSetValue?: (v:number) => void }} handlers
+ * @param {{ onIncrement?: () => void, onDecrement?: () => void, onSetValue?: (v:number) => void, onExpand?: () => void, onCollapse?: () => void }} handlers
  */
 export function registerA11yValue(nodeId, handlers) {
   a11yValueRegistry.set(nodeId, handlers);
@@ -253,24 +313,6 @@ export function registerPointerEventsNone(nodeId) {
 }
 
 /**
- * Register a view node as solid (click-opaque).
- * Called from hostConfig.createInstance for every 'view' native node.
- * @param {number} nodeId
- */
-export function registerSolid(nodeId) {
-  solidRegistry.push(nodeId);
-}
-
-/**
- * Unregister a solid node on unmount.
- * @param {number} nodeId
- */
-export function unregisterSolid(nodeId) {
-  const i = solidRegistry.indexOf(nodeId);
-  if (i !== -1) solidRegistry.splice(i, 1);
-}
-
-/**
  * Record that `childId` is a direct child of `parentId` in the native tree.
  * Called by hostConfig whenever a child is attached to a parent.
  * @param {number} childId
@@ -281,28 +323,11 @@ export function setNodeParent(childId, parentId) {
 }
 
 /**
- * Remove a node from parentMap and solidRegistry on tree detach.
- * Replaces separate unregisterSolid + parentMap.delete calls in hostConfig.
+ * Remove a node from parentMap on tree detach.
  * @param {number} nodeId
  */
 export function removeNodeFromTree(nodeId) {
   parentMap.delete(nodeId);
-  unregisterSolid(nodeId);
-  zIndexMap.delete(nodeId);
-}
-
-/**
- * Record the z-index for a node so hit-testing can prefer visually-higher
- * nodes over ones with a later solidRegistry index.
- * @param {number} nodeId
- * @param {number} zIndex
- */
-export function setNodeZIndex(nodeId, zIndex) {
-  if (zIndex !== 0) {
-    zIndexMap.set(nodeId, zIndex);
-  } else {
-    zIndexMap.delete(nodeId);
-  }
 }
 
 /**
@@ -347,6 +372,65 @@ export function removeKeyListener(fn) {
   if (idx >= 0) keyListeners.splice(idx, 1);
 }
 
+const EDIT_CHORDS = { copy: 'KeyC', cut: 'KeyX', paste: 'KeyV', selectAll: 'KeyA' };
+
+/**
+ * Run an editing command (`copy`, `cut`, `paste`, `selectAll`) on the focused text field, by replaying
+ * its Ctrl chord through the same dispatcher real keys use, so the field handles it exactly as typed.
+ * Returns false for an unknown command or without a runtime.
+ * @param {'copy'|'cut'|'paste'|'selectAll'} role
+ */
+export function runEditCommand(role) {
+  const key = EDIT_CHORDS[role];
+  if (!key || typeof globalThis.__glyx_pollEvents === 'undefined') return false;
+  const chord = [
+    { type: 'keyInput', key: 'ControlLeft', pressed: true },
+    { type: 'keyInput', key, pressed: true },
+    { type: 'keyInput', key, pressed: false },
+    { type: 'keyInput', key: 'ControlLeft', pressed: false },
+  ];
+  const prev = globalThis.__glyx_pollEvents;
+  globalThis.__glyx_pollEvents = () => chord;
+  try { dispatchEvents(); } finally { globalThis.__glyx_pollEvents = prev; }
+  return true;
+}
+
+/**
+ * Subscribe to tray events (pushed by the runtime). Returns nothing; use removeTrayListener.
+ * @param {(ev: object) => void} fn  e.g. `{ MenuItemClick: { tray_id, item_id } }`
+ */
+export function addTrayListener(fn) {
+  trayListeners.push(fn);
+}
+
+/** Unsubscribe from tray events. */
+export function removeTrayListener(fn) {
+  const idx = trayListeners.indexOf(fn);
+  if (idx >= 0) trayListeners.splice(idx, 1);
+}
+
+/** How many tray listeners there are, so the first and last can switch the runtime push on and off. */
+export function trayListenerCount() {
+  return trayListeners.length;
+}
+
+/**
+ * Subscribe to native menu bar choices (pushed by the runtime when an item is clicked).
+ * @param {(ev: {id: string, checked?: boolean}) => void} fn
+ */
+export function addMenuBarListener(fn) {
+  menuBarListeners.push(fn);
+}
+
+/**
+ * Unsubscribe from native menu bar choices.
+ * @param {(ev: {id: string, checked?: boolean}) => void} fn
+ */
+export function removeMenuBarListener(fn) {
+  const idx = menuBarListeners.indexOf(fn);
+  if (idx >= 0) menuBarListeners.splice(idx, 1);
+}
+
 /**
  * Subscribe to every mouse-button press event (regardless of which node was hit).
  * Useful for dropdowns/overlays that need to close on outside click.
@@ -365,6 +449,11 @@ export function removeGlobalClickListener(fn) {
   if (idx >= 0) globalClickListeners.splice(idx, 1);
 }
 
+/** The id of the text input that has focus right now, or null. */
+export function getFocusedInput() {
+  return focusedNodeId;
+}
+
 /**
  * Explicitly focus a TextInput node from JS (e.g. programmatic focus).
  * @param {number} nodeId
@@ -378,10 +467,32 @@ export function setFocus(nodeId) {
     focusedNodeId = nodeId;
     const handlers = inputRegistry.get(nodeId);
     handlers?.onFocus?.();
+    // Sync the native focus registry ONCE, here, with the final new value —
+    // deliberately AFTER onBlur/onFocus have run, and deliberately the only
+    // place that does this (TextInput's onFocus/onBlur used to call
+    // `__glyx_setFocus` directly too). Calling it from both places raced:
+    // Tab moving focus to a plain Pressable already set native focus to
+    // the new target correctly, but the outgoing TextInput's onBlur firing
+    // straight after (from this same function) would then unconditionally
+    // null it back out, since it had no way to know a new target existed.
+    if (typeof __glyx_setFocus !== 'undefined') {
+      __glyx_setFocus(nodeId);
+    }
   }
 }
 
 // ── Hit-test helpers ──────────────────────────────────────────────────────────
+
+// The node's REAL top-left for element-relative coordinates (`locationX`,
+// text-input click/drag offsets). `__glyx_getLayout`'s `x/y` are clipped to
+// the node's clip ancestor — right for "is the pointer over it" hit tests
+// (hitTest below), wrong as an origin: for a node half-scrolled out of a
+// ScrollView the clipped `y` is the clip edge, so every offset measured from
+// it was short by the scrolled-away amount and clicks landed on the wrong
+// line. `boxX/boxY` are the unclipped box (identical when not clipped);
+// the `?? x/y` fallback keeps older runtimes / test stubs working.
+function boxOriginX(layout) { return layout.boxX ?? layout.x; }
+function boxOriginY(layout) { return layout.boxY ?? layout.y; }
 
 function hitTest(nodeId, px, py) {
   if (pointerEventsNoneRegistry.has(nodeId)) return false;
@@ -391,6 +502,20 @@ function hitTest(nodeId, px, py) {
     px >= layout.x && px < layout.x + layout.width &&
     py >= layout.y && py < layout.y + layout.height
   );
+}
+
+// Commits React updates made while handling one text-input key before the
+// next key is handled. A text field computes each edit from its `value` prop
+// and caret state as of the last render; when several keys arrive in one
+// frame (fast typing, a barcode scanner, automation), without this every key
+// edits the same stale value and only the last one survives. Set by
+// index.js to the reconciler's `flushSync`; a plain call elsewhere (tests).
+let flushKey = (fn) => fn();
+export function setKeyFlush(fn) { flushKey = fn; }
+
+/** Keys that press a focused button (winit physical key names). */
+export function isActivationKey(key) {
+  return key === 'Enter' || key === 'NumpadEnter' || key === 'Space';
 }
 
 /** True when the node is in the disabled registry. */
@@ -429,63 +554,12 @@ function isAncestorOf(ancestorId, descendantId) {
   return false;
 }
 
-/**
- * Return the topmost solid (click-opaque) node covering (x, y), or null.
- *
- * React creates host instances in post-order (children before parents), so
- * solidRegistry is ordered: children have LOWER indices, parents HIGHER.
- *
- * Algorithm:
- *   1. Collect every solid node whose layout rect covers (x, y).
- *   2. Filter to "deepest" — remove any node that is an ancestor of another
- *      covering node (an ancestor is painted beneath its descendants).
- *   3. Among the remaining siblings/cousins, return the one with the highest
- *      solidRegistry index (later-registered sibling = painted on top).
- */
-function findTopmostSolid(x, y) {
-  const covering = [];
-  for (const id of solidRegistry) {
-    if (hitTest(id, x, y)) covering.push(id);
-  }
-  if (covering.length === 0) return null;
-  if (covering.length === 1) return covering[0];
-  // Keep only deepest nodes (remove ancestors of other covering nodes).
-  const deepest = covering.filter(
-    id => !covering.some(other => other !== id && isAncestorOf(id, other))
-  );
-  if (deepest.length === 1) return deepest[0];
-  // Among siblings, pick the visually topmost node.
-  // z-index takes priority over registration order: a node with a higher
-  // z-index beats one registered later (which is the common case when an
-  // absolutely-positioned overlay is declared before the content it covers
-  // in JSX but must receive clicks over it).
-  // The effective z-index is inherited from the ancestor chain: a leaf inside
-  // a zIndex:999 overlay layer must beat content re-rendered after the
-  // overlay mounted (e.g. toast items over a screen that re-rendered later).
-  const effectiveZ = (id) => {
-    let z = zIndexMap.get(id) ?? 0;
-    let p = parentMap.get(id);
-    while (p !== undefined) {
-      const pz = zIndexMap.get(p);
-      if (pz !== undefined && pz > z) z = pz;
-      p = parentMap.get(p);
-    }
-    return z;
-  };
-  let bestId = deepest[0];
-  let bestIdx = solidRegistry.lastIndexOf(deepest[0]);
-  let bestZ   = effectiveZ(deepest[0]);
-  for (let i = 1; i < deepest.length; i++) {
-    const z   = effectiveZ(deepest[i]);
-    const idx = solidRegistry.lastIndexOf(deepest[i]);
-    if (z > bestZ || (z === bestZ && idx > bestIdx)) {
-      bestId  = deepest[i];
-      bestIdx = idx;
-      bestZ   = z;
-    }
-  }
-  return bestId;
-}
+// The topmost-solid-node hit-test that used to live here (`findTopmostSolid`)
+// is now computed natively at input-event-construction time — see
+// `glyx-core`'s `hit_test_solid` (`scene.rs`) and the `cursorTarget`/
+// `ev.target` usage below. JS used to call `__glyx_getLayout` once per
+// candidate node on every click and every cursor move; that's now zero
+// additional native calls, since the result rides along on the input event.
 
 // ── Main dispatch ─────────────────────────────────────────────────────────────
 
@@ -510,6 +584,21 @@ export function dispatchEvents() {
 
         const isRight = ev.button === 1; // 0 = left, 1 = right, 2 = middle
 
+        // Any mouse click clears the keyboard-focus-visible ring, matching
+        // browsers' `:focus-visible` behavior: the ring is a keyboard/AT
+        // affordance, not a "this is the active element" indicator, so
+        // clicking ANYWHERE — including on the already-focused element
+        // itself, or on a different element about to get its own
+        // click-driven native focus — dismisses it until the next Tab
+        // press. Deliberately unconditional and independent of hit-testing
+        // below: matches the ring's own registry (`focusVisualRegistry`),
+        // which mouse handling elsewhere never touches by design (see its
+        // definition further up this file).
+        if (visualFocusedNodeId !== null) {
+          focusVisualRegistry.get(visualFocusedNodeId)?.onBlur?.();
+          visualFocusedNodeId = null;
+        }
+
         // Notify global click listeners first (e.g. to close open dropdowns /
         // context menus). `button` lets listeners distinguish right-clicks.
         if (globalClickListeners.length > 0) {
@@ -517,11 +606,14 @@ export function dispatchEvents() {
           for (const fn of globalClickListeners) try { fn(gev); } catch {}
         }
 
-        // Find the topmost solid (click-opaque) node at this position.
+        // Topmost solid (click-opaque) node at this position, resolved
+        // NATIVELY at input-event-construction time (glyx-core's
+        // `hit_test_solid`), not by calling `findTopmostSolid` here.
         // A plain View absorbs the click even without a handler, preventing
         // fallthrough to pressables/inputs rendered beneath it in z-order.
-        const topmostId = findTopmostSolid(ev.x, ev.y);
+        const topmostId = ev.target;
         let inputTarget;
+        let keepFocusPress = false;   // the press landed on a `keepFocus` Pressable (a menu bar item)
 
         if (topmostId !== null) {
           // Walk up the parent chain to find the nearest pressable ancestor
@@ -534,12 +626,13 @@ export function dispatchEvents() {
           }
           if (pressableTarget !== undefined) {
             const ph = pressableRegistry.get(pressableTarget);
+            if (ph && ph.keepFocus) keepFocusPress = true;
             if (ph && !isDisabled(pressableTarget)) {
               const layout = __glyx_getLayout(pressableTarget);
               const pev = {
                 x: ev.x, y: ev.y,
-                locationX: layout ? ev.x - layout.x : 0,
-                locationY: layout ? ev.y - layout.y : 0,
+                locationX: layout ? ev.x - boxOriginX(layout) : 0,
+                locationY: layout ? ev.y - boxOriginY(layout) : 0,
               };
               // Right-click → onRightPress (if present); otherwise left → onPress.
               if (isRight) ph.onRightPress?.(pev);
@@ -569,11 +662,11 @@ export function dispatchEvents() {
                 && Math.abs(ev.x - lastClickX) <= DOUBLE_CLICK_PX
                 && Math.abs(ev.y - lastClickY) <= DOUBLE_CLICK_PX;
               if (isDoubleClick && ih.onDoubleClickAt) {
-                ih.onDoubleClickAt(ev.x - layout.x, ev.y - layout.y);
+                ih.onDoubleClickAt(ev.x - boxOriginX(layout), ev.y - boxOriginY(layout));
                 // Don't chain into a triple-click as another double-click.
                 lastClickTime = 0;
               } else {
-                ih.onClickAt?.(ev.x - layout.x, ev.y - layout.y);
+                ih.onClickAt?.(ev.x - boxOriginX(layout), ev.y - boxOriginY(layout));
                 lastClickTime   = now;
                 lastClickX      = ev.x;
                 lastClickY      = ev.y;
@@ -586,10 +679,17 @@ export function dispatchEvents() {
           }
         }
 
-        // Blur focused input if the click landed elsewhere.
-        if (focusedNodeId !== null && focusedNodeId !== inputTarget) {
+        // Blur focused input if the click landed elsewhere. Uses the same
+        // native-sync responsibility as `setFocus()` (onBlur itself no
+        // longer touches `__glyx_setFocus` — see its comment) since this
+        // path bypasses `setFocus()` entirely (there's no new input target
+        // to focus, just a plain click on non-input ground).
+        if (focusedNodeId !== null && focusedNodeId !== inputTarget && !keepFocusPress) {
           inputRegistry.get(focusedNodeId)?.onBlur?.();
           focusedNodeId = null;
+          if (typeof __glyx_setFocus !== 'undefined') {
+            __glyx_setFocus(null);
+          }
         }
         break;
       }
@@ -604,11 +704,22 @@ export function dispatchEvents() {
           shiftHeld = ev.pressed;
           break;
         }
+        if (ev.key === 'AltLeft' || ev.key === 'AltRight') {
+          altHeld = ev.pressed;
+          break;
+        }
+        if (ev.key === 'SuperLeft' || ev.key === 'SuperRight') {
+          superHeld = ev.pressed;
+          break;
+        }
 
         // Notify global key listeners (used for app-focused shortcuts).
         if (keyListeners.length > 0) {
-          const kev = { key: ev.key, ctrl: ctrlHeld, shift: shiftHeld, pressed: ev.pressed };
-          for (const fn of keyListeners) try { fn(kev); } catch {}
+          const kev = { key: ev.key, ctrl: ctrlHeld, shift: shiftHeld, alt: altHeld, super: superHeld, pressed: ev.pressed };
+          // A listener that returns true has consumed the key: nothing else (a focused field, scrolling) sees it.
+          let consumed = false;
+          for (const fn of keyListeners) try { if (fn(kev) === true) consumed = true; } catch {}
+          if (consumed) break;
         }
 
         if (!ev.pressed) break;
@@ -644,16 +755,63 @@ export function dispatchEvents() {
         if (focusedNodeId === null) break;
 
         const handlers = inputRegistry.get(focusedNodeId);
-        if (!handlers) break;
+        if (!handlers) {
+          // Not a text input: a focused control that handles keys itself
+          // (a chart's arrow-key navigation, say) via Pressable `onKeyDown`.
+          const kev = {
+            key: ev.key, ctrl: ctrlHeld, shift: shiftHeld,
+            defaultPrevented: false,
+            preventDefault() { this.defaultPrevented = true; },
+          };
+          focusVisualRegistry.get(focusedNodeId)?.onKeyDown?.(kev);
+          // Enter / Space press a focused button, as on the web and native
+          // toolkits. `onKeyDown` can call `e.preventDefault()` to keep them.
+          if (!kev.defaultPrevented && isActivationKey(ev.key)) {
+            const id = focusedNodeId;
+            const ph = pressableRegistry.get(id);
+            if (ph && !isDisabled(id)) {
+              const layout = typeof __glyx_getLayout === 'function' ? __glyx_getLayout(id) : null;
+              const cx = layout ? boxOriginX(layout) + layout.width / 2 : 0;
+              const cy = layout ? boxOriginY(layout) + layout.height / 2 : 0;
+              ph.onPress?.({
+                x: cx, y: cy,
+                locationX: layout ? layout.width / 2 : 0,
+                locationY: layout ? layout.height / 2 : 0,
+                keyboard: true,
+              });
+            }
+          }
+          break;
+        }
 
-        handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld });
+        flushKey(() => handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld }));
         break;
       }
 
       case 'accessibilityFocus': {
-        // Screen reader (or other AT) moved focus — sync JS's own focus
-        // tracker the same way a mouse click would, so onFocus/styling fire.
+        // Screen reader / Tab-driven focus. Two independent consumers:
+        //  - text-edit focus (cursor placement, IME routing) via the
+        //    existing `inputRegistry`/`setFocus` — TextInput still wants
+        //    this exactly like a click would trigger it.
+        //  - a focus-visible ring for everything else (buttons, checkboxes,
+        //    ...) via `focusVisualRegistry`, which mouse clicks never touch.
         setFocus(ev.nodeId);
+        if (visualFocusedNodeId !== ev.nodeId) {
+          if (visualFocusedNodeId !== null) {
+            focusVisualRegistry.get(visualFocusedNodeId)?.onBlur?.();
+          }
+          visualFocusedNodeId = ev.nodeId;
+          focusVisualRegistry.get(ev.nodeId)?.onFocus?.();
+        }
+        break;
+      }
+
+      case 'accessibilityTextSelection': {
+        // Screen reader set the selection in a text field (moving by
+        // character/word/line, or selecting with its own commands). Offsets
+        // are already mapped from AccessKit run positions to characters of
+        // the field's value natively; the field applies them like a drag.
+        inputRegistry.get(ev.nodeId)?.onSetSelection?.(ev.anchor, ev.focus);
         break;
       }
 
@@ -663,6 +821,8 @@ export function dispatchEvents() {
         if (ev.action === 'increment') h.onIncrement?.();
         else if (ev.action === 'decrement') h.onDecrement?.();
         else if (ev.action === 'setValue' && ev.numericValue !== undefined) h.onSetValue?.(ev.numericValue);
+        else if (ev.action === 'expand') h.onExpand?.();
+        else if (ev.action === 'collapse') h.onCollapse?.();
         break;
       }
 
@@ -680,7 +840,7 @@ export function dispatchEvents() {
             cursorEnd: ev.cursorEnd ?? 0,
           });
         } else if (ev.kind === 'commit') {
-          handlers.onImeCommit?.(ev.text ?? '');
+          flushKey(() => handlers.onImeCommit?.(ev.text ?? ''));
         } else if (ev.kind === 'disabled') {
           handlers.onImePreedit?.({ text: '', cursorStart: 0, cursorEnd: 0 });
         }
@@ -692,6 +852,7 @@ export function dispatchEvents() {
         // so multiple cursor events per frame produce only one hit-test.
         cursorX = ev.x;
         cursorY = ev.y;
+        cursorTarget = ev.target;
         cursorMovedThisFrame = true;
         // Text drag-selection: while the left button is held on an input,
         // every cursor move extends the selection toward the pointer.
@@ -699,13 +860,27 @@ export function dispatchEvents() {
           const ih = inputRegistry.get(inputDragNodeId);
           if (ih && ih.onDragAt) {
             const layout = __glyx_getLayout(inputDragNodeId);
-            if (layout) ih.onDragAt(ev.x - layout.x, ev.y - layout.y);
+            if (layout) ih.onDragAt(ev.x - boxOriginX(layout), ev.y - boxOriginY(layout));
           }
         }
         break;
       }
 
       case 'scroll': {
+        // Wheel handlers (e.g. Ctrl+wheel zoom on a chart) get the first offer.
+        let wheelNode = null;
+        for (const nodeId of wheelRegistry.keys()) {
+          if (!hitTest(nodeId, cursorX, cursorY) || isDisabled(nodeId)) continue;
+          if (wheelNode === null || isAncestorOf(wheelNode, nodeId)) wheelNode = nodeId;
+        }
+        if (wheelNode !== null) {
+          const l = __glyx_getLayout(wheelNode);
+          const consumed = wheelRegistry.get(wheelNode)({
+            deltaY: ev.deltaY, ctrl: ctrlHeld, shift: shiftHeld,
+            x: l ? cursorX - boxOriginX(l) : 0, y: l ? cursorY - boxOriginY(l) : 0,
+          });
+          if (consumed === true) break;
+        }
         // Route the scroll delta to the DEEPEST ScrollView the cursor is over.
         // Registration order is unreliable for nesting (children mount before
         // parents, and side-by-side panes can re-register in any order): a
@@ -731,9 +906,38 @@ export function dispatchEvents() {
         break;
       }
 
+      case 'scrollIntoView': {
+        // Absolute scroll position computed NATIVELY (see glyx-core's
+        // `layout::scroll_reveal_target`) to bring a just-focused node into
+        // view. Routed through the exact same `onAbsoluteScroll` path as
+        // `scrollbarDrag` above — deliberately no separate math or clamping
+        // here. An earlier JS-side attempt at this feature tried to
+        // recompute the equivalent of this value itself from a React-state
+        // ref and raced real scroll updates; the fix was moving the
+        // computation to Rust (which already has the authoritative current
+        // offset) and treating the result as just another absolute-scroll
+        // request, same as a scrollbar drag.
+        const handlers = scrollRegistry.get(ev.nodeId);
+        handlers?.onAbsoluteScroll?.(ev.scrollY);
+        break;
+      }
+
       case 'resize': {
         const size = { width: ev.width, height: ev.height };
         for (const fn of windowSizeListeners) fn(size);
+        break;
+      }
+
+      case 'tray': {
+        let tev = null;
+        try { tev = JSON.parse(ev.json); } catch { /* ignore a malformed event */ }
+        if (tev) for (const fn of trayListeners.slice()) try { fn(tev); } catch {}
+        break;
+      }
+
+      case 'menuBar': {
+        const mev = ev.checked === undefined ? { id: ev.id } : { id: ev.id, checked: ev.checked };
+        for (const fn of menuBarListeners.slice()) try { fn(mev); } catch {}
         break;
       }
 
@@ -792,11 +996,12 @@ export function dispatchEvents() {
   // ── Hover state update ────────────────────────────────────────────────────
   // Run once per frame using the final cursor position.
   // Only fires onHoverIn/Out callbacks on actual enter/leave transitions.
-  // Uses findTopmostSolid so that views beneath a covering solid node never
-  // receive hover effects, and plain Views (not in pressableRegistry) are
-  // treated as hover-opaque (no effect fires on them).
+  // Uses the natively-resolved topmost solid node (`cursorTarget`, set by
+  // the 'cursorMoved' case above) so that views beneath a covering solid
+  // node never receive hover effects, and plain Views (not in
+  // pressableRegistry) are treated as hover-opaque (no effect fires on them).
   if (cursorMovedThisFrame) {
-    const topSolid = findTopmostSolid(cursorX, cursorY);
+    const topSolid = cursorTarget;
     // Walk up to find the nearest pressable ancestor (same bubbling logic as click).
     let hoverId = topSolid;
     while (hoverId !== undefined && !pressableRegistry.has(hoverId)) {
@@ -812,6 +1017,22 @@ export function dispatchEvents() {
         pressableRegistry.get(newHoveredId)?.onHoverIn?.();
       }
       hoveredPressableId = newHoveredId;
+    }
+
+    // Continuous pointer tracking for the hovered pressable (charts'
+    // crosshair, sliders' hover preview…). Once per frame: cursor moves are
+    // already coalesced natively, so this never runs more than once a frame.
+    if (newHoveredId !== null) {
+      const h = pressableRegistry.get(newHoveredId);
+      if (h?.onPointerMove && typeof __glyx_getLayout !== 'undefined') {
+        const l = __glyx_getLayout(newHoveredId);
+        if (l) {
+          h.onPointerMove({
+            x: cursorX, y: cursorY,
+            locationX: cursorX - boxOriginX(l), locationY: cursorY - boxOriginY(l),
+          });
+        }
+      }
     }
   }
 }

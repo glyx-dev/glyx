@@ -88,13 +88,15 @@ for methodology):
 | Hardware | Renderer | RSS |
 |---|---|---|
 | No GPU / integrated GPU / CI | TinySkia (default) | **~27–40 MB, flat under load** |
-| Discrete GPU | Vello | ~350–430 MB idle, **spikes to 600–700 MB** under interaction |
+| Discrete GPU | Vello | ~180–210 MB on the `dashboard` example since its scratch buffers became scene-sized (October 2026); ~350–430 MB idle, **spiking to 600–700 MB**, before |
 | Windows, opt-in (`renderMode: 'direct2d'`, experimental) | Direct2D | ~77–114 MB, flat under load |
 
 Vello's GPU-parallel throughput is real and worth it for genuinely
-GPU-bound 2D scenes (dense paths/text, large canvases) — but it carries a
-real, structural memory cost most app UIs never need to pay. TinySkia is the
-right default for typical apps, not a fallback for weak hardware.
+GPU-bound 2D scenes (dense paths/text, large canvases). Most of its old memory
+cost was fixed-size scratch buffers (about 165 MiB for every scene), which Glyx now
+sizes from the scene; what remains over TinySkia (~140 MB on an integrated GPU) is
+wgpu, the driver and shaders. TinySkia is still the right default for typical apps,
+not a fallback for weak hardware. `GLYX_VELLO_FIXED_BUFFERS=1` restores the old sizes.
 
 Override via `glyx.config.ts`: `renderMode: 'auto' | 'skia' | 'gpu' | 'cpu' | 'direct2d'`
 
@@ -133,7 +135,9 @@ for the full walkthrough.
 - **SQLite built-in** — `db.query()` from any component; migrations, FTS, vector search
 - **Capability system** — apps declare what they can access, nothing more
 - **Custom title bar** — full native window control (macOS traffic lights, Windows chrome)
+- **Glyx DevTools + MCP** — `glyx dev --devtools` / `glyx inspect`: element tree with live prop editing, frame timings, animations (pause, slow motion), memory, layout and network panels; `glyx mcp` lets AI agents read and drive the running app
 - **CDP debugger** — Chrome DevTools (breakpoints, console, network) via the built-in inspector
+- **Smooth by default, in Rust** — spring transitions, smooth scrolling and canvas easing run in the native frame loop with no JavaScript per frame, and turn off with the OS reduced-motion setting
 - **Canvas 2D + 3D** — GPU drawing, textured GLTF models, dynamic lights, one wgpu pipeline
 - **Embedded WebView** — opt-in native OS webview (WebView2/WKWebView/WebKitGTK) for real web content — OAuth, embeds — with a two-way postMessage bridge; separate from the GPU-rendered UI everything else uses
 - **Cross-platform** — Windows, macOS, Linux from one codebase
@@ -182,7 +186,7 @@ js/packages/@glyx/
   three/               Three.js-style 3D API over Canvas3D
   config/              glyx.config.ts schema + types
   drizzle/             Drizzle ORM adapter for glyx-db
-  charts/              Line/Area/Bar/Pie charts on Canvas
+  charts/              Line/Area/Bar/Pie/Scatter/Candlestick/Sparkline charts on Canvas (stacked bars and areas, realtime, container-sized)
   table/               Sortable, resizable, virtualized data table
   command/             Cmd+K command palette
   markdown/            Markdown renderer
@@ -207,6 +211,8 @@ examples/
   notes-app/           Full-featured reference app (SQLite, vector search, multi-window)
   calculator/
   dashboard/           Stat cards + nav layout
+  chart-gallery/       Every chart type, container-sized charts, Ctrl+wheel zoom
+  realtime-chart/      A live chart fed up to 1000 values a second
   files/               File system / dialog demo
   log-viewer/          Streaming log viewer
   media-player/        Audio/video playback demo

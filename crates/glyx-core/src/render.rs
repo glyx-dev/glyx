@@ -1,17 +1,26 @@
 use super::*;
+use smallvec::SmallVec;
+use crate::render_props::parse_scrollbar_color;
 
 pub(crate) struct RenderCtx<'a> {
     pub nodes: &'a std::collections::HashMap<u32, JsNode>,
-    /// Current interpolated opacity for nodes with an active `@glyx-dev/motion`
-    /// transition — read instead of `node.props.opacity` when present. See
-    /// `PerWindowState::opacity_transitions`'s docs.
-    pub opacity_overrides: &'a std::collections::HashMap<u32, f32>,
+    /// Current interpolated values for nodes with an active `@glyx-dev/motion`
+    /// transition — each present field is read instead of the node's own
+    /// prop. See `crate::motion`.
+    pub overrides: &'a std::collections::HashMap<u32, crate::motion::Overrides>,
     pub images: &'a std::collections::HashMap<u32, peniko::ImageData>,
-    pub resolved: &'a [(NodeId, ResolvedLayout)],
+    /// `layout_id → rect` index (see `PerWindowState::resolved_by_id`).
+    pub resolved_by_id: &'a std::collections::HashMap<NodeId, ResolvedLayout>,
+    /// `z_index`-sorted children per js node id, rebuilt only on change by
+    /// `scene::reconcile_z_order` — render never sorts (see `sorted_children`).
+    pub z_order: &'a std::collections::HashMap<u32, SmallVec<[u32; 4]>>,
     pub frame: &'a mut AnyFrame,
     pub text_sys: &'a mut TextSystem,
     pub label_cache: &'a mut lru::LruCache<LabelKey, CachedLabel>,
     pub canvas_cmds: &'a std::collections::HashMap<u32, Vec<CanvasCmd>>,
+    /// Interpolated command lists for canvases easing toward new data: drawn
+    /// in place of `canvas_cmds` (their target) while they move.
+    pub canvas_anim: &'a std::collections::HashMap<u32, Vec<CanvasCmd>>,
     /// Accumulated (canvas3d_id, x, y, w, h) for post-Vello 3D overlay rendering.
     #[cfg(feature = "canvas3d")]
     pub canvas3d_overlays: &'a mut Vec<(u32, f32, f32, f32, f32)>,
@@ -50,78 +59,29 @@ pub(crate) struct RenderCtx<'a> {
     pub boundary_cache_new: &'a mut std::collections::HashMap<u32, Scene>,
 }
 
+impl<'a> RenderCtx<'a> {
+    /// Z-sorted children for a node. Reads the precomputed `z_order` table
+    /// (rebuilt only on change by `scene::reconcile_z_order`); falls back to a
+    /// live sort for any node that renders before its first reconcile, keeping
+    /// the old semantics (stable by document order for z_index ties).
+    fn sorted_children(&self, id: u32) -> SmallVec<[u32; 4]> {
+        match self.z_order.get(&id) {
+            Some(list) => list.clone(),
+            None => {
+                let mut list: SmallVec<[u32; 4]> = self.nodes.get(&id)
+                    .map(|n| n.children.iter().copied().collect())
+                    .unwrap_or_default();
+                list.sort_by_key(|&cid| self.nodes.get(&cid).and_then(|n| n.props.z_index).unwrap_or(0));
+                list
+            }
+        }
+    }
+}
+
 fn apply_opacity(c: peniko::Color, opacity: f32) -> peniko::Color {
     if opacity >= 1.0 { c } else { c.multiply_alpha(opacity) }
 }
 
-/// Parse a hex colour string (`#RGB`, `#RRGGBB`, `#RRGGBBAA`) into RGBA bytes.
-fn hex_color(s: &str) -> Option<[u8; 4]> {
-    let h = s.strip_prefix('#')?;
-    let (r, g, b, a) = match h.len() {
-        3 => (u8::from_str_radix(&h[0..1], 16).ok()? * 17,
-              u8::from_str_radix(&h[1..2], 16).ok()? * 17,
-              u8::from_str_radix(&h[2..3], 16).ok()? * 17, 255),
-        6 => (u8::from_str_radix(&h[0..2], 16).ok()?,
-              u8::from_str_radix(&h[2..4], 16).ok()?,
-              u8::from_str_radix(&h[4..6], 16).ok()?, 255),
-        8 => (u8::from_str_radix(&h[0..2], 16).ok()?,
-              u8::from_str_radix(&h[2..4], 16).ok()?,
-              u8::from_str_radix(&h[4..6], 16).ok()?,
-              u8::from_str_radix(&h[6..8], 16).ok()?),
-        _ => return None,
-    };
-    Some([r, g, b, a])
-}
-
-fn parse_box_shadow(s: &str) -> Option<(f64, f64, peniko::Color)> {
-    let parts: Vec<&str> = s.split_whitespace().collect();
-    if parts.len() < 4 { return None; }
-    let dx    = parts[0].parse::<f64>().ok()?;
-    let dy    = parts[1].parse::<f64>().ok()?;
-    let color = hex_color(parts[3])?;
-    Some((dx, dy, rgba_to_vello(color)))
-}
-
-fn parse_gradient(s: &str) -> Option<(peniko::Color, peniko::Color)> {
-    let parts: Vec<&str> = s.split_whitespace().collect();
-    if parts.len() < 2 { return None; }
-    let c1 = hex_color(parts[0])?;
-    let c2 = hex_color(parts[1])?;
-    Some((rgba_to_vello(c1), rgba_to_vello(c2)))
-}
-
-/// Parse a transform string into a kurbo Affine.
-/// Supports `"translate(x, y)"`, `"rotate(deg)"`, `"scale(sx, sy)"` / `"scale(s)"`,
-/// and chaining: `"translate(10,20) rotate(45)"`.
-fn parse_transform(s: &str) -> Option<peniko::kurbo::Affine> {
-    use peniko::kurbo::Affine;
-    let mut result = Affine::IDENTITY;
-    let mut remaining = s.trim();
-    while !remaining.is_empty() {
-        let open = remaining.find('(')?;
-        let close = remaining[open..].find(')')?;
-        let func = &remaining[..open].trim().to_lowercase();
-        let args_str = &remaining[open + 1..open + close];
-        let args: Vec<f64> = args_str.split(',').filter_map(|p| p.trim().parse().ok()).collect();
-        let t = match func.as_str() {
-            "translate" if args.len() >= 1 => {
-                Some(Affine::translate((args[0], args.get(1).copied().unwrap_or(0.0))))
-            }
-            "rotate" if args.len() >= 1 => {
-                Some(Affine::rotate(args[0].to_radians()))
-            }
-            "scale" if args.len() >= 1 => {
-                let sx = args[0];
-                let sy = args.get(1).copied().unwrap_or(sx);
-                Some(Affine::scale_non_uniform(sx, sy))
-            }
-            _ => None,
-        }?;
-        result = t * result;
-        remaining = remaining[open + close + 1..].trim();
-    }
-    Some(result)
-}
 
 pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut RenderCtx<'_>) {
     // ── O4b: clean-node fast path ────────────────────────────────────────
@@ -173,15 +133,22 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     // Hidden nodes and their entire subtree are invisible — skip rendering.
     if node.props.hidden.unwrap_or(false) { return; }
     let Some(layout_id) = node.layout_id                                             else { return };
-    let Some((_, rl))   = ctx.resolved.iter().find(|(nid, _)| *nid == layout_id) else { return };
+    let Some(rl)        = ctx.resolved_by_id.get(&layout_id).copied()                    else { return };
 
     let rx = rl.x as f64;
     let ry = rl.y as f64 - scroll_y;
     let rw = rl.width  as f64;
     let rh = rl.height as f64;
 
-    let own_opacity = ctx.opacity_overrides.get(&id).copied()
+    // Animated values win over the node's props while a transition runs.
+    let ov = ctx.overrides.get(&id);
+    let own_opacity = ov.and_then(|o| o.opacity)
         .unwrap_or_else(|| node.props.opacity.unwrap_or(1.0));
+    let eff_radius    = ov.and_then(|o| o.radius).or(node.props.border_radius).unwrap_or(0.0) as f64;
+    let eff_bg        = ov.and_then(|o| o.background).or(node.props.background_color);
+    let eff_border    = ov.and_then(|o| o.border_color).or(node.props.border_color);
+    let eff_shadow    = ov.and_then(|o| o.shadow).or(node.box_shadow);
+    let eff_transform = ov.and_then(|o| o.transform).or(node.transform);
     let child_opacity = opacity * own_opacity;
 
     // ── Viewport culling ──────────────────────────────────────────────────────
@@ -200,7 +167,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     // their parent in normal flow (Glyx has no absolute positioning), so all
     // descendants are also off-screen.  Their cache entries are dropped and
     // repopulated lazily on scroll-in (the "tile rasterize on demand" path).
-    let has_transform = node.props.transform.is_some();
+    let has_transform = eff_transform.is_some();
     let off_screen = !has_transform
         && (ry + rh <= 0.0 || ry >= ctx.win_h || rx + rw <= 0.0 || rx >= ctx.win_w);
 
@@ -238,8 +205,12 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     // ── Transform handling ───────────────────────────────────────────────
     // If the node has a transform, render node + children into a temporary
     // scene, then append it to the main scene with the computed Affine.
-    let node_transform = node.props.transform.as_deref().and_then(parse_transform);
+    // (The Affine itself is pre-parsed on the node — see `render_props`.)
+    let node_transform = eff_transform;
     let mut _transform_sub: Option<(Scene, peniko::kurbo::Affine)> = None;
+    // Non-Vello backends (TinySkia, Direct2D) apply it as a frame transform
+    // instead, popped at the end of this node.
+    let mut transform_pushed = false;
     if let Some(affine) = node_transform {
         // Center the transform on the element's bounding box
         // (equivalent to CSS transform-origin: center center)
@@ -251,44 +222,43 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
         if ctx.frame.supports_caching() {
             let parent = ctx.frame.replace_scene(Scene::new());
             _transform_sub = Some((parent, centered));
+        } else {
+            ctx.frame.push_transform(centered);
+            transform_pushed = true;
         }
     }
 
     match node.node_type {
         NodeType::View => {
-            let radius = node.props.border_radius.unwrap_or(0.0) as f64;
+            let radius = eff_radius;
 
             // ── Box shadow ────────────────────────────────────────────────
-            if let Some(ref ss) = node.props.box_shadow {
-                if let Some((sx, sy, sc)) = parse_box_shadow(ss) {
-                    ctx.frame.fill_rounded_rect(
-                        rx + sx, ry + sy, rw, rh, radius,
-                        apply_opacity(sc, child_opacity),
-                    );
-                }
+            if let Some((sx, sy, sc)) = eff_shadow {
+                ctx.frame.fill_rounded_rect(
+                    rx + sx, ry + sy, rw, rh, radius,
+                    apply_opacity(sc, child_opacity),
+                );
             }
 
             // ── Background (gradient takes precedence over solid) ─────────
-            if let Some(ref gs) = node.props.background_gradient {
-                if let Some((c1, c2)) = parse_gradient(gs) {
-                    let gradient = peniko::Gradient::new_linear(
-                        glyx_renderer::peniko::kurbo::Point::new(rx, ry),
-                        glyx_renderer::peniko::kurbo::Point::new(rx, ry + rh),
-                    )
-                    .with_stops([
-                        (0.0_f32, apply_opacity(c1, child_opacity)),
-                        (1.0_f32, apply_opacity(c2, child_opacity)),
-                    ]);
-                    let brush = peniko::Brush::Gradient(gradient);
-                    ctx.frame.fill_rounded_rect_with_brush(rx, ry, rw, rh, radius, &brush);
-                }
-            } else if let Some(bg) = node.props.background_color.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
+            if let Some((c1, c2)) = node.gradient {
+                let gradient = peniko::Gradient::new_linear(
+                    glyx_renderer::peniko::kurbo::Point::new(rx, ry),
+                    glyx_renderer::peniko::kurbo::Point::new(rx, ry + rh),
+                )
+                .with_stops([
+                    (0.0_f32, apply_opacity(c1, child_opacity)),
+                    (1.0_f32, apply_opacity(c2, child_opacity)),
+                ]);
+                let brush = peniko::Brush::Gradient(gradient);
+                ctx.frame.fill_rounded_rect_with_brush(rx, ry, rw, rh, radius, &brush);
+            } else if let Some(bg) = eff_bg.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
                 ctx.frame.fill_rounded_rect(rx, ry, rw, rh, radius, bg);
             }
 
             // ── Border ────────────────────────────────────────────────────
-            if let Some(bw) = node.props.border_width {
-                let bc = node.props.border_color.unwrap_or([80, 80, 120, 255]);
+            if let Some(bw) = node.props.border_width.filter(|w| *w > 0.0) {
+                let bc = eff_border.unwrap_or([80, 80, 120, 255]);
                 ctx.frame.stroke_rounded_rect(rx, ry, rw, rh, radius, bw as f64, apply_opacity(rgba_to_vello(bc), child_opacity));
             }
 
@@ -301,9 +271,8 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                     .filter_map(|&cid| {
                         let cn   = ctx.nodes.get(&cid)?;
                         let clid = cn.layout_id?;
-                        ctx.resolved.iter()
-                            .find(|(nid, _)| *nid == clid)
-                            .map(|(_, crl)| (crl.y + crl.height) as f64)
+                        ctx.resolved_by_id.get(&clid).copied()
+                            .map(|crl| (crl.y + crl.height) as f64)
                     })
                     .fold(f64::NEG_INFINITY, f64::max)
             } else {
@@ -336,11 +305,8 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                 }
             }
 
-            // Sort children by z_index (stable — preserves document order for ties).
-            let mut children: Vec<u32> = node.children.to_vec();
-            children.sort_by_key(|&cid| {
-                ctx.nodes.get(&cid).and_then(|n| n.props.z_index).unwrap_or(0)
-            });
+            // Children in z_order (pre-sorted on change — see `reconcile_z_order`).
+            let children = ctx.sorted_children(id);
             for child_id in children {
                 render_subtree(child_id, child_scroll_y, child_opacity, ctx);
             }
@@ -363,7 +329,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
         }
 
         NodeType::Image => {
-            let radius = node.props.border_radius.unwrap_or(0.0) as f64;
+            let radius = eff_radius;
             let resize_mode = node.props.image_resize_mode.as_deref().unwrap_or("stretch");
             if let Some(image_id) = node.props.image_id {
                 if let Some(image) = ctx.images.get(&image_id) {
@@ -404,8 +370,8 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                         ctx.frame.pop_layer();
                     }
 
-                    if let Some(bw) = node.props.border_width {
-                        let bc = node.props.border_color.unwrap_or([80, 80, 120, 255]);
+                    if let Some(bw) = node.props.border_width.filter(|w| *w > 0.0) {
+                        let bc = eff_border.unwrap_or([80, 80, 120, 255]);
                         ctx.frame.stroke_rounded_rect(rx, ry, rw, rh, radius, bw as f64, apply_opacity(rgba_to_vello(bc), child_opacity));
                     }
                 } else {
@@ -418,36 +384,33 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
 
         NodeType::Text => {
             let text       = node.props.text.as_deref().unwrap_or("Text");
-            let font_size  = node.props.font_size.unwrap_or(16.0);
             let color      = node.props.color.unwrap_or([255, 255, 255, 255]);
-            let bold   = node.props.font_weight.as_deref() == Some("bold");
-            let italic = node.props.font_style.as_deref()  == Some("italic");
             let underline = node.props.text_decoration_line.as_deref() == Some("underline");
-            // Single-line input text (marked by textScrollX) must NEVER wrap:
-            // it's shaped unbounded and panned left by text_scroll_x, with the
-            // container clipping the overflow.  Shaping at the node width made
-            // long input text wrap like a textarea and threw off caret math
-            // (measure_to_cursor walks wrapped lines).  1e6 matches the JS
-            // side's __glyx_measure_text(…, 1e6) caret measurements.
-            //
-            // For normal Text, +1px guards against Taffy rounding shaving a
-            // sub-pixel off the measured width and wrapping the last word.
-            let single_line = node.props.text_scroll_x.is_some();
-            let max_width = if single_line {
-                1e6_f32
-            } else {
-                (rw as f32).max(1.0) + 1.0
-            };
-            // CSS default is left; center/right are opt-in via `textAlign`.
-            let align = node.props.text_align.as_deref();
+            // Shaping + placement come from the SAME mapping the JS hit-test
+            // bindings use (`glyx_runtime::text_props`) — see glyx-text's
+            // `TextBox` for the rules themselves (single-line inputs shaped
+            // unbounded and panned by textScrollX, +1px wrap guard, alignment
+            // shift, vertical centering except for multiline editors). Keeping
+            // one copy is what makes a click land on the glyph drawn under it.
+            let tstyle = glyx_runtime::text_props::text_style(&node.props);
+            let tbox   = glyx_runtime::text_props::text_box(&node.props, rw as f32, rh as f32);
+            let font_size   = tstyle.font_size;
+            let bold        = tstyle.bold;
+            let italic      = tstyle.italic;
+            let line_height = tstyle.line_height;
+            let max_width   = tbox.wrap_width();
             let show_cursor     = node.props.show_cursor.unwrap_or(false);
+            // numberOfLines={1} on display text: cut to the box with "…".
+            // (Editors and single-line inputs scroll instead.)
+            let ellipsized = if node.props.number_of_lines == Some(1) && !show_cursor && !tbox.single_line {
+                ctx.text_sys.ellipsize(text, font_size, bold, italic, rw as f32)
+            } else { None };
+            let text = ellipsized.as_deref().unwrap_or(text);
             let cursor_position = node.props.cursor_position.map(|p| p as usize);
             let selection_start = node.props.selection_start.map(|p| p as usize);
             let selection_end   = node.props.selection_end.map(|p| p as usize);
             let ime_preedit_start = node.props.ime_preedit_start.map(|p| p as usize);
             let ime_preedit_end   = node.props.ime_preedit_end.map(|p| p as usize);
-
-            let line_height = node.props.line_height;
 
             // LabelKey::new() is allocation-free (hashes text, packs fields).
             // Derive it twice instead of cloning — cheaper than a String clone.
@@ -457,28 +420,9 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             }
             let label = ctx.label_cache.get(&LabelKey::new(text, font_size, max_width, bold, italic, line_height)).unwrap();
 
-            let bw = rw;
-            let bh = rh;
-            // text_scroll_x > 0 shifts text left (caret-follow for single-line inputs).
-            let scroll_x = node.props.text_scroll_x.unwrap_or(0.0) as f64;
-            let tx = match align {
-                Some("center") => rx + (bw - label.width).max(0.0) / 2.0,
-                Some("right")  => rx + (bw - label.width).max(0.0),
-                _              => rx,   // left (CSS default)
-            } - scroll_x;
-            // Vertically center the text's line box within the node box. `draw_text`
-            // treats ty as the layout top (glyphs at ty + baseline), so standard
-            // line-box centering is (bh - text_height)/2. For content-sized boxes
-            // (bh ≈ text_height) this is ~0, leaving text at the top as before.
-            // EXCEPTION: multiline editors (cursor without single-line panning)
-            // are always TOP-aligned — centering makes the text drift down as
-            // content shrinks below the box height (e.g. while deleting).
-            let multiline_editor = show_cursor && !single_line;
-            let ty = if multiline_editor {
-                ry
-            } else {
-                ry + (bh - label.text_height).max(0.0) / 2.0
-            };
+            let (dx, dy) = tbox.origin(label.width as f32, label.text_height as f32);
+            let tx = rx + dx as f64;
+            let ty = ry + dy as f64;
 
             let label_width = label.width;
             // Cursor/selection positioned using font metrics (not the line-box)
@@ -616,27 +560,52 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
 
         NodeType::Canvas => {
             // Draw optional background.
-            if let Some(bg) = node.props.background_color.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
-                let radius = node.props.border_radius.unwrap_or(0.0) as f64;
+            if let Some(bg) = eff_bg.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
+                let radius = eff_radius;
                 ctx.frame.fill_rounded_rect(rx, ry, rw, rh, radius, bg);
             }
             // Clip all canvas draw commands to the node's layout rect.
             ctx.frame.push_layer(rx, ry, rw, rh);
-            if let Some(cmds) = ctx.canvas_cmds.get(&id) {
+            if let Some(cmds) = ctx.canvas_anim.get(&id).or_else(|| ctx.canvas_cmds.get(&id)) {
+                // Clip pushes still open, so a canvas with unbalanced
+                // pushClip/popClip can't leak clips into the rest of the frame.
+                let mut clip_depth = 0usize;
                 for cmd in cmds {
-                    // `fillText` needs the TextSystem to shape real glyphs, so it's
-                    // handled here (where ctx is available) rather than in the
-                    // frame-only `draw_canvas_cmd`. Everything else is frame-only.
-                    if let CanvasCmd::FillText { text, x, y, font_size, color } = cmd {
-                        let layout = ctx.text_sys.label(text, *font_size);
-                        ctx.frame.draw_text(
-                            &layout, rx + *x as f64, ry + *y as f64,
-                            apply_opacity(rgba_to_vello(*color), child_opacity),
-                        );
-                    } else {
-                        draw_canvas_cmd(ctx.frame, cmd, rx, ry);
+                    match cmd {
+                        // `fillText` needs the TextSystem to shape real glyphs, so
+                        // it's handled here (where ctx is available) rather than in
+                        // the frame-only `draw_canvas_cmd`.
+                        CanvasCmd::FillText { text, x, y, font_size, color, bold } => {
+                            // Shaping is most of a label's cost, and a canvas draws
+                            // the same few strings (a chart's axis labels) every
+                            // frame — so share the Text-node label cache. Same
+                            // inputs as `TextSystem::label`/`bold_label` (single
+                            // line, no wrapping), so the layout is identical.
+                            let key = LabelKey::new(text, *font_size, f32::MAX, *bold, false, None);
+                            if ctx.label_cache.peek(&key).is_none() {
+                                let lbl = CachedLabel::new(ctx.text_sys, text, *font_size, f32::MAX, *color, *bold, false, None);
+                                ctx.label_cache.put(LabelKey::new(text, *font_size, f32::MAX, *bold, false, None), lbl);
+                            }
+                            let label = ctx.label_cache.get(&key).unwrap();
+                            ctx.frame.draw_text(
+                                &label.layout, rx + *x as f64, ry + *y as f64,
+                                apply_opacity(rgba_to_vello(*color), child_opacity),
+                            );
+                        }
+                        CanvasCmd::PushClip { x, y, w, h } => {
+                            ctx.frame.push_layer(rx + *x as f64, ry + *y as f64, *w as f64, *h as f64);
+                            clip_depth += 1;
+                        }
+                        CanvasCmd::PopClip => {
+                            if clip_depth > 0 {
+                                ctx.frame.pop_layer();
+                                clip_depth -= 1;
+                            }
+                        }
+                        _ => draw_canvas_cmd(ctx.frame, cmd, rx, ry, child_opacity),
                     }
                 }
+                for _ in 0..clip_depth { ctx.frame.pop_layer(); }
             }
             ctx.frame.pop_layer();
         }
@@ -644,7 +613,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
         NodeType::Canvas3D => {
             #[cfg(feature = "canvas3d")]
             {
-                if let Some(bg) = node.props.background_color.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
+                if let Some(bg) = eff_bg.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
                     ctx.frame.fill_rect(rx, ry, rw, rh, bg);
                 }
                 ctx.canvas3d_overlays.push((id, rx as f32, ry as f32, rw as f32, rh as f32));
@@ -672,7 +641,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                             glyx_renderer::peniko::kurbo::Affine::new([sx, 0.0, 0.0, sy, rx, ry])
                         };
                         ctx.frame.push_layer(rx, ry, rw, rh);
-                        ctx.frame.draw_image_with_transform(img, transform);
+                        ctx.frame.draw_frame_image(img, transform);
                         ctx.frame.pop_layer();
                     } else {
                         ctx.frame.fill_rect(rx, ry, rw, rh,
@@ -693,7 +662,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                         let sy = rh / ih;
                         let transform = glyx_renderer::peniko::kurbo::Affine::new([sx, 0.0, 0.0, sy, rx, ry]);
                         ctx.frame.push_layer(rx, ry, rw, rh);
-                        ctx.frame.draw_image_with_transform(img, transform);
+                        ctx.frame.draw_frame_image(img, transform);
                         ctx.frame.pop_layer();
                     } else {
                         // No frame yet — draw a black placeholder.
@@ -724,10 +693,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                 // No cache yet (first frame) — fall through to full render.
             }
 
-            let mut children: Vec<u32> = node.children.to_vec();
-            children.sort_by_key(|&cid| {
-                ctx.nodes.get(&cid).and_then(|n| n.props.z_index).unwrap_or(0)
-            });
+            let children = ctx.sorted_children(id);
 
             if ctx.frame.supports_caching() {
                 // Dirty or first render: capture the subtree into a sub-Scene,
@@ -752,6 +718,9 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
         let sub = ctx.frame.replace_scene(parent);
         ctx.frame.append_scene(&sub, Some(affine));
     }
+    if transform_pushed {
+        ctx.frame.pop_transform();
+    }
 
     // ── O4b: end capture — store fragment for next-frame replay ─────────
     // Restore the outer scene; the captured fragment is appended to it and
@@ -763,7 +732,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     }
 }
 
-fn draw_canvas_cmd(frame: &mut AnyFrame, cmd: &CanvasCmd, ox: f64, oy: f64) {
+pub(crate) fn draw_canvas_cmd(frame: &mut AnyFrame, cmd: &CanvasCmd, ox: f64, oy: f64, opacity: f32) {
     use CanvasCmd::*;
     match cmd {
         Clear => {
@@ -784,7 +753,7 @@ fn draw_canvas_cmd(frame: &mut AnyFrame, cmd: &CanvasCmd, ox: f64, oy: f64) {
         StrokeLine { x0, y0, x1, y1, color, line_width } => {
             frame.stroke_line(ox + *x0 as f64, oy + *y0 as f64, ox + *x1 as f64, oy + *y1 as f64, *line_width as f64, rgba_to_vello(*color));
         }
-        FillText { text, x, y, font_size, color } => {
+        FillText { text, x, y, font_size, color, .. } => {
             // Canvas text: draw a filled placeholder rect sized to the text.
             // Full Parley shaping requires a mutable TextSystem not available here.
             frame.fill_rect(ox + *x as f64, oy + *y as f64, *font_size as f64 * text.len() as f64 * 0.6, *font_size as f64 * 1.2, rgba_to_vello(*color));
@@ -797,6 +766,21 @@ fn draw_canvas_cmd(frame: &mut AnyFrame, cmd: &CanvasCmd, ox: f64, oy: f64) {
             let pts = offset_points(points, ox, oy);
             frame.stroke_path(&pts, *line_width as f64, *closed, rgba_to_vello(*color));
         }
+        FillPathGradient { points, x0, y0, x1, y1, stops } => {
+            let pts = offset_points(points, ox, oy);
+            let gradient = peniko::Gradient::new_linear(
+                peniko::kurbo::Point::new(ox + *x0 as f64, oy + *y0 as f64),
+                peniko::kurbo::Point::new(ox + *x1 as f64, oy + *y1 as f64),
+            ).with_stops(
+                stops.iter()
+                    .map(|(o, c)| (o.clamp(0.0, 1.0), apply_opacity(rgba_to_vello(*c), opacity)))
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            );
+            frame.fill_path_with_brush(&pts, &peniko::Brush::Gradient(gradient));
+        }
+        // Handled by the Canvas node's loop (they need clip bookkeeping).
+        PushClip { .. } | PopClip => {}
     }
 }
 
@@ -822,7 +806,12 @@ pub(crate) fn compute_scrollbar_thumb(
     bar_width: f64,
 ) -> Option<(f64, f64, f64, f64)> {
     let viewport_height = rh;
-    if content_height <= viewport_height {
+    // A zero/negative-height viewport (e.g. a transitional frame mid-layout,
+    // such as a container swapping subtrees) has no track to draw a thumb
+    // into — bail out instead of feeding `track_h = 0` into the clamp below,
+    // which panics ("min > max") once `bar_width * 0.6 > 0`. Found via a real
+    // crash switching a list from full-render to virtualized.
+    if content_height <= viewport_height || viewport_height <= 0.0 {
         return None;
     }
     let track_x = rx + rw - bar_width;
@@ -856,13 +845,30 @@ fn draw_scrollbar(
     frame.fill_rounded_rect(tx, ty, tw, th, bar_width * 0.5, bar_color);
 }
 
-/// Parse an RGBA/hex colour string from JS into a peniko::Color.
-/// Supports `"#RGB"`, `"#RRGGBB"`, `"#RRGGBBAA"`.
-/// Falls back to a semi-transparent grey on parse failure.
-fn parse_scrollbar_color(s: &str) -> peniko::Color {
-    if let Some(rgba) = hex_color(s) {
-        rgba_to_vello(rgba)
-    } else {
-        peniko::Color::from_rgba8(140, 140, 170, 153) // default: semi-transparent grey-blue
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_scrollbar_thumb_does_not_panic_on_a_zero_height_viewport() {
+        // Reproduces a real crash: a transitional render frame (e.g. a
+        // container swapping subtrees, like VirtualizedList replacing a
+        // plain View) can momentarily report `rh = 0.0` while
+        // `content_height` is still positive. `clamp(bar_width * 0.6, 0.0)`
+        // then panics with "min > max" once `bar_width > 0`.
+        let result = compute_scrollbar_thumb(0.0, 0.0, 440.0, 0.0, 0.0, 100.0, 8.0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn compute_scrollbar_thumb_does_not_panic_on_a_negative_height_viewport() {
+        let result = compute_scrollbar_thumb(0.0, 0.0, 440.0, -5.0, 0.0, 100.0, 8.0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn compute_scrollbar_thumb_still_computes_a_normal_thumb() {
+        let result = compute_scrollbar_thumb(0.0, 0.0, 440.0, 140.0, 0.0, 400.0, 8.0);
+        assert!(result.is_some());
     }
 }

@@ -1,16 +1,17 @@
-//! JSON-based `NodeProps`/`NodeType` parsing for the QuickJS backend.
+//! Direct `NodeProps`/`NodeType` parsing for the QuickJS backend.
 //!
 //! V8's `parse_props` (`bindings/mod.rs`) reads directly from a
-//! `v8::Local<Object>` field by field. QuickJS's equivalent instead
-//! stringifies the incoming JS object once (`ctx.json_stringify`) and
-//! parses the result as `serde_json::Value` — avoids writing ~100 lines of
-//! bespoke `rquickjs::Object` field-reads for a struct this wide, and keeps
-//! the actual field list (this file) trivially diffable against V8's.
+//! `v8::Local<Object>` field by field. QuickJS's equivalent does the same
+//! via `rquickjs::Object::get` — no `JSON.stringify` + `serde_json` round
+//! trip. The readers below intentionally mirror V8's `get_str_prop` /
+//! `get_num_prop` / `get_length_prop` / `get_bool_prop` / `get_color_prop`
+//! coercion rules 1:1.
 //!
 //! Every field name/type here is intentionally kept in the same order as
 //! `bindings/mod.rs`'s `parse_props` so the two stay easy to compare.
 
-use serde_json::Value as Json;
+use rquickjs::{Object, Value};
+
 use crate::bindings::{parse_hex_color, LengthValue, NodeProps, NodeType};
 
 pub(crate) fn parse_node_type_str(s: &str) -> NodeType {
@@ -27,185 +28,229 @@ pub(crate) fn parse_node_type_str(s: &str) -> NodeType {
     }
 }
 
-fn get_str(v: &Json, key: &str) -> Option<String> {
-    match v.get(key)? {
-        Json::String(s) => Some(s.clone()),
-        Json::Number(n) => Some(n.to_string()),
-        _ => None,
+/// Read a property, returning `None` for an absent key or a thrown getter.
+fn get_value<'js>(obj: &Object<'js>, key: &str) -> Option<Value<'js>> {
+    obj.get::<&str, Value<'js>>(key).ok()
+}
+
+/// Format a JS number the way its `ToString` / previous JSON round-trip
+/// would: integral values have no trailing `.0` (`42`, not `42.0`).
+fn number_to_string(n: f64) -> String {
+    if n.fract() == 0.0 && n.abs() < 1e15 {
+        (n as i64).to_string()
+    } else {
+        format!("{n}")
     }
 }
 
-fn get_num(v: &Json, key: &str) -> Option<f32> {
-    v.get(key)?.as_f64().map(|n| n as f32)
+/// String property, coercing numbers to strings (mirrors V8's
+/// `is_string() || is_number()` check in `get_str_prop`).
+fn get_str(obj: &Object<'_>, key: &str) -> Option<String> {
+    let v = get_value(obj, key)?;
+    if let Some(s) = v.as_string() {
+        s.to_string().ok()
+    } else {
+        v.as_number().map(number_to_string)
+    }
 }
 
-fn get_bool(v: &Json, key: &str) -> Option<bool> {
-    v.get(key)?.as_bool()
+/// Number property as `f32`; non-numbers (including numeric strings) give
+/// `None`, matching V8's `is_number()` check in `get_num_prop`.
+fn get_num(obj: &Object<'_>, key: &str) -> Option<f32> {
+    get_value(obj, key)?.as_number().map(|n| n as f32)
 }
 
-fn get_length(v: &Json, key: &str) -> Option<LengthValue> {
-    match v.get(key)? {
-        Json::String(s) => {
-            if let Some(pct) = s.strip_suffix('%') {
-                pct.parse::<f32>().ok().map(|n| LengthValue::Percent(n / 100.0))
-            } else {
-                s.parse::<f32>().ok().map(LengthValue::Px)
-            }
+fn get_bool(obj: &Object<'_>, key: &str) -> Option<bool> {
+    get_value(obj, key)?.as_bool()
+}
+
+/// `"50%"` → `Percent(0.5)`, `"123"` → `Px(123.0)`, `123` → `Px(123.0)`.
+fn get_length(obj: &Object<'_>, key: &str) -> Option<LengthValue> {
+    let v = get_value(obj, key)?;
+    if let Some(s) = v.as_string() {
+        let s = s.to_string().ok()?;
+        if let Some(pct) = s.strip_suffix('%') {
+            return pct.parse::<f32>().ok().map(|n| LengthValue::Percent(n / 100.0));
         }
-        Json::Number(n) => n.as_f64().map(|n| LengthValue::Px(n as f32)),
-        _ => None,
+        return s.parse::<f32>().ok().map(LengthValue::Px);
     }
+    v.as_number().map(|n| LengthValue::Px(n as f32))
 }
 
-fn get_color(v: &Json, key: &str) -> Option<[u8; 4]> {
-    parse_hex_color(&get_str(v, key)?)
+fn get_color(obj: &Object<'_>, key: &str) -> Option<[u8; 4]> {
+    parse_hex_color(&get_str(obj, key)?)
 }
 
-/// Parse a `NodeProps` from a JSON-stringified JS props object. Field list
+/// Parse a `NodeProps` directly from the JS props object. Field list
 /// intentionally mirrors `bindings/mod.rs`'s `parse_props` 1:1 — see that
 /// function if a field is missing here after a NodeProps change upstream.
-pub(crate) fn parse_props_json(json: &str) -> NodeProps {
-    let v: Json = match serde_json::from_str(json) {
-        Ok(v) => v,
-        Err(_) => return NodeProps::default(),
-    };
-    let mut props = NodeProps::default();
+pub(crate) fn parse_props_value(props: Value<'_>) -> NodeProps {
+    let mut out = NodeProps::default();
+    let Some(obj) = props.into_object() else { return out };
 
-    props.width  = get_length(&v, "width");
-    props.height = get_length(&v, "height");
+    out.width  = get_length(&obj, "width");
+    out.height = get_length(&obj, "height");
 
-    props.text                  = get_str(&v, "text");
-    props.font_size             = get_num(&v, "fontSize");
-    props.line_height           = get_num(&v, "lineHeight");
-    props.font_weight           = get_str(&v, "fontWeight");
-    props.font_style            = get_str(&v, "fontStyle");
-    props.text_decoration_line  = get_str(&v, "textDecorationLine");
-    props.number_of_lines       = get_num(&v, "numberOfLines").map(|n| n as u32);
-    props.color                 = get_color(&v, "color");
+    out.text                  = get_str(&obj, "text");
+    out.font_size             = get_num(&obj, "fontSize");
+    out.line_height           = get_num(&obj, "lineHeight");
+    out.font_weight           = get_str(&obj, "fontWeight");
+    out.font_style            = get_str(&obj, "fontStyle");
+    out.text_decoration_line  = get_str(&obj, "textDecorationLine");
+    out.number_of_lines       = get_num(&obj, "numberOfLines").map(|n| n as u32);
+    out.color                 = get_color(&obj, "color");
 
-    props.background_color = get_color(&v, "backgroundColor");
-    props.border_radius    = get_num(&v, "borderRadius");
+    out.background_color = get_color(&obj, "backgroundColor");
+    out.border_radius    = get_num(&obj, "borderRadius");
 
-    props.flex            = get_num(&v, "flex");
-    props.flex_direction   = get_str(&v, "flexDirection");
-    props.justify_content  = get_str(&v, "justifyContent");
-    props.align_items      = get_str(&v, "alignItems");
-    props.padding          = get_length(&v, "padding");
-    props.gap              = get_length(&v, "gap");
-    props.flex_grow        = get_num(&v, "flexGrow");
-    props.flex_shrink      = get_num(&v, "flexShrink");
-    props.flex_basis       = get_length(&v, "flexBasis");
-    props.flex_wrap        = get_str(&v, "flexWrap");
+    out.flex            = get_num(&obj, "flex");
+    out.flex_direction   = get_str(&obj, "flexDirection");
+    out.justify_content  = get_str(&obj, "justifyContent");
+    out.align_items      = get_str(&obj, "alignItems");
+    out.padding          = get_length(&obj, "padding");
+    out.gap              = get_length(&obj, "gap");
+    out.flex_grow        = get_num(&obj, "flexGrow");
+    out.flex_shrink      = get_num(&obj, "flexShrink");
+    out.flex_basis       = get_length(&obj, "flexBasis");
+    out.flex_wrap        = get_str(&obj, "flexWrap");
 
-    props.align_self    = get_str(&v, "alignSelf");
-    props.align_content  = get_str(&v, "alignContent");
-    props.justify_self   = get_str(&v, "justifySelf");
-    props.justify_items  = get_str(&v, "justifyItems");
+    out.align_self    = get_str(&obj, "alignSelf");
+    out.align_content  = get_str(&obj, "alignContent");
+    out.justify_self   = get_str(&obj, "justifySelf");
+    out.justify_items  = get_str(&obj, "justifyItems");
 
-    props.display               = get_str(&v, "display");
-    props.grid_template_columns = get_str(&v, "gridTemplateColumns");
-    props.grid_template_rows    = get_str(&v, "gridTemplateRows");
-    props.grid_column           = get_str(&v, "gridColumn");
-    props.grid_row              = get_str(&v, "gridRow");
+    out.display               = get_str(&obj, "display");
+    out.grid_template_columns = get_str(&obj, "gridTemplateColumns");
+    out.grid_template_rows    = get_str(&obj, "gridTemplateRows");
+    out.grid_column           = get_str(&obj, "gridColumn");
+    out.grid_row              = get_str(&obj, "gridRow");
 
-    props.show_cursor       = get_bool(&v, "showCursor");
-    props.cursor_position   = get_num(&v, "cursorPosition").map(|n| n as u32);
-    props.selection_start   = get_num(&v, "selectionStart").map(|n| n as u32);
-    props.selection_end     = get_num(&v, "selectionEnd").map(|n| n as u32);
-    props.ime_preedit_start = get_num(&v, "imePreeditStart").map(|n| n as u32);
-    props.ime_preedit_end   = get_num(&v, "imePreeditEnd").map(|n| n as u32);
-    props.role         = get_str(&v, "role");
-    props.aria_label    = get_str(&v, "ariaLabel");
-    props.checked       = get_bool(&v, "checked");
-    props.numeric_value = get_num(&v, "numericValue").map(|n| n as f64);
-    props.numeric_min   = get_num(&v, "numericMin").map(|n| n as f64);
-    props.numeric_max   = get_num(&v, "numericMax").map(|n| n as f64);
-    props.text_align    = get_str(&v, "textAlign");
-    props.border_width  = get_num(&v, "borderWidth");
-    props.border_color  = get_color(&v, "borderColor");
+    out.show_cursor       = get_bool(&obj, "showCursor");
+    out.cursor_position   = get_num(&obj, "cursorPosition").map(|n| n as u32);
+    out.selection_start   = get_num(&obj, "selectionStart").map(|n| n as u32);
+    out.selection_end     = get_num(&obj, "selectionEnd").map(|n| n as u32);
+    out.ime_preedit_start = get_num(&obj, "imePreeditStart").map(|n| n as u32);
+    out.ime_preedit_end   = get_num(&obj, "imePreeditEnd").map(|n| n as u32);
+    out.role         = get_str(&obj, "role");
+    out.aria_label    = get_str(&obj, "ariaLabel");
+    out.checked       = get_bool(&obj, "checked");
+    out.numeric_value = get_num(&obj, "numericValue").map(|n| n as f64);
+    out.numeric_min   = get_num(&obj, "numericMin").map(|n| n as f64);
+    out.numeric_max   = get_num(&obj, "numericMax").map(|n| n as f64);
+    out.accessibility_hint = get_str(&obj, "accessibilityHint");
+    out.expanded           = get_bool(&obj, "expanded");
+    out.focusable          = get_bool(&obj, "focusable");
+    out.live_region        = get_str(&obj, "accessibilityLiveRegion");
+    out.role_description   = get_str(&obj, "accessibilityRoleDescription");
+    out.placeholder        = get_str(&obj, "placeholder");
+    out.text_align    = get_str(&obj, "textAlign");
+    out.border_width  = get_num(&obj, "borderWidth");
+    out.border_color  = get_color(&obj, "borderColor");
 
-    props.clip              = get_bool(&v, "clip");
-    props.scroll_offset_y   = get_num(&v, "scrollOffsetY");
-    props.image_id          = get_num(&v, "imageId").map(|n| n as u32);
-    props.image_resize_mode = get_str(&v, "resizeMode");
-    props.z_index           = get_num(&v, "zIndex").map(|n| n as i32);
-    props.draggable         = get_bool(&v, "draggable");
-    props.pressable         = get_bool(&v, "pressable");
-    props.test_id           = get_str(&v, "testID");
-    props.text_scroll_x     = get_num(&v, "textScrollX");
-    props.camera_handle     = get_num(&v, "cameraHandle").map(|n| n as u32);
-    props.mirror            = get_bool(&v, "mirror");
-    props.video_handle      = get_num(&v, "videoHandle").map(|n| n as u32);
-    props.webview_src       = get_str(&v, "webviewSrc");
-    props.webview_html      = get_str(&v, "webviewHtml");
-    props.webview_opts      = get_str(&v, "webviewOpts");
+    out.clip              = get_bool(&obj, "clip");
+    out.scroll_offset_y   = get_num(&obj, "scrollOffsetY");
+    out.image_id          = get_num(&obj, "imageId").map(|n| n as u32);
+    out.image_resize_mode = get_str(&obj, "resizeMode");
+    out.z_index           = get_num(&obj, "zIndex").map(|n| n as i32);
+    out.draggable         = get_bool(&obj, "draggable");
+    out.pressable         = get_bool(&obj, "pressable");
+    out.test_id           = get_str(&obj, "testID");
+    out.text_scroll_x     = get_num(&obj, "textScrollX");
+    out.camera_handle     = get_num(&obj, "cameraHandle").map(|n| n as u32);
+    out.mirror            = get_bool(&obj, "mirror");
+    out.video_handle      = get_num(&obj, "videoHandle").map(|n| n as u32);
+    out.webview_src       = get_str(&obj, "webviewSrc");
+    out.webview_html      = get_str(&obj, "webviewHtml");
+    out.webview_opts      = get_str(&obj, "webviewOpts");
 
-    props.margin            = get_length(&v, "margin");
-    props.margin_horizontal = get_length(&v, "marginHorizontal");
-    props.margin_vertical   = get_length(&v, "marginVertical");
-    props.margin_left       = get_length(&v, "marginLeft");
-    props.margin_right      = get_length(&v, "marginRight");
-    props.margin_top        = get_length(&v, "marginTop");
-    props.margin_bottom     = get_length(&v, "marginBottom");
+    out.margin            = get_length(&obj, "margin");
+    out.margin_horizontal = get_length(&obj, "marginHorizontal");
+    out.margin_vertical   = get_length(&obj, "marginVertical");
+    out.margin_left       = get_length(&obj, "marginLeft");
+    out.margin_right      = get_length(&obj, "marginRight");
+    out.margin_top        = get_length(&obj, "marginTop");
+    out.margin_bottom     = get_length(&obj, "marginBottom");
 
-    props.padding_horizontal = get_length(&v, "paddingHorizontal");
-    props.padding_vertical   = get_length(&v, "paddingVertical");
-    props.padding_left       = get_length(&v, "paddingLeft");
-    props.padding_right      = get_length(&v, "paddingRight");
-    props.padding_top        = get_length(&v, "paddingTop");
-    props.padding_bottom     = get_length(&v, "paddingBottom");
+    out.padding_horizontal = get_length(&obj, "paddingHorizontal");
+    out.padding_vertical   = get_length(&obj, "paddingVertical");
+    out.padding_left       = get_length(&obj, "paddingLeft");
+    out.padding_right      = get_length(&obj, "paddingRight");
+    out.padding_top        = get_length(&obj, "paddingTop");
+    out.padding_bottom     = get_length(&obj, "paddingBottom");
 
-    props.min_width  = get_length(&v, "minWidth");
-    props.min_height = get_length(&v, "minHeight");
-    props.max_width  = get_length(&v, "maxWidth");
-    props.max_height = get_length(&v, "maxHeight");
+    out.min_width  = get_length(&obj, "minWidth");
+    out.min_height = get_length(&obj, "minHeight");
+    out.max_width  = get_length(&obj, "maxWidth");
+    out.max_height = get_length(&obj, "maxHeight");
 
-    props.overflow       = get_str(&v, "overflow");
-    props.hidden         = get_bool(&v, "hidden");
-    props.disabled       = get_bool(&v, "disabled");
-    props.pointer_events = get_str(&v, "pointerEvents");
+    out.overflow       = get_str(&obj, "overflow");
+    out.hidden         = get_bool(&obj, "hidden");
+    out.disabled       = get_bool(&obj, "disabled");
+    out.pointer_events = get_str(&obj, "pointerEvents");
 
-    props.opacity             = get_num(&v, "opacity");
-    props.transition_ms       = get_num(&v, "transitionMs").map(|n| n as u32);
-    props.box_shadow          = get_str(&v, "boxShadow");
-    props.background_gradient = get_str(&v, "backgroundGradient");
+    out.opacity             = get_num(&obj, "opacity");
+    out.transition_ms       = get_num(&obj, "transitionMs").map(|n| n as u32);
+    out.transition_property = get_str(&obj, "transitionProperty");
+    out.transition_easing   = get_str(&obj, "transitionEasing");
+    out.transition_stiffness = get_num(&obj, "transitionStiffness");
+    out.transition_damping   = get_num(&obj, "transitionDamping");
+    out.animation_keyframes  = get_str(&obj, "animationKeyframes");
+    out.animation_ms         = get_num(&obj, "animationMs").map(|n| n as u32);
+    out.animation_easing     = get_str(&obj, "animationEasing");
+    out.animation_iterations = get_num(&obj, "animationIterations");
+    out.animation_direction  = get_str(&obj, "animationDirection");
+    out.animation_fill       = get_str(&obj, "animationFill");
+    out.box_shadow          = get_str(&obj, "boxShadow");
+    out.background_gradient = get_str(&obj, "backgroundGradient");
 
-    props.position  = get_str(&v, "position");
-    props.top       = get_length(&v, "top");
-    props.left      = get_length(&v, "left");
-    props.right     = get_length(&v, "right");
-    props.bottom    = get_length(&v, "bottom");
-    props.transform = get_str(&v, "transform");
-    props.box_sizing = get_str(&v, "boxSizing");
+    out.position  = get_str(&obj, "position");
+    out.top       = get_length(&obj, "top");
+    out.left      = get_length(&obj, "left");
+    out.right     = get_length(&obj, "right");
+    out.bottom    = get_length(&obj, "bottom");
+    out.transform = get_str(&obj, "transform");
+    out.box_sizing = get_str(&obj, "boxSizing");
 
-    props.scrollbar_width = get_num(&v, "scrollbarWidth");
-    props.scrollbar_color = get_str(&v, "scrollbarColor");
-    props.show_scrollbar  = get_bool(&v, "showScrollbar");
+    out.scrollbar_width = get_num(&obj, "scrollbarWidth");
+    out.scrollbar_color = get_str(&obj, "scrollbarColor");
+    out.show_scrollbar  = get_bool(&obj, "showScrollbar");
+    out.smooth_scroll   = get_bool(&obj, "smoothScroll");
 
-    props
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Build a real JS object in a throwaway QuickJS context and parse it,
+    /// exercising the same path `createNode`/`updateNode` use.
+    fn parse(source: &str) -> NodeProps {
+        let rt = rquickjs::Runtime::new().expect("quickjs runtime should build");
+        let ctx = rquickjs::Context::full(&rt).expect("quickjs context should build");
+        ctx.with(|ctx| {
+            let value: Value = ctx.eval(source).expect("test snippet should eval");
+            parse_props_value(value)
+        })
+    }
+
     #[test]
     fn parses_length_values_number_and_percent() {
-        let props = parse_props_json(r#"{"width": 100, "height": "50%"}"#);
+        let props = parse("({ width: 100, height: '50%' })");
         assert_eq!(props.width, Some(LengthValue::Px(100.0)));
         assert_eq!(props.height, Some(LengthValue::Percent(0.5)));
     }
 
     #[test]
     fn parses_hex_colors() {
-        let props = parse_props_json(r##"{"backgroundColor": "#ff0000", "color": "#00ff00ff"}"##);
+        let props = parse("({ backgroundColor: '#ff0000', color: '#00ff00ff' })");
         assert_eq!(props.background_color, Some([255, 0, 0, 255]));
         assert_eq!(props.color, Some([0, 255, 0, 255]));
     }
 
     #[test]
     fn parses_strings_bools_and_numbers() {
-        let props = parse_props_json(r#"{"text": "hi", "flex": 1, "hidden": true, "zIndex": -2}"#);
+        let props = parse("({ text: 'hi', flex: 1, hidden: true, zIndex: -2 })");
         assert_eq!(props.text, Some("hi".to_string()));
         assert_eq!(props.flex, Some(1.0));
         assert_eq!(props.hidden, Some(true));
@@ -213,15 +258,22 @@ mod tests {
     }
 
     #[test]
+    fn coerces_numbers_used_as_strings_without_trailing_zero() {
+        let props = parse("({ text: 42, fontWeight: 700 })");
+        assert_eq!(props.text, Some("42".to_string()));
+        assert_eq!(props.font_weight, Some("700".to_string()));
+    }
+
+    #[test]
     fn missing_fields_stay_none() {
-        let props = parse_props_json("{}");
+        let props = parse("({})");
         assert_eq!(props.width, None);
         assert_eq!(props.text, None);
     }
 
     #[test]
-    fn invalid_json_falls_back_to_default() {
-        let props = parse_props_json("not json");
+    fn undefined_and_null_props_yield_default() {
+        let props = parse("undefined");
         assert_eq!(props, NodeProps::default());
     }
 
@@ -231,5 +283,172 @@ mod tests {
         assert_eq!(parse_node_type_str("IMAGE"), NodeType::Image);
         assert_eq!(parse_node_type_str("webview"), NodeType::WebView);
         assert_eq!(parse_node_type_str("bogus"), NodeType::View);
+    }
+
+    /// Golden parity fixture: one object covering EVERY field V8's `parse_props`
+    /// reads (`bindings/mod.rs:2196-2311`). Both parsers must yield the same
+    /// `NodeProps` for this object — if a field is added to V8's parser, it must
+    /// be added here (and to `parse_props_value`) or this test only covers the
+    /// subset it names.
+    #[test]
+    fn v8_field_for_v8_field_parity() {
+        let props = parse("({
+            width: 100, height: '50%',
+            fontSize: 16, lineHeight: 22, fontWeight: 'bold', fontStyle: 'italic',
+            textDecorationLine: 'underline', text: 'Hello',
+            numberOfLines: 2, color: '#00ff00ff',
+            backgroundColor: '#ff0000', borderRadius: 4,
+            flex: 1, flexDirection: 'row', justifyContent: 'center', alignItems: 'stretch',
+            padding: 8, gap: '12', flexGrow: 0.5, flexShrink: 1, flexBasis: '200',
+            flexWrap: 'wrap',
+            alignSelf: 'flex-start', alignContent: 'space-between',
+            justifySelf: 'auto', justifyItems: 'start',
+            display: 'flex',
+            gridTemplateColumns: '1fr 1fr', gridTemplateRows: 'auto',
+            gridColumn: '1', gridRow: '2',
+            showCursor: true, cursorPosition: 3, selectionStart: 1, selectionEnd: 5,
+            imePreeditStart: 2, imePreeditEnd: 4,
+            role: 'button', ariaLabel: 'Submit', checked: true,
+            numericValue: 7.5, numericMin: 0, numericMax: 10,
+            accessibilityHint: 'Deletes this note permanently', expanded: true,
+            focusable: true, accessibilityLiveRegion: 'polite',
+            accessibilityRoleDescription: 'line chart',
+            placeholder: 'Search notes',
+            textAlign: 'center', borderWidth: 2, borderColor: '#0000ff',
+            clip: true, scrollOffsetY: 100, imageId: 42, resizeMode: 'cover',
+            zIndex: -3, draggable: true, pressable: true, testID: 'submit-btn',
+            textScrollX: 12.5, cameraHandle: 7, mirror: false, videoHandle: 8,
+            webviewSrc: 'https://example.com', webviewHtml: '<p>hi</p>',
+            webviewOpts: '{\"x\":1}',
+            margin: '10', marginHorizontal: 5, marginVertical: '1%',
+            marginLeft: 1, marginRight: 2, marginTop: 3, marginBottom: 4,
+            paddingHorizontal: '6', paddingVertical: 7, paddingLeft: '8',
+            paddingRight: 9, paddingTop: '1%', paddingBottom: 11,
+            minWidth: 10, minHeight: '20', maxWidth: '30%', maxHeight: 40,
+            overflow: 'hidden', hidden: false, disabled: true, pointerEvents: 'auto',
+            opacity: 0.5, transitionMs: 250,
+            transitionProperty: 'opacity,transform', transitionEasing: 'ease-in-out',
+            animationKeyframes: '[[0,{\"opacity\":0}],[1,{\"opacity\":1}]]', animationMs: 800,
+            animationEasing: 'linear', animationIterations: -1,
+            animationDirection: 'alternate', animationFill: 'forwards',
+            boxShadow: '2px 3px #000000', backgroundGradient: '#ff0000 #0000ff',
+            position: 'absolute', top: 1, left: '2%', right: 3, bottom: '4',
+            transform: 'translate(10,20) rotate(45)', boxSizing: 'border-box',
+            scrollbarWidth: 9, scrollbarColor: '#888888', showScrollbar: false
+        })");
+
+        let expected = NodeProps {
+            width:  Some(LengthValue::Px(100.0)),
+            height: Some(LengthValue::Percent(0.5)),
+            font_size:  Some(16.0),
+            line_height: Some(22.0),
+            font_weight: Some("bold".to_string()),
+            font_style: Some("italic".to_string()),
+            text_decoration_line: Some("underline".to_string()),
+            text: Some("Hello".to_string()),
+            number_of_lines: Some(2),
+            color: Some([0, 255, 0, 255]),
+            background_color: Some([255, 0, 0, 255]),
+            border_radius: Some(4.0),
+            flex: Some(1.0),
+            flex_direction: Some("row".to_string()),
+            justify_content: Some("center".to_string()),
+            align_items: Some("stretch".to_string()),
+            padding: Some(LengthValue::Px(8.0)),
+            gap: Some(LengthValue::Px(12.0)),
+            flex_grow: Some(0.5),
+            flex_shrink: Some(1.0),
+            flex_basis: Some(LengthValue::Px(200.0)),
+            flex_wrap: Some("wrap".to_string()),
+            align_self: Some("flex-start".to_string()),
+            align_content: Some("space-between".to_string()),
+            justify_self: Some("auto".to_string()),
+            justify_items: Some("start".to_string()),
+            display: Some("flex".to_string()),
+            grid_template_columns: Some("1fr 1fr".to_string()),
+            grid_template_rows: Some("auto".to_string()),
+            grid_column: Some("1".to_string()),
+            grid_row: Some("2".to_string()),
+            show_cursor: Some(true),
+            cursor_position: Some(3),
+            selection_start: Some(1),
+            selection_end: Some(5),
+            ime_preedit_start: Some(2),
+            ime_preedit_end: Some(4),
+            role: Some("button".to_string()),
+            aria_label: Some("Submit".to_string()),
+            checked: Some(true),
+            numeric_value: Some(7.5),
+            numeric_min: Some(0.0),
+            numeric_max: Some(10.0),
+            accessibility_hint: Some("Deletes this note permanently".to_string()),
+            focusable: Some(true),
+            live_region: Some("polite".to_string()),
+            role_description: Some("line chart".to_string()),
+            expanded: Some(true),
+            placeholder: Some("Search notes".to_string()),
+            text_align: Some("center".to_string()),
+            border_width: Some(2.0),
+            border_color: Some([0, 0, 255, 255]),
+            clip: Some(true),
+            scroll_offset_y: Some(100.0),
+            image_id: Some(42),
+            image_resize_mode: Some("cover".to_string()),
+            z_index: Some(-3),
+            draggable: Some(true),
+            pressable: Some(true),
+            test_id: Some("submit-btn".to_string()),
+            text_scroll_x: Some(12.5),
+            camera_handle: Some(7),
+            mirror: Some(false),
+            video_handle: Some(8),
+            webview_src: Some("https://example.com".to_string()),
+            webview_html: Some("<p>hi</p>".to_string()),
+            webview_opts: Some("{\"x\":1}".to_string()),
+            margin: Some(LengthValue::Px(10.0)),
+            margin_horizontal: Some(LengthValue::Px(5.0)),
+            margin_vertical: Some(LengthValue::Percent(0.01)),
+            margin_left: Some(LengthValue::Px(1.0)),
+            margin_right: Some(LengthValue::Px(2.0)),
+            margin_top: Some(LengthValue::Px(3.0)),
+            margin_bottom: Some(LengthValue::Px(4.0)),
+            padding_horizontal: Some(LengthValue::Px(6.0)),
+            padding_vertical: Some(LengthValue::Px(7.0)),
+            padding_left: Some(LengthValue::Px(8.0)),
+            padding_right: Some(LengthValue::Px(9.0)),
+            padding_top: Some(LengthValue::Percent(0.01)),
+            padding_bottom: Some(LengthValue::Px(11.0)),
+            min_width: Some(LengthValue::Px(10.0)),
+            min_height: Some(LengthValue::Px(20.0)),
+            max_width: Some(LengthValue::Percent(0.3)),
+            max_height: Some(LengthValue::Px(40.0)),
+            overflow: Some("hidden".to_string()),
+            hidden: Some(false),
+            disabled: Some(true),
+            pointer_events: Some("auto".to_string()),
+            opacity: Some(0.5),
+            transition_ms: Some(250),
+            transition_property: Some("opacity,transform".to_string()),
+            transition_easing: Some("ease-in-out".to_string()),
+            animation_keyframes: Some(r#"[[0,{"opacity":0}],[1,{"opacity":1}]]"#.to_string()),
+            animation_ms: Some(800),
+            animation_easing: Some("linear".to_string()),
+            animation_iterations: Some(-1.0),
+            animation_direction: Some("alternate".to_string()),
+            animation_fill: Some("forwards".to_string()),
+            box_shadow: Some("2px 3px #000000".to_string()),
+            background_gradient: Some("#ff0000 #0000ff".to_string()),
+            position: Some("absolute".to_string()),
+            top: Some(LengthValue::Px(1.0)),
+            left: Some(LengthValue::Percent(0.02)),
+            right: Some(LengthValue::Px(3.0)),
+            bottom: Some(LengthValue::Px(4.0)),
+            transform: Some("translate(10,20) rotate(45)".to_string()),
+            box_sizing: Some("border-box".to_string()),
+            scrollbar_width: Some(9.0),
+            scrollbar_color: Some("#888888".to_string()),
+            show_scrollbar: Some(false),
+        };
+        assert_eq!(props, expected);
     }
 }

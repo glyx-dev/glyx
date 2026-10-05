@@ -61,6 +61,29 @@ pub trait JsRuntime {
     /// Push an input event so JS can poll it via `__glyx_pollEvents()`.
     fn push_event(&self, event: InputEvent);
 
+    /// Push a `CursorMoved` event, coalescing with an already-queued
+    /// `CursorMoved` at the TAIL of the queue by overwriting it in place,
+    /// instead of appending a new one. A fast mouse move (especially on a
+    /// high-poll-rate mouse) can generate many `CursorMoved` events within
+    /// a single rendered frame; only the LATEST position/target matters to
+    /// anything that consumes it (hover state, drag routing), so forwarding
+    /// every intermediate one across the native/JS boundary — building a JS
+    /// object for each, on both engines — was pure waste. Only coalesces
+    /// with the tail specifically: if something else (a click, a key) was
+    /// queued in between two cursor moves, that event sits between them and
+    /// this correctly appends a fresh entry instead of clobbering it.
+    ///
+    /// Default (not per-engine) implementation — both backends share the
+    /// same `EventQueue` shape via `events()`, so there's nothing engine-
+    /// specific to override here. Delegates to `coalesce_cursor_moved`
+    /// (a free function, not a trait method) so the actual logic is
+    /// unit-testable without a full `JsRuntime` mock.
+    fn push_cursor_moved(&self, x: f32, y: f32, target: Option<u32>) {
+        let events = self.events();
+        let mut q = events.lock();
+        coalesce_cursor_moved(&mut q, x, y, target);
+    }
+
     // ── Layout cache ──────────────────────────────────────────────────────
 
     /// Store a node's resolved layout rectangle for JS hit-testing.
@@ -96,6 +119,19 @@ pub trait JsRuntime {
     /// short-lived React render objects outpacing incremental GC.
     fn gc_hint(&mut self);
 
+    // ── CPU profiling (DevTools, dev builds) ─────────────────────────────────
+
+    /// Start sampling the JS stack every `interval_us`. Engines without a
+    /// sampling profiler (QuickJS) say so.
+    fn profile_start(&mut self, _interval_us: u32) -> Result<(), String> {
+        Err("CPU profiling needs the V8 engine; this app runs on QuickJS".into())
+    }
+
+    /// Stop sampling and return the profile, in Chrome's `cpuProfile` format.
+    fn profile_stop(&mut self) -> Result<serde_json::Value, String> {
+        Err("not recording".into())
+    }
+
     // ── Shared-state accessors ────────────────────────────────────────────
     // These Arc clones let `Box<dyn JsRuntime>` consumers read shared state
     // without downcasting. glyx-core currently uses the concrete type alias
@@ -110,4 +146,81 @@ pub trait JsRuntime {
     fn video_events(&self) -> crate::bindings::VideoEvents;
     fn raycast_requests(&self) -> crate::bindings::RaycastRequestQueue;
     fn raycast_results(&self) -> crate::bindings::RaycastResults;
+}
+
+/// Overwrites a `CursorMoved` at the tail of `q` in place, or appends a new
+/// one if the tail isn't a `CursorMoved` (queue empty, or the last queued
+/// event is something else — a click, a key, etc. — that must not be
+/// clobbered). Extracted from `JsRuntime::push_cursor_moved` as a free
+/// function so this logic is unit-testable directly, without a full
+/// `JsRuntime` mock.
+pub fn coalesce_cursor_moved(q: &mut VecDeque<InputEvent>, x: f32, y: f32, target: Option<u32>) {
+    if let Some(InputEvent::CursorMoved { x: lx, y: ly, target: lt }) = q.back_mut() {
+        *lx = x;
+        *ly = y;
+        *lt = target;
+        return;
+    }
+    q.push_back(InputEvent::CursorMoved { x, y, target });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Rust warns on matching float literals directly in patterns, so pull
+    // the fields out via `if let` and compare with `assert_eq!` instead.
+    fn as_cursor_moved(ev: &InputEvent) -> (f32, f32, Option<u32>) {
+        match ev {
+            InputEvent::CursorMoved { x, y, target } => (*x, *y, *target),
+            other => panic!("expected CursorMoved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn appends_when_queue_is_empty() {
+        let mut q: VecDeque<InputEvent> = VecDeque::new();
+        coalesce_cursor_moved(&mut q, 1.0, 2.0, Some(5));
+        assert_eq!(q.len(), 1);
+        assert_eq!(as_cursor_moved(&q[0]), (1.0, 2.0, Some(5)));
+    }
+
+    #[test]
+    fn coalesces_consecutive_cursor_moves_into_one() {
+        let mut q: VecDeque<InputEvent> = VecDeque::new();
+        coalesce_cursor_moved(&mut q, 1.0, 1.0, None);
+        coalesce_cursor_moved(&mut q, 2.0, 2.0, Some(7));
+        coalesce_cursor_moved(&mut q, 3.0, 3.0, Some(9));
+        // Three moves in a row within one frame collapse to a single
+        // queued event holding only the LATEST position/target.
+        assert_eq!(q.len(), 1);
+        assert_eq!(as_cursor_moved(&q[0]), (3.0, 3.0, Some(9)));
+    }
+
+    #[test]
+    fn does_not_clobber_a_different_event_queued_in_between() {
+        let mut q: VecDeque<InputEvent> = VecDeque::new();
+        coalesce_cursor_moved(&mut q, 1.0, 1.0, None);
+        q.push_back(InputEvent::MouseButton { x: 1.0, y: 1.0, button: 0, pressed: true, target: None });
+        coalesce_cursor_moved(&mut q, 2.0, 2.0, None);
+        // The click sitting between the two moves must survive untouched,
+        // and the second move must append rather than overwrite it.
+        assert_eq!(q.len(), 3);
+        assert_eq!(as_cursor_moved(&q[0]), (1.0, 1.0, None));
+        assert!(matches!(q[1], InputEvent::MouseButton { .. }));
+        assert_eq!(as_cursor_moved(&q[2]), (2.0, 2.0, None));
+    }
+
+    #[test]
+    fn preserves_events_queued_before_an_unrelated_cursor_moved_run() {
+        // A scroll event queued first, then a burst of cursor moves — the
+        // scroll must stay put; only the moves after it coalesce together.
+        let mut q: VecDeque<InputEvent> = VecDeque::new();
+        q.push_back(InputEvent::Scroll { delta_y: 10.0 });
+        coalesce_cursor_moved(&mut q, 1.0, 1.0, None);
+        coalesce_cursor_moved(&mut q, 2.0, 2.0, None);
+        assert_eq!(q.len(), 2);
+        assert!(matches!(q[0], InputEvent::Scroll { .. }));
+        assert_eq!(as_cursor_moved(&q[1]), (2.0, 2.0, None));
+    }
 }

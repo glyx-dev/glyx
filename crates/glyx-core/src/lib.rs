@@ -99,14 +99,32 @@ pub use glyx_shell::RenderMode;
 mod config;
 mod state;
 mod dev_mode;
+#[cfg(feature = "dev")]
+mod devtools;
+#[cfg(feature = "dev")]
+mod devtools_inspect;
+#[cfg(feature = "dev")]
+mod devtools_perf;
+#[cfg(feature = "dev")]
+mod devtools_layout;
+#[cfg(feature = "dev")]
+mod devtools_net;
+#[cfg(feature = "dev")]
+mod devtools_caps;
+mod av_clock;
 mod scene;
+mod canvas_damage;
+mod damage_rects;
 mod layout;
 mod render;
+mod render_props;
+mod motion;
 mod soft_present;
 #[cfg(target_os = "windows")]
 mod d2d_present;
 #[cfg(feature = "a11y")]
 mod a11y;
+mod focus;
 
 use self::config::*;
 use self::state::*;
@@ -115,8 +133,18 @@ use self::dev_mode::*;
 #[cfg(feature = "dev")]
 use arboard;
 
-use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, snapshot_resolved, tick_opacity_transitions};
-use layout::{recompute_layout, update_scroll_positions};
+use scene::{apply_scene_commands, update_dirty_from_layout, build_dirty_subtrees, reconcile_z_order, snapshot_resolved, tick_transitions, hit_test_solid, shrink_oversized_collections};
+use focus::{focus_order, next_focus, sort_by_position};
+use layout::{recompute_layout, update_scroll_positions, scroll_reveal_target};
+
+/// Named-pipe path for single-instance IPC. Pipe names MUST start with
+/// `\\.\pipe\` (two leading backslashes); a single one is an invalid path, so
+/// creating the pipe failed (os error 123) and single-instance + deep-link
+/// hand-off never worked on Windows.
+#[cfg(target_os = "windows")]
+fn windows_pipe_name(app_name: &str) -> String {
+    format!(r"\\.\pipe\glyx-{app_name}")
+}
 
 // ── F1: Windows named-pipe DACL restricted to current user ───────────────────
 //
@@ -381,6 +409,8 @@ struct CachedLabel {
     layout: TextLayout,
     /// Pre-computed advance width for horizontal centering.
     width:       f64,
+    /// Width including trailing whitespace (single-line spans measure by it).
+    full_width:  f64,
     /// Parley's full line-box height including all wrapped lines.
     /// Used to detect whether the layout box was auto-sized to the text —
     /// in which case we top-align rather than center-align vertically.
@@ -398,6 +428,7 @@ impl CachedLabel {
     fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4], bold: bool, italic: bool, line_height: Option<f32>) -> Self {
         let layout      = ts.styled_label(text, font_size, max_width, bold, italic, line_height);
         let width       = layout.width() as f64;
+        let full_width  = layout.full_width() as f64;
         let text_height = layout.height() as f64;
         // For an empty string Parley produces no glyph runs, so ascent() = 0.
         // Shape a reference "M" at the same size to get the real font ascent.
@@ -412,6 +443,7 @@ impl CachedLabel {
         Self {
             layout,
             width,
+            full_width,
             text_height,
             cursor_top:    cursor_top_raw    as f64,
             cursor_height: cursor_height_raw as f64,
@@ -491,6 +523,21 @@ fn composite_splash_frame(
 /// Returns `true` if any descendant of `id` with `pressable=true` covers (cx, cy).
 /// Used by the drag check to yield window-drag priority to interactive children
 /// inside a `glyxDraggable` region (e.g. buttons inside a custom title bar).
+/// Fill `slot` with the just-rendered `texture`'s pixels, once, if a
+/// screenshot was requested (`slot.result` still empty). Call right before
+/// `texture.present()` on every wgpu present path — see `PerWindowState::gpu_screenshot`.
+#[cfg(feature = "dev")]
+fn capture_gpu_screenshot(
+    slot: &mut Option<GpuScreenshotSlot>,
+    gpu: &GpuContext,
+    texture: &glyx_gpu::wgpu::SurfaceTexture,
+) {
+    let Some(slot) = slot.as_mut() else { return };
+    if slot.result.is_some() { return; }
+    let (w, h) = (texture.texture.width(), texture.texture.height());
+    slot.result = Some((w, h, gpu.read_texture_rgba(&texture.texture, w, h)));
+}
+
 fn has_pressable_descendant_at(
     id:     u32,
     cx:     f32,
@@ -516,6 +563,16 @@ fn has_pressable_descendant_at(
         }
     }
     false
+}
+
+/// After focus moves to `id` (Tab/Shift+Tab, AT-driven focus, or focus
+/// survival on node removal), scroll it into view if it's outside its
+/// nearest scrollable ancestor's viewport. Shared by all three call sites
+/// so the behavior — and any future fix to it — stays in exactly one place.
+fn reveal_focus_if_needed(s: &PerWindowState, id: u32) {
+    if let Some((scroll_id, new_scroll_y)) = scroll_reveal_target(s, id) {
+        s.runtime.push_event(InputEvent::ScrollIntoView { node_id: scroll_id, scroll_y: new_scroll_y });
+    }
 }
 
 /// Try to start a scrollbar interaction at the current cursor position.
@@ -546,14 +603,12 @@ fn try_start_scrollbar_drag(s: &mut PerWindowState) -> Option<ScrollbarDragState
             let scroll_y = node.props.scroll_offset_y.unwrap_or(0.0) as f64;
             // Content height from raw Taffy child rects (scroll-independent).
             let Some(lid) = node.layout_id else { continue };
-            let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == lid) else { continue };
+            let Some(rl) = s.resolved_rect(lid) else { continue };
             let max_child_bottom: f64 = node.children.iter()
                 .filter_map(|&cid| {
                     let cn   = s.js_nodes.get(&cid)?;
                     let clid = cn.layout_id?;
-                    s.resolved.iter()
-                        .find(|(nid, _)| *nid == clid)
-                        .map(|(_, crl)| (crl.y + crl.height) as f64)
+                    s.resolved_rect(clid).map(|crl| (crl.y + crl.height) as f64)
                 })
                 .fold(f64::NEG_INFINITY, f64::max);
             if !max_child_bottom.is_finite() { continue; }
@@ -803,13 +858,20 @@ pub fn run(mut config: AppConfig) -> bool {
         glyx_security::init(caps);
     }
 
+    // ── Autostart: tell the app it was started at login, not by hand ──
+    if glyx_runtime::autostart::was_opened_at_login() {
+        #[allow(unused_unsafe)]
+        unsafe { std::env::set_var("GLYX_OPENED_AT_LOGIN", "1"); }
+        log::info!("glyx: started at login ({} on the command line)", glyx_runtime::autostart::AUTOSTART_ARG);
+    }
+
     // ── Deep link: check launch args for a URL matching the configured scheme ──
     //
     // M4: Single-instance deep-link IPC via named pipe (Windows) or Unix socket
     // (Linux/macOS) instead of TCP.  Named IPC has no discoverable port and no
     // race window between reading the port file and connecting.
     //
-    //   Windows: \.\pipe\glyx-{app_name}
+    //   Windows: \\.\pipe\glyx-{app_name}
     //   Unix:    /tmp/.glyx-{app_name}.sock  (or $XDG_RUNTIME_DIR/... if set)
     //
     // The variable carries the IPC name so the async listener can be created
@@ -837,7 +899,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     .unwrap_or_else(|| "glyx-app".to_string());
 
                 #[cfg(target_os = "windows")]
-                let ipc_name = format!(r"\.\pipe\glyx-{}", app_name);
+                let ipc_name = windows_pipe_name(&app_name);
 
                 #[cfg(not(target_os = "windows"))]
                 let ipc_name = {
@@ -959,6 +1021,7 @@ pub fn run(mut config: AppConfig) -> bool {
     let window_bg = window.background_color;
     // Capture configured mode; Auto is resolved after GPU adapter is known.
     let render_mode_config = window.render_mode;
+    let max_fps = window.max_fps;
     // Canvas2D transport config — applied to each runtime after construction.
     let canvas_protocol  = window.canvas_protocol.clone();
     let canvas_buffer_kb = window.canvas_buffer_kb.unwrap_or(256) as usize;
@@ -995,12 +1058,20 @@ pub fn run(mut config: AppConfig) -> bool {
     // entire run when no splash is configured, or once handed off.
     let mut pending_splash: Option<(Arc<winit::window::Window>, soft_present::SoftPresent)> = None;
 
+    // GDP devtools server (`GLYX_DEVTOOLS_PORT`): started on the first
+    // WindowReady, the first point where an event-loop proxy exists to wake
+    // an idle app when a request arrives.
+    #[cfg(feature = "dev")]
+    let mut devtools: Option<devtools::Devtools> = None;
+    #[cfg(feature = "dev")]
+    let mut devtools_started = false;
+
     let restart = glyx_shell::run(window, move |event| {
         match event {
             // ── Pre-init splash window — paint it immediately, before any
             // GPU/JS setup for the real main window even starts. ──────────
             ShellEvent::SplashWindowReady { window } => {
-                match soft_present::SoftPresent::new(Arc::clone(&window)) {
+                match soft_present::SoftPresent::new(Arc::clone(&window), max_fps) {
                     Ok(mut sp) => {
                         let (w, h) = (sp.width(), sp.height());
                         if let Some(splash) = &mut main_splash_state {
@@ -1016,6 +1087,11 @@ pub fn run(mut config: AppConfig) -> bool {
             }
             // ── Window ready — initialise per-window subsystems ──────────
             ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy, #[cfg(feature = "a11y")] a11y_update } => {
+                #[cfg(feature = "dev")]
+                if !devtools_started {
+                    devtools_started = true;
+                    devtools = devtools::Devtools::start_from_env(&tokio_handle, ev_proxy.clone());
+                }
                 // Resolve RenderMode → BackendKind.
                 // GLYX_CPU_RENDER=1 forces the cheapest CPU path (TinySkia) for
                 // CI, headless testing, or machines without a supported GPU.
@@ -1065,7 +1141,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     .map(|v| v.trim() == "1").unwrap_or(false);
                 let (present, mut renderer) =
                     if matches!(backend_kind, BackendKind::TinySkia) && !no_soft {
-                        match soft_present::SoftPresent::new(Arc::clone(&window)) {
+                        match soft_present::SoftPresent::new(Arc::clone(&window), max_fps) {
                             Ok(sp) => {
                                 let size = window.inner_size();
                                 let r = AnyRenderer::TinySkia(
@@ -1279,17 +1355,18 @@ pub fn run(mut config: AppConfig) -> bool {
                     if let Some(ipc_name) = single_instance_ipc.take() {
                         let queue_clone = rt.deeplink_url_queue();
 
-                        // F1: Build SD before spawning to avoid holding *mut c_void across await.
-                        // Transmit as usize (Send); valid for the lifetime of sd_guard below.
+                        // F1: Build SD before spawning. The guard moves into the
+                        // listener task (it's Send), so the descriptor lives as long
+                        // as the pipes made with it. (It used to be dropped right
+                        // after spawning: every pipe then read freed memory and
+                        // failed with "The revision level is unknown".)
                         #[cfg(target_os = "windows")]
-                        let (_sd_guard, sd_ptr_usize) = {
-                            let g = pipe_dacl::current_user_only_sd();
-                            let p = g.as_ref().map(|sd| sd.ptr as usize).unwrap_or(0);
-                            (g, p)
-                        };
+                        let sd_guard = pipe_dacl::current_user_only_sd();
 
                         tokio_handle.spawn(async move {
                             use tokio::io::AsyncBufReadExt;
+                            #[cfg(target_os = "windows")]
+                            let sd_ptr_usize = sd_guard.as_ref().map(|sd| sd.ptr as usize).unwrap_or(0);
 
                             #[cfg(target_os = "windows")]
                             {
@@ -1381,7 +1458,15 @@ pub fn run(mut config: AppConfig) -> bool {
                 // `dev`-only — write-only (and warns) otherwise.
                 #[cfg(feature = "dev")]
                 let mut initial_eval_error: Option<String> = None;
+                // Lets the React host config keep what devtools needs (node →
+                // component names) only when a devtools server is running.
+                #[cfg(feature = "dev")]
+                if std::env::var_os("GLYX_DEVTOOLS_PORT").is_some() {
+                    let _ = rt.eval("globalThis.__glyx_devtools = true;");
+                }
                 if let Some(ref js) = *js_src_arc {
+                    #[cfg(feature = "dev")]
+                    let js = &*devtools::prepare_bundle(js);
                     match rt.eval(js) {
                         Ok(_)  => log::info!("Window {}: JS eval complete.", window_handle),
                         Err(e) => {
@@ -1430,9 +1515,20 @@ pub fn run(mut config: AppConfig) -> bool {
                     layout_dirty:           true,
                     layout_structure_dirty: true,
                     resolved:               Vec::new(),
+                    resolved_by_id:         std::collections::HashMap::new(),
+                    z_order:                std::collections::HashMap::new(),
+                    z_order_dirty:          std::collections::HashSet::new(),
                     js_nodes:     std::collections::HashMap::with_capacity(256),
                     js_root:      None,
-                    opacity_transitions: std::collections::HashMap::new(),
+                    transitions: std::collections::HashMap::new(),
+                    scroll_springs: std::collections::HashMap::new(),
+                    canvas_tweens: std::collections::HashMap::new(),
+                    canvas_size: std::collections::HashMap::new(),
+                    canvas_cadence: std::collections::HashMap::new(),
+                    canvas_drawn: std::collections::HashMap::new(),
+                    precise_scroll_frames: 0,
+                    animations:  std::collections::HashMap::new(),
+                    motion_clock: Default::default(),
                     images:       std::collections::HashMap::with_capacity(32),
                     images_by_path: ByteBudgetImageCache::new(256 * 1024 * 1024),
                     image_cache_hits: 0,
@@ -1454,10 +1550,16 @@ pub fn run(mut config: AppConfig) -> bool {
                     last_trim_reserved_bytes: 0,
                     cursor_node_rect:      None,
                     focused_node:          None,
+                    focus_visible:         false,
+                    shift_down:            false,
                     #[cfg(feature = "a11y")]
                     a11y_update,
                     #[cfg(feature = "a11y")]
                     a11y_dirty: true, // force the first-ever tree push
+                    #[cfg(feature = "a11y")]
+                    a11y_text: std::collections::HashMap::new(),
+                    #[cfg(feature = "a11y")]
+                    a11y_next_run_id: a11y::RUN_ID_BASE,
                     cursor_blink_tx:       None,
                     perf:          shared_perf,
                     rss_bytes:     {
@@ -1518,11 +1620,35 @@ pub fn run(mut config: AppConfig) -> bool {
                     descendant_cascade_nodes: std::collections::HashSet::new(),
                     dirty_subtrees:           std::collections::HashSet::new(),
                     prev_resolved:   std::collections::HashMap::new(),
+                    prev_visual:     std::collections::HashMap::new(),
                     scene_cache:              std::collections::HashMap::new(),
                     scene_cache_new:          std::collections::HashMap::new(),
                     boundary_scene_cache:     std::collections::HashMap::new(),
                     boundary_scene_cache_new: std::collections::HashMap::new(),
                     pipeline_cache_saved:     false,
+                    #[cfg(feature = "dev")]
+                    #[cfg(feature = "dev")]
+                    devtools_highlight: None,
+                    #[cfg(feature = "dev")]
+                    damage_log: None,
+                    #[cfg(feature = "dev")]
+                    inspect_mode: false,
+                    #[cfg(feature = "dev")]
+                    inspect_events: Vec::new(),
+                    #[cfg(feature = "dev")]
+                    tree_version: 0,
+                    #[cfg(feature = "dev")]
+                    devtools_notify: None,
+                    #[cfg(feature = "dev")]
+                    paint_flash: false,
+                    #[cfg(feature = "dev")]
+                    flashes: Vec::new(),
+                    #[cfg(feature = "dev")]
+                    overlay_was_drawn: false,
+                    #[cfg(feature = "dev")]
+                    frame_details: None,
+                    #[cfg(feature = "dev")]
+                    gpu_screenshot: None,
                     #[cfg(feature = "dev")]
                     dev_mode: if window_handle == 0 {
                         // Hot-reload dev overlay is only wired to the main window.
@@ -1564,6 +1690,17 @@ pub fn run(mut config: AppConfig) -> bool {
 
             // ── Resize ────────────────────────────────────────────────────
             ShellEvent::Resized { window_handle, width, height } => {
+                // Minimizing reports a 0×0 size (Windows/winit). That's not a
+                // layout the app should ever run at: treating it as a resize
+                // clamped the surface to 1×1, re-laid out the whole tree for a
+                // 1px-wide window and told JS the window was 0 wide — multiline
+                // text reflowed to one word per line, and on restore that
+                // collapsed layout was briefly drawn before the real size
+                // arrived. Keep the last real size instead; restoring to the
+                // same size is then a no-op, so nothing stale is ever shown.
+                if width == 0 || height == 0 {
+                    return;
+                }
                 if let Some(s) = windows.get_mut(&window_handle) {
                     let prev_w = s.gpu.width();
                     let prev_h = s.gpu.height();
@@ -1578,14 +1715,30 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Cursor movement ───────────────────────────────────────────
             ShellEvent::CursorMoved { window_handle, x, y } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    // Devtools select mode: outline what's under the pointer;
+                    // the app doesn't see the move.
+                    #[cfg(feature = "dev")]
+                    if s.inspect_mode {
+                        s.cursor_x = x as f32;
+                        s.cursor_y = y as f32;
+                        let hit = hit_test_solid(s, s.cursor_x, s.cursor_y);
+                        if hit != s.devtools_highlight {
+                            s.devtools_highlight = hit;
+                            (s.request_redraw)();
+                        }
+                        return;
+                    }
                     let prev_x = s.cursor_x;
                     let prev_y = s.cursor_y;
                     s.cursor_x = x as f32;
                     s.cursor_y = y as f32;
-                    s.runtime.push_event(InputEvent::CursorMoved {
-                        x: s.cursor_x,
-                        y: s.cursor_y,
-                    });
+                    let target = hit_test_solid(s, s.cursor_x, s.cursor_y);
+                    // Coalescing push (Work Item 10) — see
+                    // `JsRuntime::push_cursor_moved`'s doc comment. Collapses
+                    // multiple cursor moves arriving within one rendered
+                    // frame into a single queued event instead of one per
+                    // native motion notification.
+                    s.runtime.push_cursor_moved(s.cursor_x, s.cursor_y, target);
 
                     // Scrollbar thumb drag
                     if let Some(ref drag) = s.scrollbar_drag {
@@ -1618,6 +1771,20 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Mouse button ──────────────────────────────────────────────
             ShellEvent::MouseInput { window_handle, button, pressed } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    // Devtools select mode: a left click picks the element
+                    // under the pointer instead of reaching the app.
+                    #[cfg(feature = "dev")]
+                    if s.inspect_mode {
+                        if pressed && button == 0 {
+                            if let Some(hit) = hit_test_solid(s, s.cursor_x, s.cursor_y) {
+                                s.inspect_events.push(crate::state::InspectEvent::Picked(hit));
+                                (s.request_redraw)();
+                            }
+                        }
+                        return;
+                    }
+                    // Matches JS clearing the ring on any click (events.js).
+                    if pressed { s.focus_visible = false; }
                     // Native fallback close control (see CLOSE_BTN_SIZE doc)
                     // — only live when JS has never rendered anything, so it
                     // can never intercept a real app's own clicks.
@@ -1656,8 +1823,9 @@ pub fn run(mut config: AppConfig) -> bool {
                                 drag_fn();
                                 // Still send MouseButton so onPressIn handlers fire, but
                                 // do NOT start a DragStart — the OS owns this drag now.
+                                let target = hit_test_solid(s, cx, cy);
                                 s.runtime.push_event(InputEvent::MouseButton {
-                                    x: cx, y: cy, button, pressed,
+                                    x: cx, y: cy, button, pressed, target,
                                 });
                                 return;
                             }
@@ -1678,8 +1846,9 @@ pub fn run(mut config: AppConfig) -> bool {
                         }
                     }
 
+                    let target = hit_test_solid(s, s.cursor_x, s.cursor_y);
                     s.runtime.push_event(InputEvent::MouseButton {
-                        x: s.cursor_x, y: s.cursor_y, button, pressed,
+                        x: s.cursor_x, y: s.cursor_y, button, pressed, target,
                     });
                     // Track left-button drag state (button == 0).
                     if button == 0 {
@@ -1703,6 +1872,16 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Keyboard ──────────────────────────────────────────────────
             ShellEvent::KeyInput { window_handle, key, text, pressed } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    // Devtools select mode: Escape cancels it; other keys
+                    // don't reach the app meanwhile.
+                    #[cfg(feature = "dev")]
+                    if s.inspect_mode {
+                        if pressed && key == "Escape" {
+                            s.inspect_events.push(crate::state::InspectEvent::Cancelled);
+                            (s.request_redraw)();
+                        }
+                        return;
+                    }
                     // Same native fallback as the close control drawn/hit-tested
                     // above: Escape closes the app, but only while JS has never
                     // rendered a scene — never intercepts a real app's own
@@ -1710,6 +1889,51 @@ pub fn run(mut config: AppConfig) -> bool {
                     if key.as_str() == "Escape" && pressed && !s.decorations && s.js_root.is_none() {
                         (s.quit_fn)();
                         return;
+                    }
+
+                    match key.as_str() {
+                        "ShiftLeft" | "ShiftRight" => s.shift_down = pressed,
+                        "Tab" if pressed => {
+                            if let Some(root) = s.js_root {
+                                let mut order = focus_order(&s.js_nodes, root);
+                                // Reorder into visual (top-to-bottom, left-to-right)
+                                // order — the raw BFS order follows scene-graph
+                                // child-list order, which doesn't reliably match
+                                // on-screen layout (e.g. a toolbar row can sit
+                                // after a sibling list container there despite
+                                // rendering above it).
+                                let positions: std::collections::HashMap<u32, (f32, f32)> = order
+                                    .iter()
+                                    .filter_map(|&id| {
+                                        let node = s.js_nodes.get(&id)?;
+                                        let rl = s.resolved_rect(node.layout_id?)?;
+                                        Some((id, (rl.y, rl.x)))
+                                    })
+                                    .collect();
+                                sort_by_position(&mut order, &positions);
+                                let target = next_focus(&order, s.focused_node, s.shift_down);
+                                if target != s.focused_node {
+                                    s.focused_node = target;
+                                    s.window.set_ime_allowed(target.is_some());
+                                    // Reuses the same event JS already handles for
+                                    // AT-driven focus moves (see events.js's
+                                    // 'accessibilityFocus' case, which calls the JS
+                                    // focus tracker's `setFocus` so onFocus/styling
+                                    // fire) — Tab navigation needs identical JS-side
+                                    // behavior and shouldn't require the `a11y`
+                                    // feature to work.
+                                    s.focus_visible = target.is_some();
+                                    if let Some(id) = target {
+                                        s.runtime.push_event(InputEvent::AccessibilityFocus { node_id: id });
+                                        reveal_focus_if_needed(s, id);
+                                    }
+                                    #[cfg(feature = "a11y")]
+                                    { s.a11y_dirty = true; }
+                                    (s.request_redraw)();
+                                }
+                            }
+                        }
+                        _ => {}
                     }
 
                     #[cfg(feature = "dev")]
@@ -1743,14 +1967,16 @@ pub fn run(mut config: AppConfig) -> bool {
 
             // ── Accessibility action requests (screen reader, etc.) ──────
             #[cfg(feature = "a11y")]
-            ShellEvent::AccessibilityAction { window_handle, target, action, numeric_value } => {
+            ShellEvent::AccessibilityAction { window_handle, target, action, numeric_value, text_selection } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
                     match action.as_str() {
                         "focus" => {
                             if s.js_nodes.contains_key(&target) {
                                 s.focused_node = Some(target);
+                                s.focus_visible = true;
                                 s.window.set_ime_allowed(true);
                                 s.runtime.push_event(InputEvent::AccessibilityFocus { node_id: target });
+                                reveal_focus_if_needed(s, target);
                                 // This path bypasses apply_scene_commands (which
                                 // marks a11y_dirty for SceneCommand-driven focus
                                 // changes), so the AT-driven focus move would
@@ -1763,23 +1989,48 @@ pub fn run(mut config: AppConfig) -> bool {
                         "click" => {
                             if let Some(node) = s.js_nodes.get(&target) {
                                 if let Some(layout_id) = node.layout_id {
-                                    if let Some((_, rl)) = s.resolved.iter().find(|(nid, _)| *nid == layout_id) {
+                                    if let Some(rl) = s.resolved_rect(layout_id) {
                                         let cx = rl.x + rl.width  / 2.0;
                                         let cy = rl.y + rl.height / 2.0;
-                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: true });
-                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: false });
+                                        // AT-driven click already names its target explicitly —
+                                        // no need to hit-test a point we picked ourselves.
+                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: true, target: Some(target) });
+                                        s.runtime.push_event(InputEvent::MouseButton { x: cx, y: cy, button: 0, pressed: false, target: Some(target) });
                                         (s.request_redraw)();
                                     }
                                 }
                             }
                         }
-                        // Increment/Decrement/SetValue don't have a generic
-                        // scene-graph meaning (unlike click, which is just a
-                        // synthesized mouse event) — the actual step/range
-                        // logic lives in the JS control (e.g. Slider knows
-                        // its own min/max/step), so these are just forwarded
-                        // for JS's a11yValueRegistry to act on.
-                        "increment" | "decrement" | "setValue" => {
+                        // Increment/Decrement/SetValue/Expand/Collapse don't
+                        // have a generic scene-graph meaning (unlike click,
+                        // which is just a synthesized mouse event) — the
+                        // actual behavior lives in the JS control (e.g.
+                        // Slider knows its own step; an accordion knows what
+                        // "expanded" should render as), so these are just
+                        // forwarded for JS's a11yValueRegistry to act on.
+                        // Screen reader moved/extended the selection in a text
+                        // field. Positions name AccessKit text-run nodes, which
+                        // only the field that built them can map back — try
+                        // the target first (usually the field itself), then
+                        // every exposed field (the target can be a run node).
+                        "setTextSelection" => {
+                            if let Some(sel) = text_selection {
+                                let candidates: Vec<u32> = std::iter::once(target)
+                                    .chain(s.a11y_text.keys().copied().filter(|&f| f != target))
+                                    .collect();
+                                for field in candidates {
+                                    if let Some((anchor, focus)) = a11y::selection_from_access(s, field, &sel) {
+                                        s.runtime.push_event(InputEvent::AccessibilityTextSelection {
+                                            node_id: field, anchor, focus,
+                                        });
+                                        s.a11y_dirty = true;
+                                        (s.request_redraw)();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        "increment" | "decrement" | "setValue" | "expand" | "collapse" => {
                             if s.js_nodes.contains_key(&target) {
                                 s.runtime.push_event(InputEvent::AccessibilityValueChange {
                                     node_id: target,
@@ -1811,14 +2062,23 @@ pub fn run(mut config: AppConfig) -> bool {
             }
 
             // ── Scroll ────────────────────────────────────────────────────
-            ShellEvent::Scroll { window_handle, delta_y } => {
+            ShellEvent::Scroll { window_handle, delta_y, precise } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
+                    // The JS handler runs on the next frame, and React may commit
+                    // the new offset a frame after that: hold across a few frames.
+                    s.precise_scroll_frames = if precise { scene::PRECISE_SCROLL_FRAMES } else { 0 };
                     s.runtime.push_event(InputEvent::Scroll { delta_y });
                 }
             }
 
             // ── Draw ──────────────────────────────────────────────────────
+            ShellEvent::Wake => {
+                #[cfg(feature = "dev")]
+                if let Some(d) = devtools.as_mut() { d.pump(&mut windows); }
+            }
             ShellEvent::RedrawRequested { window_handle } => {
+                #[cfg(feature = "dev")]
+                if let Some(d) = devtools.as_mut() { d.pump(&mut windows); }
                 let Some(s) = windows.get_mut(&window_handle) else { return };
 
                 #[cfg(feature = "dev")]
@@ -1889,21 +2149,48 @@ pub fn run(mut config: AppConfig) -> bool {
                 #[cfg(feature = "dev")]
                 if let Some(err) = frame_tick_err {
                     if let Some(dev) = s.dev_mode.as_mut() {
+                        // The overlay only has room for part of it; the
+                        // terminal always gets the whole error, once.
+                        if dev.last_js_error.as_deref() != Some(err.as_str()) {
+                            log::error!("[JS] uncaught error:\n{err}");
+                            // …and to the console feed, so DevTools' Console shows it.
+                            glyx_runtime::log_bus::publish(Some(window_handle), &format!("[error] Uncaught {err}"));
+                        }
                         dev.last_js_error = Some(err);
                     }
                 }
                 #[cfg(not(feature = "dev"))]
                 let _ = frame_tick_err;
 
+                // 3b. Drain jobs/microtasks scheduled *during* step 3's JS callback
+                // (e.g. React's `scheduleMicrotask` — `Promise.resolve().then(fn)` —
+                // used for passive-effect flushing, or any `.then()` chain that
+                // resolves synchronously mid-callback). V8 auto-runs microtasks at
+                // each callback boundary, so step 3 alone is enough there; QuickJS
+                // requires an explicit `execute_pending_job()` drain (step 1's
+                // `tick()` only covers jobs pending *before* this frame ran). Without
+                // this, a microtask scheduled mid-frame sits queued until some
+                // *other* trigger causes another frame — nothing does that when the
+                // app is otherwise idle, so QuickJS apps would stall (observed:
+                // frames only advanced while the mouse moved over the window, since
+                // CursorMoved incidentally requests a redraw that ran step 1 again).
+                s.runtime.tick();
+
                 // 4. Post-frame commands (React re-renders from step 3 events).
                 let post_commands = s.runtime.drain_scene_commands();
                 let post_changed  = apply_scene_commands(s, post_commands);
+                s.precise_scroll_frames = s.precise_scroll_frames.saturating_sub(1);
 
-                // 4b. Advance any active opacity transitions (@glyx-dev/motion v1) —
+                // 4b. Advance any active property transitions and keyframe
+                // animations (@glyx-dev/motion) —
                 // Rust-owned interpolation, no JS re-entry. If any are still
                 // running after this tick, force this frame to render and
                 // schedule the next one (nothing else would wake the loop).
-                let transitions_active = tick_opacity_transitions(s);
+                // Smooth-scroll springs ride the same frame loop.
+                let scroll_active = scene::tick_scroll(s);
+                // Canvas tweens too (a chart easing toward its new data).
+                let canvas_active = scene::tick_canvas(s);
+                let transitions_active = tick_transitions(s) | scroll_active | canvas_active;
                 if transitions_active {
                     (s.request_redraw)();
                 }
@@ -1967,6 +2254,8 @@ pub fn run(mut config: AppConfig) -> bool {
                 // Detect any position/size changes that cascaded out of layout and
                 // add them to dirty_nodes before building the dirty subtree set.
                 update_dirty_from_layout(s);
+                // Rebuild any stale z-sorted child lists before render touches them.
+                reconcile_z_order(s);
                 build_dirty_subtrees(s);
                 let layout_time_ms = layout_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -2040,6 +2329,7 @@ pub fn run(mut config: AppConfig) -> bool {
 
                     if should_trim {
                         s.renderer.trim_resources();
+                        shrink_oversized_collections(s);
                         if let Present::Gpu(gpu) = &s.gpu { gpu.poll(); }
                         let (_, _, reserved_after, _, _) = s.gpu.memory_counters();
                         s.last_trim_reserved_bytes = reserved_after;
@@ -2058,6 +2348,9 @@ pub fn run(mut config: AppConfig) -> bool {
                         || d.last_js_error.is_some()                 // error banner active
                     }).unwrap_or(false);
                     scene_needs_gpu || overlay_refresh_due
+                        // Devtools overlays draw on top of the scene: render
+                        // while one is up, and once more after (to clear it).
+                        || s.devtools_highlight.is_some() || !s.flashes.is_empty() || s.overlay_was_drawn
                 };
                 #[cfg(not(feature = "dev"))]
                 let _needs_full_render = true;
@@ -2133,6 +2426,8 @@ pub fn run(mut config: AppConfig) -> bool {
                             if let Err(e) = s.renderer.blit_cached_frame(gpu, &texture) {
                                 log::warn!("blit_cached_frame: {e}");
                             } else {
+                                #[cfg(feature = "dev")]
+                                capture_gpu_screenshot(&mut s.gpu_screenshot, gpu, &texture);
                                 texture.present();
                                 gpu.poll();
                             }
@@ -2145,10 +2440,37 @@ pub fn run(mut config: AppConfig) -> bool {
                 }
 
                 // 9. Render JS scene graph.
-                // Sync renderer dims before begin_frame — TinySkia/FemtoVG create
-                // their per-frame buffer at their stored size; if the window was
+                // Sync renderer dims before begin_frame — TinySkia creates
+                // its per-frame buffer at their stored size; if the window was
                 // just maximized/resized, Resized only updated gpu, not the renderer.
                 s.renderer.notify_resize(s.gpu.width().max(1), s.gpu.height().max(1));
+
+                // Sample each active transition once, fresh every frame — this
+                // is the actual interpolation step. Shared by the damage
+                // analysis and the renderer so both see the same values.
+                let now = s.motion_clock.now();
+                let mut motion_overrides: std::collections::HashMap<u32, motion::Overrides> = s.transitions
+                    .iter()
+                    .map(|(&id, t)| (id, t.sample(now).0))
+                    .collect();
+                // Keyframe animations layer over transitions (CSS precedence).
+                for (&id, anim) in &s.animations {
+                    if let Some(node) = s.js_nodes.get(&id) {
+                        if let Some(ov) = anim.overrides(&motion::Visual::of(&node.props), now) {
+                            motion_overrides.entry(id).or_default().overlay(ov);
+                        }
+                    }
+                }
+                // Canvases easing toward new data draw an interpolated command
+                // list instead of their own (the target); empty when none move.
+                let canvas_anim: std::collections::HashMap<u32, Vec<CanvasCmd>> = s.canvas_tweens
+                    .iter()
+                    .filter_map(|(&id, t)| s.canvas_cmds.get(&id).map(|to| (id, t.sample(to, now).0)))
+                    .collect();
+                // For each redrawn canvas, the part of it that actually changed
+                // since it was last drawn (so a moved crosshair doesn't repaint
+                // the whole chart); a canvas not listed is damaged whole.
+                let canvas_damage = canvas_damage::plan(s, &canvas_anim, &motion_overrides);
 
                 // ── Damage computation (soft present + TinySkia only) ─────────
                 // Redraw + push only the changed region.  Full frame when the
@@ -2160,65 +2482,108 @@ pub fn run(mut config: AppConfig) -> bool {
                 // rect — captured during the previous render — to the damage
                 // union.  An idle focused editor repaints one input at 2 Hz,
                 // not the whole window.
-                let frame_damage: Option<(f64, f64, f64, f64)> = {
+                // Devtools: what the app's own changes redraw this frame, on
+                // any renderer (paint flashing, frame detail). Only computed
+                // while one of them is on.
+                #[cfg(feature = "dev")]
+                let (app_damage, dirty_list): (Option<[f64; 4]>, Option<(Vec<u32>, usize)>) =
+                    if (s.paint_flash || s.frame_details.is_some()) && !s.dirty_nodes.is_empty() {
+                        let full = [0.0, 0.0, s.gpu.width() as f64, s.gpu.height() as f64];
+                        let rects = scene::compute_frame_damage(s, &motion_overrides, &canvas_damage);
+                        let area = rects.as_deref().and_then(damage_rects::bounds)
+                            .map(|(x, y, w, h)| [x, y, w, h]).unwrap_or(full);
+                        if s.paint_flash {
+                            let now = Instant::now();
+                            match &rects {
+                                Some(rs) => for r in rs { s.flashes.push(([r.0, r.1, r.2, r.3], now)); },
+                                None => s.flashes.push((full, now)),
+                            }
+                        }
+                        let list = s.frame_details.is_some().then(|| {
+                            let mut ids: Vec<u32> = s.dirty_nodes.iter().copied().collect();
+                            ids.sort_unstable();
+                            let total = ids.len();
+                            ids.truncate(200);
+                            (ids, total)
+                        });
+                        (Some(area), list)
+                    } else {
+                        (None, None)
+                    };
+
+                let frame_damage: Option<Vec<damage_rects::Rect>> = {
                     let soft = matches!(s.gpu, Present::Soft(_));
                     let splash_up = s.splash_state.as_ref().map_or(false, |sp| sp.is_visible());
                     #[cfg(feature = "dev")]
                     let overlay_up = s.dev_mode.as_ref()
-                        .map_or(false, |d| d.overlay_visible || d.last_js_error.is_some());
+                        .map_or(false, |d| d.overlay_visible || d.last_js_error.is_some())
+                        || s.devtools_highlight.is_some()
+                        || !s.flashes.is_empty()
+                        || s.overlay_was_drawn;
                     #[cfg(not(feature = "dev"))]
                     let overlay_up = false;
 
                     if !soft || splash_up || overlay_up {
                         None
                     } else {
-                        // Dirty-node contribution: empty set → no rect;
-                        // non-empty → union rect, or bail (full frame).
-                        let dirty_damage: Option<Option<(f64, f64, f64, f64)>> =
+                        // Dirty-node contribution: empty set → no rects;
+                        // non-empty → the coalesced rects, or bail (full frame).
+                        let dirty_damage: Option<Vec<damage_rects::Rect>> =
                             if s.dirty_nodes.is_empty() {
-                                Some(None)
+                                Some(Vec::new())
                             } else {
-                                match scene::compute_frame_damage(s) {
-                                    Some(d) => Some(Some(d)),
-                                    None    => None, // bail → full
-                                }
+                                scene::compute_frame_damage(s, &motion_overrides, &canvas_damage)
                             };
                         match dirty_damage {
-                            None => None,
-                            Some(dd) => {
+                            None => None, // bail → full
+                            Some(mut rects) => {
                                 if blink_changed {
                                     match s.cursor_node_rect {
                                         // Pad matches compute_frame_damage's AA slack.
                                         Some((cx, cy, cw, ch)) => {
-                                            let cr = (cx - 4.0, cy - 4.0, cw + 8.0, ch + 8.0);
-                                            Some(match dd {
-                                                None => cr,
-                                                Some((dx, dy, dw, dh)) => {
-                                                    let l = dx.min(cr.0);
-                                                    let t = dy.min(cr.1);
-                                                    let r = (dx + dw).max(cr.0 + cr.2);
-                                                    let b = (dy + dh).max(cr.1 + cr.3);
-                                                    (l, t, r - l, b - t)
-                                                }
-                                            })
+                                            rects.push((cx - 4.0, cy - 4.0, cw + 8.0, ch + 8.0));
+                                            Some(damage_rects::coalesce(rects))
                                         }
                                         // Caret position unknown (first blink
                                         // before any render) → full frame.
                                         None => None,
                                     }
+                                } else if rects.is_empty() {
+                                    None
                                 } else {
-                                    dd
+                                    Some(rects)
                                 }
                             }
                         }
                     }
                 };
 
-                let mut frame = match (&s.renderer, frame_damage) {
+                #[cfg(feature = "dev")]
+                if let Some(log) = s.damage_log.as_mut() {
+                    // Bounded: a client that stops reading can't grow this.
+                    if log.len() < 600 {
+                        log.push(crate::state::DamageRecord {
+                            rect: frame_damage.as_deref().and_then(damage_rects::bounds).map(|(x, y, w, h)| [x, y, w, h]),
+                            dirty_nodes: s.dirty_nodes.len(),
+                            timestamp_ms: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64).unwrap_or(0),
+                        });
+                    }
+                }
+
+                // Render / present split for the perf record: render runs from
+                // here (frame building) to the present call; present is the
+                // hand-off to the OS minus any pacing sleep.
+                let render_start = Instant::now();
+                let mut present_ms = 0.0_f64;
+                let mut pace_ms = 0.0_f64;
+
+                let mut frame = match (&s.renderer, &frame_damage) {
                     (glyx_renderer::AnyRenderer::TinySkia(_), Some(_)) => {
                         match &mut s.renderer {
                             glyx_renderer::AnyRenderer::TinySkia(r) =>
-                                glyx_renderer::AnyFrame::TinySkia(r.begin_frame_damaged(frame_damage)),
+                                glyx_renderer::AnyFrame::TinySkia(r.begin_frame_damaged(frame_damage.as_deref())),
                             _ => unreachable!(),
                         }
                     }
@@ -2230,23 +2595,18 @@ pub fn run(mut config: AppConfig) -> bool {
                 #[cfg(feature = "webview")]
                 let mut webview_overlays: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
 
-                // Sample each active opacity transition's current value once,
-                // fresh every frame — this is the actual interpolation step.
-                let opacity_overrides: std::collections::HashMap<u32, f32> = s.opacity_transitions
-                    .iter()
-                    .map(|(&id, t)| (id, t.sample(Instant::now()).0))
-                    .collect();
-
                 if let Some(root_id) = s.js_root {
                     let mut render_ctx = RenderCtx {
                         nodes:             &s.js_nodes,
-                        opacity_overrides: &opacity_overrides,
+                        overrides:         &motion_overrides,
                         images:            &s.images,
-                        resolved:          &s.resolved,
+                        resolved_by_id:     &s.resolved_by_id,
+                        z_order:            &s.z_order,
                         frame:             &mut frame,
                         text_sys:          &mut s.text_sys,
                         label_cache:       &mut s.label_cache,
                         canvas_cmds:       &s.canvas_cmds,
+                        canvas_anim:       &canvas_anim,
                         #[cfg(feature = "canvas3d")]
                         canvas3d_overlays: &mut canvas3d_overlays,
                         #[cfg(feature = "webview")]
@@ -2304,7 +2664,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 // gated rather than unconditional.
                 #[cfg(feature = "a11y")]
                 if s.a11y_dirty {
-                    if let Some(update) = a11y::build_tree(s) {
+                    if let Some(update) = a11y::build_tree(&mut *s) {
                         (s.a11y_update.0)(update);
                     }
                     s.a11y_dirty = false;
@@ -2432,6 +2792,12 @@ pub fn run(mut config: AppConfig) -> bool {
                 #[cfg(feature = "dev")]
                 draw_error_overlay(s, &mut frame);
 
+                #[cfg(feature = "dev")]
+                {
+                    dev_mode::draw_devtools_highlight(s, &mut frame);
+                    s.overlay_was_drawn = s.devtools_highlight.is_some() || !s.flashes.is_empty();
+                }
+
                 // (overlay timer reschedule moved to before the blit-only fast path above)
 
                 // ── Idle wgpu→soft downgrade ─────────────────────────────────
@@ -2449,7 +2815,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     } else if s.gpu_was_upgraded && matches!(s.gpu, Present::Gpu(_)) {
                         let last = s.canvas3d_last_used.unwrap_or(frame_start);
                         if last.elapsed() >= IDLE_3D {
-                            match soft_present::SoftPresent::new(Arc::clone(&s.window)) {
+                            match soft_present::SoftPresent::new(Arc::clone(&s.window), max_fps) {
                                 Ok(sp) => {
                                     log::info!(
                                         "Canvas3D idle for 60 s — releasing wgpu, \
@@ -2676,7 +3042,11 @@ pub fn run(mut config: AppConfig) -> bool {
                             }
                         }
 
+                        #[cfg(feature = "dev")]
+                        capture_gpu_screenshot(&mut s.gpu_screenshot, gpu, &texture);
+                        let t = Instant::now();
                         texture.present();
+                        present_ms = t.elapsed().as_secs_f64() * 1000.0;
                     }
                     Present::Soft(sp) => {
                         // CPU path: finalize the tiny-skia frame and blit it to
@@ -2691,7 +3061,10 @@ pub fn run(mut config: AppConfig) -> bool {
                             (glyx_renderer::AnyRenderer::TinySkia(r),
                              glyx_renderer::AnyFrame::TinySkia(f)) => {
                                 r.finish_frame_soft(f, |rgba, w, h, damage| {
+                                    let t = Instant::now();
                                     sp.present_rgba(rgba, w, h, damage);
+                                    pace_ms = sp.last_pace_ms();
+                                    present_ms = (t.elapsed().as_secs_f64() * 1000.0 - pace_ms).max(0.0);
                                 });
                             }
                             _ => {
@@ -2737,7 +3110,9 @@ pub fn run(mut config: AppConfig) -> bool {
                                     log::error!("Direct2D render error: {e}");
                                     return;
                                 }
+                                let t = Instant::now();
                                 dp.present();
+                                present_ms = t.elapsed().as_secs_f64() * 1000.0;
                             }
                             _ => {
                                 log::error!("Direct2D present requires the Direct2D renderer");
@@ -2746,6 +3121,11 @@ pub fn run(mut config: AppConfig) -> bool {
                         }
                     }
                 }
+
+                let render_ms = (render_start.elapsed().as_secs_f64() * 1000.0 - present_ms - pace_ms).max(0.0);
+                let (win_w, win_h) = (s.gpu.width() as u64, s.gpu.height() as u64);
+                let damage_px = frame_damage.as_deref().map_or(win_w * win_h, |r| damage_rects::total_area(r) as u64);
+                let animating = (s.transitions.len() + s.canvas_tweens.len() + s.animations.values().filter(|a| !a.settled).count()) as u32;
 
                 // Pre-init splash handoff: the main window's first real frame
                 // has now actually rendered and presented (we just did it,
@@ -2797,7 +3177,8 @@ pub fn run(mut config: AppConfig) -> bool {
                     s.pipeline_cache_saved = true;
                 }
 
-                // Update prev_resolved snapshot and clear per-frame dirty sets.
+                // Update prev_resolved/prev_visual snapshots and clear per-frame dirty sets.
+                scene::record_visual_bounds(s, &motion_overrides);
                 snapshot_resolved(s);
                 s.dirty_nodes.clear();
                 s.dirty_subtrees.clear();
@@ -2857,6 +3238,7 @@ pub fn run(mut config: AppConfig) -> bool {
 
                     perf.push(glyx_perf::PerfFrame {
                         frame_time_ms,
+                        work_ms: (frame_start.elapsed().as_secs_f64() * 1000.0 - pace_ms).max(0.001),
                         js_time_ms,
                         layout_time_ms,
                         gpu_time_ms,
@@ -2869,7 +3251,21 @@ pub fn run(mut config: AppConfig) -> bool {
                         gpu_reserved_bytes: gpu_reserved_bytes,
                         gpu_buffer_count:   gpu_buf_count,
                         gpu_texture_count:  gpu_tex_count,
+                        render_ms,
+                        present_ms,
+                        damage_px,
+                        partial: frame_damage.is_some(),
+                        animating,
                     });
+                    #[cfg(feature = "dev")]
+                    if let Some(details) = s.frame_details.as_mut() {
+                        if let Some((dirty, dirty_total)) = dirty_list {
+                            if details.len() == 300 { details.pop_front(); }
+                            details.push_back(crate::state::FrameDetail { seq: perf.frame_seq, dirty, dirty_total, damage: app_damage });
+                        }
+                    }
+                    #[cfg(feature = "dev")]
+                    if let Some(notify) = &s.devtools_notify { notify(); }
                 } else {
                     s.perf.lock().last_frame_at = Some(frame_start);
                 }
@@ -2934,6 +3330,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 for s in windows.values_mut() {
                     s.runtime.gc_hint();
                     s.renderer.trim_resources();
+                    shrink_oversized_collections(s);
                 }
                 extern "C" { fn mi_collect(force: bool); }
                 unsafe { mi_collect(true); }
@@ -3078,6 +3475,22 @@ mod tests {
 
         let (cfg, _) = apply(r#"{ "window": { "startupMode": "fullscreen" } }"#);
         assert_eq!(cfg.startup_mode, glyx_shell::StartupMode::Fullscreen);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_pipe_names_use_the_pipe_namespace() {
+        assert_eq!(windows_pipe_name("notes-app"), r"\\.\pipe\glyx-notes-app");
+    }
+
+    #[test]
+    fn config_max_fps_is_optional_and_clamped() {
+        let (cfg, _) = apply(r#"{ "window": { "maxFps": 60 } }"#);
+        assert_eq!(cfg.max_fps, Some(60));
+        let (cfg, _) = apply(r#"{ "window": { "maxFps": 1 } }"#);
+        assert_eq!(cfg.max_fps, Some(15));
+        let (cfg, _) = apply(r#"{ "window": {} }"#);
+        assert_eq!(cfg.max_fps, None);
     }
 
     #[test]

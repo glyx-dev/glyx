@@ -1,15 +1,37 @@
 [package]
 name    = "glyx-sysapi"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+
+# Camera enumeration pulls in nokhwa. A build without glyx-runtime's `camera`
+# feature (whose bindings are stubbed out anyway) leaves it out. The microphone
+# helpers (cpal + hound) stay unconditional: `microphone.record()` is available
+# in every runtime build that grants the capability.
+[features]
+default = []
+camera  = ["dep:nokhwa"]
 
 [dependencies]
 battery    = { workspace = true }
 sysinfo    = { workspace = true }
 keepawake  = { workspace = true }
 dark-light = { workspace = true }
-keyring    = { workspace = true }
-nokhwa     = { workspace = true }
+nokhwa     = { workspace = true, optional = true }
 cpal       = { workspace = true }
 hound      = { workspace = true }
 log        = { workspace = true }
+
+# keyring 3 enables NO platform backend by default — with none selected it
+# silently falls back to its in-memory MOCK store, where every `Entry::new`
+# is a separate credential: `set` succeeds, the next `get` finds nothing, and
+# nothing ever reaches the OS. Select the real store per platform.
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }    # Credential Manager
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }      # Keychain
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Secret Service (GNOME Keyring / KWallet) over D-Bus; pure-Rust crypto so
+# no OpenSSL dependency. Needs libdbus-1-dev at build time.
+keyring = { workspace = true, features = ["sync-secret-service", "crypto-rust"] }

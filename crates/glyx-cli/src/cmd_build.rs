@@ -101,7 +101,7 @@ pub(super) fn build_snapshot_mode(target: Option<&str>, project_name: &str, p: p
 
     // 1. Build the app bundle (embedded in binary, eval'd at runtime)
     println!("Bundling JS: {} → {}", entry, output);
-    pm::js_bundle(p, &entry, &output, /*minify=*/false, /*source_map=*/true)
+    pm::js_bundle(p, &entry, &output, /*minify=*/false, pm::SourceMap::Kept, !super::read_keep_test_ids())
         .context("JS build failed")?;
     println!("✓ JS bundled (dev output)");
     let bundle = build_app_bundle(project_name, &entry, p).context("app bundle build failed")?;
@@ -130,7 +130,7 @@ pub(super) fn build_snapshot_mode(target: Option<&str>, project_name: &str, p: p
     let caps = super::read_capabilities_from_config();
     if !caps.is_empty() {
         let bin_dir = bin_path.parent().unwrap_or(Path::new("target/release"));
-        build_cap_dlls(&caps, target, bin_dir).context("cap DLL build failed")?;
+        stage_cap_dlls(&caps, target, bin_dir).context("capability module staging failed")?;
         super::write_caps_lock(bin_dir).context("failed to write glyx-caps.lock")?;
     }
 
@@ -166,7 +166,7 @@ pub(super) fn build_bundle_mode(target: Option<&str>, project_name: &str, p: pm:
     let caps = super::read_capabilities_from_config();
     if !caps.is_empty() {
         let bin_dir = bin_path.parent().unwrap_or(Path::new("target/release"));
-        build_cap_dlls(&caps, target, bin_dir).context("cap DLL build failed")?;
+        stage_cap_dlls(&caps, target, bin_dir).context("capability module staging failed")?;
         super::write_caps_lock(bin_dir).context("failed to write glyx-caps.lock")?;
     }
 
@@ -185,7 +185,7 @@ pub(super) fn build_portable_mode(target: Option<&str>, project_name: &str, p: p
 
     if let Some((entry, output)) = read_dev_config() {
         println!("Bundling JS: {} → {}", entry, output);
-        pm::js_bundle(p, &entry, &output, /*minify=*/false, /*source_map=*/true)
+        pm::js_bundle(p, &entry, &output, /*minify=*/false, pm::SourceMap::Kept, !super::read_keep_test_ids())
             .context("JS build failed")?;
         println!("✓ JS built: {}", output);
     } else {
@@ -202,7 +202,7 @@ pub(super) fn build_portable_mode(target: Option<&str>, project_name: &str, p: p
     let caps = super::read_capabilities_from_config();
     if !caps.is_empty() {
         let bin_dir = bin_path.parent().unwrap_or(Path::new("target/release"));
-        build_cap_dlls(&caps, target, bin_dir).context("cap DLL build failed")?;
+        stage_cap_dlls(&caps, target, bin_dir).context("capability module staging failed")?;
         super::write_caps_lock(bin_dir).context("failed to write glyx-caps.lock")?;
     }
 
@@ -448,11 +448,21 @@ pub(super) fn cargo_build_release(
     let status = cmd.status().context("Failed to run `cargo build`")?;
     if !status.success() { bail!("cargo build failed"); }
 
-    Ok(if let Some(ref t) = rust_target {
+    let rel = if let Some(ref t) = rust_target {
         PathBuf::from(format!("target/{}/release/{}", t, binary_name(project_name)))
     } else {
         PathBuf::from(format!("target/release/{}", binary_name(project_name)))
-    })
+    };
+    // In a cargo workspace (e.g. the examples) the binary lands in the
+    // workspace's target/, not the app folder's: return where it really is,
+    // so the ICU data and capability modules go next to it.
+    if !rel.exists() {
+        if let Some(root) = super::find_workspace_root()? {
+            let in_ws = root.join(&rel);
+            if in_ws.exists() { return Ok(in_ws); }
+        }
+    }
+    Ok(rel)
 }
 
 /// Build all capability DLLs declared in glyx.config and copy them next to `dest`.
@@ -517,12 +527,205 @@ pub fn build_cap_dlls(caps: &[String], target: Option<&str>, dest: &Path) -> Res
         }
 
         std::fs::create_dir_all(dest)?;
-        let dst = dest.join(&lib_name);
-        std::fs::copy(&src, &dst)
-            .with_context(|| format!("copy {} → {}", src.display(), dst.display()))?;
+        // Named the way the runtime's loader looks for it (no `lib` prefix).
+        let dst = dest.join(cap_file_name(cap, cap_os(rust_target.as_deref())));
+        // cargo may have put it there already (workspace target = dest).
+        let same = std::fs::canonicalize(&src).ok().zip(std::fs::canonicalize(&dst).ok()).is_some_and(|(a, b)| a == b);
+        if !same {
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("copy {} → {}", src.display(), dst.display()))?;
+        }
         println!("  ✓ {} → {}", src.display(), dst.display());
     }
     Ok(())
+}
+
+// ── Capability modules: build (source checkout) or download (everyone else) ──
+
+/// Capabilities the release workflow publishes signed modules for.
+pub(crate) const PUBLISHED_CAPS: &[&str] = &["audio", "camera", "gamepad", "hid", "ai"];
+
+/// Where a staged capability module came from.
+#[derive(Debug, PartialEq)]
+pub enum CapSource {
+    /// Built from the glyx source checkout — unsigned; only a dev runner may
+    /// load it (with signature checks skipped).
+    BuiltLocally,
+    /// The signed release module (+ `.sig`) for this CLI version.
+    DownloadedSigned,
+}
+
+/// OS family of a Rust target triple (or of this machine for `None`).
+pub(crate) fn cap_os(rust_target: Option<&str>) -> &'static str {
+    match rust_target {
+        Some(t) if t.contains("windows") => "windows",
+        Some(t) if t.contains("apple") || t.contains("darwin") => "macos",
+        Some(_) => "linux",
+        None if cfg!(target_os = "windows") => "windows",
+        None if cfg!(target_os = "macos") => "macos",
+        None => "linux",
+    }
+}
+
+fn cap_ext(os: &str) -> &'static str {
+    match os { "windows" => "dll", "macos" => "dylib", _ => "so" }
+}
+
+/// The file name the runtime's loader looks for next to the runner:
+/// `glyx_cap_<name>.<ext>` — no `lib` prefix on any OS (see
+/// `cap_loader::try_load_dynamic`).
+pub(crate) fn cap_file_name(cap: &str, os: &str) -> String {
+    format!("glyx_cap_{}.{}", cap.replace('-', "_"), cap_ext(os))
+}
+
+/// The release asset name (`release.yml`): `glyx_cap_<name>-<os>.<ext>`.
+pub(crate) fn cap_release_asset(cap: &str, os: &str) -> String {
+    format!("glyx_cap_{}-{os}.{}", cap.replace('-', "_"), cap_ext(os))
+}
+
+/// Download URL for a release asset of this CLI version, honouring a
+/// self-hosted mirror (`$GLYX_TOOLS_BASE/caps/<asset>`).
+pub(crate) fn cap_asset_url(asset: &str, version: &str, mirror_base: Option<&str>) -> String {
+    match mirror_base {
+        Some(base) => format!("{}/{}", base.trim_end_matches('/'), super::tools::cap_mirror_path(asset)),
+        None => format!("https://github.com/glyx-dev/glyx/releases/download/v{version}/{asset}"),
+    }
+}
+
+/// Put the declared capability modules in `dest`. In the glyx source
+/// checkout they're built from source (and a native build is the only thing
+/// that can be); everywhere else — a JS developer who installed the CLI —
+/// the signed modules for this CLI version are downloaded from the release.
+pub fn stage_cap_dlls(caps: &[String], target: Option<&str>, dest: &Path) -> Result<CapSource> {
+    if caps.is_empty() { return Ok(CapSource::DownloadedSigned); }
+    if super::glyx_source_checkout().is_some() {
+        build_cap_dlls(caps, target, dest)?;
+        return Ok(CapSource::BuiltLocally);
+    }
+    let rust_target = target.map(super::platform_to_rust_target).transpose()?;
+    download_cap_dlls(caps, cap_os(rust_target.as_deref()), dest, env!("CARGO_PKG_VERSION"))?;
+    Ok(CapSource::DownloadedSigned)
+}
+
+/// Whether `dest` already holds `cap`'s module + signature for `version`.
+pub(crate) fn cap_is_staged(dest: &Path, file: &str, version: &str) -> bool {
+    dest.join(file).is_file()
+        && dest.join(format!("{file}.sig")).is_file()
+        && std::fs::read_to_string(dest.join(format!("{file}.version")))
+            .map(|v| v.trim() == version)
+            .unwrap_or(false)
+}
+
+fn download_cap_dlls(caps: &[String], os: &str, dest: &Path, version: &str) -> Result<()> {
+    let mirror = super::tools::tools_base();
+    std::fs::create_dir_all(dest)?;
+    for cap in caps {
+        if !PUBLISHED_CAPS.contains(&cap.as_str()) {
+            bail!("the `{cap}` capability module isn't published as a prebuilt download yet — \
+                   it can only be built from the glyx source");
+        }
+        let file = cap_file_name(cap, os);
+        if cap_is_staged(dest, &file, version) { continue; }
+        let asset = cap_release_asset(cap, os);
+        println!("Downloading the `{cap}` capability module ({version})…");
+        for (src, dst) in [(asset.clone(), file.clone()), (format!("{asset}.sig"), format!("{file}.sig"))] {
+            let url = cap_asset_url(&src, version, mirror.as_deref());
+            download_to(&url, &dest.join(&dst))
+                .with_context(|| format!("download {url}"))?;
+        }
+        let _ = std::fs::write(dest.join(format!("{file}.version")), version);
+        println!("  ✓ {}", dest.join(&file).display());
+    }
+    Ok(())
+}
+
+/// GET `url` into `dest` via a temp file + rename (never a half-written file).
+fn download_to(url: &str, dest: &Path) -> Result<()> {
+    let resp = ureq::get(url).call().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let tmp = dest.with_extension("part");
+    let mut file = std::fs::File::create(&tmp)?;
+    std::io::copy(&mut resp.into_reader(), &mut file)?;
+    drop(file);
+    std::fs::rename(&tmp, dest)
+        .with_context(|| format!("replace {} (is an app still running from it?)", dest.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod cap_staging_tests {
+    use super::*;
+
+    #[test]
+    fn file_names_match_what_the_loader_and_the_release_use() {
+        // Loader: no `lib` prefix on any OS (the old copy step used one on
+        // macOS/Linux, so locally built modules never loaded there).
+        assert_eq!(cap_file_name("audio", "windows"), "glyx_cap_audio.dll");
+        assert_eq!(cap_file_name("audio", "macos"), "glyx_cap_audio.dylib");
+        assert_eq!(cap_file_name("audio", "linux"), "glyx_cap_audio.so");
+        // release.yml's asset names.
+        assert_eq!(cap_release_asset("audio", "windows"), "glyx_cap_audio-windows.dll");
+        assert_eq!(cap_release_asset("camera", "macos"), "glyx_cap_camera-macos.dylib");
+        assert_eq!(cap_release_asset("hid", "linux"), "glyx_cap_hid-linux.so");
+    }
+
+    #[test]
+    fn target_triples_map_to_release_os_names() {
+        assert_eq!(cap_os(Some("x86_64-pc-windows-msvc")), "windows");
+        assert_eq!(cap_os(Some("aarch64-apple-darwin")), "macos");
+        assert_eq!(cap_os(Some("x86_64-unknown-linux-gnu")), "linux");
+    }
+
+    #[test]
+    fn urls_are_pinned_to_this_cli_version_or_the_mirror() {
+        assert_eq!(
+            cap_asset_url("glyx_cap_audio-windows.dll", "0.2.0", None),
+            "https://github.com/glyx-dev/glyx/releases/download/v0.2.0/glyx_cap_audio-windows.dll",
+        );
+        assert_eq!(
+            cap_asset_url("glyx_cap_audio-windows.dll", "0.2.0", Some("https://mirror.example/glyx/")),
+            "https://mirror.example/glyx/caps/glyx_cap_audio-windows.dll",
+        );
+    }
+
+    #[test]
+    fn a_module_is_fetched_once_per_version() {
+        let dir = std::env::temp_dir().join(format!("glyx-caps-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = "glyx_cap_audio.dll";
+        assert!(!cap_is_staged(&dir, f, "0.2.0"), "nothing there");
+        std::fs::write(dir.join(f), b"dll").unwrap();
+        assert!(!cap_is_staged(&dir, f, "0.2.0"), "no signature");
+        std::fs::write(dir.join(format!("{f}.sig")), b"sig").unwrap();
+        assert!(!cap_is_staged(&dir, f, "0.2.0"), "unknown version (a local build)");
+        std::fs::write(dir.join(format!("{f}.version")), "0.1.0").unwrap();
+        assert!(!cap_is_staged(&dir, f, "0.2.0"), "another version: re-download");
+        std::fs::write(dir.join(format!("{f}.version")), "0.2.0\n").unwrap();
+        assert!(cap_is_staged(&dir, f, "0.2.0"), "this version: keep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Network: the real v0.1.0 release. `cargo test -p glyx-cli -- --ignored`.
+    #[test]
+    #[ignore]
+    fn downloads_the_real_signed_module_from_a_published_release() {
+        let dir = std::env::temp_dir().join(format!("glyx-caps-net-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        download_cap_dlls(&["audio".to_string()], "windows", &dir, "0.1.0").expect("download");
+        let f = cap_file_name("audio", "windows");
+        assert!(std::fs::metadata(dir.join(&f)).unwrap().len() > 100_000, "a real DLL");
+        assert_eq!(std::fs::metadata(dir.join(format!("{f}.sig"))).unwrap().len(), 64, "Ed25519 signature");
+        assert!(cap_is_staged(&dir, &f, "0.1.0"), "so the next run doesn't re-download");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unpublished_capabilities_fail_with_a_clear_message_before_any_download() {
+        let dir = std::env::temp_dir().join(format!("glyx-caps-test2-{}", std::process::id()));
+        let err = download_cap_dlls(&["webview".to_string()], "windows", &dir, "0.2.0").unwrap_err();
+        assert!(err.to_string().contains("isn't published"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Create a V8 snapshot containing ONLY stubs + polyfills.

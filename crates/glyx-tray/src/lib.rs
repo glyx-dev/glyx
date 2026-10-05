@@ -1,3 +1,6 @@
+mod menubar;
+pub use menubar::*;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{atomic::AtomicBool, atomic::Ordering, LazyLock, Mutex};
 
@@ -6,6 +9,32 @@ use muda::{CheckMenuItem, ContextMenu, Menu, MenuItem, PredefinedMenuItem, Subme
 use tray_icon::{menu::MenuEvent, Icon, TrayIconBuilder, TrayIconEvent, TrayIconId};
 
 static HANDLER_SET: AtomicBool = AtomicBool::new(false);
+
+/// Where tray events go when something is listening. With no sink they queue
+/// for `poll_events`, as before.
+pub type TraySink = std::sync::Arc<dyn Fn(TrayEvent) + Send + Sync>;
+static TRAY_SINK: LazyLock<Mutex<Option<TraySink>>> = LazyLock::new(|| Mutex::new(None));
+
+/// Point tray events at `sink`, or back to the polled queue with `None`.
+pub fn set_tray_sink(sink: Option<TraySink>) {
+    *TRAY_SINK.lock().unwrap() = sink;
+}
+
+fn emit(ev: TrayEvent) {
+    let sink = TRAY_SINK.lock().unwrap().clone();
+    match sink {
+        Some(sink) => sink(ev),
+        None => EVENT_QUEUE.lock().unwrap().push_back(ev),
+    }
+}
+/// The app's own icon (the window icon), registered at startup, used when a
+/// tray icon is created without pixels of its own.
+static APP_ICON: std::sync::OnceLock<(Vec<u8>, u32, u32)> = std::sync::OnceLock::new();
+
+/// Register the app icon as raw RGBA pixels. Only the first call counts.
+pub fn set_app_icon(rgba: Vec<u8>, width: u32, height: u32) {
+    let _ = APP_ICON.set((rgba, width, height));
+}
 static EVENT_QUEUE: LazyLock<Mutex<VecDeque<TrayEvent>>> =
     LazyLock::new(|| Mutex::new(VecDeque::new()));
 static TRAY_MAP: LazyLock<Mutex<HashMap<u32, TrayIconId>>> =
@@ -66,20 +95,24 @@ fn ensure_event_handler() {
         };
 
         if let Some(ev) = ev {
-            EVENT_QUEUE.lock().unwrap().push_back(ev);
+            emit(ev);
         }
     }));
 
     MenuEvent::set_event_handler(Some(|event: MenuEvent| {
         let item_id = event.id.0.clone();
+        // One handler serves both: window menu bar clicks first, the rest are the tray's.
+        // The handler runs inside the window procedure, where a panic cannot unwind
+        // and would abort the app, so nothing here may be allowed to panic outward.
+        let ours = std::panic::catch_unwind(|| menubar::dispatch(&item_id)).unwrap_or(true);
+        if ours {
+            return;
+        }
         let map = MENU_ITEM_TO_TRAY.lock().unwrap();
         let tray_id = map.get(&item_id).copied();
 
         if let Some(id) = tray_id {
-            EVENT_QUEUE
-                .lock()
-                .unwrap()
-                .push_back(TrayEvent::MenuItemClick { tray_id: id, item_id });
+            emit(TrayEvent::MenuItemClick { tray_id: id, item_id });
         }
     }));
 }
@@ -175,7 +208,8 @@ fn append_submenu_items(
 
 // Remove the old MenuParent trait and append_items function
 
-static NEXT_ID: Mutex<u32> = Mutex::new(0);
+// Handles start at 1: 0 is what `tray.create` returns for a failure.
+static NEXT_ID: Mutex<u32> = Mutex::new(1);
 
 fn next_id() -> u32 {
     let mut id = NEXT_ID.lock().unwrap();
@@ -193,6 +227,15 @@ pub fn create_tray(
 ) -> Result<TrayHandle, String> {
     ensure_event_handler();
 
+    // No pixels given: use the app's own icon.
+    let (icon_rgba, width, height) = if icon_rgba.is_empty() {
+        match APP_ICON.get() {
+            Some((rgba, w, h)) => (rgba.as_slice(), *w, *h),
+            None => return Err("this app has no icon to use: pass pixels to tray.create".to_string()),
+        }
+    } else {
+        (icon_rgba, width, height)
+    };
     let icon = Icon::from_rgba(icon_rgba.to_vec(), width, height)
         .map_err(|e| format!("bad icon data: {e:?}"))?;
 
@@ -248,4 +291,35 @@ pub fn destroy_tray(handle: TrayHandle) {
 pub fn poll_events() -> Vec<TrayEvent> {
     let mut q = EVENT_QUEUE.lock().unwrap();
     q.drain(..).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tray_without_pixels_or_an_app_icon_says_why() {
+        // Nothing registers an app icon in this test binary, so there is nothing to fall back to.
+        let err = create_tray(&[], 0, 0, "x", &[]).err().expect("no icon available");
+        assert!(err.contains("no icon"), "{err}");
+    }
+
+    #[test]
+    fn events_go_to_a_sink_when_one_is_set_and_to_the_queue_otherwise() {
+        let seen: std::sync::Arc<Mutex<Vec<String>>> = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = std::sync::Arc::clone(&seen);
+        set_tray_sink(Some(std::sync::Arc::new(move |e| sink_seen.lock().unwrap().push(format!("{e:?}")))));
+        emit(TrayEvent::Click { tray_id: 9001 });
+        set_tray_sink(None);
+        emit(TrayEvent::DoubleClick { tray_id: 9002 });
+        assert!(seen.lock().unwrap().iter().any(|e| e.contains("9001")));
+        let queued: Vec<String> = poll_events().into_iter().map(|e| format!("{e:?}")).collect();
+        assert!(queued.iter().any(|e| e.contains("9002")));
+        assert!(!queued.iter().any(|e| e.contains("9001")), "a sunk event must not also queue");
+    }
+
+    #[test]
+    fn handles_never_collide_with_the_failure_value() {
+        assert_ne!(next_id(), 0);
+    }
 }

@@ -14,14 +14,18 @@ use std::process::Command;
 
 mod cmd_create;
 mod cmd_dev;
+mod cmd_inspect;
+mod cmd_mcp;
 mod cmd_build;
 mod cmd_package;
 mod icu_trim;
+mod ffmpeg_notice;
 mod cmd_check;
 mod cmd_test;
 mod cmd_generate;
 mod cmd_runtime;
 mod tools;
+mod updates;
 pub mod pm;
 
 use self::cmd_create::*;
@@ -52,6 +56,9 @@ static DEFAULT_ICON_PNG: &[u8] = include_bytes!("../../../assets/glyx.png");
         glyx create my-app --template notes   Start from the notes template\n  \
         glyx dev                              Run with hot reload\n  \
         glyx dev --inspect                    Attach Chrome DevTools (port 9229)\n  \
+        glyx dev --devtools                   Serve the Glyx DevTools Protocol (port 9228)\n  \
+        glyx dev --devtools --open            …and open Glyx DevTools on it\n  \
+        glyx inspect                          Open Glyx DevTools for running apps\n  \
         glyx build                            Self-contained release binary\n  \
         glyx build --check-performance        Build + enforce 60fps frame budget\n  \
         glyx package --installer              Native installer for this OS\n\n\
@@ -118,6 +125,38 @@ enum Commands {
         /// to set breakpoints and profile.
         #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "9229")]
         inspect: Option<u16>,
+        /// Serve the Glyx DevTools Protocol (GDP) for inspection and
+        /// automation, on both JS engines. Optionally pass a port (default
+        /// 9228). The address and session token are written to
+        /// target/glyx/devtools.json.
+        #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "9228")]
+        devtools: Option<u16>,
+        /// With --devtools: open Glyx DevTools in the browser, attached to
+        /// this app.
+        #[arg(long, requires = "devtools")]
+        open: bool,
+    },
+    /// Open Glyx DevTools: inspect, profile and drive running dev apps
+    ///
+    /// Serves the DevTools UI on 127.0.0.1 and lists the apps started with
+    /// `glyx dev --devtools` in this project, its subfolders, or anywhere
+    /// with GLYX_DEVTOOLS_PORT set.
+    /// Serve running dev apps to AI agents over MCP (stdio)
+    ///
+    /// Add to your agent's MCP config:
+    ///   { "mcpServers": { "glyx": { "command": "glyx", "args": ["mcp"] } } }
+    /// Then start apps with `glyx dev --devtools` in this folder (or below):
+    /// the agent can list them, read the UI, click, type, wait and take
+    /// screenshots.
+    #[command(verbatim_doc_comment)]
+    Mcp,
+    Inspect {
+        /// Port for the DevTools page (default 9227, or any free one).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Print the address without opening a browser.
+        #[arg(long)]
+        no_open: bool,
     },
     /// Produce a production build
     ///
@@ -332,13 +371,23 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
+    // MCP speaks JSON-RPC on stdout: nothing else may print there, so it
+    // skips the update notice and config detection below.
+    if matches!(cli.command, Commands::Mcp) { return cmd_mcp::cmd_mcp(); }
+
+    // "A newer glyx is available" — instant (reads the last cached result);
+    // any network refresh happens in the background.
+    updates::run(&glyx_dir(), env!("CARGO_PKG_VERSION"), glyx_source_checkout().is_some());
+
     // Detect package manager once; all subcommands use this value.
     let config_json = resolve_config_json().unwrap_or_default();
     let pm = pm::detect(cli.pm.as_deref(), &config_json)?;
 
     match cli.command {
         Commands::Create { name, native, template } => cmd_create(&name, native, &template, pm),
-        Commands::Dev { inspect }         => cmd_dev(inspect, pm, cli.icupkg.clone()),
+        Commands::Dev { inspect, devtools, open } => cmd_dev(inspect, devtools, open, pm, cli.icupkg.clone()),
+        Commands::Inspect { port, no_open } => cmd_inspect::cmd_inspect(port, no_open),
+        Commands::Mcp => unreachable!("handled above"),
         Commands::Build { target, snapshot: _, bundle, portable, check_performance, perf_budget, perf_duration } => {
             let mode = if bundle { "bundle" } else if portable { "portable" } else { "snapshot" };
             cmd_build(target.as_deref(), mode, check_performance, perf_budget, perf_duration, pm, cli.icupkg.clone())
@@ -355,9 +404,9 @@ fn run() -> Result<()> {
                     println!("No capabilities declared in glyx.config — nothing to build.");
                     return Ok(());
                 }
-                println!("Building {} cap DLL(s): {}", caps.len(), caps.join(", "));
-                cmd_build::build_cap_dlls(&caps, target.as_deref(), &dest)
-                    .context("cap DLL build failed")?;
+                println!("Staging {} capability module(s): {}", caps.len(), caps.join(", "));
+                cmd_build::stage_cap_dlls(&caps, target.as_deref(), &dest)
+                    .context("capability module staging failed")?;
                 write_caps_lock(&dest).context("failed to write glyx-caps.lock")?;
                 println!("Done. DLLs and glyx-caps.lock written to {}", dest.display());
                 Ok(())
@@ -446,20 +495,72 @@ fn find_or_build_runner(dev_mode: bool, engine: &str) -> Result<PathBuf> {
     //    stale wrong-engine binary cached under the same path.
     let cache_dir = glyx_runners_dir().join(engine).join(profile);
     let cached    = cache_dir.join(bin_name);
-    if cached.exists() { return Ok(cached); }
+
+    // 0. Inside the glyx source workspace: always build from source. The
+    //    cache only knows the CLI version, not the source it was built from,
+    //    so after a native change it silently kept serving an old runner
+    //    (a whole day of native fixes never reached `glyx dev` examples).
+    //    Cargo is incremental — a no-op build takes about a second.
+    if let Some(home) = glyx_source_checkout() {
+        let built = build_runner_from_source(&home, dev_mode, engine)?;
+        return Ok(refresh_cache(&built, &cache_dir, &cached));
+    }
+
+    let stamp = std::fs::read_to_string(cache_dir.join(".version")).ok();
+    match cached_runner_action(cached.exists(), stamp.as_deref(), env!("CARGO_PKG_VERSION")) {
+        CachedRunner::Use => return Ok(cached),
+        CachedRunner::Replace => {
+            // The CLI was upgraded (or the cache predates version stamps):
+            // the runner is built together with the CLI, so fetch the one
+            // that matches — only this engine/profile, not all four.
+            println!("glyx {} needs a matching runner [{profile}, {engine}] — updating the cached one…",
+                     env!("CARGO_PKG_VERSION"));
+            match download_runner(profile, engine, &cached) {
+                Ok(true) => {
+                    write_version_stamp(&cache_dir);
+                    return Ok(cached);
+                }
+                // Offline, or an old instance still has the file open: keep
+                // working with what's there and say so.
+                _ => {
+                    check_cache_freshness(&cache_dir, engine, profile);
+                    return Ok(cached);
+                }
+            }
+        }
+        CachedRunner::Missing => {}
+    }
 
     // 2. Download the prebuilt runner for this CLI version from GitHub
     //    Releases — the NORMAL path for users who installed the CLI binary
     //    and don't have the glyx source workspace.  Falls through to a
     //    source build (workspace devs) if unavailable.
     if download_runner(profile, engine, &cached).unwrap_or(false) {
+        write_version_stamp(&cache_dir);
         return Ok(cached);
     }
 
     // 3. Build from source
     let home = glyx_home().context("Cannot locate glyx workspace — needed to build glyx-runner")?;
+    let built = build_runner_from_source(&home, dev_mode, engine)?;
+
+    // Cache it for future use
+    std::fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("create cache dir {}", cache_dir.display()))?;
+    std::fs::copy(&built, &cached)
+        .with_context(|| format!("cache runner to {}", cached.display()))?;
+    write_version_stamp(&cache_dir);
+
+    println!("✓ glyx-runner [{profile}, {engine}] cached at {}", cached.display());
+    Ok(cached)
+}
+
+/// `cargo build -p glyx-runner` with exactly the requested engine/profile
+/// features, returning the built binary's path.
+fn build_runner_from_source(home: &Path, dev_mode: bool, engine: &str) -> Result<PathBuf> {
+    let bin_name = runner_bin_name();
     let label = if dev_mode { "dev (with hot-reload)" } else { "prod (lean)" };
-    println!("Building glyx-runner [{label}, {engine}] from source (first-run, one-time cost)...");
+    println!("Building glyx-runner [{label}, {engine}] from source (no-op if up to date)...");
 
     // Always pass explicit features (both modes) so `engine` is honored
     // regardless of glyx-runner/Cargo.toml's own default feature set —
@@ -485,15 +586,95 @@ fn find_or_build_runner(dev_mode: bool, engine: &str) -> Result<PathBuf> {
     if !built.exists() {
         bail!("glyx-runner binary not found at {} after build", built.display());
     }
+    Ok(built)
+}
 
-    // Cache it for future use
-    std::fs::create_dir_all(&cache_dir)
-        .with_context(|| format!("create cache dir {}", cache_dir.display()))?;
-    std::fs::copy(&built, &cached)
-        .with_context(|| format!("cache runner to {}", cached.display()))?;
+/// Make the cached runner match a fresh source build, and return the path
+/// to run. The cache dir is preferred because capability DLLs live beside
+/// the cached runner. If the cached file is locked (an instance is still
+/// running — Windows locks running executables), run the fresh build
+/// directly rather than an out-of-date copy.
+fn refresh_cache(built: &Path, cache_dir: &Path, cached: &Path) -> PathBuf {
+    if !cache_needs_refresh(built, cached) {
+        return cached.to_path_buf();
+    }
+    let copied = std::fs::create_dir_all(cache_dir)
+        .and_then(|_| std::fs::copy(built, cached));
+    match copied {
+        Ok(_) => {
+            write_version_stamp(cache_dir);
+            cached.to_path_buf()
+        }
+        Err(e) => {
+            println!(
+                "Note: couldn't update the cached runner ({e}) — is an older instance still                  running? Using the fresh build at {} instead.",
+                built.display()
+            );
+            built.to_path_buf()
+        }
+    }
+}
 
-    println!("✓ glyx-runner [{profile}, {engine}] cached at {}", cached.display());
-    Ok(cached)
+/// The cache is stale when it's missing or differs in size or is older than
+/// the build — cheap metadata checks, no 70 MB byte comparison per launch.
+fn cache_needs_refresh(built: &Path, cached: &Path) -> bool {
+    let (Ok(b), Ok(c)) = (std::fs::metadata(built), std::fs::metadata(cached)) else { return true };
+    if b.len() != c.len() { return true; }
+    match (b.modified(), c.modified()) {
+        (Ok(bm), Ok(cm)) => bm > cm,
+        _ => true,
+    }
+}
+
+/// What to do with the cached runner for this CLI.
+#[derive(Debug, PartialEq)]
+enum CachedRunner {
+    /// Present and produced by this CLI version.
+    Use,
+    /// Present but from another CLI version (or unstamped): replace it.
+    Replace,
+    /// Not cached yet.
+    Missing,
+}
+
+fn cached_runner_action(exists: bool, stamp: Option<&str>, current: &str) -> CachedRunner {
+    if !exists { return CachedRunner::Missing; }
+    if stamp_is_stale(stamp, current) { CachedRunner::Replace } else { CachedRunner::Use }
+}
+
+/// Records which CLI version produced a cached runner, so a later
+/// `find_or_build_runner` call can tell a user their cache predates the CLI
+/// they're now running — see `check_cache_freshness`. Best-effort: a failure
+/// to write this is not worth failing the whole command over.
+fn write_version_stamp(cache_dir: &Path) {
+    let _ = std::fs::write(cache_dir.join(".version"), env!("CARGO_PKG_VERSION"));
+}
+
+/// Prints a notice when the cached runner is from another CLI version and
+/// replacing it just failed (offline, or the file is locked by a running
+/// instance). A successful replace — the normal path after an upgrade — is
+/// handled by `find_or_build_runner` via `cached_runner_action`.
+fn check_cache_freshness(cache_dir: &Path, engine: &str, profile: &str) {
+    let current = env!("CARGO_PKG_VERSION");
+    let stamped = std::fs::read_to_string(cache_dir.join(".version")).ok();
+    if stamp_is_stale(stamped.as_deref(), current) {
+        let from = stamped.as_deref().map(str::trim).unwrap_or("an unknown (pre-versioning) build");
+        println!(
+            "Note: cached glyx-runner [{engine}/{profile}] was built by glyx-cli {from}, \
+             this is glyx-cli {current}, and updating it failed (offline?). It will be \
+             retried on the next run; `glyx runtime build --force` forces it."
+        );
+    }
+}
+
+/// Exact-match comparison, not semver-range — the runner and the CLI are
+/// built together from the same workspace (not an independently-versioned
+/// dependency), so "produced by literally this CLI build" is the right
+/// question, matching how `download_runner` already keys release URLs off
+/// `CARGO_PKG_VERSION` verbatim. `None` (no stamp at all) is always stale —
+/// covers caches from before this check existed.
+fn stamp_is_stale(stamped: Option<&str>, current: &str) -> bool {
+    stamped.map(str::trim) != Some(current)
 }
 
 /// The release-artifact target triple for the running CLI, or None on
@@ -529,9 +710,11 @@ fn download_runner(profile: &str, engine: &str, dest: &std::path::Path) -> Resul
         format!("glyx-runner-{engine_prefix}{target}{suffix}")
     };
     let version = env!("CARGO_PKG_VERSION");
+    // Only this CLI's own release: the runner is built together with the
+    // CLI, and a `latest` fallback could pair it with a newer, mismatched
+    // runner (then stamped as matching).
     let upstream = [
         format!("https://github.com/glyx-dev/glyx/releases/download/v{version}/{artifact}"),
-        format!("https://github.com/glyx-dev/glyx/releases/latest/download/{artifact}"),
     ];
     // When self-hosting, every runner comes from the mirror base; otherwise
     // fall back to the upstream GitHub release URLs.
@@ -570,13 +753,17 @@ fn download_runner(profile: &str, engine: &str, dest: &std::path::Path) -> Resul
     Ok(false)
 }
 
-fn glyx_runners_dir() -> PathBuf {
-    // Cross-platform home directory
+/// `~/.glyx` — runners, capability modules and the update-check cache.
+fn glyx_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
-    home.join(".glyx").join("runners")
+    home.join(".glyx")
+}
+
+fn glyx_runners_dir() -> PathBuf {
+    glyx_dir().join("runners")
 }
 
 fn runner_bin_name() -> &'static str {
@@ -587,7 +774,7 @@ fn runner_bin_name() -> &'static str {
 
 fn build_app_bundle(project_name: &str, entry: &str, p: pm::Pm) -> Result<PathBuf> {
     let bundle_out = format!("target/glyx/{project_name}.js");
-    pm::js_bundle(p, entry, &bundle_out, /*minify=*/true, /*source_map=*/false)?;
+    pm::js_bundle(p, entry, &bundle_out, /*minify=*/true, pm::SourceMap::Kept, !read_keep_test_ids())?;
     Ok(PathBuf::from(bundle_out))
 }
 
@@ -599,6 +786,21 @@ fn is_native_project() -> bool {
 }
 
 // ── Helper utilities ──────────────────────────────────────────────────────────
+
+/// The glyx SOURCE checkout this CLI runs from, if any — stricter than
+/// `glyx_home()`. That one accepts any `[workspace]` Cargo.toml mentioning
+/// `glyx-core`, which a user's own app workspace (depending on glyx-core,
+/// with the CLI installed under node_modules) also matches. Only a tree
+/// that actually contains the runner's source can build it, so only that
+/// switches `find_or_build_runner` to always-build-from-source; everyone
+/// else keeps the cache → download path.
+fn glyx_source_checkout() -> Option<PathBuf> {
+    glyx_home().ok().filter(|home| is_glyx_source_checkout(home))
+}
+
+fn is_glyx_source_checkout(dir: &Path) -> bool {
+    dir.join("crates").join("glyx-runner").join("Cargo.toml").is_file()
+}
 
 fn glyx_home() -> Result<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -921,6 +1123,30 @@ fn read_dev_config() -> Option<(String, String)> {
     Some((dev.entry?, dev.output?))
 }
 
+/// `keepTestIds` from glyx.config: keep `testID` props in release builds (for
+/// end-to-end tests against the release binary). Default false: stripped.
+fn read_keep_test_ids() -> bool {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Cfg { keep_test_ids: Option<bool> }
+    resolve_config_json().ok()
+        .and_then(|src| serde_json::from_str::<Cfg>(&src).ok())
+        .and_then(|c| c.keep_test_ids)
+        .unwrap_or(false)
+}
+
+/// `devtools.autoIdCacheThreshold` from glyx.config: node count above which
+/// devtools caches element IDs between requests.
+fn read_devtools_auto_id_cache_threshold() -> Option<usize> {
+    #[derive(serde::Deserialize)]
+    struct Cfg { devtools: Option<Devtools> }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Devtools { auto_id_cache_threshold: Option<usize> }
+    let src = resolve_config_json().ok()?;
+    serde_json::from_str::<Cfg>(&src).ok()?.devtools?.auto_id_cache_threshold
+}
+
 /// Read `dev.inspect` from glyx.config.ts/.json.
 /// Returns `Some(port)` if inspect is enabled, `None` otherwise.
 fn read_dev_inspect_port() -> Option<u16> {
@@ -1001,8 +1227,18 @@ fn copy_runtime_files(dest_root: &Path) -> Result<()> {
             std::fs::copy(&config, dest_root.join("glyx.config.json"))
                 .with_context(|| format!("copy {}", config.display()))?;
         }
-        let js_dir = PathBuf::from("js");
-        if js_dir.exists() { copy_dir_all(&js_dir, &dest_root.join("js"))?; }
+        // Only the bundle the app loads (`dev.output`), at the same relative
+        // path: not the whole js/ folder, which holds the app's sources.
+        let output = read_dev_config().map(|(_, o)| o).unwrap_or_else(|| "js/dist/app.js".to_string());
+        let src = PathBuf::from(&output);
+        if src.exists() {
+            let dst = dest_root.join(&output);
+            if let Some(parent) = dst.parent() { std::fs::create_dir_all(parent)?; }
+            std::fs::copy(&src, &dst).with_context(|| format!("copy {output}"))?;
+            println!("  JS bundle: {output}");
+        } else {
+            println!("  ⚠ JS bundle {output} not found: run `glyx build` first");
+        }
     }
     let assets_dir = PathBuf::from("assets");
     if assets_dir.exists() { copy_dir_all(&assets_dir, &dest_root.join("assets"))?; }
@@ -1068,7 +1304,11 @@ fn write_caps_lock(dest_root: &Path) -> Result<()> {
     // build_cap_dlls), not the project root — search both so this also
     // works for a developer who's manually copied a DLL into cwd (e.g. via
     // `glyx caps build --dest .`).
-    let search_dirs: &[&Path] = &[Path::new("target/release"), Path::new(".")];
+    // `dest_root` first: that's where `glyx build` just staged the fresh
+    // modules. (Searching `target/release` relative to the app folder first
+    // could hash, and copy over the fresh one, a stale module from an
+    // earlier build.)
+    let search_dirs: &[&Path] = &[dest_root, Path::new("target/release"), Path::new(".")];
 
     for cap in &cap_names {
         let stem = format!("glyx_cap_{cap}");
@@ -1084,15 +1324,20 @@ fn write_caps_lock(dest_root: &Path) -> Result<()> {
                         .with_context(|| format!("read {}", path.display()))?;
                     let hex = format!("{:x}", Sha256::digest(&bytes));
                     hashes.insert(cap.to_string(), serde_json::Value::String(hex));
-                    // Copy the module into the dist dir alongside the binary.
-                    std::fs::copy(&path, dest_root.join(&filename))
-                        .with_context(|| format!("copy {filename} to dist"))?;
+                    // Copy the module into the dist dir alongside the binary
+                    // (unless it's already the one there).
+                    let dest = dest_root.join(&filename);
+                    let same = std::fs::canonicalize(&path).ok().zip(std::fs::canonicalize(&dest).ok()).is_some_and(|(a, b)| a == b);
+                    if !same {
+                        std::fs::copy(&path, &dest)
+                            .with_context(|| format!("copy {filename} to dist"))?;
+                    }
                     println!("Capability module: {filename} (hash pinned in glyx-caps.lock)");
                     // Also copy the Ed25519 .sig sidecar cap_loader requires
                     // in release builds — silently missing this left every
                     // packaged app with a capability that refuses to load.
                     let sig_path = path.with_extension(format!("{ext}.sig"));
-                    if sig_path.exists() {
+                    if sig_path.exists() && !same {
                         std::fs::copy(&sig_path, dest_root.join(format!("{filename}.sig")))
                             .with_context(|| format!("copy {filename}.sig to dist"))?;
                         println!("  + {filename}.sig");
@@ -1114,6 +1359,21 @@ fn write_caps_lock(dest_root: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Everything a packaged app needs next to its executable: config and JS
+/// bundle (unless embedded), assets, capability lock, the trimmed ICU data
+/// `glyx build` left next to `bin`, and the media libraries.
+fn copy_app_payload(dest_root: &Path, bin: &Path) -> Result<()> {
+    copy_runtime_files(dest_root)?;
+    // Without icudtl.dat, Intl.* and toLocaleString() don't work.
+    if let Some(icu) = bin.parent().map(|d| d.join("icudtl.dat")).filter(|p| p.exists()) {
+        std::fs::copy(&icu, dest_root.join("icudtl.dat")).context("copy icudtl.dat")?;
+        println!("  ICU data: icudtl.dat ({} KB)", std::fs::metadata(&icu)?.len() / 1024);
+    } else {
+        println!("  ⚠ no icudtl.dat next to {}: Intl.* and toLocaleString() won't work (run `glyx build`)", bin.display());
+    }
+    copy_media_dll_if_needed(dest_root)
 }
 
 /// Copy the cached glyx-media DLL **and all FFmpeg runtime DLLs** into `dest_root`
@@ -1157,29 +1417,57 @@ fn copy_media_dll_if_needed(dest_root: &Path) -> Result<()> {
         return Ok(());
     }
 
-    // Copy the glyx-media DLL itself.
+    // Copy the glyx-media DLL and its signed manifest. A release build only
+    // loads the DLL when `<stem>.manifest.json` + `.manifest.sig` sit next to
+    // it and the signature checks out (see glyx-media's verify.rs).
     std::fs::copy(&media_dll, dest_root.join(format!("{media_stem}.{ext}")))
         .with_context(|| format!("copy glyx-media DLL → {}", dest_root.display()))?;
     println!("  Media DLL: {media_stem}.{ext}");
+    for side in ["manifest.json", "manifest.sig"] {
+        let src = cache_dir.join(format!("{media_stem}.{side}"));
+        if !src.exists() {
+            println!("  ⚠ {} is missing: the packaged app will refuse to load the media DLL (video, camera and microphone won't work).", src.display());
+            continue;
+        }
+        std::fs::copy(&src, dest_root.join(format!("{media_stem}.{side}")))
+            .with_context(|| format!("copy {} → {}", src.display(), dest_root.display()))?;
+    }
+    if is_dev_signature(&cache_dir.join(format!("{media_stem}.manifest.sig"))) {
+        println!("  ⚠ This glyx-media DLL is a local build with a dev (unsigned) manifest.");
+        println!("    A packaged app refuses it: video, camera and microphone won't work for users.");
+        println!("    Package with a signed release build instead: put the glyx-media-build workflow's");
+        println!("    artifact (DLL, manifest, signature and FFmpeg libraries) in {}.", cache_dir.display());
+    }
 
-    // Copy every other DLL in the cache dir (FFmpeg runtime: avcodec, avformat, etc.).
+    // FFmpeg's runtime libraries the wrapper links to: only those, not
+    // whatever else is in the cache (older FFmpeg versions, avfilter…).
     if let Ok(entries) = std::fs::read_dir(&cache_dir) {
         for entry in entries.flatten() {
-            let p = entry.path();
-            let is_dll = p.extension().and_then(|e| e.to_str())
-                .map(|e| e.eq_ignore_ascii_case("dll") || e.eq_ignore_ascii_case("dylib") || e == "so")
-                .unwrap_or(false);
-            let name = p.file_name().unwrap_or_default().to_string_lossy();
-            // Skip the glyx-media DLL itself (already copied above).
-            if is_dll && !name.starts_with("glyx-media-") {
-                let dest = dest_root.join(entry.file_name());
-                std::fs::copy(&p, &dest)
-                    .with_context(|| format!("copy {} → {}", p.display(), dest.display()))?;
-                println!("  FFmpeg DLL: {name}");
-            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !is_ffmpeg_runtime_lib(&name) { continue; }
+            let dest = dest_root.join(entry.file_name());
+            std::fs::copy(entry.path(), &dest)
+                .with_context(|| format!("copy {} → {}", entry.path().display(), dest.display()))?;
+            println!("  FFmpeg library: {name}");
         }
     }
     Ok(())
+}
+
+/// The FFmpeg libraries glyx-media links to (`avcodec-63.dll`,
+/// `libavformat.62.dylib`, `libswscale.so.9`…); not avfilter / avdevice /
+/// postproc, which it doesn't use.
+fn is_ffmpeg_runtime_lib(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    let n = n.strip_prefix("lib").unwrap_or(&n);
+    let is_lib = n.ends_with(".dll") || n.contains(".dylib") || n.contains(".so");
+    is_lib && ["avcodec", "avformat", "avutil", "swresample", "swscale"].iter()
+        .any(|l| n.starts_with(l) && n[l.len()..].starts_with(['-', '.']))
+}
+
+/// A dev manifest from `generate-dev-manifest` has an all-zero signature.
+fn is_dev_signature(sig: &Path) -> bool {
+    std::fs::read(sig).is_ok_and(|b| !b.is_empty() && b.iter().all(|&x| x == 0))
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
@@ -1242,6 +1530,38 @@ if (typeof MessageChannel === 'undefined') {
 
 #[cfg(test)]
 mod cli_tests {
+    /// The real bundling step against this machine's media cache, for an app
+    /// that declares video (changes the working directory: run it alone).
+    ///   GLYX_PKG_APP=examples/notes-app cargo test -p glyx-cli media_bundle -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn media_bundle_against_the_real_cache() {
+        let app = std::env::var("GLYX_PKG_APP").expect("GLYX_PKG_APP");
+        let dest = std::env::temp_dir().join(format!("glyx-pkg-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(&dest).unwrap();
+        std::env::set_current_dir(&app).unwrap();
+        super::copy_media_dll_if_needed(&dest).unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(&dest).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        println!("bundled: {names:?}");
+        assert!(names.iter().any(|n| n.ends_with(".manifest.json")) && names.iter().any(|n| n.ends_with(".manifest.sig")));
+        assert!(names.iter().all(|n| !n.starts_with("avfilter") && !n.starts_with("avdevice")));
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn packaging_ships_only_the_ffmpeg_libraries_glyx_media_uses() {
+        for yes in ["avcodec-63.dll", "avformat-62.dll", "AVUTIL-61.DLL", "swresample-7.dll", "swscale-10.dll",
+                    "libavcodec.62.dylib", "libswscale.so.9", "libavutil.so"] {
+            assert!(super::is_ffmpeg_runtime_lib(yes), "{yes}");
+        }
+        for no in ["avfilter-11.dll", "avdevice-62.dll", "postproc-58.dll", "glyx-media-1.0.0-windows-x64.dll",
+                   "glyx-media-1.0.0-windows-x64.manifest.json", "avcodecs-1.dll", "notes.txt"] {
+            assert!(!super::is_ffmpeg_runtime_lib(no), "{no}");
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1270,5 +1590,111 @@ mod cli_tests {
     #[test]
     fn platform_to_rust_target_rejects_unknown_platform() {
         assert!(platform_to_rust_target("plan9").is_err());
+    }
+
+    #[test]
+    fn a_runner_cached_by_another_cli_version_is_replaced() {
+        assert_eq!(cached_runner_action(false, None, "0.2.0"), CachedRunner::Missing);
+        assert_eq!(cached_runner_action(true, Some("0.2.0"), "0.2.0"), CachedRunner::Use);
+        assert_eq!(cached_runner_action(true, Some("0.2.0\n"), "0.2.0"), CachedRunner::Use);
+        // The regression: an upgraded CLI used to keep running the old runner.
+        assert_eq!(cached_runner_action(true, Some("0.1.0"), "0.2.0"), CachedRunner::Replace);
+        assert_eq!(cached_runner_action(true, None, "0.2.0"), CachedRunner::Replace, "unstamped cache");
+    }
+
+    #[test]
+    fn only_a_tree_with_the_runner_source_counts_as_a_source_checkout() {
+        let dir = std::env::temp_dir().join(format!("glyx-checkout-test-{}", std::process::id()));
+        // A user's own app workspace that depends on glyx-core.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[workspace]
+[dependencies]
+glyx-core = \"0.1\"
+").unwrap();
+        assert!(!is_glyx_source_checkout(&dir));
+        // The real source tree has the runner crate.
+        std::fs::create_dir_all(dir.join("crates/glyx-runner")).unwrap();
+        std::fs::write(dir.join("crates/glyx-runner/Cargo.toml"), "[package]
+name = \"glyx-runner\"
+").unwrap();
+        assert!(is_glyx_source_checkout(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        // This repo itself is one.
+        assert!(glyx_source_checkout().is_some());
+    }
+
+    #[test]
+    fn cached_runner_is_refreshed_when_missing_resized_or_older_than_the_build() {
+        let dir = std::env::temp_dir().join(format!("glyx-cache-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (built, cached) = (dir.join("built.exe"), dir.join("cached.exe"));
+        std::fs::write(&built, b"new runner").unwrap();
+        assert!(cache_needs_refresh(&built, &cached), "missing cache");
+
+        std::fs::write(&cached, b"old").unwrap();
+        assert!(cache_needs_refresh(&built, &cached), "different size");
+
+        // Same size, cache written after the build: up to date.
+        std::fs::write(&cached, b"new runner").unwrap();
+        let now = std::time::SystemTime::now();
+        std::fs::File::options().write(true).open(&built).unwrap()
+            .set_modified(now - std::time::Duration::from_secs(60)).unwrap();
+        std::fs::File::options().write(true).open(&cached).unwrap().set_modified(now).unwrap();
+        assert!(!cache_needs_refresh(&built, &cached));
+
+        // A newer build than the cache (a native change was rebuilt): refresh.
+        std::fs::File::options().write(true).open(&built).unwrap()
+            .set_modified(now + std::time::Duration::from_secs(60)).unwrap();
+        assert!(cache_needs_refresh(&built, &cached));
+
+        // refresh_cache copies it over and then serves the cache path.
+        let served = refresh_cache(&built, &dir, &cached);
+        assert_eq!(served, cached);
+        assert_eq!(std::fs::read(&cached).unwrap(), b"new runner");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stamp_is_stale_matches_exact_current_version() {
+        assert!(!stamp_is_stale(Some("0.1.0"), "0.1.0"));
+    }
+
+    #[test]
+    fn stamp_is_stale_flags_a_different_version() {
+        assert!(stamp_is_stale(Some("0.0.9"), "0.1.0"));
+        // Not semver-range logic — even a "newer-looking" stamp than current
+        // still counts as stale (mismatch, not "compatible enough").
+        assert!(stamp_is_stale(Some("0.2.0"), "0.1.0"));
+    }
+
+    #[test]
+    fn stamp_is_stale_flags_a_missing_stamp() {
+        // No stamp at all — a cache from before this check existed.
+        assert!(stamp_is_stale(None, "0.1.0"));
+    }
+
+    #[test]
+    fn stamp_is_stale_tolerates_trailing_whitespace_from_the_stamp_file() {
+        // `write_version_stamp` writes without a trailing newline, but a
+        // stamp edited or written by another tool might have one.
+        assert!(!stamp_is_stale(Some("0.1.0\n"), "0.1.0"));
+    }
+
+    #[test]
+    fn write_and_check_version_stamp_round_trip() {
+        let dir = std::env::temp_dir().join(format!("glyx-cli-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // No stamp yet — freshness check must not panic, and (indirectly,
+        // since it only prints) must treat this as stale via stamp_is_stale.
+        let before = std::fs::read_to_string(dir.join(".version")).ok();
+        assert!(stamp_is_stale(before.as_deref(), env!("CARGO_PKG_VERSION")));
+
+        write_version_stamp(&dir);
+        let after = std::fs::read_to_string(dir.join(".version")).unwrap();
+        assert_eq!(after.trim(), env!("CARGO_PKG_VERSION"));
+        assert!(!stamp_is_stale(Some(&after), env!("CARGO_PKG_VERSION")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

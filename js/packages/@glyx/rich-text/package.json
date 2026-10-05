@@ -1,11 +1,11 @@
 {
   "name": "@glyx-dev/rich-text",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "main": "src/index.js",
   "description": "Rich text editor for Glyx apps",
   "peerDependencies": {
-    "@glyx-dev/react": "*",
+    "@glyx-dev/react": "^0.2.0",
     "react": "*"
   }
 }

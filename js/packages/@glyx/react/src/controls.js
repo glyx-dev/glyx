@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   registerInput, unregisterInput,
   registerDraggable, unregisterDraggable,
@@ -11,6 +11,7 @@ import {
 import { View, Text, Image, ScrollView, Pressable, measureText, useWindowSize } from './core.js';
 import { openPopover, closePopover } from './popover.js';
 import { clipboard, dialog } from './api.js';
+import { flattenStyle } from './style.js';
 
 // ── Control width resolution ──────────────────────────────────────────────────
 //
@@ -22,7 +23,8 @@ import { clipboard, dialog } from './api.js';
 //      (so stretch parents don't blow it up) + its default width.
 // "Use the defaults or override" — stretching is one style away:
 //   style={{ alignSelf: 'stretch' }}   or   style={{ flex: 1 }} (in a row).
-function _sizedRootStyle(style, defaultWidth) {
+function _sizedRootStyle(styleProp, defaultWidth) {
+  const style = flattenStyle(styleProp);
   const sized = !!style && (
     style.width != null || style.flex != null || style.flexGrow != null ||
     style.minWidth != null || style.alignSelf != null
@@ -126,10 +128,15 @@ export function TextInput({
   maxLines,                  // multiline auto-height ceiling (default 10)
   secureTextEntry = false,   // mask characters (password fields)
   keyboardType = 'default',  // 'default' | 'numeric' | 'decimal'
-  style,
+  textAlign = 'left',        // passed to the inner Text; hit-testing respects it too
+  style: styleProp,
   ...props
 }) {
+  const style = flattenStyle(styleProp);
   const nodeIdRef   = useRef(null);
+  // Inner `text` node — hit-tests measure from ITS box (see textBoxInView).
+  const textNodeIdRef = useRef(null);
+  const onTextMount   = useCallback((id) => { textNodeIdRef.current = id; }, []);
   const handlersRef = useRef(null);
   const [focused, setFocused] = useState(false);
   // Live layout width of the field — flex/stretch styles routinely make the
@@ -245,9 +252,14 @@ export function TextInput({
   // Multiline auto-height: count rendered lines (explicit '\n' plus soft
   // wraps at the real field width) and size the box between minLines and
   // maxLines.  An explicit `height` prop opts out.
+  //
+  // Memoized: this used to run inline in the render body on EVERY render
+  // (even ones triggered by unrelated parent/context changes), re-measuring
+  // every line of text each time with no way to skip the work. Now it only
+  // recomputes when something it actually depends on changes.
   const lineH = realLineHeight(fontSize, lineHeight);
-  let autoHeight;
-  if (multiline && height == null) {
+  const autoHeight = useMemo(() => {
+    if (!(multiline && height == null)) return undefined;
     const lo = Math.max(1, minLines ?? 3);
     const hi = Math.max(lo, maxLines ?? 10);
     let lineCount = 0;
@@ -260,9 +272,49 @@ export function TextInput({
       lineCount = renderValue.split('\n').length;
     }
     const lines = Math.max(lo, Math.min(hi, Math.max(1, lineCount)));
-    autoHeight = Math.ceil(lines * lineH) + innerPadding * 2 + 4;
-  }
+    return Math.ceil(lines * lineH) + innerPadding * 2 + 4;
+  }, [multiline, height, renderValue, fontSize, innerW, minLines, maxLines, lineH, innerPadding]);
   const resolvedHeight = height ?? (multiline ? autoHeight : 44);
+
+  // The inner Text node's shaping/placement props — spread into the `text`
+  // element below AND passed to every native hit-test, so native resolves a
+  // click using exactly what it rendered (glyx-runtime's `text_props` maps
+  // both the same way). Previously hit-tests re-stated a subset of these as
+  // positional args and dropped lineHeight/scroll/centering along the way.
+  const textHitProps = {
+    fontSize,
+    lineHeight,
+    textAlign,
+    textScrollX: multiline ? undefined : scrollX,
+    showCursor:  focused,
+  };
+
+  // The inner text box relative to the input's own box, plus its size —
+  // read from the Text node's OWN layout (unclipped `box*` fields), so user
+  // `style.padding` overrides and multiline scroll (which moves the text node
+  // up) are accounted for by construction rather than re-derived here.
+  // Falls back to the known padding when layouts aren't available (tests).
+  const textBoxInView = () => {
+    const tid = textNodeIdRef.current, vid = nodeIdRef.current;
+    if (tid != null && vid != null && typeof __glyx_getLayout !== 'undefined') {
+      const t = __glyx_getLayout(tid), v = __glyx_getLayout(vid);
+      if (t && v) {
+        return {
+          dx: (t.boxX ?? t.x) - (v.boxX ?? v.x),
+          dy: (t.boxY ?? t.y) - (v.boxY ?? v.y),
+          w:  t.boxWidth ?? t.width,
+          h:  t.boxHeight ?? t.height,
+        };
+      }
+    }
+    return {
+      dx: innerPadding,
+      dy: innerPadding - (multiline ? scrollYRef.current : 0),
+      w:  innerW,
+      h:  multiline ? 0 : resolvedHeight - innerPadding * 2,
+    };
+  };
+  const hitOpts = (b) => ({ ...textHitProps, boxWidth: b.w, boxHeight: b.h });
 
   // Keep handlersRef current so it always captures the latest state/props.
   handlersRef.current = {
@@ -272,18 +324,16 @@ export function TextInput({
       const end = value.length;
       setAnchor(end);
       setFocus_(end);
-      // Tell the Rust-side focus registry — foundation for IME composition
-      // routing and (later) accessibility focus events.
-      if (typeof __glyx_setFocus !== 'undefined' && nodeIdRef.current != null) {
-        __glyx_setFocus(nodeIdRef.current);
-      }
+      // Native focus registry sync happens centrally in events.js's
+      // `setFocus()` (the caller of this handler), not here — see its
+      // comment for why: this used to call `__glyx_setFocus` directly too,
+      // which raced with Tab-driven focus moving to a DIFFERENT node
+      // afterward (this input's onBlur firing after Tab had already
+      // updated native focus, unconditionally nulling it back out).
     },
     onBlur: () => {
       setFocused(false);
       setPreedit('');
-      if (typeof __glyx_setFocus !== 'undefined') {
-        __glyx_setFocus(null);
-      }
     },
     // IME composition (CJK/etc). `text` is the in-progress candidate string
     // ("preedit") — displayed inline but NOT yet part of `value`.
@@ -396,11 +446,16 @@ export function TextInput({
         const l = (id != null && typeof __glyx_getLayout !== 'undefined') ? __glyx_getLayout(id) : null;
         const lineH = realLineHeight(fontSize, lineHeight);
         const pageLines = Math.max(1, Math.floor(((l ? l.height : 300) - innerPadding * 2) / lineH) - 1);
-        if (typeof __glyx_measure_text !== 'undefined' && typeof __glyx_text_pos_at !== 'undefined') {
-          const caretY = __glyx_measure_text(renderValue.slice(0, focus_) || ' ', fontSize, innerW).height - lineH / 2;
-          const caretX = 0; // column preservation via x would need caret x tracking; home-column is acceptable
-          const targetY = key === 'PageUp' ? caretY - pageLines * lineH : caretY + pageLines * lineH;
-          const pos = __glyx_text_pos_at(renderValue, fontSize, innerW, caretX, Math.max(0, targetY));
+        if (typeof __glyx_text_caret_at !== 'undefined' && typeof __glyx_text_pos_at !== 'undefined') {
+          // Caret → point → caret, all through the same native layout: keeps
+          // the caret's COLUMN (x) instead of snapping to the line start, and
+          // respects alignment/lineHeight since both calls share the node's
+          // own props. y is the middle of the caret's line, moved by a page.
+          const opts = hitOpts(textBoxInView());
+          const c = __glyx_text_caret_at(renderValue, focus_, opts);
+          const midY = c.y + c.height / 2;
+          const targetY = key === 'PageUp' ? midY - pageLines * lineH : midY + pageLines * lineH;
+          const pos = __glyx_text_pos_at(renderValue, c.x, Math.max(0, targetY), opts);
           if (shift) { extendTo(pos); } else { moveCursor(pos); }
         }
         return;
@@ -448,34 +503,29 @@ export function TextInput({
     },
     // Character position under a pointer coordinate (shared by click + drag).
     posAt: (relX, relY) => {
-      const padding = multiline ? 10 : 8;
-      const textX   = relX - padding;
-
+      // Point relative to the inner text box, then one native call that
+      // shapes + places the text exactly as rendered (soft wraps, newlines,
+      // alignment, lineHeight, single-line scroll, vertical centering).
+      // Measured against renderValue so masked (password) glyph widths line
+      // up with what's on screen.
+      const b = textBoxInView();
+      const tx = relX - b.dx, ty = relY - b.dy;
+      if (typeof __glyx_text_pos_at !== 'undefined') {
+        return __glyx_text_pos_at(renderValue, tx, ty, hitOpts(b));
+      }
+      // Fallbacks for runtimes without the native hit-test (approximate).
       if (multiline) {
-        // Multiline: native 2-D hit-test against the WRAPPED layout (handles
-        // soft wraps + '\n', which naive line-splitting cannot).  The click Y
-        // is in viewport space — add the scroll offset to land in content space.
-        const contentY = relY - padding + scrollYRef.current;
-        if (typeof __glyx_text_pos_at !== 'undefined') {
-          return __glyx_text_pos_at(renderValue, fontSize, innerW, Math.max(0, textX), Math.max(0, contentY));
-        }
-        // Fallback: '\n'-split line mapping (inaccurate with soft wraps).
         const rowH    = realLineHeight(fontSize, lineHeight);
-        const lineIdx = Math.max(0, Math.floor(contentY / rowH));
-        const lines      = renderValue.split('\n');
-        const clampedLine = Math.min(lineIdx, lines.length - 1);
-        const lineText   = lines[clampedLine];
+        const lines   = renderValue.split('\n');
+        const lineIdx = Math.min(Math.max(0, Math.floor(ty / rowH)), lines.length - 1);
         const col = (typeof __glyx_text_char_at_x !== 'undefined')
-          ? __glyx_text_char_at_x(lineText, fontSize, 1e6, Math.max(0, textX))
-          : Math.max(0, Math.min(Math.round(Math.max(0, textX) / (fontSize * 0.55)), lineText.length));
+          ? __glyx_text_char_at_x(lines[lineIdx], fontSize, 1e6, Math.max(0, tx))
+          : Math.max(0, Math.min(Math.round(Math.max(0, tx) / (fontSize * 0.55)), lines[lineIdx].length));
         let pos = 0;
-        for (let i = 0; i < clampedLine; i++) pos += lines[i].length + 1;
+        for (let i = 0; i < lineIdx; i++) pos += lines[i].length + 1;
         return pos + col;
       }
-      // Single-line: add scrollX offset so click maps to the correct character
-      // even when the text is shifted left.  Measured against renderValue so
-      // masked (password) glyph widths line up with what's on screen.
-      const localX = Math.max(0, textX) + scrollXRef.current;
+      const localX = Math.max(0, tx) + scrollXRef.current;
       return (typeof __glyx_text_char_at_x !== 'undefined')
         ? __glyx_text_char_at_x(renderValue, fontSize, 1e6, localX)
         : Math.max(0, Math.min(Math.round(localX / (fontSize * 0.55)), renderValue.length));
@@ -495,6 +545,14 @@ export function TextInput({
     onDragAt: (relX, relY) => {
       extendTo(handlersRef.current.posAt(relX, relY));
     },
+    // Screen reader set the selection (character offsets into `value`,
+    // mapped natively from AccessKit's run positions). Same effect as a
+    // mouse drag from `anchor` to `focus`.
+    onSetSelection: (a, f) => {
+      const len = value.length;
+      setAnchor(Math.max(0, Math.min(a, len)));
+      setFocus_(Math.max(0, Math.min(f, len)));
+    },
   };
 
   // Clamp a target scroll offset against the real (native-measured) overflow.
@@ -502,8 +560,10 @@ export function TextInput({
     const id = nodeIdRef.current;
     if (id == null || typeof __glyx_getLayout === 'undefined') return 0;
     const l = __glyx_getLayout(id);
+    // Unclipped viewport height — contentHeight is measured from unclipped
+    // rects, so a clipped `height` (field half-scrolled out) would overshoot.
     const max = (l && typeof l.contentHeight === 'number')
-      ? Math.max(0, l.contentHeight - l.height) : 0;
+      ? Math.max(0, l.contentHeight - (l.boxHeight ?? l.height)) : 0;
     return Math.min(max, Math.max(0, y));
   };
 
@@ -522,6 +582,7 @@ export function TextInput({
       onClickAt:       (relX, relY) => handlersRef.current.onClickAt(relX, relY),
       onDoubleClickAt: (relX, relY) => handlersRef.current.onDoubleClickAt(relX, relY),
       onDragAt:        (relX, relY) => handlersRef.current.onDragAt(relX, relY),
+      onSetSelection:  (a, f)       => handlersRef.current.onSetSelection(a, f),
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -589,7 +650,7 @@ export function TextInput({
     alignItems: 'flex-start',
     padding: innerPadding,
     clip: true,   // prevent text from rendering outside the input bounds
-    ...style,
+    ...flattenStyle(style),
     // Vertical scroll state (after the user-style spread — not overridable).
     // `showScrollbar`/`scrollbarWidth`/`scrollbarColor` use the same native
     // clip+scroll mechanism (and the same visual defaults) as
@@ -603,14 +664,19 @@ export function TextInput({
     'view',
     { _glyxOnMount: onMount, style: inputStyle, width: nodeWidth, height: resolvedHeight, role: 'textbox', ...props },
     React.createElement('text', {
+      _glyxOnMount:   onTextMount,
       text:           displayText,
-      fontSize,
-      lineHeight,
+      // Present ONLY while the placeholder is what's displayed: tells the
+      // accessibility tree the field is empty and this text is its
+      // placeholder, so a screen reader doesn't read it as typed content.
+      placeholder:    displayingPlaceholder ? placeholder : undefined,
+      // fontSize / lineHeight / textAlign / textScrollX / showCursor — the
+      // SAME object hit-tests pass to native (see textHitProps).
+      ...textHitProps,
       // Wrap (multiline) at the REAL measured width, not the 240 prop default.
       width:          innerW,
       height:         multiline ? undefined : resolvedHeight - innerPadding * 2,
       style:          { color: textColor },
-      showCursor:     focused,
       cursorPosition: focused ? focus_ : undefined,
       selectionStart: (focused && selStart < selEnd) ? selStart : undefined,
       selectionEnd:   (focused && selStart < selEnd) ? selEnd   : undefined,
@@ -618,8 +684,6 @@ export function TextInput({
       // `value`), since preedit is spliced in for display only.
       imePreeditStart: preedit ? focus_ : undefined,
       imePreeditEnd:   preedit ? focus_ + [...preedit].length : undefined,
-      textAlign:      'left',
-      textScrollX:    multiline ? undefined : scrollX,
     })
   );
 }
@@ -678,7 +742,7 @@ export function Checkbox({ checked = false, onChange, disabled = false, label, s
 
   return React.createElement(Pressable, {
     onPress: () => { if (!disabled && onChange) onChange(!checked); },
-    style: { flexDirection: 'row', alignItems: 'center', gap: 8, ...style },
+    style: { flexDirection: 'row', alignItems: 'center', gap: 8, ...flattenStyle(style) },
     role: 'checkbox',
     checked,
     ariaLabel: label != null ? String(label) : undefined,
@@ -702,7 +766,7 @@ export function Switch({ value = false, onValueChange, disabled = false, style, 
       justifyContent: 'center',
       alignItems: value ? 'flex-end' : 'flex-start',
       padding: 2,
-      ...style,
+      ...flattenStyle(style),
     },
     role: 'switch',
     checked: value,
@@ -726,7 +790,7 @@ export function RadioGroup({ value, onValueChange, children, style, ...rest }) {
   return React.createElement(
     _RadioCtx.Provider,
     { value: { value, onValueChange } },
-    React.createElement(View, { style: { gap: 8, ...style }, ...rest }, children)
+    React.createElement(View, { style: { gap: 8, ...flattenStyle(style) }, ...rest }, children)
   );
 }
 
@@ -760,7 +824,7 @@ export function Radio({ value, label, disabled = false, style, ...rest }) {
 
   return React.createElement(Pressable, {
     onPress: () => { if (!disabled && ctx && ctx.onValueChange) ctx.onValueChange(value); },
-    style: { flexDirection: 'row', alignItems: 'center', gap: 8, ...style },
+    style: { flexDirection: 'row', alignItems: 'center', gap: 8, ...flattenStyle(style) },
     role: 'radio',
     checked: selected,
     ariaLabel: label != null ? String(label) : undefined,
@@ -828,7 +892,7 @@ export function FileInput({
       justifyContent: 'center',
       alignItems: 'center',
       flexShrink: 0,
-      ...style,
+      ...flattenStyle(style),
     },
     ...rest,
   },
@@ -854,10 +918,11 @@ export function FileInput({
 export function Slider({
   value = 0, onValueChange, onChange,
   min = 0, max = 1, step = 0,
-  disabled = false, style,
+  disabled = false, style: styleProp,
   width: widthProp = 200,
   ...rest
 }) {
+  const style = flattenStyle(styleProp);
   const _cb = onValueChange ?? onChange;
   const THUMB = 20;
   const TRACK = 4;
@@ -977,7 +1042,7 @@ export function Slider({
     _glyxOnMount: onTrackMount,
     width: widthProp,
     pressable: true, // mark interactive so clicks hit-test to this node
-    style: { flexDirection: 'row', alignItems: 'center', ...style },
+    style: { flexDirection: 'row', alignItems: 'center', ...flattenStyle(style) },
     role: 'slider',
     numericValue: value,
     numericMin: min,

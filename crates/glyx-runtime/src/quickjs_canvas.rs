@@ -11,7 +11,7 @@
 
 use rquickjs::{ArrayBuffer, Ctx, Function, TypedArray, Value};
 
-use crate::bindings::{decode_canvas_binary, CanvasCmd, SceneCommand, SceneQueue};
+use crate::bindings::{decode_canvas_binary, CanvasCmd, FrameBuffer, SceneCommand};
 #[cfg(feature = "canvas3d")]
 use crate::bindings::{RaycastRequest, RaycastRequestQueue, RaycastResults};
 
@@ -19,25 +19,25 @@ use crate::bindings::{RaycastRequest, RaycastRequestQueue, RaycastResults};
 #[cfg(feature = "canvas3d")]
 static NEXT_RAYCAST_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
-pub(crate) fn canvas_update(id: u32, json: String, scene: &SceneQueue) {
+pub(crate) fn canvas_update(id: u32, json: String, frame: &FrameBuffer) {
     let cmds: Vec<CanvasCmd> = match serde_json::from_str(&json) {
         Ok(c) => c,
         Err(e) => { log::warn!("canvas_update parse error: {e}"); return; }
     };
-    scene.lock().push_back(SceneCommand::CanvasUpdate { id, cmds, append: false });
+    frame.borrow_mut().push(SceneCommand::CanvasUpdate { id, cmds, append: false });
 }
 
 #[cfg(feature = "canvas3d")]
-pub(crate) fn canvas3d_update(id: u32, json: String, scene: &SceneQueue) {
+pub(crate) fn canvas3d_update(id: u32, json: String, frame: &FrameBuffer) {
     let s: glyx_3d::Scene3D = match serde_json::from_str(&json) {
         Ok(s) => s,
         Err(e) => { log::warn!("canvas3d_update parse error: {e}"); return; }
     };
-    scene.lock().push_back(SceneCommand::Canvas3DUpdate { id, scene: s });
+    frame.borrow_mut().push(SceneCommand::Canvas3DUpdate { id, scene: s });
 }
 
 #[cfg(feature = "canvas3d")]
-pub(crate) fn canvas3d_load_gltf(id: u32, path: String, scene: &SceneQueue) -> Result<(), String> {
+pub(crate) fn canvas3d_load_gltf(id: u32, path: String, frame: &FrameBuffer) -> Result<(), String> {
     let path = glyx_security::resolve_and_check_read(std::path::Path::new(&path))
         .map(|c| c.to_string_lossy().into_owned())
         .map_err(|e| format!("canvas3d.loadGltf denied: {e}"))?;
@@ -51,13 +51,13 @@ pub(crate) fn canvas3d_load_gltf(id: u32, path: String, scene: &SceneQueue) -> R
             color: [1.; 4],
         }],
     };
-    scene.lock().push_back(SceneCommand::Canvas3DUpdate { id, scene: s });
+    frame.borrow_mut().push(SceneCommand::Canvas3DUpdate { id, scene: s });
     Ok(())
 }
 
 #[cfg(feature = "canvas3d")]
-pub(crate) fn canvas3d_unload_gltf(path: String, scene: &SceneQueue) {
-    scene.lock().push_back(SceneCommand::Canvas3DUnloadGltf { path });
+pub(crate) fn canvas3d_unload_gltf(path: String, frame: &FrameBuffer) {
+    frame.borrow_mut().push(SceneCommand::Canvas3DUnloadGltf { path });
 }
 
 /// `__glyx_canvas3d_raycast(id, ndcX, ndcY) -> reqId` — sync, returns
@@ -81,8 +81,8 @@ pub(crate) fn canvas3d_raycast_poll(results: &RaycastResults) -> String {
 }
 
 #[cfg(feature = "webview")]
-pub(crate) fn webview_post_message(id: u32, msg: String, scene: &SceneQueue) {
-    scene.lock().push_back(SceneCommand::WebviewPostMessage { id, msg });
+pub(crate) fn webview_post_message(id: u32, msg: String, frame: &FrameBuffer) {
+    frame.borrow_mut().push(SceneCommand::WebviewPostMessage { id, msg });
 }
 
 #[cfg(feature = "webview")]
@@ -147,7 +147,7 @@ pub(crate) fn init_canvas_buffers(ctx: &Ctx<'_>, protocol: &str, buffer_kb: usiz
 /// as arguments — no JSON.stringify, no string copy, no serde parse.
 pub(crate) fn canvas_flush(
     id: u32, f32buf: Value<'_>, float_count: usize, u8buf: Value<'_>, str_len: usize, append: bool,
-    scene: &SceneQueue,
+    frame: &FrameBuffer,
 ) {
     let Some(f32_array) = TypedArray::<f32>::from_value(f32buf).ok() else {
         log::warn!("canvas_flush: command buffer unavailable");
@@ -164,5 +164,5 @@ pub(crate) fn canvas_flush(
         .unwrap_or(&[]);
 
     let cmds = decode_canvas_binary(cmd_bytes, float_count, str_bytes);
-    scene.lock().push_back(SceneCommand::CanvasUpdate { id, cmds, append });
+    frame.borrow_mut().push(SceneCommand::CanvasUpdate { id, cmds, append });
 }

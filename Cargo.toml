@@ -14,6 +14,7 @@ members = [
     "crates/glyx-ai",
     "crates/glyx-sysapi",
     "crates/glyx-perf",
+    "crates/glyx-devtools",
     "crates/glyx-cli",
     "crates/glyx-runner",
     "examples/hello-world",
@@ -24,6 +25,7 @@ members = [
     "examples/webview-demo",
     "examples/a11y-ime-demo",
     "examples/bench-app",
+    "examples/motion-demo",
     "crates/glyx-snapshot",
     "crates/glyx-media",
     "crates/glyx-cap-abi",
@@ -42,7 +44,7 @@ members = [
 [workspace.dependencies]
 # Windowing + GPU
 winit     = "0.30"
-wgpu      = { version = "29", features = ["counters"] }
+wgpu      = { version = "29" }
 
 # 2D Rendering
 vello     = "0.9"
@@ -94,7 +96,7 @@ base64              = "0.22"
 tokio-tungstenite   = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
 futures-util        = "0.3"
 mdns-sd             = "0.11"
-battery             = "0.7"
+battery             = { package = "starship-battery", version = "0.12" }
 sysinfo             = "0.33"
 keepawake           = "0.5"
 gilrs               = "0.11"
@@ -134,8 +136,8 @@ muda                = "0.19"
 wry                 = "0.50"
 
 # Accessibility (accesskit surfaces to NSAccessibility / UIAutomation / AT-SPI)
-accesskit           = "0.19"
-accesskit_winit     = "0.27"
+accesskit           = "0.24"
+accesskit_winit     = "0.33"
 
 # QuickJS (mobile-required, desktop-optional lightweight engine — see
 # glyx_rough_docs/QUICKJS_PERFORMANCE_PLAN.md). Mutually exclusive with `v8`

@@ -8,6 +8,10 @@ use std::sync::Arc;
 use thiserror::Error;
 use winit::window::Window;
 
+/// Re-exported so callers (e.g. glyx-core's devtools screenshot capture)
+/// don't need their own direct `wgpu` dependency just to name `SurfaceTexture`.
+pub use wgpu;
+
 #[derive(Debug, Error)]
 pub enum GpuError {
     #[error("No suitable GPU adapter found")]
@@ -145,8 +149,17 @@ impl GpuContext {
         let format_raw = format.remove_srgb_suffix();
         let view_formats = if format_raw != format { vec![format_raw] } else { vec![] };
 
+        // COPY_SRC lets devtools read the swapchain texture back for
+        // Automation.screenshot (see read_texture_rgba). Most backends
+        // support it on the swapchain; added only when the surface actually
+        // advertises it, so configure() can't fail over a devtools nicety.
+        let copy_src = if caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            wgpu::TextureUsages::COPY_SRC
+        } else {
+            wgpu::TextureUsages::empty()
+        };
         let config = wgpu::SurfaceConfiguration {
-            usage:                         wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage:                         wgpu::TextureUsages::RENDER_ATTACHMENT | copy_src,
             format,
             width:                         size.width.max(1),
             height:                        size.height.max(1),
@@ -203,11 +216,77 @@ impl GpuContext {
         self.config.format.remove_srgb_suffix()
     }
 
+    /// Whether the swapchain was configured with `COPY_SRC` — i.e. whether
+    /// `read_texture_rgba` can actually read it back (see its configure-time
+    /// check in `new`). False only on backends that don't advertise it.
+    pub fn supports_readback(&self) -> bool {
+        self.config.usage.contains(wgpu::TextureUsages::COPY_SRC)
+    }
+
     /// Non-blocking poll — frees staging buffers and command allocators from
     /// completed GPU submissions.  Call once per frame after `present()` to
     /// prevent wgpu's upload ring buffer from growing unboundedly.
     pub fn poll(&self) {
         self.device.poll(wgpu::PollType::Poll).ok();
+    }
+
+    /// Copy `texture` back to CPU memory as 0RGB `u32` pixels (same layout
+    /// `SoftPresent::last_frame` uses), for devtools screenshots on a
+    /// wgpu-presented window. Call with the just-rendered swapchain texture,
+    /// before `present()` consumes it. Blocks on the GPU — the texture is
+    /// usually a few MB, and this only runs when a screenshot was asked for.
+    pub fn read_texture_rgba(&self, texture: &wgpu::Texture, width: u32, height: u32) -> Vec<u32> {
+        let bytes_per_pixel = 4u32;
+        let unpadded = width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = unpadded.div_ceil(align) * align;
+        let buf_size = (padded as u64) * (height as u64);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glyx-screenshot-readback"),
+            size: buf_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("glyx-screenshot-encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(height) },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+        // Only this call makes the mapping callback above actually fire.
+        while self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).is_ok() {
+            if let Ok(r) = rx.try_recv() {
+                if r.is_err() { return Vec::new(); }
+                break;
+            }
+        }
+        let data = slice.get_mapped_range();
+        // BGRA is the common native swapchain order; anything else (RGBA) is
+        // read as is. Either way the alpha byte is dropped, matching the
+        // opaque 0RGB convention `inspect::png` already expects.
+        let bgr_order = !matches!(self.surface_format_raw(), wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb);
+        let mut out = Vec::with_capacity((width * height) as usize);
+        for row in 0..height {
+            let start = (row * padded) as usize;
+            let row_bytes = &data[start..start + unpadded as usize];
+            for px in row_bytes.chunks_exact(4) {
+                let (r, g, b) = if bgr_order { (px[2], px[1], px[0]) } else { (px[0], px[1], px[2]) };
+                out.push(u32::from_be_bytes([0, r, g, b]));
+            }
+        }
+        drop(data);
+        buffer.unmap();
+        out
     }
 
     /// Return live wgpu memory counters: `(buffer_bytes, texture_bytes, allocator_reserved_bytes)`.
@@ -217,7 +296,8 @@ impl GpuContext {
     /// for the total reserved heap block size.  The difference between
     /// `allocator_reserved_bytes` and `buffer_bytes + texture_bytes` reveals
     /// how much wgpu's DX12/Vulkan allocator is over-reserving in heap blocks.
-    /// Returns zeros on backends that do not expose counters.
+    /// Returns zeros on backends that do not expose counters, and in builds
+    /// without the `counters` feature (everything but dev builds).
     /// Returns `(buffer_bytes, texture_bytes, allocator_reserved_bytes, buffer_count, texture_count)`.
     pub fn memory_counters(&self) -> (u64, u64, u64, u32, u32) {
         let c = self.device.get_internal_counters();
@@ -242,7 +322,7 @@ impl GpuContext {
     ///
     /// - `None`          → TinySkia  (~97 MB RSS, no GPU allocation at all)
     /// - `Integrated`    → TinySkia  (~97 MB RSS, avoids iGPU buffer pool cost)
-    /// - `DiscreteIntel` → FemtoVG   (~103–153 MB RSS, OpenGL triangle path)
+    /// - `DiscreteIntel` → Vello     (same GPU-compute path as `Discrete`)
     /// - `Discrete`      → Vello     (~285–328 MB RSS, full GPU compute)
     pub fn gpu_tier(&self) -> GpuTier {
         tier_from_info(&self.adapter.get_info())
@@ -266,7 +346,7 @@ fn tier_from_info(info: &wgpu::AdapterInfo) -> GpuTier {
         wgpu::DeviceType::IntegratedGpu                           => GpuTier::Integrated,
         wgpu::DeviceType::DiscreteGpu => {
             // Intel PCI vendor ID 0x8086 — covers Arc (Alchemist/Battlemage).
-            // Lighter VRAM budget than NVIDIA/AMD flagships; FemtoVG fits better.
+            // Lighter VRAM budget than NVIDIA/AMD flagships, so it is a tier of its own.
             if info.vendor == 0x8086 {
                 GpuTier::DiscreteIntel
             } else {
@@ -327,7 +407,7 @@ pub enum GpuTier {
     /// TinySkia uses zero GPU memory.
     Integrated,
     /// Intel Arc discrete GPU. Capable but lighter VRAM budget than NVIDIA/AMD.
-    /// FemtoVG (OpenGL tessellation) is the best balance of quality and footprint.
+    /// Runs the Vello GPU-compute path, like `Discrete`.
     DiscreteIntel,
     /// NVIDIA or AMD discrete GPU. Full Vello GPU-compute path justified.
     Discrete,

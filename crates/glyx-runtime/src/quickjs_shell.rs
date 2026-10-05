@@ -12,11 +12,11 @@ use crate::bindings::{shell_run_core, CompletionQueue, RedrawRequest};
 use crate::quickjs_runtime::QuickJsRuntime;
 
 pub(crate) fn shell_run<'js>(
-    ctx: Ctx<'js>, bin: String, args_json: Opt<String>,
+    ctx: Ctx<'js>, bin: String, args_json: Opt<Option<String>>,
     queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>,
 ) -> rquickjs::Result<rquickjs::Promise<'js>> {
     QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, async move {
-        let argv: Vec<String> = args_json.0
+        let argv: Vec<String> = args_json.0.flatten()
             .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
             .unwrap_or_default();
         let out = shell_run_core(&bin, argv).await?;

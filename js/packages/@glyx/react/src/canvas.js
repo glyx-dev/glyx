@@ -61,7 +61,25 @@ function _parseColor(c) {
 // Opcodes — must match `canvas_op` in glyx-runtime/src/bindings.rs.
 const _OP_CLEAR = 0, _OP_FILLRECT = 1, _OP_STROKERECT = 2, _OP_FILLCIRCLE = 3,
       _OP_STROKECIRCLE = 4, _OP_STROKELINE = 5, _OP_FILLTEXT = 6,
-      _OP_FILLPATH = 7, _OP_STROKEPATH = 8;
+      _OP_FILLPATH = 7, _OP_STROKEPATH = 8, _OP_FILLPATH_GRAD = 9,
+      _OP_PUSHCLIP = 10, _OP_POPCLIP = 11, _OP_FILLTEXT_BOLD = 12;
+
+/** A linear gradient usable as `ctx.fillStyle` (from `createLinearGradient`). */
+class GlyxCanvasGradient {
+  constructor(x0, y0, x1, y1) {
+    this.x0 = x0; this.y0 = y0; this.x1 = x1; this.y1 = y1;
+    this.stops = []; // [offset 0..1, color]
+  }
+  addColorStop(offset, color) {
+    this.stops.push([Math.min(1, Math.max(0, offset)), color]);
+    this.stops.sort((a, b) => a[0] - b[0]);
+  }
+}
+
+// measureText results, keyed by "size|weight|text". Chart labels repeat
+// every redraw, so this turns most measurements into a Map lookup.
+const _measureCache = new Map();
+const _MEASURE_CACHE_MAX = 2000;
 
 // Pack a color into one little-endian u32 whose bytes are [r, g, b, a].
 function _packColor(c) {
@@ -94,7 +112,7 @@ function _canvasBinaryEnv() {
   return _canvasBin;
 }
 
-class GlyxCanvasContext {
+export class GlyxCanvasContext {
   constructor(nativeId) {
     this._id    = nativeId;
     this._bin   = _canvasBinaryEnv(); // shared buffers, or false for JSON
@@ -107,6 +125,51 @@ class GlyxCanvasContext {
     this.fillStyle   = [255, 255, 255, 255];
     this.strokeStyle = [255, 255, 255, 255];
     this.lineWidth   = 1;
+    // Text placement relative to fillText's (x, y), as in the web canvas:
+    // textAlign 'left' | 'center' | 'right', textBaseline 'top' | 'middle' |
+    // 'bottom'. fontWeight 'normal' | 'bold'.
+    this.textAlign    = 'left';
+    this.textBaseline = 'top';
+    this.fontWeight   = 'normal';
+  }
+
+  /** A linear gradient from (x0,y0) to (x1,y1); add stops, then assign to `fillStyle`. */
+  createLinearGradient(x0, y0, x1, y1) { return new GlyxCanvasGradient(x0, y0, x1, y1); }
+
+  /**
+   * Size of `text` at `fontSize` (current `fontWeight`), as `{ width, height }`
+   * in pixels — measured by the same text engine that draws it.
+   */
+  measureText(text, fontSize = 16) {
+    const s = String(text);
+    const bold = this.fontWeight === 'bold';
+    const key = fontSize + (bold ? '|b|' : '|n|') + s;
+    let m = _measureCache.get(key);
+    if (m) return m;
+    if (typeof __glyx_measure_text !== 'undefined') {
+      const r = __glyx_measure_text(s, fontSize, 0, bold ? 'bold' : '');
+      m = { width: r.width, height: r.height };
+    } else {
+      m = { width: s.length * fontSize * 0.55, height: fontSize * 1.25 }; // tests / no runtime
+    }
+    if (_measureCache.size >= _MEASURE_CACHE_MAX) _measureCache.clear();
+    _measureCache.set(key, m);
+    return m;
+  }
+
+  /** Clip everything drawn until the matching `popClip()` to this rect. */
+  pushClip(x, y, w, h) {
+    if (!this._bin) { this._cmds.push({ type: 'pushClip', x, y, w, h }); return; }
+    this._ensure(5);
+    const f = this._bin.f32, p = this._fc;
+    f[p] = _OP_PUSHCLIP; f[p+1] = x; f[p+2] = y; f[p+3] = w; f[p+4] = h;
+    this._fc = p + 5;
+  }
+  popClip() {
+    if (!this._bin) { this._cmds.push({ type: 'popClip' }); return; }
+    this._ensure(1);
+    this._bin.f32[this._fc] = _OP_POPCLIP;
+    this._fc += 1;
   }
 
   // Ensure `slots` f32 command slots are free; flush a continuation chunk if not.
@@ -136,6 +199,12 @@ class GlyxCanvasContext {
   }
 
   fillRect(x, y, w, h) {
+    if (this.fillStyle instanceof GlyxCanvasGradient) {
+      this.beginPath();
+      this.moveTo(x, y); this.lineTo(x + w, y); this.lineTo(x + w, y + h); this.lineTo(x, y + h);
+      this.fill();
+      return;
+    }
     if (!this._bin) { this._cmds.push({ type: 'fillRect', x, y, w, h, color: _parseColor(this.fillStyle) }); return; }
     this._ensure(6);
     const f = this._bin.f32, p = this._fc;
@@ -176,7 +245,16 @@ class GlyxCanvasContext {
     this._fc = p + 7;
   }
   fillText(text, x, y, fontSize = 16) {
-    if (!this._bin) { this._cmds.push({ type: 'fillText', text: String(text), x, y, fontSize, color: _parseColor(this.fillStyle) }); return; }
+    // Resolve textAlign/textBaseline to the top-left the native side draws at.
+    if (this.textAlign !== 'left' || this.textBaseline !== 'top') {
+      const m = this.measureText(text, fontSize);
+      if (this.textAlign === 'center') x -= m.width / 2;
+      else if (this.textAlign === 'right' || this.textAlign === 'end') x -= m.width;
+      if (this.textBaseline === 'middle') y -= m.height / 2;
+      else if (this.textBaseline === 'bottom') y -= m.height;
+    }
+    const bold = this.fontWeight === 'bold';
+    if (!this._bin) { this._cmds.push({ type: 'fillText', text: String(text), x, y, fontSize, color: _parseColor(this.fillStyle), bold }); return; }
     const b = this._bin, s = String(text);
     // The command and its UTF-8 bytes must live in the same chunk (offset is
     // chunk-relative), so flush up-front if either region lacks room.
@@ -186,7 +264,7 @@ class GlyxCanvasContext {
     if (b.enc) { len = (b.enc.encodeInto(s, b.str.subarray(this._sc)).written) | 0; }
     this._sc += len;
     const f = b.f32, p = this._fc;
-    f[p] = _OP_FILLTEXT; f[p+1] = x; f[p+2] = y; f[p+3] = fontSize;
+    f[p] = bold ? _OP_FILLTEXT_BOLD : _OP_FILLTEXT; f[p+1] = x; f[p+2] = y; f[p+3] = fontSize;
     b.u32[p+4] = _packColor(this.fillStyle); f[p+5] = off; f[p+6] = len;
     this._fc = p + 7;
   }
@@ -200,13 +278,19 @@ class GlyxCanvasContext {
   lineTo(x, y) { this._path.push(x, y); }
   closePath() { this._pathClosed = true; }
 
-  /** Arc from `a0`→`a1` radians (set `ccw` for counter-clockwise). */
-  arc(cx, cy, r, a0, a1, ccw = false) {
+  /**
+   * Arc from `a0`→`a1` radians (set `ccw` for counter-clockwise). It is split
+   * into line segments: by default as many as its sweep needs (more for a
+   * wider arc). Pass `segments` to fix the count instead, so a shape whose
+   * angle changes keeps the same number of points — which is what lets a
+   * canvas with a `transition` ease between two draws of it.
+   */
+  arc(cx, cy, r, a0, a1, ccw = false, segments) {
     let start = a0, end = a1;
     if (ccw && end > start) end -= Math.PI * 2;
     if (!ccw && end < start) end += Math.PI * 2;
     const sweep = Math.abs(end - start);
-    const segs  = Math.max(6, Math.ceil(sweep / (Math.PI / 16)));
+    const segs  = segments > 0 ? Math.ceil(segments) : Math.max(6, Math.ceil(sweep / (Math.PI / 16)));
     for (let i = 0; i <= segs; i++) {
       const t = start + (end - start) * (i / segs);
       this._path.push(cx + Math.cos(t) * r, cy + Math.sin(t) * r);
@@ -225,11 +309,18 @@ class GlyxCanvasContext {
     }
   }
 
-  bezierCurveTo(c1x, c1y, c2x, c2y, x, y) {
+  /**
+   * Cubic curve to (x, y). It is split into line segments: 20 by default. Pass
+   * `segments` to choose the count: a curve that spans only a few pixels needs
+   * far fewer, and every vertex costs when the path is stroked. Keep the count
+   * independent of the data (derive it from the geometry) when the canvas has a
+   * `transition`, so consecutive draws keep the same number of points.
+   */
+  bezierCurveTo(c1x, c1y, c2x, c2y, x, y, segments) {
     const n = this._path.length;
     const x0 = n >= 2 ? this._path[n - 2] : c1x;
     const y0 = n >= 2 ? this._path[n - 1] : c1y;
-    const segs = 20;
+    const segs = segments > 0 ? Math.ceil(segments) : 20;
     for (let i = 1; i <= segs; i++) {
       const t = i / segs, mt = 1 - t;
       const a = mt * mt * mt, b = 3 * mt * mt * t, c = 3 * mt * t * t, d = t * t * t;
@@ -241,6 +332,7 @@ class GlyxCanvasContext {
   /** Fill the current path as a polygon (auto-closed). */
   fill() {
     if (this._path.length < 6) return; // need ≥3 points
+    if (this.fillStyle instanceof GlyxCanvasGradient) { this._fillGradient(this.fillStyle); return; }
     if (this._bin) {
       const count = this._path.length >> 1;
       const slots = 3 + this._path.length; // op + count + color + points
@@ -254,6 +346,30 @@ class GlyxCanvasContext {
       this._fc = o + this._path.length;
     } else {
       this._cmds.push({ type: 'fillPath', points: this._path.slice(), color: _parseColor(this.fillStyle) });
+    }
+  }
+
+  _fillGradient(g) {
+    const stops = g.stops.length ? g.stops : [[0, [0, 0, 0, 0]], [1, [0, 0, 0, 0]]];
+    if (this._bin) {
+      const count = this._path.length >> 1;
+      const slots = 7 + stops.length * 2 + this._path.length;
+      if (slots > this._bin.cap) return;
+      if (this._fc + slots > this._bin.cap) this._flushChunk();
+      const f = this._bin.f32, u = this._bin.u32;
+      let p = this._fc;
+      f[p++] = _OP_FILLPATH_GRAD; f[p++] = count;
+      f[p++] = g.x0; f[p++] = g.y0; f[p++] = g.x1; f[p++] = g.y1;
+      f[p++] = stops.length;
+      for (const [o, c] of stops) { f[p++] = o; u[p++] = _packColor(c); }
+      for (let k = 0; k < this._path.length; k++) f[p++] = this._path[k];
+      this._fc = p;
+    } else {
+      this._cmds.push({
+        type: 'fillPathGradient', points: this._path.slice(),
+        x0: g.x0, y0: g.y0, x1: g.x1, y1: g.y1,
+        stops: stops.map(([o, c]) => [o, _parseColor(c)]),
+      });
     }
   }
 

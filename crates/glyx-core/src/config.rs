@@ -84,6 +84,8 @@ pub(super) struct WindowCfgJson {
     pub(super) render_mode:  Option<String>,
     #[serde(rename = "maxJsHeapMb")]
     pub(super) max_js_heap_mb: Option<u32>,
+    #[serde(rename = "maxFps")]
+    pub(super) max_fps: Option<u32>,
     /// When true, `glyxWindow.create` with a title matching an open window
     /// focuses that window instead of opening a twin.  Per-call
     /// `allowDuplicate: true` or an explicit `key` override this.
@@ -146,7 +148,19 @@ pub(super) fn read_config_json() -> Option<String> {
     }
 
     // 4. Plain JSON config (no TypeScript, no bundler needed).
-    std::fs::read_to_string("glyx.config.json").ok()
+    std::fs::read_to_string(app_file("glyx.config.json")?).ok()
+}
+
+/// Where a packaged app's file `rel` lives: the working directory (dev, or
+/// launched from its folder), else next to the executable, else (macOS
+/// `.app`) its `Resources` folder. A packaged app can be launched from
+/// anywhere, e.g. Finder starts apps in `/`.
+pub(super) fn app_file(rel: &str) -> Option<std::path::PathBuf> {
+    let direct = std::path::PathBuf::from(rel);
+    if direct.exists() { return Some(direct); }
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    [exe_dir.join(rel), exe_dir.join("..").join("Resources").join(rel)]
+        .into_iter().find(|p| p.exists())
 }
 
 /// Wrap a bun `--format cjs` bundle (which ends in `module.exports = ...`)
@@ -360,6 +374,10 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
             cfg.max_js_heap_mb = Some(mb.clamp(16, 512));
         }
 
+        if let Some(fps) = w.max_fps {
+            cfg.max_fps = Some(fps.clamp(15, 500));
+        }
+
         if let Some(on) = w.prevent_duplicate_windows {
             glyx_runtime::set_prevent_duplicate_windows(on);
         }
@@ -385,6 +403,10 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
         cfg.icon_rgba = load_icon_png(icon_path);
     } else {
         cfg.icon_rgba = load_icon_from_bytes(DEFAULT_ICON_BYTES);
+    }
+    // The tray uses the same icon when an app creates one without pixels of its own.
+    if let Some((rgba, w, h)) = &cfg.icon_rgba {
+        glyx_runtime::set_app_icon(rgba.clone(), *w, *h);
     }
 
     let app_caps = file.as_ref().and_then(|f| f.capabilities.as_ref());
@@ -652,9 +674,13 @@ pub(super) fn read_output_js() -> Option<String> {
 
     let cfg: Cfg = serde_json::from_str(&read_config_json()?).ok()?;
     let output = cfg.dev?.output.unwrap_or_else(|| "js/dist/app.js".to_string());
-    match std::fs::read_to_string(&output) {
-        Ok(js) => { log::info!("Loaded JS from {}", output); Some(js) }
-        Err(e) => { log::warn!("Could not read JS from {}: {}", output, e); None }
+    let Some(path) = app_file(&output) else {
+        log::warn!("Could not find the JS bundle {output} (looked in the working directory and next to the executable)");
+        return None;
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(js) => { log::info!("Loaded JS from {}", path.display()); Some(js) }
+        Err(e) => { log::warn!("Could not read JS from {}: {}", path.display(), e); None }
     }
 }
 

@@ -132,7 +132,7 @@ const ICONS = {
  * <Icon name="arrow-right" size={20} color="#fff" />
  * <Icon name="check-circle" size={24} color="#00A878" strokeWidth={1.5} />
  */
-export function Icon({ name, size = 24, color = '#000000', strokeWidth = 2, style }) {
+export function Icon({ name, size = 24, color = '#000000', strokeWidth = 2, style, ariaLabel }) {
   const inner = ICONS[name];
   if (!inner) {
     if (typeof __glyx_log !== 'undefined') {
@@ -156,7 +156,11 @@ export function Icon({ name, size = 24, color = '#000000', strokeWidth = 2, styl
   ].join('');
 
   const src = 'data:image/svg+xml,' + encodeURIComponent(svg);
-  return React.createElement(Image, { src, width: size, height: size, style });
+  // Decorative unless the caller names it, so screen readers skip it (or read the label).
+  return React.createElement(Image, {
+    src, width: size, height: size, style,
+    ...(ariaLabel ? { ariaLabel } : { role: 'presentation' }),
+  });
 }
 
 /**

@@ -1255,6 +1255,48 @@ pub fn deeplink_poll_callback(
     rv.set(s.into());
 }
 
+// ── Autostart bindings ──────────────────────────────────────────────────────
+
+/// `__glyx_autostart_isEnabled() -> bool`
+///
+/// Synchronous: a registry query (Windows) or a file existence check
+/// (macOS/Linux), same reasoning as the clipboard bindings being sync.
+pub fn autostart_is_enabled_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    rv.set(v8::Boolean::new(scope, crate::autostart::is_enabled()).into());
+}
+
+/// `__glyx_autostart_setEnabled(enabled: bool) -> bool`
+///
+/// Registers or unregisters launch-at-login. Returns `false` (not a thrown
+/// error) on failure, same as other best-effort OS-integration bindings
+/// here; `false` is also returned when the `autostart` capability isn't granted.
+pub fn autostart_set_enabled_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if !glyx_security::get().autostart {
+        rv.set(v8::Boolean::new(scope, false).into());
+        return;
+    }
+    let enabled = args.get(0).boolean_value(scope);
+    let ok = crate::autostart::set_enabled(enabled).is_ok();
+    rv.set(v8::Boolean::new(scope, ok).into());
+}
+
+/// `__glyx_autostart_wasOpenedAtLogin() -> bool`
+pub fn autostart_was_opened_at_login_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    rv.set(v8::Boolean::new(scope, crate::autostart::was_opened_at_login()).into());
+}
+
 #[cfg(test)]
 mod tests {
     use super::validate_external_url;

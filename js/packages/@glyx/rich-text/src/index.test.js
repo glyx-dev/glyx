@@ -358,3 +358,20 @@ test('charIndexAtPoint resolves a click on a space to the space itself, not the 
   // the word, not bleed back into the space.
   expect(charIndexAtPoint(para, 66, 20)).toBe(6);
 });
+
+test('a span ending in a space keeps that space when hit-testing the next span', () => {
+  // Stub the native measurer the way Parley behaves: width() drops
+  // trailing whitespace; the cursor API counts every character.
+  globalThis.__glyx_measure_text = (t) => ({ width: t.replace(/\s+$/, '').length * 10 });
+  globalThis.__glyx_text_cursor_x = (t, _fs, _w, i) => i * 10;
+  try {
+    const para = { spans: [{ text: 'Hello ' }, { text: 'world', bold: true }] };
+    // 'w' is index 6 at px [60, 70). Without counting the space, the bold
+    // span would be thought to start at 50 and this click would land on 'o'.
+    expect(charIndexAtPoint(para, 62, 16)).toBe(6);
+    expect(charIndexAtPoint(para, 55, 16)).toBe(5); // the space itself
+  } finally {
+    delete globalThis.__glyx_measure_text;
+    delete globalThis.__glyx_text_cursor_x;
+  }
+});

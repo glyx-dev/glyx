@@ -10,6 +10,18 @@ env:
   RUST_LOG: warn
 
 jobs:
+  # ── Version guard ──────────────────────────────────────────────────────────
+  # Every build job waits on this: the tag must equal the version of every
+  # crate and npm package (bun run release:version sets them together), or
+  # nothing is built or published.
+  versions:
+    name: Versions match the tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun scripts/release/check.mjs "${{ github.ref_name }}"
+
   # ── Lean glyx-runner binary ────────────────────────────────────────────────
   # One runner artifact pair (lean prod + dev) per (platform, engine) —
   # engine selection lives in glyx.config's "engine" field (default "v8");
@@ -18,6 +30,7 @@ jobs:
   # a "quickjs-" segment — see crates/glyx-cli/src/main.rs).
   runner:
     name: Runner (${{ matrix.platform.target }}, ${{ matrix.engine }})
+    needs: versions
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
@@ -47,7 +60,7 @@ jobs:
 
       - name: Install system deps (Linux)
         if: matrix.platform.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libv4l-dev libusb-1.0-0-dev libudev-dev libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libv4l-dev libusb-1.0-0-dev libudev-dev libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev libxdo-dev libdbus-1-dev
 
       - name: Compute artifact names
         id: names
@@ -95,6 +108,7 @@ jobs:
   # ── glyx CLI binary ────────────────────────────────────────────────────────
   cli:
     name: CLI (${{ matrix.target }})
+    needs: versions
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -121,6 +135,16 @@ jobs:
         with:
           key: ${{ matrix.target }}-cli
 
+      # The CLI embeds the DevTools UI (`glyx inspect`) at compile time
+      # (crates/glyx-cli/build.rs); without this step it would ship only a
+      # "not built" placeholder page.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Build the DevTools UI
+        shell: bash
+        run: bun install --frozen-lockfile && (cd tools/glyx-devtools-ui && bun run build)
+
       - name: Build CLI
         run: cargo build --release -p glyx-cli --target ${{ matrix.target }}
 
@@ -138,6 +162,7 @@ jobs:
   # ── Capability DLLs ────────────────────────────────────────────────────────
   cap-windows:
     name: Cap DLLs (windows)
+    needs: versions
     runs-on: windows-latest
     environment: release
     strategy:
@@ -174,6 +199,7 @@ jobs:
 
   cap-macos:
     name: Cap DLLs (macos)
+    needs: versions
     runs-on: macos-latest
     environment: release
     strategy:
@@ -208,6 +234,7 @@ jobs:
 
   cap-linux:
     name: Cap DLLs (linux)
+    needs: versions
     runs-on: ubuntu-latest
     environment: release
     strategy:
@@ -224,7 +251,7 @@ jobs:
       # installed unconditionally here since apt is cheap and this matrix
       # runs one job per cap anyway — simpler than a per-cap conditional.
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libv4l-dev libusb-1.0-0-dev libudev-dev libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libv4l-dev libusb-1.0-0-dev libudev-dev libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev libxdo-dev libdbus-1-dev
       - name: Build
         run: cargo build --release -p glyx-cap-${{ matrix.cap }}
       - name: Stage
@@ -248,7 +275,7 @@ jobs:
   # ── Publish GitHub Release ─────────────────────────────────────────────────
   publish:
     name: Publish release
-    needs: [runner, cli, cap-windows, cap-macos, cap-linux]
+    needs: [versions, runner, cli, cap-windows, cap-macos, cap-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -501,7 +501,7 @@ function App() {
           { sql: 'INSERT INTO tasks (title, body, priority, due, created_at) VALUES (?,?,?,?,?)',
             params: ['Welcome to Tasks', 'Click a task to edit. Tap the circle to mark it done.', 'medium', today, now] },
           { sql: 'INSERT INTO tasks (title, body, priority, due, created_at) VALUES (?,?,?,?,?)',
-            params: ['Ship the docs page', 'Add examples to veloxkit-docs.', 'high', today, now] },
+            params: ['Ship the docs page', 'Add examples to the docs site.', 'high', today, now] },
           { sql: 'INSERT INTO tasks (title, body, priority, recurring, created_at) VALUES (?,?,?,?,?)',
             params: ['Daily standup', 'Team sync at 9am.', 'low', 'daily', now] },
         ]);

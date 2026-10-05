@@ -160,7 +160,7 @@ function ActionButton({ label, onPress, variant = 'secondary', minWidth = 96 }) 
 
 // ── Chart widget ───────────────────────────────────────────────────────────────
 
-function ChartWidget({ config, timeseries, deviceData, width }) {
+function ChartWidget({ config, timeseries, deviceData, width, scheme }) {
   const C = useTheme().colors;
   const h = 260;
   // Card already applies 16px padding on each side; leave a little extra right
@@ -178,7 +178,7 @@ function ChartWidget({ config, timeseries, deviceData, width }) {
     chart = (
       <AreaChart
         data={timeseries.map((d) => ({ x: d.timestamp, y: d[config.dataKey] }))}
-        width={cw} height={h} color={COLORS.sky}
+        width={cw} height={h} color={COLORS.sky} theme={scheme} title={config.title}
         onPointPress={onPointPress} zoomPan
       />
     );
@@ -186,7 +186,7 @@ function ChartWidget({ config, timeseries, deviceData, width }) {
     chart = (
       <LineChart
         data={timeseries.map((d) => ({ x: d.timestamp, y: d[config.dataKey] }))}
-        width={cw} height={h} color={COLORS.emerald} showDots={false}
+        width={cw} height={h} color={COLORS.emerald} theme={scheme} title={config.title}
         onPointPress={onPointPress}
       />
     );
@@ -194,7 +194,7 @@ function ChartWidget({ config, timeseries, deviceData, width }) {
     chart = (
       <BarChart
         data={timeseries.map((d) => ({ x: d.timestamp, y: d[config.dataKey] }))}
-        width={cw} height={h} color={COLORS.indigo}
+        width={cw} height={h} color={COLORS.indigo} theme={scheme} title={config.title}
         onPointPress={onPointPress}
       />
     );
@@ -203,7 +203,7 @@ function ChartWidget({ config, timeseries, deviceData, width }) {
     // widget's fixed height budget instead of letting it overflow the card.
     chart = (
       <PieChart
-        data={deviceData} width={cw} height={h - 36} innerRadius={0.5}
+        data={deviceData} width={cw} height={h - 36} innerRadius={0.62} theme={scheme} title={config.title} centerLabel="Sessions" formatValue={(v) => String(Math.round(v))}
         onPointPress={onPointPress} showLegend
       />
     );
@@ -268,7 +268,7 @@ function Dashboard({ scheme, onToggleTheme }) {
       }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
           <View style={{ width: 32, height: 32, borderRadius: 8, backgroundColor: COLORS.sky, alignItems: 'center', justifyContent: 'center' }}>
-            <Text fontSize={15} style={{ color: '#fff', fontWeight: '700' }}>N</Text>
+            <Text fontSize={15} style={{ color: '#0B1220', fontWeight: '700' }}>N</Text>
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             <Text fontSize={18} style={{ color: C.text, fontWeight: '700' }}>Nexus Analytics</Text>
@@ -329,7 +329,7 @@ function Dashboard({ scheme, onToggleTheme }) {
             const ww = span2 ? chartW * 2 + chartGap : chartW;
             return (
               <View key={w.id} style={{ width: ww }}>
-                <ChartWidget config={w} timeseries={timeseries} deviceData={deviceData} width={ww} />
+                <ChartWidget config={w} timeseries={timeseries} deviceData={deviceData} width={ww} scheme={scheme} />
               </View>
             );
           })}

@@ -1,6 +1,6 @@
 [package]
 name    = "glyx-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [[bin]]
@@ -22,6 +22,9 @@ flate2     = { workspace = true }
 tar        = { workspace = true }
 sha2       = { workspace = true }
 ureq       = "2"
+# `glyx inspect` / `glyx dev --devtools --open`: the DevTools relay + UI.
+glyx-devtools = { path = "../glyx-devtools" }
+tokio         = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros", "io-std", "io-util"] }
 time       = { version = "0.3", default-features = false, features = ["std"] }
 # "signing" feature is a CLI-tooling-only escape hatch (never linked into the
 # runtime) — powers `glyx caps sign`/`glyx caps keygen`. See

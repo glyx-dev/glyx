@@ -41,3 +41,25 @@ pub fn credentials_delete(service: &str, key: &str) -> Result<(), String> {
         Err(e)                       => Err(format!("keyring delete: {e}")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Round-trips through the REAL OS credential store — the regression this
+    /// guards against is keyring silently using its in-memory mock store
+    /// (no platform backend feature enabled), where `set` succeeded and the
+    /// next `get` found nothing. Ignored by default: it writes (then deletes)
+    /// a throwaway credential on the machine running it, and CI runners have
+    /// no Secret Service daemon. Run with `cargo test -p glyx-sysapi -- --ignored`.
+    #[test]
+    #[ignore]
+    fn round_trips_through_the_real_os_store() {
+        let service = "glyx-sysapi-test";
+        let key = format!("roundtrip-{}", std::process::id());
+        credentials_set(service, &key, "s3cret").expect("set");
+        assert_eq!(credentials_get(service, &key).expect("get"), Some("s3cret".to_string()));
+        credentials_delete(service, &key).expect("delete");
+        assert_eq!(credentials_get(service, &key).expect("get after delete"), None);
+    }
+}

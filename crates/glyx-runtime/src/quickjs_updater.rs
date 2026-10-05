@@ -10,7 +10,7 @@
 use rquickjs::Ctx;
 use tokio::runtime::Handle;
 
-use crate::bindings::{CompletionQueue, RedrawRequest, SceneCommand, SceneQueue};
+use crate::bindings::{CompletionQueue, FrameBuffer, RedrawRequest, SceneCommand};
 use crate::quickjs_runtime::QuickJsRuntime;
 
 fn cap_denied<'js>(ctx: &Ctx<'js>, cap: &str) -> rquickjs::Result<rquickjs::Promise<'js>> {
@@ -232,6 +232,6 @@ pub(crate) fn crash_clear_reports(ctx: Ctx<'_>) -> rquickjs::Result<()> {
     Ok(())
 }
 
-pub(crate) fn splash_hide(scene: &SceneQueue) {
-    scene.lock().push_back(SceneCommand::HideSplash);
+pub(crate) fn splash_hide(frame: &FrameBuffer) {
+    frame.borrow_mut().push(SceneCommand::HideSplash);
 }

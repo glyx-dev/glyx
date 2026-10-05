@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::rc::Rc;
 use std::collections::VecDeque;
 
-use rquickjs::{Context, Runtime as QjsRuntime, Function, Promise, Persistent, Ctx, Value};
+use rquickjs::{Context, Runtime as QjsRuntime, Array, Function, Object, Promise, Persistent, Ctx, Value};
 use rquickjs::prelude::Opt;
 use tokio::runtime::Handle;
 
@@ -27,7 +27,7 @@ use crate::{
         InputEvent, LayoutCache, NodeProps, PromiseHandle, RedrawRequest, SceneCommand,
         SceneQueue, VideoEvents, WebviewEvents, WindowController,
     },
-    quickjs_props::{parse_node_type_str, parse_props_json},
+    quickjs_props::{parse_node_type_str, parse_props_value},
     runtime_trait::{HeapStats, JsRuntime},
     GlyxExtension, RuntimeError,
 };
@@ -87,6 +87,10 @@ pub struct QuickJsRuntime {
     events:             EventQueue,
     layout_cache:       LayoutCache,
     scene:              SceneQueue,
+    /// Main-thread scene-command frame buffer (W2). See `FrameBuffer` in
+    /// `bindings/mod.rs`. `Rc`-backed because `QuickJsRuntime` is `!Send`
+    /// (single `Rc<Ctx>`), and JS binding closures capture a clone of it.
+    frame_scene:        Rc<crate::bindings::FrameBuffer>,
     perf_state:         Arc<parking_lot::Mutex<glyx_perf::PerfState>>,
     deeplink_url_queue: Arc<parking_lot::Mutex<VecDeque<String>>>,
     db_pools:           DbPools,
@@ -154,6 +158,8 @@ impl QuickJsRuntime {
         let events         = new_event_queue();
         let layout_cache   = new_layout_cache();
         let scene          = new_scene_queue();
+        let frame_scene: Rc<crate::bindings::FrameBuffer> =
+            Rc::new(std::cell::RefCell::new(Vec::new()));
         let db_pools       = new_db_pools();
         let video_events   = new_video_events();
         let next_video_id  = Arc::new(std::sync::atomic::AtomicU32::new(1));
@@ -232,7 +238,7 @@ impl QuickJsRuntime {
             #[cfg(feature = "gamepad")]
             gamepad_gilrs,
             hotkey_state, next_hotkey_id,
-            events, layout_cache, scene, perf_state, deeplink_url_queue,
+            events, layout_cache, scene, frame_scene, perf_state, deeplink_url_queue,
             db_pools, video_events, next_video_id, webview_events,
             raycast_requests, raycast_results,
             ipc_bus, my_handle, next_window_id, backend_commands, js_plugins,
@@ -251,56 +257,7 @@ impl QuickJsRuntime {
     /// matching the (otherwise-unused-at-runtime) snapshot stub script's
     /// own console shim in `snapshot.rs`.
     fn install_polyfills(&self) -> Result<(), RuntimeError> {
-        const POLYFILL: &str = r#"
-        (function() {
-            function _fmt(args) {
-                return Array.prototype.map.call(args, function(x) {
-                    return typeof x === 'object' ? JSON.stringify(x) : String(x);
-                }).join(' ');
-            }
-            function _table(data) {
-                if (data == null || typeof data !== 'object') { __glyx_log(String(data)); return; }
-                var rows = Array.isArray(data) ? data.map(function(v, i) { return [String(i), v]; })
-                                                : Object.keys(data).map(function(k) { return [k, data[k]]; });
-                var cols = [];
-                rows.forEach(function(r) {
-                    var v = r[1];
-                    if (v != null && typeof v === 'object') {
-                        Object.keys(v).forEach(function(k) { if (cols.indexOf(k) === -1) cols.push(k); });
-                    } else if (cols.indexOf('Values') === -1) {
-                        cols.push('Values');
-                    }
-                });
-                var headers = ['(index)'].concat(cols);
-                var lines = rows.map(function(r) {
-                    var v = r[1];
-                    var cells = cols.map(function(c) {
-                        if (v != null && typeof v === 'object') {
-                            return c in v ? String(v[c]) : '';
-                        }
-                        return c === 'Values' ? String(v) : '';
-                    });
-                    return [r[0]].concat(cells);
-                });
-                var widths = headers.map(function(h, i) {
-                    return Math.max(h.length, lines.reduce(function(m, l) { return Math.max(m, l[i].length); }, 0));
-                });
-                var pad = function(s, w) { return s + Array(w - s.length + 1).join(' '); };
-                var sep = '+-' + widths.map(function(w) { return Array(w + 1).join('-'); }).join('-+-') + '-+';
-                var fmtRow = function(cells) { return '| ' + cells.map(function(c, i) { return pad(c, widths[i]); }).join(' | ') + ' |'; };
-                var out = [sep, fmtRow(headers), sep].concat(lines.map(fmtRow)).concat([sep]);
-                __glyx_log(out.join('\n'));
-            }
-            globalThis.console = {
-                log:   function() { __glyx_log(_fmt(arguments)); },
-                info:  function() { __glyx_log(_fmt(arguments)); },
-                warn:  function() { __glyx_log('[warn] ' + _fmt(arguments)); },
-                error: function() { __glyx_log('[error] ' + _fmt(arguments)); },
-                debug: function() { __glyx_log('[debug] ' + _fmt(arguments)); },
-                table: function(data) { _table(data); },
-            };
-        })();
-        "#;
+        const POLYFILL: &str = crate::console_js::CONSOLE_POLYFILL;
         self.ctx.with(|ctx| ctx.eval::<(), _>(POLYFILL))
             .map_err(|e| RuntimeError::CompileError(format!("quickjs polyfill install: {e}")))
     }
@@ -370,6 +327,7 @@ impl QuickJsRuntime {
             events:         Arc::clone(&self.events),
             layout_cache:   Arc::clone(&self.layout_cache),
             scene:          Arc::clone(&self.scene),
+            frame_scene:    Rc::clone(&self.frame_scene),
             next_id:        Arc::clone(&self.next_id),
             next_image_id:  Arc::clone(&self.next_image_id),
             next_db_id:     Arc::clone(&self.next_db_id),
@@ -471,6 +429,7 @@ struct RegisterState {
     events:         EventQueue,
     layout_cache:   LayoutCache,
     scene:          SceneQueue,
+    frame_scene:    Rc<crate::bindings::FrameBuffer>,
     next_id:        Arc<std::sync::atomic::AtomicU32>,
     // Reserved for a QuickJS image-loading binding (V8 has one in
     // bind_core.rs; not yet ported) — plumbed through but unread until then.
@@ -538,15 +497,23 @@ struct RegisterState {
 fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
-    let log_fn = Function::new(ctx.clone(), |msg: String| {
+    let window_id = reg.my_handle;
+    let log_fn = Function::new(ctx.clone(), move |msg: String| {
         log::info!("[js] {msg}");
+        crate::log_bus::publish(Some(window_id), &msg);
     })?;
     globals.set("__glyx_log", log_fn)?;
+
+    // DevTools Network panel feed (see `net_bus`).
+    let net_fn = Function::new(ctx.clone(), move |json: String| {
+        crate::net_bus::publish(Some(window_id), json);
+    })?;
+    globals.set("__glyx_devNet", net_fn)?;
 
     let time_fn = Function::new(ctx.clone(), || -> f64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as f64)
+            .map(|d| d.as_secs_f64() * 1000.0) // fractional ms, like V8's
             .unwrap_or(0.0)
     })?;
     globals.set("__glyx_getTime", time_fn)?;
@@ -556,8 +523,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     {
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let request_frame_fn = Function::new(ctx.clone(), move |ms: Opt<f64>| {
-            let ms = ms.0.unwrap_or(16.0).max(0.0) as u64;
+        let request_frame_fn = Function::new(ctx.clone(), move |ms: Opt<Option<f64>>| {
+            let ms = ms.0.flatten().unwrap_or(16.0).max(0.0) as u64;
             if let Some(redraw) = redraw.clone() {
                 tokio.spawn(async move {
                     if ms > 0 {
@@ -572,68 +539,130 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
 
     // ── Scene graph (SceneCommand pushes) ───────────────────────────────
     {
-        let scene = reg.scene.clone();
+        let frame = Rc::clone(&reg.frame_scene);
         let next_id = Arc::clone(&reg.next_id);
         let create_node_fn = Function::new(ctx.clone(), move |node_type: String, props_obj: rquickjs::Value| {
             let id = next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let node_type = parse_node_type_str(&node_type);
-            let props = props_json_from_value(props_obj);
-            scene.lock().push_back(SceneCommand::CreateNode { id, node_type, props });
+            let props = props_from_value(props_obj);
+            frame.borrow_mut().push(SceneCommand::CreateNode { id, node_type, props });
             id
         })?;
         globals.set("__glyx_createNode", create_node_fn)?;
     }
     {
-        let scene = reg.scene.clone();
+        let frame = Rc::clone(&reg.frame_scene);
         let append_child_fn = Function::new(ctx.clone(), move |parent_id: u32, child_id: u32| {
-            scene.lock().push_back(SceneCommand::AppendChild { parent_id, child_id });
+            frame.borrow_mut().push(SceneCommand::AppendChild { parent_id, child_id });
             true
         })?;
         globals.set("__glyx_appendChild", append_child_fn)?;
     }
     {
-        let scene = reg.scene.clone();
+        let frame = Rc::clone(&reg.frame_scene);
         let insert_before_fn = Function::new(ctx.clone(), move |parent_id: u32, child_id: u32, before_id: u32| {
-            scene.lock().push_back(SceneCommand::InsertBefore { parent_id, child_id, before_id });
+            frame.borrow_mut().push(SceneCommand::InsertBefore { parent_id, child_id, before_id });
             true
         })?;
         globals.set("__glyx_insertBefore", insert_before_fn)?;
     }
     {
-        let scene = reg.scene.clone();
+        let frame = Rc::clone(&reg.frame_scene);
         let update_node_fn = Function::new(ctx.clone(), move |id: u32, props_obj: rquickjs::Value| {
-            let props = props_json_from_value(props_obj);
-            scene.lock().push_back(SceneCommand::UpdateNode { id, props });
+            let props = props_from_value(props_obj);
+            frame.borrow_mut().push(SceneCommand::UpdateNode { id, props });
             true
         })?;
         globals.set("__glyx_updateNode", update_node_fn)?;
     }
     {
-        let scene = reg.scene.clone();
+        let frame = Rc::clone(&reg.frame_scene);
         let remove_node_fn = Function::new(ctx.clone(), move |id: u32| {
-            scene.lock().push_back(SceneCommand::RemoveNode { id });
+            frame.borrow_mut().push(SceneCommand::RemoveNode { id });
             true
         })?;
         globals.set("__glyx_removeNode", remove_node_fn)?;
     }
     {
-        let scene = reg.scene.clone();
+        let frame = Rc::clone(&reg.frame_scene);
         let set_root_fn = Function::new(ctx.clone(), move |id: u32| {
-            scene.lock().push_back(SceneCommand::SetRoot { id });
+            frame.borrow_mut().push(SceneCommand::SetRoot { id });
             true
         })?;
         globals.set("__glyx_setRoot", set_root_fn)?;
     }
+    // `__glyx_flushSceneOps(ops)` — batches append/insertBefore/update/remove/
+    // setRoot into ONE JS→native call per React commit instead of one call
+    // per op (mirrors V8's `flush_scene_ops_callback`, `bind_core.rs` — see
+    // that doc comment for the "why" and the op-tuple encoding). `createNode`
+    // stays a separate, immediate call (needs its id back synchronously).
     {
-        let scene = reg.scene.clone();
-        let set_focus_fn = Function::new(ctx.clone(), move |id: Opt<u32>| {
-            scene.lock().push_back(SceneCommand::SetFocus { id: id.0 });
+        let frame = Rc::clone(&reg.frame_scene);
+        // `ops` is ONE FLAT array (`[opcode, ...args, opcode, ...args, ...]`),
+        // not an array of per-op arrays — see the doc comment on V8's mirror
+        // implementation (`flush_scene_ops_callback`, `bind_core.rs`) for why:
+        // a follow-up measurement after the original array-of-arrays version
+        // shipped showed QuickJS paying disproportionately more than V8 for
+        // unwrapping thousands of small nested arrays in one mass-removal
+        // commit. One flat array is a single allocation on the JS side;
+        // reading it here is one buffer walk with a known per-opcode stride
+        // instead of N nested `Array` conversions.
+        let flush_scene_ops_fn = Function::new(ctx.clone(), move |ops: Array| -> rquickjs::Result<bool> {
+            let mut f = frame.borrow_mut();
+            let len = ops.len();
+            let mut i: usize = 0;
+            while i < len {
+                let opcode: u32 = ops.get(i).unwrap_or(0);
+                match opcode {
+                    0 => {
+                        let parent_id: u32 = ops.get(i + 1).unwrap_or(0);
+                        let child_id:  u32 = ops.get(i + 2).unwrap_or(0);
+                        f.push(SceneCommand::AppendChild { parent_id, child_id });
+                        i += 3;
+                    }
+                    1 => {
+                        let parent_id: u32 = ops.get(i + 1).unwrap_or(0);
+                        let child_id:  u32 = ops.get(i + 2).unwrap_or(0);
+                        let before_id: u32 = ops.get(i + 3).unwrap_or(0);
+                        f.push(SceneCommand::InsertBefore { parent_id, child_id, before_id });
+                        i += 4;
+                    }
+                    2 => {
+                        let id: u32 = ops.get(i + 1).unwrap_or(0);
+                        let props_val: Value = ops.get(i + 2)?;
+                        let props = props_from_value(props_val);
+                        f.push(SceneCommand::UpdateNode { id, props });
+                        i += 3;
+                    }
+                    3 => {
+                        let id: u32 = ops.get(i + 1).unwrap_or(0);
+                        f.push(SceneCommand::RemoveNode { id });
+                        i += 2;
+                    }
+                    4 => {
+                        let id: u32 = ops.get(i + 1).unwrap_or(0);
+                        f.push(SceneCommand::SetRoot { id });
+                        i += 2;
+                    }
+                    // Unknown opcode — stop rather than risk misreading the
+                    // rest of the buffer with a wrong stride.
+                    _ => break,
+                }
+            }
+            Ok(true)
+        })?;
+        globals.set("__glyx_flushSceneOps", flush_scene_ops_fn)?;
+    }
+    {
+        let frame = Rc::clone(&reg.frame_scene);
+        let set_focus_fn = Function::new(ctx.clone(), move |id: Opt<Option<u32>>| {
+            frame.borrow_mut().push(SceneCommand::SetFocus { id: id.0.flatten() });
             true
         })?;
         globals.set("__glyx_setFocus", set_focus_fn)?;
     }
     {
-        let create_image_fn = Function::new(ctx.clone(), move |_path: String, _w: Opt<f64>, _h: Opt<f64>| -> u32 {
+        let create_image_fn = Function::new(ctx.clone(), move |_path: String, _w: Opt<Option<f64>>, _h: Opt<Option<f64>>| -> u32 {
             // Image loading isn't ported yet (needs glyx_security path
             // resolution + SceneCommand::CreateImage wiring) — returns an
             // id so callers don't crash, but nothing will actually render.
@@ -649,25 +678,39 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let events = reg.events.clone();
         let poll_events_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<rquickjs::Value<'js>> {
             let drained: Vec<InputEvent> = events.lock().drain(..).collect();
-            let json = input_events_to_json(&drained);
-            ctx.json_parse(json)
+            input_events_to_array(&ctx, &drained).map(|a| a.into_value())
         })?;
         globals.set("__glyx_pollEvents", poll_events_fn)?;
     }
     {
         let layout_cache = reg.layout_cache.clone();
+        // Builds a real `Object` directly instead of `format!()` + `ctx.json_parse()`
+        // — mirrors V8's `get_layout_callback` (`bind_core.rs`). Found alongside
+        // `__glyx_measure_text` below: both were missed by the earlier JSON-removal
+        // pass (Work Items 1-3), which covered props/input events but not every
+        // JSON-returning binding. `getLayout` is called from `events.js`'s hit-test
+        // path (`findTopmostSolid` → `hitTest`), likely once per solid node per
+        // click/hit-test pass — a real hot path, not a rare one.
         let get_layout_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>, id: u32| -> rquickjs::Result<rquickjs::Value<'js>> {
             let cache = layout_cache.lock();
             match cache.get(&id) {
                 Some(&[x, y, w, h]) => {
-                    let content_height = cache.get(&(id | 0x8000_0000)).map(|&[_, _, _, ch]| ch);
-                    let json = match content_height {
-                        Some(ch) => format!(
-                            "{{\"x\":{x},\"y\":{y},\"width\":{w},\"height\":{h},\"contentHeight\":{ch}}}"
-                        ),
-                        None => format!("{{\"x\":{x},\"y\":{y},\"width\":{w},\"height\":{h}}}"),
-                    };
-                    ctx.json_parse(json)
+                    let obj = Object::new(ctx.clone())?;
+                    obj.set("x", x)?;
+                    obj.set("y", y)?;
+                    obj.set("width", w)?;
+                    obj.set("height", h)?;
+                    // Full unclipped box — see V8's `get_layout_callback` doc
+                    // comment (bind_core.rs) and glyx-core's UNCLIPPED_KEY.
+                    let [bx, by, bw, bh] = cache.get(&(id | 0x4000_0000)).copied().unwrap_or([x, y, w, h]);
+                    obj.set("boxX", bx)?;
+                    obj.set("boxY", by)?;
+                    obj.set("boxWidth", bw)?;
+                    obj.set("boxHeight", bh)?;
+                    if let Some(&[_, _, _, ch]) = cache.get(&(id | 0x8000_0000)) {
+                        obj.set("contentHeight", ch)?;
+                    }
+                    Ok(obj.into_value())
                 }
                 None => Ok(rquickjs::Value::new_null(ctx.clone())),
             }
@@ -678,13 +721,13 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     // ── Text measurement (table auto-sizing, caret hit-testing) ────────
     {
         let text_measure = Arc::clone(&reg.text_measure);
-        let measure_text_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>, text: String, font_size: Opt<f64>, max_width: Opt<f64>, style: Opt<String>, line_height: Opt<f64>| -> rquickjs::Result<rquickjs::Value<'js>> {
-            let font_size = font_size.0.unwrap_or(14.0) as f32;
-            let mw = max_width.0.unwrap_or(0.0);
+        let measure_text_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>, text: String, font_size: Opt<Option<f64>>, max_width: Opt<Option<f64>>, style: Opt<Option<String>>, line_height: Opt<Option<f64>>| -> rquickjs::Result<rquickjs::Value<'js>> {
+            let font_size = font_size.0.flatten().unwrap_or(14.0) as f32;
+            let mw = max_width.0.flatten().unwrap_or(0.0);
             let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
-            let style = style.0.unwrap_or_default();
+            let style = style.0.flatten().unwrap_or_default();
             let (bold, italic) = (style.contains("bold"), style.contains("italic"));
-            let line_height = line_height.0.map(|v| v as f32);
+            let line_height = line_height.0.flatten().map(|v| v as f32);
             let mut tm = text_measure.lock();
             let (w, h) = if bold || italic || line_height.is_some() {
                 let layout = tm.styled_label(&text, font_size, max_width, bold, italic, line_height);
@@ -692,18 +735,21 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
             } else {
                 tm.measure(&text, font_size, max_width)
             };
-            ctx.json_parse(format!("{{\"width\":{w},\"height\":{h}}}"))
+            let obj = Object::new(ctx)?;
+            obj.set("width", w)?;
+            obj.set("height", h)?;
+            Ok(obj.into_value())
         })?;
         globals.set("__glyx_measure_text", measure_text_fn)?;
     }
     {
         let text_measure = Arc::clone(&reg.text_measure);
-        let char_at_x_fn = Function::new(ctx.clone(), move |text: String, font_size: Opt<f64>, max_width: Opt<f64>, x: Opt<f64>, style: Opt<String>| -> u32 {
-            let font_size = font_size.0.unwrap_or(16.0) as f32;
-            let mw = max_width.0.unwrap_or(0.0);
+        let char_at_x_fn = Function::new(ctx.clone(), move |text: String, font_size: Opt<Option<f64>>, max_width: Opt<Option<f64>>, x: Opt<Option<f64>>, style: Opt<Option<String>>| -> u32 {
+            let font_size = font_size.0.flatten().unwrap_or(16.0) as f32;
+            let mw = max_width.0.flatten().unwrap_or(0.0);
             let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
-            let x = x.0.unwrap_or(0.0) as f32;
-            let style = style.0.unwrap_or_default();
+            let x = x.0.flatten().unwrap_or(0.0) as f32;
+            let style = style.0.flatten().unwrap_or_default();
             let (bold, italic) = (style.contains("bold"), style.contains("italic"));
             text_measure.lock().char_at_x_styled(&text, font_size, max_width, x, bold, italic) as u32
         })?;
@@ -711,28 +757,45 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     }
     {
         let text_measure = Arc::clone(&reg.text_measure);
-        let cursor_x_fn = Function::new(ctx.clone(), move |text: String, font_size: Opt<f64>, max_width: Opt<f64>, char_idx: Opt<f64>, style: Opt<String>| -> f64 {
-            let font_size = font_size.0.unwrap_or(16.0) as f32;
-            let mw = max_width.0.unwrap_or(0.0);
+        let cursor_x_fn = Function::new(ctx.clone(), move |text: String, font_size: Opt<Option<f64>>, max_width: Opt<Option<f64>>, char_idx: Opt<Option<f64>>, style: Opt<Option<String>>| -> f64 {
+            let font_size = font_size.0.flatten().unwrap_or(16.0) as f32;
+            let mw = max_width.0.flatten().unwrap_or(0.0);
             let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
-            let char_idx = char_idx.0.unwrap_or(0.0).max(0.0) as usize;
-            let style = style.0.unwrap_or_default();
+            let char_idx = char_idx.0.flatten().unwrap_or(0.0).max(0.0) as usize;
+            let style = style.0.flatten().unwrap_or_default();
             let (bold, italic) = (style.contains("bold"), style.contains("italic"));
             text_measure.lock().cursor_x_at_styled(&text, font_size, max_width, char_idx, bold, italic) as f64
         })?;
         globals.set("__glyx_text_cursor_x", cursor_x_fn)?;
     }
+    // Text hit-testing — same `opts` contract as V8's `text_pos_at_callback`
+    // (see bind_core.rs): the Text node's own props + `boxWidth`/`boxHeight`,
+    // parsed by the regular prop parser and mapped through `text_props`
+    // exactly like render.rs, so both engines and the renderer agree.
     {
         let text_measure = Arc::clone(&reg.text_measure);
-        let pos_at_fn = Function::new(ctx.clone(), move |text: String, font_size: Opt<f64>, max_width: Opt<f64>, x: Opt<f64>, y: Opt<f64>| -> u32 {
-            let font_size = font_size.0.unwrap_or(16.0) as f32;
-            let mw = max_width.0.unwrap_or(0.0);
-            let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
-            let x = x.0.unwrap_or(0.0) as f32;
-            let y = y.0.unwrap_or(0.0) as f32;
-            text_measure.lock().pos_at_point(&text, font_size, max_width, x, y) as u32
+        let pos_at_fn = Function::new(ctx.clone(), move |text: String, x: Opt<Option<f64>>, y: Opt<Option<f64>>, opts: Opt<Value<'js>>| -> u32 {
+            let (style, bx) = text_geometry_from_opts(opts.0);
+            let x = x.0.flatten().unwrap_or(0.0) as f32;
+            let y = y.0.flatten().unwrap_or(0.0) as f32;
+            text_measure.lock().hit_test(&text, &style, &bx, x, y).offset as u32
         })?;
         globals.set("__glyx_text_pos_at", pos_at_fn)?;
+    }
+    {
+        let text_measure = Arc::clone(&reg.text_measure);
+        let caret_at_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>, text: String, offset: Opt<Option<f64>>, opts: Opt<Value<'js>>| -> rquickjs::Result<rquickjs::Value<'js>> {
+            let (style, bx) = text_geometry_from_opts(opts.0);
+            let offset = offset.0.flatten().unwrap_or(0.0).max(0.0) as usize;
+            let c = text_measure.lock()
+                .caret_rect(&text, &style, &bx, glyx_text::TextPosition::new(offset));
+            let obj = Object::new(ctx)?;
+            obj.set("x", c.x as f64)?;
+            obj.set("y", c.y as f64)?;
+            obj.set("height", c.height as f64)?;
+            Ok(obj.into_value())
+        })?;
+        globals.set("__glyx_text_caret_at", caret_at_fn)?;
     }
 
     // ── Window control (no-ops if `window` is None, e.g. in tests) ─────
@@ -758,7 +821,7 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let setter = w.set_maximized.clone();
         globals.set("__glyx_setMaximized", Function::new(ctx.clone(), move |v: bool| setter(v))?)?;
         let setter = w.set_minimized.clone();
-        globals.set("__glyx_setMinimized", Function::new(ctx.clone(), move |v: Opt<bool>| setter(v.0.unwrap_or(true)))?)?;
+        globals.set("__glyx_setMinimized", Function::new(ctx.clone(), move |v: Opt<Option<bool>>| setter(v.0.flatten().unwrap_or(true)))?)?;
         let getter = w.is_fullscreen.clone();
         globals.set("__glyx_isFullscreen", Function::new(ctx.clone(), move || getter())?)?;
         let getter = w.is_maximized.clone();
@@ -769,6 +832,14 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_setTitle", Function::new(ctx.clone(), move |v: String| setter(v))?)?;
         let setter = w.set_cursor.clone();
         globals.set("__glyx_setCursor", Function::new(ctx.clone(), move |v: String| setter(v))?)?;
+
+        // Native window menu bar: the window handle comes from this window's controller.
+        let hwnd = w.hwnd;
+        let (events, redraw) = (reg.events.clone(), reg.redraw.clone());
+        globals.set("__glyx_menubar_set", Function::new(ctx.clone(), move |json: String| {
+            crate::menubar_api::set(hwnd, &json, crate::menubar_api::sink(Arc::clone(&events), redraw.clone()))
+        })?)?;
+        globals.set("__glyx_menubar_clear", Function::new(ctx.clone(), move || crate::menubar_api::clear(hwnd))?)?;
     }
 
     // `__glyx_battery_getStatus() -> Promise<JSON | null>` — real
@@ -840,8 +911,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let queue = reg.queue.clone();
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, sql: String, params: Opt<String>| {
-            crate::quickjs_db::db_query(ctx, handle, sql, params.0.unwrap_or_default(), pools.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, sql: String, params: Opt<Option<String>>| {
+            crate::quickjs_db::db_query(ctx, handle, sql, params.0.flatten().unwrap_or_default(), pools.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_db_query", f)?;
     }
@@ -850,8 +921,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let queue = reg.queue.clone();
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, sql: String, params: Opt<String>| {
-            crate::quickjs_db::db_run(ctx, handle, sql, params.0.unwrap_or_default(), pools.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, sql: String, params: Opt<Option<String>>| {
+            crate::quickjs_db::db_run(ctx, handle, sql, params.0.flatten().unwrap_or_default(), pools.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_db_run", f)?;
     }
@@ -901,8 +972,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let queue = reg.queue.clone();
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, table: String, id: String, vec_json: String, meta: Opt<String>| {
-            crate::quickjs_db::vectordb_upsert(ctx, handle, table, id, vec_json, meta.0.unwrap_or_default(), stores.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, table: String, id: String, vec_json: String, meta: Opt<Option<String>>| {
+            crate::quickjs_db::vectordb_upsert(ctx, handle, table, id, vec_json, meta.0.flatten().unwrap_or_default(), stores.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_vectorDb_upsert", f)?;
     }
@@ -911,8 +982,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let queue = reg.queue.clone();
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, table: String, query_json: String, limit: Opt<u32>| {
-            crate::quickjs_db::vectordb_search(ctx, handle, table, query_json, limit.0.unwrap_or(10), stores.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, table: String, query_json: String, limit: Opt<Option<u32>>| {
+            crate::quickjs_db::vectordb_search(ctx, handle, table, query_json, limit.0.flatten().unwrap_or(10), stores.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_vectorDb_search", f)?;
     }
@@ -933,7 +1004,7 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let queue = reg.queue.clone();
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, bin: String, args: Opt<String>| {
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, bin: String, args: Opt<Option<String>>| {
             crate::quickjs_shell::shell_run(ctx, bin, args, Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_shell_run", f)?;
@@ -945,8 +1016,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let queue = reg.queue.clone();
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, url: String, opts: Opt<String>| {
-            crate::quickjs_net::fetch(ctx, url, opts.0.unwrap_or_default(), Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, url: String, opts: Opt<Option<String>>| {
+            crate::quickjs_net::fetch(ctx, url, opts.0.flatten().unwrap_or_default(), Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_fetch", f)?;
     }
@@ -987,8 +1058,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let queue = reg.queue.clone();
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, service_type: String, timeout_ms: Opt<u32>| {
-            crate::quickjs_net::mdns_discover(ctx, service_type, timeout_ms.0.unwrap_or(5000) as u64, Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, service_type: String, timeout_ms: Opt<Option<u32>>| {
+            crate::quickjs_net::mdns_discover(ctx, service_type, timeout_ms.0.flatten().unwrap_or(5000) as u64, Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_mdns_discover", f)?;
     }
@@ -998,15 +1069,15 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     //    from the rest of bind_sys.rs) ────────────────────────────────────
     {
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, filters: Opt<String>, multiple: Opt<bool>| {
-            crate::quickjs_sys::dialog_open_file(ctx, filters.0.unwrap_or_default(), multiple.0.unwrap_or(false), Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, filters: Opt<Option<String>>, multiple: Opt<Option<bool>>| {
+            crate::quickjs_sys::dialog_open_file(ctx, filters.0.flatten().unwrap_or_default(), multiple.0.flatten().unwrap_or(false), Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_dialog_openFile", f)?;
     }
     {
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, name: Opt<String>, filters: Opt<String>| {
-            crate::quickjs_sys::dialog_save_file(ctx, name.0.unwrap_or_default(), filters.0.unwrap_or_default(), Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, name: Opt<Option<String>>, filters: Opt<Option<String>>| {
+            crate::quickjs_sys::dialog_save_file(ctx, name.0.flatten().unwrap_or_default(), filters.0.flatten().unwrap_or_default(), Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_dialog_saveFile", f)?;
     }
@@ -1074,13 +1145,37 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_deeplink_poll", f)?;
     }
     {
+        let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+            crate::quickjs_sys::print_list_printers(ctx, Arc::clone(&queue), tokio.clone(), redraw.clone())
+        })?;
+        globals.set("__glyx_print_listPrinters", f)?;
+    }
+    {
+        let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+            crate::quickjs_sys::print_get_default_printer(ctx, Arc::clone(&queue), tokio.clone(), redraw.clone())
+        })?;
+        globals.set("__glyx_print_getDefaultPrinter", f)?;
+    }
+    {
+        let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, path: String, printer: String| {
+            crate::quickjs_sys::print_file(ctx, path, printer, Arc::clone(&queue), tokio.clone(), redraw.clone())
+        })?;
+        globals.set("__glyx_print_file", f)?;
+    }
+    globals.set("__glyx_autostart_isEnabled", Function::new(ctx.clone(), crate::quickjs_sys::autostart_is_enabled)?)?;
+    globals.set("__glyx_autostart_setEnabled", Function::new(ctx.clone(), crate::quickjs_sys::autostart_set_enabled)?)?;
+    globals.set("__glyx_autostart_wasOpenedAtLogin", Function::new(ctx.clone(), crate::quickjs_sys::autostart_was_opened_at_login)?)?;
+    {
         let perf = Arc::clone(&reg.perf_state);
         let f = Function::new(ctx.clone(), move || crate::quickjs_sys::perf_snapshot(&perf))?;
         globals.set("__glyx_perf_snapshot", f)?;
     }
     {
         let perf = Arc::clone(&reg.perf_state);
-        let f = Function::new(ctx.clone(), move |ms: Opt<f64>| crate::quickjs_sys::perf_set_budget(&perf, ms.0.unwrap_or(16.667)))?;
+        let f = Function::new(ctx.clone(), move |ms: Opt<Option<f64>>| crate::quickjs_sys::perf_set_budget(&perf, ms.0.flatten().unwrap_or(16.667)))?;
         globals.set("__glyx_perf_set_budget", f)?;
     }
     {
@@ -1102,6 +1197,7 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_restart", Function::new(ctx.clone(), move || crate::quickjs_sys::restart(&window))?)?;
     }
     globals.set("__glyx_platform", Function::new(ctx.clone(), crate::quickjs_sys::platform)?)?;
+    globals.set("__glyx_getEnv", Function::new(ctx.clone(), crate::quickjs_sys::get_env)?)?;
     globals.set("__glyx_collect_memory", Function::new(ctx.clone(), crate::quickjs_sys::collect_memory)?)?;
     {
         let f = Function::new(ctx.clone(), move |ctx: Ctx<'_>, url: String| -> rquickjs::Result<()> {
@@ -1111,8 +1207,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     }
     {
         let events = reg.events.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'_>, kind: String, interval_ms: Opt<f64>| {
-            crate::quickjs_sys::system_watch(ctx, kind, interval_ms.0.unwrap_or(0.0), Arc::clone(&events), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'_>, kind: String, interval_ms: Opt<Option<f64>>| {
+            crate::quickjs_sys::system_watch(ctx, kind, interval_ms.0.flatten().unwrap_or(0.0), Arc::clone(&events), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_system_watch", f)?;
         let f = Function::new(ctx.clone(), move |id: u32| crate::quickjs_sys::system_unwatch(id))?;
@@ -1127,9 +1223,9 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let trackers = reg.audio_trackers.clone();
         let next_id = Arc::clone(&reg.next_audio_id);
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, src: String, opts: Opt<String>| {
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, src: String, opts: Opt<Option<String>>| {
             crate::quickjs_media::audio_play(
-                ctx, src, opts.0.unwrap_or_else(|| "{}".to_string()), Arc::clone(&device),
+                ctx, src, opts.0.flatten().unwrap_or_else(|| "{}".to_string()), Arc::clone(&device),
                 sinks.clone(), trackers.clone(), Arc::clone(&next_id), Arc::clone(&queue), tokio.clone(), redraw.clone(),
             )
         })?;
@@ -1206,8 +1302,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     }
     {
         let guards = reg.sleep_guards.clone(); let next_id = Arc::clone(&reg.next_guard_id);
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, reason: Opt<String>| {
-            crate::quickjs_sys::power_prevent_sleep(ctx, reason.0.unwrap_or_default(), guards.clone(), Arc::clone(&next_id))
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, reason: Opt<Option<String>>| {
+            crate::quickjs_sys::power_prevent_sleep(ctx, reason.0.flatten().unwrap_or_default(), guards.clone(), Arc::clone(&next_id))
         })?;
         globals.set("__glyx_power_preventSleep", f)?;
 
@@ -1247,24 +1343,24 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         })?;
         globals.set("__glyx_video_open", f)?;
 
-        let scene = reg.scene.clone();
-        let f = Function::new(ctx.clone(), move |handle_id: String, seconds: f64| crate::quickjs_video::video_seek(&scene, handle_id, seconds))?;
+        let frame = Rc::clone(&reg.frame_scene);
+        let f = Function::new(ctx.clone(), move |handle_id: String, seconds: f64| crate::quickjs_video::video_seek(&frame, handle_id, seconds))?;
         globals.set("__glyx_video_seek", f)?;
 
-        let scene = reg.scene.clone();
-        let f = Function::new(ctx.clone(), move |handle_id: String, volume: f32| crate::quickjs_video::video_set_volume(&scene, handle_id, volume))?;
+        let frame = Rc::clone(&reg.frame_scene);
+        let f = Function::new(ctx.clone(), move |handle_id: String, volume: f32| crate::quickjs_video::video_set_volume(&frame, handle_id, volume))?;
         globals.set("__glyx_video_set_volume", f)?;
 
-        let scene = reg.scene.clone();
-        let f = Function::new(ctx.clone(), move |handle_id: String| crate::quickjs_video::video_close(&scene, handle_id))?;
+        let frame = Rc::clone(&reg.frame_scene);
+        let f = Function::new(ctx.clone(), move |handle_id: String| crate::quickjs_video::video_close(&frame, handle_id))?;
         globals.set("__glyx_video_close", f)?;
 
-        let scene = reg.scene.clone();
-        let f = Function::new(ctx.clone(), move |handle_id: String| crate::quickjs_video::video_pause(&scene, handle_id))?;
+        let frame = Rc::clone(&reg.frame_scene);
+        let f = Function::new(ctx.clone(), move |handle_id: String| crate::quickjs_video::video_pause(&frame, handle_id))?;
         globals.set("__glyx_video_pause", f)?;
 
-        let scene = reg.scene.clone();
-        let f = Function::new(ctx.clone(), move |handle_id: String| crate::quickjs_video::video_play(&scene, handle_id))?;
+        let frame = Rc::clone(&reg.frame_scene);
+        let f = Function::new(ctx.clone(), move |handle_id: String| crate::quickjs_video::video_play(&frame, handle_id))?;
         globals.set("__glyx_video_play", f)?;
 
         let events = reg.video_events.clone();
@@ -1287,7 +1383,7 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_ipc_send", f)?;
 
         let ipc_bus = reg.ipc_bus.clone(); let my_handle = reg.my_handle;
-        let f = Function::new(ctx.clone(), move || crate::quickjs_ipc::ipc_poll(&ipc_bus, my_handle))?;
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>| crate::quickjs_ipc::ipc_poll(&ctx, &ipc_bus, my_handle))?;
         globals.set("__glyx_ipc_poll", f)?;
 
         // Eval each JS plugin's bundled IIFE (sets globalThis.<global_name> to
@@ -1300,9 +1396,9 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let commands = reg.backend_commands.clone();
         let js_backend_commands = Rc::clone(&reg.js_backend_commands);
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, name: String, args_json: Opt<String>| {
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, name: String, args_json: Opt<Option<String>>| {
             crate::quickjs_ipc::backend_call(
-                ctx, name, args_json.0.unwrap_or_else(|| "{}".to_string()), commands.clone(),
+                ctx, name, args_json.0.flatten().unwrap_or_else(|| "{}".to_string()), commands.clone(),
                 Rc::clone(&js_backend_commands),
                 Arc::clone(&queue), tokio.clone(), redraw.clone(),
             )
@@ -1332,8 +1428,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         #[cfg(not(feature = "ai"))]
         let ai_cap = reg.ai_cap;
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, prompt: String, opts: Opt<String>| {
-            let opts_raw = opts.0.unwrap_or_else(|| "{}".to_string());
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, prompt: String, opts: Opt<Option<String>>| {
+            let opts_raw = opts.0.flatten().unwrap_or_else(|| "{}".to_string());
             #[cfg(feature = "ai")]
             { crate::quickjs_ai::ai_generate(ctx, prompt, opts_raw, model_cache.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone()) }
             #[cfg(not(feature = "ai"))]
@@ -1346,9 +1442,9 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         #[cfg(not(feature = "ai"))]
         let ai_cap = reg.ai_cap;
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, audio_path: String, opts: Opt<String>| {
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, audio_path: String, opts: Opt<Option<String>>| {
             #[cfg(feature = "ai")]
-            { let opts_raw = opts.0.unwrap_or_else(|| "{}".to_string());
+            { let opts_raw = opts.0.flatten().unwrap_or_else(|| "{}".to_string());
               crate::quickjs_ai::ai_transcribe(ctx, audio_path, opts_raw, model_cache.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone()) }
             #[cfg(not(feature = "ai"))]
             { let _ = &opts; crate::quickjs_ai::ai_transcribe(ctx, audio_path, ai_cap, Arc::clone(&queue), tokio.clone(), redraw.clone()) }
@@ -1434,15 +1530,15 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>| crate::quickjs_updater::crash_clear_reports(ctx))?;
         globals.set("__glyx_crash_clear_reports", f)?;
 
-        let scene = reg.scene.clone();
-        let f = Function::new(ctx.clone(), move || crate::quickjs_updater::splash_hide(&scene))?;
+        let frame = Rc::clone(&reg.frame_scene);
+        let f = Function::new(ctx.clone(), move || crate::quickjs_updater::splash_hide(&frame))?;
         globals.set("__glyx_splash_hide", f)?;
     }
 
     // ── System tray (crate::quickjs_tray) ────────────────────────────────
     {
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, rgba: rquickjs::TypedArray<'js, u8>, width: u32, height: u32, tooltip: String, menu_json: Opt<String>| {
-            crate::quickjs_tray::tray_create(ctx, rgba, width, height, tooltip, menu_json.0.unwrap_or_default())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, rgba: Option<rquickjs::TypedArray<'js, u8>>, width: u32, height: u32, tooltip: String, menu_json: Opt<Option<String>>| {
+            crate::quickjs_tray::tray_create(ctx, rgba, width, height, tooltip, menu_json.0.flatten().unwrap_or_default())
         })?;
         globals.set("__glyx_tray_create", f)?;
 
@@ -1450,39 +1546,46 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_tray_update_menu", Function::new(ctx.clone(), crate::quickjs_tray::tray_update_menu)?)?;
         globals.set("__glyx_tray_set_tooltip", Function::new(ctx.clone(), crate::quickjs_tray::tray_set_tooltip)?)?;
         globals.set("__glyx_tray_poll_events", Function::new(ctx.clone(), crate::quickjs_tray::tray_poll_events)?)?;
+        let (events, redraw) = (reg.events.clone(), reg.redraw.clone());
+        globals.set("__glyx_tray_listen", Function::new(ctx.clone(), move |on: bool| {
+            crate::menubar_api::tray_listen(on, Arc::clone(&events), redraw.clone())
+        })?)?;
+        globals.set("__glyx_menubar_set_enabled", Function::new(ctx.clone(), |id: String, on: bool| crate::menubar_api::set_enabled(&id, on))?)?;
+        globals.set("__glyx_menubar_set_checked", Function::new(ctx.clone(), |id: String, on: bool| crate::menubar_api::set_checked(&id, on))?)?;
+        globals.set("__glyx_menubar_supported", Function::new(ctx.clone(), crate::menubar_api::supported)?)?;
     }
 
     // ── Canvas / webview messaging (crate::quickjs_canvas) ──────────────
     {
-        let scene = reg.scene.clone();
+        let frame = Rc::clone(&reg.frame_scene);
         let f = Function::new(ctx.clone(), move |id: u32, json: String| {
-            crate::quickjs_canvas::canvas_update(id, json, &scene)
+            crate::quickjs_canvas::canvas_update(id, json, &frame)
         })?;
         globals.set("__glyx_canvas_update", f)?;
 
-        let scene = reg.scene.clone();
+        let frame = Rc::clone(&reg.frame_scene);
         let f = Function::new(ctx.clone(), move |id: u32, f32buf: Value<'js>, float_count: usize, u8buf: Value<'js>, str_len: usize, append: bool| {
-            crate::quickjs_canvas::canvas_flush(id, f32buf, float_count, u8buf, str_len, append, &scene)
+            crate::quickjs_canvas::canvas_flush(id, f32buf, float_count, u8buf, str_len, append, &frame)
         })?;
         globals.set("__glyx_canvas_flush", f)?;
     }
     #[cfg(feature = "canvas3d")]
     {
-        let scene = reg.scene.clone();
+        let frame = Rc::clone(&reg.frame_scene);
         let f = Function::new(ctx.clone(), move |id: u32, json: String| {
-            crate::quickjs_canvas::canvas3d_update(id, json, &scene)
+            crate::quickjs_canvas::canvas3d_update(id, json, &frame)
         })?;
         globals.set("__glyx_canvas3d_update", f)?;
 
-        let scene = reg.scene.clone();
+        let frame = Rc::clone(&reg.frame_scene);
         let f = Function::new(ctx.clone(), move |ctx: Ctx<'_>, id: u32, path: String| -> rquickjs::Result<()> {
-            crate::quickjs_canvas::canvas3d_load_gltf(id, path, &scene)
+            crate::quickjs_canvas::canvas3d_load_gltf(id, path, &frame)
                 .map_err(|e| rquickjs::Exception::throw_message(&ctx, &e))
         })?;
         globals.set("__glyx_canvas3d_load_gltf", f)?;
 
-        let scene = reg.scene.clone();
-        let f = Function::new(ctx.clone(), move |path: String| crate::quickjs_canvas::canvas3d_unload_gltf(path, &scene))?;
+        let frame = Rc::clone(&reg.frame_scene);
+        let f = Function::new(ctx.clone(), move |path: String| crate::quickjs_canvas::canvas3d_unload_gltf(path, &frame))?;
         globals.set("__glyx_canvas3d_unload_gltf", f)?;
 
         let requests = reg.raycast_requests.clone();
@@ -1497,9 +1600,9 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     }
     #[cfg(feature = "webview")]
     {
-        let scene = reg.scene.clone();
+        let frame = Rc::clone(&reg.frame_scene);
         let f = Function::new(ctx.clone(), move |id: u32, msg: String| {
-            crate::quickjs_canvas::webview_post_message(id, msg, &scene)
+            crate::quickjs_canvas::webview_post_message(id, msg, &frame)
         })?;
         globals.set("__glyx_webview_post_message", f)?;
 
@@ -1511,82 +1614,156 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     Ok(())
 }
 
-/// Convert an already-JSON-stringified rquickjs value (from
-/// `ctx.json_stringify`) or a plain value into a `NodeProps`. Wraps
-/// `parse_props_json` (which expects a JSON string) for the `rquickjs::Value`
-/// props objects `createNode`/`updateNode` receive directly as arguments.
-fn props_json_from_value(v: rquickjs::Value) -> NodeProps {
-    let ctx = v.ctx().clone();
-    let json = ctx.json_stringify(v)
-        .ok()
-        .flatten()
-        .and_then(|s| s.to_string().ok())
-        .unwrap_or_default();
-    parse_props_json(&json)
+/// Parse a `NodeProps` from the `rquickjs::Value` props object that
+/// `createNode`/`updateNode` receive directly as arguments. Field reads
+/// happen on the live JS object (mirrors V8's `parse_props`).
+fn props_from_value(v: rquickjs::Value) -> NodeProps {
+    parse_props_value(v)
 }
 
-/// Serialize drained `InputEvent`s into the exact JSON shape `events.js`'s
-/// `dispatchEvents()` expects (`{type, ...fields}` per event) — mirrors
-/// V8's `poll_events_callback` object-construction 1:1, just built as a
-/// JSON string instead of native `v8::Object`s (see `ctx.json_parse` at the
-/// call site, which turns this back into a real JS array of objects).
-fn input_events_to_json(events: &[InputEvent]) -> String {
-    let mut out = String::from("[");
+/// `__glyx_text_pos_at` / `__glyx_text_caret_at` opts → shaping + placement,
+/// via the same `text_props` mapping render.rs uses (mirrors V8's
+/// `text_geometry_from_opts` in bind_core.rs).
+fn text_geometry_from_opts(opts: Option<rquickjs::Value>) -> (glyx_text::TextStyle, glyx_text::TextBox) {
+    let Some(v) = opts else {
+        let props = NodeProps::default();
+        return (crate::text_props::text_style(&props), crate::text_props::text_box(&props, 0.0, 0.0));
+    };
+    let (w, h) = match v.as_object() {
+        Some(o) => {
+            let num = |k: &str| o.get::<_, Option<f64>>(k).ok().flatten().unwrap_or(0.0) as f32;
+            (num("boxWidth"), num("boxHeight"))
+        }
+        None => (0.0, 0.0),
+    };
+    let props = parse_props_value(v);
+    (crate::text_props::text_style(&props), crate::text_props::text_box(&props, w, h))
+}
+
+/// Build the JS array of `{type, ...fields}` event objects that `events.js`'s
+/// `dispatchEvents()` consumes — mirrors V8's `poll_events_callback`
+/// object-construction 1:1, but constructs `rquickjs::Object`s directly
+/// instead of round-tripping through a JSON string + `ctx.json_parse`.
+fn input_events_to_array<'js>(
+    ctx:   &Ctx<'js>,
+    events: &[InputEvent],
+) -> rquickjs::Result<Array<'js>> {
+    let array = Array::new(ctx.clone())?;
     for (i, ev) in events.iter().enumerate() {
-        if i > 0 { out.push(','); }
-        let s = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string());
+        let obj = Object::new(ctx.clone())?;
         match ev {
-            InputEvent::MouseButton { x, y, button, pressed } => {
-                out += &format!("{{\"type\":\"mouseButton\",\"x\":{x},\"y\":{y},\"button\":{button},\"pressed\":{pressed}}}");
+            InputEvent::MouseButton { x, y, button, pressed, target } => {
+                obj.set("type", "mouseButton")?;
+                obj.set("x", *x as f64)?;
+                obj.set("y", *y as f64)?;
+                obj.set("button", *button as f64)?;
+                obj.set("pressed", *pressed)?;
+                obj.set("target", *target)?;
             }
-            InputEvent::CursorMoved { x, y } => {
-                out += &format!("{{\"type\":\"cursorMoved\",\"x\":{x},\"y\":{y}}}");
+            InputEvent::CursorMoved { x, y, target } => {
+                obj.set("type", "cursorMoved")?;
+                obj.set("x", *x as f64)?;
+                obj.set("y", *y as f64)?;
+                obj.set("target", *target)?;
             }
             InputEvent::DragStart { x, y } => {
-                out += &format!("{{\"type\":\"dragStart\",\"x\":{x},\"y\":{y}}}");
+                obj.set("type", "dragStart")?;
+                obj.set("x", *x as f64)?;
+                obj.set("y", *y as f64)?;
             }
             InputEvent::DragMove { x, y, dx, dy } => {
-                out += &format!("{{\"type\":\"dragMove\",\"x\":{x},\"y\":{y},\"dx\":{dx},\"dy\":{dy}}}");
+                obj.set("type", "dragMove")?;
+                obj.set("x", *x as f64)?;
+                obj.set("y", *y as f64)?;
+                obj.set("dx", *dx as f64)?;
+                obj.set("dy", *dy as f64)?;
             }
             InputEvent::DragEnd { x, y } => {
-                out += &format!("{{\"type\":\"dragEnd\",\"x\":{x},\"y\":{y}}}");
+                obj.set("type", "dragEnd")?;
+                obj.set("x", *x as f64)?;
+                obj.set("y", *y as f64)?;
             }
             InputEvent::KeyInput { key, text, pressed } => {
-                let text_field = text.as_deref().map(|t| format!(",\"text\":{}", s(t))).unwrap_or_default();
-                out += &format!("{{\"type\":\"keyInput\",\"key\":{},\"pressed\":{pressed}{text_field}}}", s(key));
+                obj.set("type", "keyInput")?;
+                obj.set("key", key.as_str())?;
+                obj.set("pressed", *pressed)?;
+                if let Some(t) = text {
+                    obj.set("text", t.as_str())?;
+                }
             }
             InputEvent::Scroll { delta_y } => {
-                out += &format!("{{\"type\":\"scroll\",\"deltaY\":{delta_y}}}");
+                obj.set("type", "scroll")?;
+                obj.set("deltaY", *delta_y as f64)?;
             }
             InputEvent::ScrollbarDrag { node_id, scroll_y } => {
-                out += &format!("{{\"type\":\"scrollbarDrag\",\"nodeId\":{node_id},\"scrollY\":{scroll_y}}}");
+                obj.set("type", "scrollbarDrag")?;
+                obj.set("nodeId", *node_id as f64)?;
+                obj.set("scrollY", *scroll_y as f64)?;
+            }
+            InputEvent::ScrollIntoView { node_id, scroll_y } => {
+                obj.set("type", "scrollIntoView")?;
+                obj.set("nodeId", *node_id as f64)?;
+                obj.set("scrollY", *scroll_y as f64)?;
             }
             InputEvent::Resize { width, height } => {
-                out += &format!("{{\"type\":\"resize\",\"width\":{width},\"height\":{height}}}");
+                obj.set("type", "resize")?;
+                obj.set("width", *width as f64)?;
+                obj.set("height", *height as f64)?;
             }
             InputEvent::ImageError { image_id, path } => {
-                out += &format!("{{\"type\":\"imageError\",\"imageId\":{image_id},\"path\":{}}}", s(path));
+                obj.set("type", "imageError")?;
+                obj.set("imageId", *image_id as f64)?;
+                obj.set("path", path.as_str())?;
             }
             InputEvent::SystemWatch { id, payload } => {
-                out += &format!("{{\"type\":\"systemWatch\",\"id\":{id},\"payload\":{}}}", s(payload));
+                obj.set("type", "systemWatch")?;
+                obj.set("id", *id as f64)?;
+                obj.set("payload", payload.as_str())?;
+            }
+            InputEvent::MenuBar { id, checked } => {
+                obj.set("type", "menuBar")?;
+                obj.set("id", id.as_str())?;
+                if let Some(c) = checked { obj.set("checked", *c)?; }
+            }
+            InputEvent::Tray { json } => {
+                obj.set("type", "tray")?;
+                obj.set("json", json.as_str())?;
             }
             InputEvent::AccessibilityFocus { node_id } => {
-                out += &format!("{{\"type\":\"accessibilityFocus\",\"nodeId\":{node_id}}}");
+                obj.set("type", "accessibilityFocus")?;
+                obj.set("nodeId", *node_id as f64)?;
+            }
+            InputEvent::AccessibilityTextSelection { node_id, anchor, focus } => {
+                obj.set("type", "accessibilityTextSelection")?;
+                obj.set("nodeId", *node_id as f64)?;
+                obj.set("anchor", *anchor as f64)?;
+                obj.set("focus", *focus as f64)?;
             }
             InputEvent::AccessibilityValueChange { node_id, action, numeric_value } => {
-                let nv_field = numeric_value.map(|v| format!(",\"numericValue\":{v}")).unwrap_or_default();
-                out += &format!("{{\"type\":\"accessibilityValueChange\",\"nodeId\":{node_id},\"action\":{}{nv_field}}}", s(action));
+                obj.set("type", "accessibilityValueChange")?;
+                obj.set("nodeId", *node_id as f64)?;
+                obj.set("action", action.as_str())?;
+                if let Some(v) = numeric_value {
+                    obj.set("numericValue", *v)?;
+                }
             }
             InputEvent::Ime { kind, text, cursor_start, cursor_end } => {
-                let text_field = text.as_deref().map(|t| format!(",\"text\":{}", s(t))).unwrap_or_default();
-                let cs_field = cursor_start.map(|v| format!(",\"cursorStart\":{v}")).unwrap_or_default();
-                let ce_field = cursor_end.map(|v| format!(",\"cursorEnd\":{v}")).unwrap_or_default();
-                out += &format!("{{\"type\":\"ime\",\"kind\":{}{text_field}{cs_field}{ce_field}}}", s(kind));
+                obj.set("type", "ime")?;
+                obj.set("kind", kind.as_str())?;
+                if let Some(t) = text {
+                    obj.set("text", t.as_str())?;
+                }
+                if let Some(cs) = cursor_start {
+                    obj.set("cursorStart", *cs as f64)?;
+                }
+                if let Some(ce) = cursor_end {
+                    obj.set("cursorEnd", *ce as f64)?;
+                }
             }
         }
+        array.set(i, obj)?;
     }
-    out.push(']');
-    out
+    Ok(array)
 }
 
 /// `__glyx_battery_getStatus`'s implementation — a free function (not a
@@ -1722,7 +1899,12 @@ impl JsRuntime for QuickJsRuntime {
     }
 
     fn drain_scene_commands(&mut self) -> Vec<SceneCommand> {
-        self.scene.lock().drain(..).collect()
+        let local = std::mem::take(&mut *self.frame_scene.borrow_mut());
+        let mut q = self.scene.lock();
+        if !local.is_empty() {
+            q.extend(local);
+        }
+        q.drain(..).collect()
     }
 
     fn flush_microtasks(&mut self) {
@@ -1935,6 +2117,22 @@ mod tests {
     }
 
     #[test]
+    fn optional_arguments_accept_null_like_undefined() {
+        // rquickjs's `Opt<T>` alone accepts a missing or undefined argument
+        // but throws on an explicit null, which JS passes routinely (the
+        // event layer calls `__glyx_setFocus(null)` to clear focus on click).
+        let (_tokio_rt, mut rt) = new_runtime();
+        for call in [
+            "__glyx_setFocus(null)",
+            "__glyx_measure_text('ab', null, null, null, null)",
+            "__glyx_text_cursor_x('ab', null, null, null, null)",
+            "__glyx_text_char_at_x('ab', null, null, null, null)",
+        ] {
+            rt.eval(call).unwrap_or_else(|e| panic!("{call} threw: {e}"));
+        }
+    }
+
+    #[test]
     fn frame_tick_is_a_no_op_when_no_callback_is_registered() {
         let (_tokio_rt, mut rt) = new_runtime();
         assert_eq!(rt.frame_tick(), None);
@@ -2061,14 +2259,17 @@ mod tests {
     #[test]
     fn poll_events_returns_a_real_js_array_of_event_objects() {
         let (_tokio_rt, mut rt) = new_runtime();
-        rt.push_event(InputEvent::MouseButton { x: 1.0, y: 2.0, button: 0, pressed: true });
+        rt.push_event(InputEvent::MouseButton { x: 1.0, y: 2.0, button: 0, pressed: true, target: None });
         rt.push_event(InputEvent::Resize { width: 800, height: 600 });
         let out = rt.eval(
             "const evs = __glyx_pollEvents(); \
-             JSON.stringify([evs.length, evs[0].type, evs[0].x, evs[1].type, evs[1].width])"
+             JSON.stringify([evs.length, evs[0].type, evs[0].x, evs[1].type, evs[1].width, \
+                             typeof evs[0].x, evs[0].pressed, typeof evs[1].height])"
         ).expect("eval should succeed");
         assert!(out.contains("2") && out.contains("mouseButton") && out.contains("resize"),
             "got: {out}");
+        // Fields must be real JS numbers/booleans, not strings (native object path).
+        assert!(out.contains("\"number\"") && out.contains("true"), "got: {out}");
         // Queue should be drained — a second poll returns empty.
         let out2 = rt.eval("__glyx_pollEvents().length").expect("eval should succeed");
         assert!(out2.contains('0'), "expected drained queue, got {out2:?}");
@@ -2085,6 +2286,21 @@ mod tests {
     }
 
     #[test]
+    fn get_layout_box_is_the_unclipped_rect_when_clipping_changed_it() {
+        let (_tokio_rt, mut rt) = new_runtime();
+        // Unclipped node: box* equals the plain rect.
+        rt.update_layout(7, 10.0, 20.0, 30.0, 40.0);
+        let plain = rt.eval("(l => [l.boxX, l.boxY, l.boxWidth, l.boxHeight].join(','))(__glyx_getLayout(7))").unwrap();
+        assert_eq!(plain.trim_matches('"'), "10,20,30,40");
+        // Clipped node (top 15px scrolled out of view): plain rect is the
+        // visible part, box* is the full rect at its real scrolled origin.
+        rt.update_layout(8, 10.0, 100.0, 30.0, 25.0);
+        rt.layout_cache().lock().insert(8 | 0x4000_0000, [10.0, 85.0, 30.0, 40.0]);
+        let clipped = rt.eval("(l => [l.y, l.height, l.boxY, l.boxHeight].join(','))(__glyx_getLayout(8))").unwrap();
+        assert_eq!(clipped.trim_matches('"'), "100,25,85,40");
+    }
+
+    #[test]
     fn measure_text_returns_positive_dimensions() {
         let (_tokio_rt, mut rt) = new_runtime();
         let out = rt.eval("JSON.stringify(__glyx_measure_text('hello', 16))").expect("eval should succeed");
@@ -2096,8 +2312,25 @@ mod tests {
         let (_tokio_rt, mut rt) = new_runtime();
         let out = rt.eval("typeof __glyx_text_char_at_x('hello', 16, 1e6, 5)").expect("eval should succeed");
         assert!(out.contains("number"), "got: {out}");
-        let out = rt.eval("typeof __glyx_text_pos_at('hello', 16, 1e6, 5, 0)").expect("eval should succeed");
+        let out = rt.eval("typeof __glyx_text_pos_at('hello', 5, 0, { fontSize: 16, boxWidth: 200, boxHeight: 20 })").expect("eval should succeed");
         assert!(out.contains("number"), "got: {out}");
+    }
+
+    #[test]
+    fn text_caret_at_round_trips_through_pos_at_with_the_nodes_own_props() {
+        // The opts object carries the Text node's own props (textAlign here)
+        // — centered text must round-trip caret → click → same offset.
+        let (_tokio_rt, mut rt) = new_runtime();
+        let out = rt.eval(
+            "(() => { const o = { fontSize: 16, textAlign: 'center', boxWidth: 300, boxHeight: 60 };\
+               const r = [];\
+               for (const off of [0, 3, 7, 11]) {\
+                 const c = __glyx_text_caret_at('hello world', off, o);\
+                 r.push(__glyx_text_pos_at('hello world', c.x, c.y + c.height / 2, o));\
+               }\
+               return r.join(','); })()"
+        ).expect("eval should succeed");
+        assert_eq!(out.trim_matches('"'), "0,3,7,11");
     }
 
     #[test]
@@ -2231,14 +2464,28 @@ mod tests {
             "__glyx_system_getInfo", "__glyx_system_getDarkMode", "__glyx_system_getBatterySaver",
             "__glyx_storage_getDrives", "__glyx_credentials_set", "__glyx_credentials_get",
             "__glyx_credentials_delete", "__glyx_deeplink_getInitialUrl", "__glyx_deeplink_poll",
+            "__glyx_autostart_isEnabled", "__glyx_autostart_setEnabled", "__glyx_autostart_wasOpenedAtLogin",
+            "__glyx_print_listPrinters", "__glyx_print_getDefaultPrinter", "__glyx_print_file",
             "__glyx_perf_snapshot", "__glyx_perf_set_budget", "__glyx_perf_poll_violations",
             "__glyx_perf_poll_leak_warnings", "__glyx_quit", "__glyx_window_close", "__glyx_restart",
-            "__glyx_platform", "__glyx_collect_memory", "__glyx_open_external",
+            "__glyx_platform", "__glyx_getEnv", "__glyx_collect_memory", "__glyx_open_external",
             "__glyx_system_watch", "__glyx_system_unwatch",
         ] {
             let out = rt.eval(&format!("typeof {name}")).expect("eval should succeed");
             assert!(out.contains("function"), "{name} should be registered, got {out}");
         }
+    }
+
+    #[test]
+    fn get_env_denies_by_default_without_leaking_whether_the_var_exists() {
+        // Mirrors V8's `get_env_callback` (bind_core.rs): a fail-closed
+        // capability check (no test in this shared process may call
+        // `glyx_security::init()` — see other tests' comments) must return
+        // `null`, the same value as a genuinely-absent variable, so a denial
+        // never reveals whether the variable exists.
+        let (_tokio_rt, mut rt) = new_runtime();
+        let out = rt.eval("__glyx_getEnv('PATH')").expect("eval should succeed");
+        assert_eq!(out.trim(), "null");
     }
 
     #[test]
@@ -2604,7 +2851,10 @@ mod tests {
     #[test]
     fn ipc_poll_returns_empty_array_when_nothing_pending() {
         let (_tokio_rt, mut rt) = new_runtime();
-        let r = rt.eval("__glyx_ipc_poll()").expect("eval should succeed");
+        // `__glyx_ipc_poll` now returns a real JS array (not a JSON string —
+        // see W2/A4), so `eval`'s ToString coercion on `[]` yields `""`, not
+        // `"[]"`. Assert via JSON.stringify to check the actual shape.
+        let r = rt.eval("JSON.stringify(__glyx_ipc_poll())").expect("eval should succeed");
         assert_eq!(r.trim(), "[]");
     }
 
@@ -2623,6 +2873,40 @@ mod tests {
         rt.eval("__glyx_ipc_send(0, 'hello'); null").expect("eval should succeed");
         let r = rt.eval("__glyx_ipc_poll()").expect("eval should succeed");
         assert!(r.contains("hello"), "expected the round-tripped message, got {r}");
+    }
+
+    #[test]
+    fn ipc_poll_returns_a_real_array_not_a_json_string() {
+        // A4: `__glyx_ipc_poll` builds a JS array directly (no
+        // `serde_json::to_string` + `JSON.parse` round trip) — assert the
+        // return value is actually an Array, not a string the caller must
+        // parse first.
+        let (_tokio_rt, mut rt) = new_runtime();
+        rt.eval("__glyx_ipc_send(0, 'a'); __glyx_ipc_send(0, 'b'); null")
+            .expect("eval should succeed");
+        let r = rt.eval("Array.isArray(__glyx_ipc_poll())").expect("eval should succeed");
+        assert_eq!(r.trim(), "true");
+    }
+
+    #[test]
+    fn ipc_poll_preserves_message_content_needing_json_escaping() {
+        // Messages are handed to JS untouched (no re-serialisation of the
+        // array), so characters that would need JSON escaping (quotes,
+        // backslashes) must survive exactly, not get double-escaped or
+        // mangled by a stray serialise/parse pass.
+        let (_tokio_rt, mut rt) = new_runtime();
+        rt.eval(r#"__glyx_ipc_send(0, 'say "hi" \\ bye'); null"#).expect("eval should succeed");
+        let r = rt.eval("__glyx_ipc_poll()[0]").expect("eval should succeed");
+        assert_eq!(r, "say \"hi\" \\ bye");
+    }
+
+    #[test]
+    fn ipc_poll_drains_messages_in_fifo_order() {
+        let (_tokio_rt, mut rt) = new_runtime();
+        rt.eval("__glyx_ipc_send(0, 'first'); __glyx_ipc_send(0, 'second'); null")
+            .expect("eval should succeed");
+        let r = rt.eval("JSON.stringify(__glyx_ipc_poll())").expect("eval should succeed");
+        assert_eq!(r.trim(), r#"["first","second"]"#);
     }
 
     #[test]

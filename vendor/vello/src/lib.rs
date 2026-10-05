@@ -106,6 +106,7 @@
     reason = "Deferred, only apply in some feature sets so not expect"
 )]
 
+mod adaptive;
 mod debug;
 mod recording;
 mod render;
@@ -332,6 +333,18 @@ pub struct Renderer {
     resolver: Resolver,
     image_atlas: Option<recording::ImageProxy>,
     shaders: FullShaders,
+    /// Glyx patch: current sizes of the bump-allocated buffers, grown on demand.
+    bump_capacity: adaptive::BumpCapacity,
+    /// Glyx patch: recent demand, to shrink the buffers again.
+    demand: adaptive::DemandTracker,
+    /// Glyx patch: size the bump buffers from the scene (see `adaptive`).
+    adaptive_buffers: bool,
+    /// Glyx patch: when a frame waits for its allocation counters.
+    sync: adaptive::SyncPolicy,
+    /// Glyx patch: the previous frame's counters, on their way back from the GPU.
+    pending_bump: Option<PendingBump>,
+    /// Glyx patch: how adaptive frames were drawn.
+    stats: AdaptiveStats,
     #[cfg(feature = "debug_layers")]
     debug: debug::DebugRenderer,
     #[cfg(feature = "wgpu-profiler")]
@@ -342,6 +355,28 @@ pub struct Renderer {
     #[doc(hidden)] // End-users of Vello should not have `wgpu-profiler` enabled.
     /// The results from profiling. This is *not* treated as public API.
     pub profile_result: Option<Vec<wgpu_profiler::GpuTimerQueryResult>>,
+}
+
+/// A frame's allocation counters on their way back from the GPU, read a frame late.
+struct PendingBump {
+    proxy: recording::BufferProxy,
+    rx: std::sync::mpsc::Receiver<std::result::Result<(), wgpu::BufferAsyncError>>,
+    /// The capacities the frame was drawn with, and its scene signature.
+    used: adaptive::BumpCapacity,
+    sig: adaptive::SceneSig,
+}
+
+/// How adaptive frames were drawn (see [`Renderer::adaptive_stats`]).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdaptiveStats {
+    /// Frames that waited for their counters before drawing.
+    pub waited_frames: u64,
+    /// Frames drawn in one pass, their counters checked a frame later.
+    pub pipelined_frames: u64,
+    /// Passes thrown away and run again because the buffers were too small.
+    pub retries: u64,
+    /// Frames found, a frame late, to have been drawn with buffers that were too small.
+    pub late_overflows: u64,
 }
 // This is not `Send` (or `Sync`) on WebAssembly as the
 // underlying wgpu types are not. This can be enabled with the
@@ -442,12 +477,21 @@ impl Renderer {
         #[cfg(feature = "debug_layers")]
         let debug = debug::DebugRenderer::new(device, wgpu::TextureFormat::Rgba8Unorm, &mut engine);
 
+        // The CPU pipeline keeps its buffers in ordinary memory and does not read
+        // the bump counters back; it keeps upstream's fixed sizes.
+        let adaptive_buffers = !options.use_cpu;
         Ok(Self {
             options,
             engine,
             resolver: Resolver::new(),
             image_atlas: None,
             shaders,
+            bump_capacity: adaptive::BumpCapacity::FLOOR,
+            demand: adaptive::DemandTracker::default(),
+            adaptive_buffers,
+            sync: adaptive::SyncPolicy::default(),
+            pending_bump: None,
+            stats: AdaptiveStats::default(),
             #[cfg(feature = "debug_layers")]
             debug,
             #[cfg(feature = "wgpu-profiler")]
@@ -479,6 +523,9 @@ impl Renderer {
         texture: &TextureView,
         params: &RenderParams,
     ) -> Result<()> {
+        if self.adaptive_buffers {
+            return self.render_to_texture_adaptive(device, queue, scene, texture, params);
+        }
         let (recording, target) = render::render_full(
             scene,
             &mut self.resolver,
@@ -512,6 +559,312 @@ impl Renderer {
         }
 
         Ok(())
+    }
+
+    /// Glyx patch: `render_to_texture` with the bump buffers sized from the scene.
+    ///
+    /// Almost every frame draws in one pass, exactly like upstream, and its
+    /// allocation counters are read back a frame later without waiting for them: if
+    /// the buffers turn out to have been too small, they grow and the next frame
+    /// waits. A frame waits for its counters before drawing (the CPU blocks on the
+    /// GPU, a few milliseconds) only when overflowing is likely, see
+    /// [`adaptive::SyncPolicy`]: then a pass that does not fit is discarded before
+    /// anything is drawn and run again larger, so those frames never show missing
+    /// content. A scene that outgrows its buffers without any of the signs (more
+    /// area covered rather than more paths) can show one frame with content missing.
+    fn render_to_texture_adaptive(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        scene: &Scene,
+        texture: &TextureView,
+        params: &RenderParams,
+    ) -> Result<()> {
+        let sig = adaptive::SceneSig::new(scene.encoding(), scene.tile_estimate());
+        // What the previous frame's counters say (this may grow the buffers).
+        let may_request = self.harvest_bump(device);
+        if self.sync.needs_sync(sig, (params.width, params.height)) {
+            self.render_waiting(device, queue, scene, texture, params, sig)
+        } else {
+            self.render_pipelined(device, queue, scene, texture, params, sig, may_request)
+        }
+    }
+
+    /// Draw in one pass and ask for the frame's counters, to be read next frame.
+    #[allow(clippy::too_many_arguments)]
+    fn render_pipelined(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        scene: &Scene,
+        texture: &TextureView,
+        params: &RenderParams,
+        sig: adaptive::SceneSig,
+        request_counters: bool,
+    ) -> Result<()> {
+        let mut render = Render::new();
+        let mut recording = render.render_encoding_coarse(
+            scene.encoding(),
+            &mut self.resolver,
+            &self.shaders,
+            &mut self.image_atlas,
+            params,
+            request_counters,
+            Some(&self.bump_capacity),
+        );
+        let target = render.out_image();
+        let bump_proxy = render.bump_buf();
+        render.record_fine(&self.shaders, &mut recording);
+        let external_resources = [ExternalResource::Image(target, texture)];
+        self.engine.run_recording(
+            device,
+            queue,
+            &recording,
+            &external_resources,
+            "render_to_texture",
+            #[cfg(feature = "wgpu-profiler")]
+            &mut self.profiler,
+        )?;
+        #[cfg(feature = "wgpu-profiler")]
+        {
+            self.profiler.end_frame().unwrap();
+            if let Some(result) = self
+                .profiler
+                .process_finished_frame(queue.get_timestamp_period())
+            {
+                self.profile_result = Some(result);
+            }
+        }
+        if request_counters {
+            if let Some(buf) = self.engine.get_download(bump_proxy) {
+                let (tx, rx) = std::sync::mpsc::channel();
+                buf.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                    let _ = tx.send(r);
+                });
+                self.pending_bump = Some(PendingBump {
+                    proxy: bump_proxy,
+                    rx,
+                    used: self.bump_capacity,
+                    sig,
+                });
+            }
+        }
+        self.sync.frame_drawn(sig, false);
+        self.stats.pipelined_frames += 1;
+        Ok(())
+    }
+
+    /// Run the coarse pass, wait for its counters, and only then draw; a pass that
+    /// does not fit is discarded and run again larger (nothing has been drawn yet).
+    fn render_waiting(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        scene: &Scene,
+        texture: &TextureView,
+        params: &RenderParams,
+        sig: adaptive::SceneSig,
+    ) -> Result<()> {
+        // Each failed stage can hide the next one's needs, so a few rounds may be needed.
+        const MAX_ATTEMPTS: u32 = 6;
+        let encoding = scene.encoding();
+        let mut attempts = 0;
+        loop {
+            let mut render = Render::new();
+            let coarse = render.render_encoding_coarse(
+                encoding,
+                &mut self.resolver,
+                &self.shaders,
+                &mut self.image_atlas,
+                params,
+                true,
+                Some(&self.bump_capacity),
+            );
+            let target = render.out_image();
+            let bump_proxy = render.bump_buf();
+            self.engine.run_recording(
+                device,
+                queue,
+                &coarse,
+                &[],
+                "render_to_texture coarse",
+                #[cfg(feature = "wgpu-profiler")]
+                &mut self.profiler,
+            )?;
+            let bump = self.read_bump(device, bump_proxy)?;
+            self.engine.free_download(bump_proxy);
+
+            if self.bump_capacity.overflowed(&bump) {
+                if attempts < MAX_ATTEMPTS && self.bump_capacity.grow_to_fit(&bump) {
+                    log::debug!(
+                        "vello: scene needs more scratch space ({bump:?}); buffers now {} MiB",
+                        self.bump_capacity.bytes() >> 20
+                    );
+                    let mut discard = Recording::default();
+                    render.discard_fine(&mut discard);
+                    self.engine.run_recording(
+                        device,
+                        queue,
+                        &discard,
+                        &[],
+                        "render_to_texture discard",
+                        #[cfg(feature = "wgpu-profiler")]
+                        &mut self.profiler,
+                    )?;
+                    attempts += 1;
+                    self.stats.retries += 1;
+                    continue;
+                }
+                self.warn_at_ceiling(&bump);
+            }
+
+            let mut fine = Recording::default();
+            render.record_fine(&self.shaders, &mut fine);
+            let external_resources = [ExternalResource::Image(target, texture)];
+            self.engine.run_recording(
+                device,
+                queue,
+                &fine,
+                &external_resources,
+                "render_to_texture fine",
+                #[cfg(feature = "wgpu-profiler")]
+                &mut self.profiler,
+            )?;
+            #[cfg(feature = "wgpu-profiler")]
+            {
+                self.profiler.end_frame().unwrap();
+                if let Some(result) = self
+                    .profiler
+                    .process_finished_frame(queue.get_timestamp_period())
+                {
+                    self.profile_result = Some(result);
+                }
+            }
+
+            self.demand.record(&bump);
+            self.sync.measured(sig, self.bump_capacity.fill(&bump));
+            self.sync.frame_drawn(sig, true);
+            self.stats.waited_frames += 1;
+            self.review_capacity();
+            return Ok(());
+        }
+    }
+
+    /// Read the previous frame's counters if they have arrived, without waiting,
+    /// and grow the buffers if that frame did not fit. Returns whether this frame
+    /// may ask for its own counters (not while the previous request is outstanding).
+    fn harvest_bump(&mut self, device: &Device) -> bool {
+        let Some(pending) = self.pending_bump.take() else {
+            return true;
+        };
+        let _ = device.poll(wgpu::PollType::Poll);
+        match pending.rx.try_recv() {
+            Ok(Ok(())) => {
+                let bump = self.engine.get_download(pending.proxy).map(|buf| {
+                    let slice = buf.slice(..);
+                    let data = slice.get_mapped_range();
+                    let bump: BumpAllocators = bytemuck::pod_read_unaligned(&data);
+                    drop(data);
+                    buf.unmap();
+                    bump
+                });
+                self.engine.free_download(pending.proxy);
+                if let Some(bump) = bump {
+                    self.demand.record(&bump);
+                    self.sync.measured(pending.sig, pending.used.fill(&bump));
+                    if pending.used.overflowed(&bump) {
+                        self.stats.late_overflows += 1;
+                        log::debug!("vello: a frame was drawn with scratch buffers too small for it ({bump:?})");
+                    }
+                    // What matters now is whether the buffers as they are today fit.
+                    if self.bump_capacity.overflowed(&bump) {
+                        // More headroom than usual: this scene was missed once already.
+                        if self.bump_capacity.grow_to_fit_with_headroom(&bump, 100) {
+                            self.sync.force_next_sync();
+                        } else {
+                            self.warn_at_ceiling(&bump);
+                        }
+                    }
+                    self.review_capacity();
+                }
+                true
+            }
+            Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.engine.free_download(pending.proxy);
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // The GPU has not finished that frame yet; ask again next frame.
+                self.pending_bump = Some(pending);
+                false
+            }
+        }
+    }
+
+    /// Hand back memory a past busy scene grew, once demand has stayed low.
+    fn review_capacity(&mut self) {
+        if let Some(smaller) = self.demand.review(&self.bump_capacity) {
+            log::debug!("vello: scratch buffers shrink to {} MiB", smaller.bytes() >> 20);
+            self.bump_capacity = smaller;
+            self.engine.trim_pool();
+        }
+    }
+
+    fn warn_at_ceiling(&self, bump: &BumpAllocators) {
+        static HAS_WARNED: AtomicBool = AtomicBool::new(false);
+        if !HAS_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!("vello: scene exceeds the largest scratch buffers ({bump:?}); some content may be missing");
+        }
+    }
+
+    /// Wait for the coarse pass and read its allocation counters.
+    fn read_bump(&mut self, device: &Device, proxy: recording::BufferProxy) -> Result<BumpAllocators> {
+        let buf = self
+            .engine
+            .get_download(proxy)
+            .ok_or(Error::UnavailableBufferUsed("vello.bump_buf", "allocation counter readback"))?;
+        let slice = buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        // Only polling makes the mapping callback fire; it also waits for the pass.
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        rx.recv()
+            .map_err(|_| Error::UnavailableBufferUsed("vello.bump_buf", "allocation counter readback"))??;
+        let data = slice.get_mapped_range();
+        let bump: BumpAllocators = bytemuck::pod_read_unaligned(&data);
+        drop(data);
+        buf.unmap();
+        Ok(bump)
+    }
+
+    /// How adaptive frames have been drawn so far: how many waited for their
+    /// counters, how many drew in one pass, how many passes were re-run, and how many
+    /// frames were found a frame late to have overflowed.
+    pub fn adaptive_stats(&self) -> AdaptiveStats {
+        self.stats
+    }
+
+    /// Whether the bump buffers are sized from the scene (the default for GPU
+    /// rendering) rather than upstream's fixed ~165 MiB.
+    pub fn adaptive_buffers(&self) -> bool {
+        self.adaptive_buffers
+    }
+
+    /// Turn scene-sized buffers on or off (for comparing against upstream's sizes).
+    pub fn set_adaptive_buffers(&mut self, on: bool) {
+        self.adaptive_buffers = on && !self.options.use_cpu;
+    }
+
+    /// Bytes the bump-allocated buffers currently take (what the next frame
+    /// allocates; upstream's fixed sizes are about 165 MiB).
+    pub fn bump_buffer_bytes(&self) -> u64 {
+        if self.adaptive_buffers {
+            self.bump_capacity.bytes()
+        } else {
+            adaptive::BumpCapacity::UPSTREAM.bytes()
+        }
     }
 
     /// Overwrite `image` with `texture`.
@@ -744,6 +1097,7 @@ impl Renderer {
             &mut self.image_atlas,
             params,
             robust,
+            None,
         );
         let target = render.out_image();
         let bump_buf = render.bump_buf();

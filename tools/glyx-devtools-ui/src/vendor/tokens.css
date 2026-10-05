@@ -1,0 +1,144 @@
+/* ============================================================
+   Glyx Design Tokens — tokens.css
+   Dark is default; add data-theme="light" on <html> for light.
+   ============================================================ */
+
+:root {
+  /* ---- Core: neutral ---- */
+  --gx-neutral-0: #FFFFFF;
+  --gx-neutral-50: #F6F6F9;
+  --gx-neutral-100: #ECECF2;
+  --gx-neutral-200: #D9D9E3;
+  --gx-neutral-300: #B9B9C7;
+  --gx-neutral-400: #8A8A99;
+  --gx-neutral-500: #63636F;
+  --gx-neutral-600: #45454F;
+  --gx-neutral-700: #2C2C36;
+  --gx-neutral-800: #1C1C24;
+  --gx-neutral-850: #141419;
+  --gx-neutral-900: #111117;
+  --gx-neutral-950: #0A0A0E;
+
+  /* ---- Core: amber (primary) ---- */
+  --gx-amber-50: #FFFBEB;
+  --gx-amber-100: #FEF3C7;
+  --gx-amber-200: #FDE68A;
+  --gx-amber-300: #FCD34D;
+  --gx-amber-400: #FBBF24;
+  --gx-amber-500: #F59E0B;
+  --gx-amber-600: #D97706;
+  --gx-amber-700: #B45309;
+  --gx-amber-800: #92400E;
+  --gx-amber-900: #78350F;
+
+  /* ---- Core: violet (accent) ---- */
+  --gx-violet-50: #F5F3FF;
+  --gx-violet-100: #EDE9FE;
+  --gx-violet-200: #DDD6FE;
+  --gx-violet-300: #C4B5FD;
+  --gx-violet-400: #A78BFA;
+  --gx-violet-500: #8B5CF6;
+  --gx-violet-600: #7C3AED;
+  --gx-violet-700: #6D28D9;
+  --gx-violet-800: #5B21B6;
+  --gx-violet-900: #4C1D95;
+
+  /* ---- Core: states ---- */
+  --gx-green-500: #22C55E;
+  --gx-green-600: #16A34A;
+  --gx-red-500: #EF4444;
+  --gx-red-600: #DC2626;
+  --gx-blue-500: #3B82F6;
+  --gx-blue-600: #2563EB;
+
+  /* ============ SEMANTIC — DARK (default) ============ */
+  --gx-bg-page: var(--gx-neutral-950);
+  --gx-bg-panel: var(--gx-neutral-900);
+  --gx-bg-elevated: var(--gx-neutral-800);
+  --gx-bg-inset: #07070A;
+  --gx-bg-hover: rgba(237, 237, 242, 0.05);
+  --gx-bg-active: rgba(237, 237, 242, 0.09);
+
+  --gx-text-primary: #EDEDF2;
+  --gx-text-secondary: #A9A9B8;
+  --gx-text-tertiary: var(--gx-neutral-400);
+  --gx-text-disabled: var(--gx-neutral-500);
+  --gx-text-inverse: #131318;
+
+  --gx-border-default: #22222E;
+  --gx-border-strong: var(--gx-neutral-700);
+  --gx-border-focus: var(--gx-violet-500);
+
+  --gx-action-primary: var(--gx-amber-500);
+  --gx-action-primary-hover: var(--gx-amber-400);
+  --gx-action-primary-active: var(--gx-amber-600);
+  --gx-link: var(--gx-violet-400);
+  --gx-link-hover: var(--gx-violet-300);
+  --gx-focus-ring: rgba(139, 92, 246, 0.6);
+  --gx-selection: rgba(139, 92, 246, 0.3);
+
+  --gx-success: var(--gx-green-500);
+  --gx-success-bg: rgba(34, 197, 94, 0.12);
+  --gx-warning: var(--gx-amber-500);
+  --gx-warning-bg: rgba(245, 158, 11, 0.12);
+  --gx-error: var(--gx-red-500);
+  --gx-error-bg: rgba(239, 68, 68, 0.12);
+  --gx-info: var(--gx-blue-500);
+  --gx-info-bg: rgba(59, 130, 246, 0.12);
+
+  /* ---- Syntax (dark) ---- */
+  --gx-syntax-keyword: var(--gx-violet-400);
+  --gx-syntax-string: var(--gx-amber-400);
+  --gx-syntax-function: #7DD3FC;
+  --gx-syntax-number: #F472B6;
+  --gx-syntax-comment: var(--gx-neutral-500);
+  --gx-syntax-plain: #EDEDF2;
+}
+
+[data-theme="light"] {
+  --gx-bg-page: var(--gx-neutral-0);
+  --gx-bg-panel: var(--gx-neutral-50);
+  --gx-bg-elevated: var(--gx-neutral-0);
+  --gx-bg-inset: var(--gx-neutral-100);
+  --gx-bg-hover: rgba(19, 19, 24, 0.04);
+  --gx-bg-active: rgba(19, 19, 24, 0.08);
+
+  --gx-text-primary: #131318;
+  --gx-text-secondary: #45454F;
+  --gx-text-tertiary: var(--gx-neutral-500);
+  --gx-text-disabled: var(--gx-neutral-300);
+  --gx-text-inverse: #FFFFFF;
+
+  --gx-border-default: var(--gx-neutral-200);
+  --gx-border-strong: var(--gx-neutral-300);
+  --gx-border-focus: var(--gx-violet-600);
+
+  --gx-action-primary: var(--gx-amber-500);
+  --gx-action-primary-hover: var(--gx-amber-600);
+  --gx-action-primary-active: var(--gx-amber-700);
+  --gx-link: var(--gx-violet-600);
+  --gx-link-hover: var(--gx-violet-700);
+  --gx-focus-ring: rgba(124, 58, 237, 0.5);
+  --gx-selection: rgba(139, 92, 246, 0.22);
+
+  --gx-success: var(--gx-green-600);
+  --gx-success-bg: rgba(34, 197, 94, 0.10);
+  --gx-warning: var(--gx-amber-700);
+  --gx-warning-bg: rgba(245, 158, 11, 0.10);
+  --gx-error: var(--gx-red-600);
+  --gx-error-bg: rgba(239, 68, 68, 0.10);
+  --gx-info: var(--gx-blue-600);
+  --gx-info-bg: rgba(59, 130, 246, 0.10);
+
+  /* ---- Syntax (light) ---- */
+  --gx-syntax-keyword: var(--gx-violet-600);
+  --gx-syntax-string: var(--gx-amber-700);
+  --gx-syntax-function: #0284C7;
+  --gx-syntax-number: #DB2777;
+  --gx-syntax-comment: var(--gx-neutral-400);
+  --gx-syntax-plain: #131318;
+}
+
+/* ---- Base applications ---- */
+::selection { background: var(--gx-selection); }
+:focus-visible { outline: 2px solid var(--gx-focus-ring); outline-offset: 2px; }

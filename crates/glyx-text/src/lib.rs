@@ -38,9 +38,192 @@ use parley::{
     Affinity, Cursor, FontContext, LayoutContext,
 };
 
+// ── Canonical selection model ─────────────────────────────────────────────────
+//
+// Every text consumer (SelectableText, TextInput, RichText) performs the same
+// two operations — "character under a pointer" and "rendered x of a character"
+// — but today each implements them independently in JS, with subtly different
+// empty/offset conventions, so the same click can land on different characters
+// depending on which component owns the field.  These are the shared, native
+// primitives the whole text layer is built on.  JS keeps owning selection
+// *state*; native owns selection *geometry*.
+
+/// A character offset into a string.  Zero-based, Unicode-aware: the JS layer
+/// indexes selections in characters (not bytes), matching how `Text` receives
+/// `selectionStart`/`selectionEnd`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct TextPosition {
+    /// 0-based character offset from the start of the text.
+    pub offset: usize,
+}
+
+impl TextPosition {
+    pub const fn new(offset: usize) -> Self {
+        Self { offset }
+    }
+}
+
+/// A text selection: `anchor` is the fixed end (press-down), `focus` the moving
+/// end (drag / shift-arrow).  The two may be in either order; callers that need
+/// an ordered range use [`TextSelection::normalized`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextSelection {
+    pub anchor: TextPosition,
+    pub focus:  TextPosition,
+}
+
+impl TextSelection {
+    pub const fn new(anchor: TextPosition, focus: TextPosition) -> Self {
+        Self { anchor, focus }
+    }
+
+    pub const fn collapsed() -> Self {
+        Self {
+            anchor: TextPosition::new(0),
+            focus:  TextPosition::new(0),
+        }
+    }
+
+    /// True when both ends coincide (no text is highlighted).
+    pub fn is_collapsed(&self) -> bool {
+        self.anchor.offset == self.focus.offset
+    }
+
+    /// Return `(start, end)` in offset order, mirroring RichText's `normSel`
+    /// convention so all consumers agree on which end comes first.
+    pub fn normalized(&self) -> (TextPosition, TextPosition) {
+        if self.anchor.offset <= self.focus.offset {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+}
+
+// ── Canonical text placement ──────────────────────────────────────────────────
+//
+// Where a text node's glyphs land inside its layout box. The renderer and
+// every hit-test query derive placement from THIS — not from their own copy
+// of the rules — so what's drawn and what a click resolves to can't drift
+// apart. (They did: the hit-test used to shape at a different wrap width,
+// ignore bold/italic/lineHeight, and skip vertical centering, each of which
+// made clicks land on a different character than the one under the pointer.)
+
+/// Horizontal text alignment within a box. CSS default is `Left`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl TextAlign {
+    /// Parse the `textAlign` prop value; anything unrecognised is `Left`.
+    pub fn from_prop(s: Option<&str>) -> Self {
+        match s {
+            Some("center") => Self::Center,
+            Some("right")  => Self::Right,
+            _              => Self::Left,
+        }
+    }
+}
+
+/// Everything that affects how a string is SHAPED (glyph widths, wraps,
+/// line spacing). Two layouts shaped with equal `TextStyle` and wrap width
+/// are identical.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextStyle {
+    pub font_size:   f32,
+    pub bold:        bool,
+    pub italic:      bool,
+    /// Absolute line height in px; `None` = the font's own metrics.
+    pub line_height: Option<f32>,
+}
+
+impl TextStyle {
+    pub fn new(font_size: f32) -> Self {
+        Self { font_size, bold: false, italic: false, line_height: None }
+    }
+}
+
+/// The layout box a text node is drawn into, plus the rules for placing a
+/// shaped layout inside it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextBox {
+    pub width:  f32,
+    pub height: f32,
+    pub align:  TextAlign,
+    /// Single-line input text: shaped UNBOUNDED (never wraps) and panned
+    /// left by `scroll_x`, with the container clipping the overflow.
+    pub single_line: bool,
+    /// Horizontal pan for single-line inputs (caret-follow).
+    pub scroll_x: f32,
+    /// A text node showing an editing caret. Multiline editors are TOP-
+    /// aligned: centering would make the text drift down as content shrinks
+    /// below the box height (e.g. while deleting).
+    pub editor: bool,
+}
+
+impl TextBox {
+    /// The max width the text is wrapped at.
+    ///
+    /// Single-line inputs are unbounded (1e6 — matches the JS side's
+    /// `__glyx_measure_text(…, 1e6)` caret measurements). Otherwise the box
+    /// width +1px: guards against Taffy rounding shaving a sub-pixel off the
+    /// measured width and wrapping the last word.
+    pub fn wrap_width(&self) -> f32 {
+        if self.single_line { 1.0e6 } else { self.width.max(1.0) + 1.0 }
+    }
+
+    /// Offset `(dx, dy)` from the box's top-left to the shaped layout's
+    /// origin, for a layout of the given size.
+    ///
+    /// The whole layout is shaped left-aligned and then translated as ONE
+    /// block, so the horizontal shift uses the widest line.
+    pub fn origin(&self, text_width: f32, text_height: f32) -> (f32, f32) {
+        let slack_x = (self.width - text_width).max(0.0);
+        let dx = match self.align {
+            TextAlign::Left   => 0.0,
+            TextAlign::Center => slack_x / 2.0,
+            TextAlign::Right  => slack_x,
+        } - self.scroll_x;
+        let top_aligned = self.editor && !self.single_line;
+        let dy = if top_aligned { 0.0 } else { (self.height - text_height).max(0.0) / 2.0 };
+        (dx, dy)
+    }
+}
+
+/// A caret's rectangle, relative to the TEXT BOX's top-left.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CaretRect {
+    pub x:      f32,
+    pub y:      f32,
+    pub height: f32,
+}
+
+/// The single rule for "which character boundary is nearest to this point"
+/// — shared by every hit-test entry point (`hit_test`, `char_at_x_styled`)
+/// so no two components can resolve the same click differently.
+///
+/// Parley's `Cursor::from_point` is used rather than hand-mapping
+/// `Cluster::from_point`'s side: it never places the caret AFTER a hard
+/// line break (a click right of a line ending in '\n' lands at that line's
+/// end, not the start of the next) and it inverts the side for RTL clusters.
+fn position_at_point(layout: &parley::Layout<()>, text: &str, x: f32, y: f32) -> TextPosition {
+    let mut byte = Cursor::from_point(layout, x, y).index().min(text.len());
+    // Cursor indices are cluster boundaries (always char boundaries); the
+    // floor is purely defensive so a malformed index can never panic a slice.
+    while !text.is_char_boundary(byte) { byte -= 1; }
+    TextPosition::new(text[..byte].chars().count())
+}
+
 pub struct TextSystem {
     font_cx:   FontContext,
     layout_cx: LayoutContext<()>,
+    /// `ellipsize` results by (text hash, size, width, bold, italic): the
+    /// renderer asks every frame, the answer only changes with the inputs.
+    ellipsis_cache: std::collections::HashMap<(u64, u32, u32, bool, bool), Option<String>>,
 }
 
 impl TextSystem {
@@ -143,6 +326,7 @@ impl TextSystem {
         Self {
             font_cx,
             layout_cx: LayoutContext::new(),
+            ellipsis_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -260,22 +444,46 @@ impl TextSystem {
         }
     }
 
-    /// Character index of the caret position nearest to point (x, y) in text
-    /// wrapped at `max_width`.  Handles soft wraps and explicit newlines —
-    /// the proper hit-test for multiline editors (line-splitting on '\n' in JS
-    /// cannot account for soft-wrapped visual lines).
-    pub fn pos_at_point(&mut self, text: &str, font_size: f32, max_width: f32, x: f32, y: f32) -> usize {
-        if text.is_empty() { return 0; }
-        let layout = self.shape(text, font_size, max_width, FontWeight::NORMAL, Alignment::Start);
-        use parley::layout::{Cluster, ClusterSide};
-        let byte = match Cluster::from_point(&layout.inner, x, y) {
-            Some((cl, side)) => {
-                let r = cl.text_range();
-                if matches!(side, ClusterSide::Left) { r.start } else { r.end }
-            }
-            None => text.len(),
-        };
-        text[..byte.min(text.len())].chars().count()
+    /// Shape `text` exactly as the renderer does for a node with this style
+    /// in this box (same wrap width, weight, style, line height).
+    pub fn shape_in_box(&mut self, text: &str, style: &TextStyle, bx: &TextBox) -> TextLayout {
+        self.styled_label(text, style.font_size, bx.wrap_width(), style.bold, style.italic, style.line_height)
+    }
+
+    /// Character position nearest to point `(x, y)`, where the point is
+    /// relative to the TEXT BOX's top-left (screen space, as drawn — the
+    /// caller does no scroll/alignment/centering compensation of its own).
+    ///
+    /// Shapes with the renderer's exact inputs (`shape_in_box`) and applies
+    /// the renderer's exact placement (`TextBox::origin`), so the result is
+    /// the character actually drawn under the pointer. Handles soft wraps and
+    /// explicit newlines — the proper hit-test for multiline editors.
+    pub fn hit_test(&mut self, text: &str, style: &TextStyle, bx: &TextBox, x: f32, y: f32) -> TextPosition {
+        if text.is_empty() { return TextPosition::new(0); }
+        let layout = self.shape_in_box(text, style, bx);
+        let (dx, dy) = bx.origin(layout.width(), layout.height());
+        position_at_point(&layout.inner, text, x - dx, y - dy)
+    }
+
+    /// Where the caret for `pos` is drawn, relative to the TEXT BOX's
+    /// top-left — the inverse of [`hit_test`](Self::hit_test), from the same
+    /// shaped layout and the same placement. `y`/`height` span the caret's
+    /// visual line (line box), so `y + height / 2` is safely inside it.
+    pub fn caret_rect(&mut self, text: &str, style: &TextStyle, bx: &TextBox, pos: TextPosition) -> CaretRect {
+        let layout = self.shape_in_box(text, style, bx);
+        let (dx, dy) = bx.origin(layout.width(), layout.height());
+        if text.is_empty() {
+            let h = layout.height().max(style.line_height.unwrap_or(0.0)).max(style.font_size);
+            return CaretRect { x: dx, y: dy, height: h };
+        }
+        let byte = text.char_indices().nth(pos.offset).map(|(b, _)| b).unwrap_or(text.len());
+        let g = Cursor::from_byte_index(&layout.inner, byte, Affinity::Downstream)
+            .geometry(&layout.inner, 0.0);
+        CaretRect {
+            x:      g.x0 as f32 + dx,
+            y:      g.y0 as f32 + dy,
+            height: (g.y1 - g.y0) as f32,
+        }
     }
 
     /// Return the character index (0-based) whose left edge is closest to `target_x`
@@ -298,9 +506,8 @@ impl TextSystem {
     pub fn char_at_x_styled(&mut self, text: &str, font_size: f32, max_width: f32, target_x: f32, bold: bool, italic: bool) -> usize {
         if text.is_empty() { return 0; }
         let layout = self.styled_label(text, font_size, max_width, bold, italic, None);
-        let cursor = Cursor::from_point(&layout.inner, target_x, 0.0);
-        let byte = cursor.index();
-        text[..byte.min(text.len())].chars().count()
+        // Same boundary rule as `hit_test` — see `position_at_point`.
+        position_at_point(&layout.inner, text, target_x, 0.0).offset
     }
 
     /// Return the X pixel offset (from the start of the text) of the cursor
@@ -341,10 +548,133 @@ impl TextSystem {
         let layout = self.styled_label(text, font_size, max_width.max(1.0), bold, italic, None);
         (layout.inner.width(), layout.inner.height())
     }
+
+    /// `numberOfLines={1}`: the text's first line cut to fit `max_width`,
+    /// ending in "…". `None` when it already fits (draw it unchanged).
+    ///
+    /// The cut is taken from ONE shaping of the whole line, at the last
+    /// character boundary whose x leaves room for the ellipsis, so kerning
+    /// and ligatures match what the untruncated text would draw.
+    pub fn ellipsize(&mut self, text: &str, font_size: f32, bold: bool, italic: bool, max_width: f32) -> Option<String> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        let key = (h.finish(), font_size.to_bits(), max_width.round() as u32, bold, italic);
+        if let Some(hit) = self.ellipsis_cache.get(&key) { return hit.clone(); }
+        let out = self.ellipsize_uncached(text, font_size, bold, italic, max_width.round());
+        if self.ellipsis_cache.len() >= 1024 { self.ellipsis_cache.clear(); }
+        self.ellipsis_cache.insert(key, out.clone());
+        out
+    }
+
+    fn ellipsize_uncached(&mut self, text: &str, font_size: f32, bold: bool, italic: bool, max_width: f32) -> Option<String> {
+        let line = text.split('\n').next().unwrap_or("");
+        let multi = line.len() < text.len();
+        if line.is_empty() && !multi { return None; }
+        let layout = self.styled_label(line, font_size, 1.0e6, bold, italic, None);
+        if !multi && layout.inner.width() <= max_width + 0.5 { return None; }
+        let (dots, _) = self.measure_styled("\u{2026}", font_size, 1.0e6, bold, italic);
+        let target = (max_width - dots).max(0.0);
+        let mut cut = 0;
+        for b in line.char_indices().map(|(i, _)| i).skip(1).chain(std::iter::once(line.len())) {
+            let x = if b == line.len() {
+                layout.inner.width()
+            } else {
+                Cursor::from_byte_index(&layout.inner, b, Affinity::Downstream).geometry(&layout.inner, 0.0).x0 as f32
+            };
+            if x > target { break; }
+            cut = b;
+        }
+        Some(format!("{}\u{2026}", line[..cut].trim_end()))
+    }
 }
 
 impl Default for TextSystem {
     fn default() -> Self { Self::new() }
+}
+
+// ── Screen-reader text exposure (feature `accesskit`) ─────────────────────────
+
+/// Exposes a shaped layout's text to assistive technology as AccessKit
+/// `TextRun` nodes, and converts text selections between glyx's
+/// [`TextSelection`] (character offsets) and AccessKit's (run node +
+/// character index) — built on Parley's own AccessKit support.
+///
+/// Keep ONE `TextAccess` per text field across tree updates: it remembers
+/// which run node id belongs to which part of the layout, so run ids stay
+/// stable while the text is edited (screen readers track nodes by id), and
+/// so an AT-issued selection — which names run node ids — can be mapped back.
+#[cfg(feature = "accesskit")]
+#[derive(Default)]
+pub struct TextAccess {
+    inner: parley::LayoutAccessibility,
+}
+
+#[cfg(feature = "accesskit")]
+impl TextAccess {
+    /// Append `TextRun` children for `layout` to `parent`, pushing the run
+    /// nodes into `update`. `origin` is the screen position of the layout's
+    /// top-left (the box position plus `TextBox::origin`), in the same
+    /// coordinate space as the rest of the tree's bounds. `next_id` must
+    /// return ids that never collide with the tree's other node ids.
+    pub fn build_runs(
+        &mut self,
+        text:    &str,
+        layout:  &TextLayout,
+        update:  &mut accesskit::TreeUpdate,
+        parent:  &mut accesskit::Node,
+        next_id: impl FnMut() -> accesskit::NodeId,
+        origin:  (f64, f64),
+    ) {
+        self.inner.build_nodes(
+            text, &layout.inner, update, parent, next_id, origin.0, origin.1,
+            |_node, _style| {}, // no brush properties: color is render-only
+        );
+    }
+
+    /// glyx selection → AccessKit selection, against the SAME layout the
+    /// runs were last built from. `None` if an offset can't be mapped (e.g.
+    /// `build_runs` hasn't run for this layout yet).
+    pub fn to_access_selection(
+        &self,
+        text:   &str,
+        layout: &TextLayout,
+        sel:    TextSelection,
+    ) -> Option<accesskit::TextSelection> {
+        let cursor = |p: TextPosition| {
+            parley::Cursor::from_byte_index(&layout.inner, char_to_byte(text, p.offset), Affinity::Downstream)
+        };
+        parley::Selection::new(cursor(sel.anchor), cursor(sel.focus))
+            .to_access_selection(&layout.inner, &self.inner)
+    }
+
+    /// AccessKit selection (e.g. from an AT's `SetTextSelection` action) →
+    /// glyx selection in character offsets. `None` if it names run nodes this
+    /// field doesn't own.
+    pub fn from_access_selection(
+        &self,
+        text:   &str,
+        layout: &TextLayout,
+        sel:    &accesskit::TextSelection,
+    ) -> Option<TextSelection> {
+        let s = parley::Selection::from_access_selection(sel, &layout.inner, &self.inner)?;
+        let pos = |byte: usize| TextPosition::new(byte_to_char(text, byte));
+        Some(TextSelection::new(pos(s.anchor().index()), pos(s.focus().index())))
+    }
+}
+
+/// Character offset → byte offset, clamped to the text's end.
+#[cfg(feature = "accesskit")]
+fn char_to_byte(text: &str, offset: usize) -> usize {
+    text.char_indices().nth(offset).map(|(b, _)| b).unwrap_or(text.len())
+}
+
+/// Byte offset → character offset (floored to a char boundary, clamped).
+#[cfg(feature = "accesskit")]
+fn byte_to_char(text: &str, byte: usize) -> usize {
+    let mut b = byte.min(text.len());
+    while !text.is_char_boundary(b) { b -= 1; }
+    text[..b].chars().count()
 }
 
 // ── TextLayout ────────────────────────────────────────────────────────────────
@@ -362,6 +692,11 @@ impl TextLayout {
         self.inner.width()
     }
 
+    /// Like [`width`](Self::width), but counting trailing whitespace.
+    pub fn full_width(&self) -> f32 {
+        self.inner.full_width()
+    }
+
     /// Full line-box height including leading.  Includes space above and below
     /// the visible glyphs.  **Do not use for vertical centering** — use
     /// `ascent()` instead.
@@ -374,7 +709,7 @@ impl TextLayout {
     /// For a single-line layout this equals the ascent of the first glyph run.
     /// This is the value you want for vertical centering:
     ///
-    /// ```
+    /// ```ignore
     /// let ty = box_top + (box_height - layout.ascent()) / 2.0;
     /// frame.draw_text(&layout, tx, ty, color);
     /// ```
@@ -421,16 +756,20 @@ impl TextLayout {
     /// Per-visual-line byte ranges and extents:
     /// `(byte_start, byte_end, top, bottom, right_edge)` relative to the layout
     /// origin.  Includes soft-wrapped lines — used for multiline selection
-    /// highlights.  `right_edge` is the x of the line's last glyph: measuring a
-    /// cursor AT a soft-wrap boundary reports x on the NEXT line (0), so
-    /// selections that reach a wrapped line's end must use this instead.
+    /// highlights.  `right_edge` is the x of the line's last *visible* glyph:
+    /// measuring a cursor AT a soft-wrap boundary reports x on the NEXT line
+    /// (0), so selections that reach a wrapped line's end must use this
+    /// instead.  The value is glyph-tight — `inline_max_coord` is the line-box
+    /// width (full wrap width including trailing whitespace), which would paint
+    /// highlight over empty space past the final word.
     pub fn line_ranges(&self) -> Vec<(usize, usize, f32, f32, f32)> {
         self.inner
             .lines()
             .map(|l| {
                 let r = l.text_range();
                 let m = l.metrics();
-                (r.start, r.end, m.block_min_coord.max(0.0), m.block_max_coord, m.inline_max_coord)
+                let right = m.inline_min_coord + (m.advance - m.trailing_whitespace).max(0.0);
+                (r.start, r.end, m.block_min_coord.max(0.0), m.block_max_coord, right)
             })
             .collect()
     }
@@ -536,4 +875,346 @@ fn register_dir_filtered(font_cx: &mut FontContext, dir: &std::path::Path) -> us
         }
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_width_counts_trailing_spaces_that_width_drops() {
+        // Rich-text lays out each styled span as its own single-line box:
+        // "Hello " must keep its space before a bold "world".
+        let mut ts = TextSystem::new();
+        let with = ts.styled_label("Hello ", 16.0, 1.0e6, false, false, None);
+        let without = ts.styled_label("Hello", 16.0, 1.0e6, false, false, None);
+        assert!((with.width() - without.width()).abs() < 0.5, "width() drops the trailing space");
+        assert!(with.full_width() > without.width() + 2.0, "full_width() keeps it");
+    }
+
+    #[test]
+    fn ellipsize_cuts_to_fit_and_leaves_short_text_alone() {
+        let mut ts = TextSystem::new();
+        assert_eq!(ts.ellipsize("short", 14.0, false, false, 500.0), None);
+        let long = "a_rather_long_file_name_that_will_not_fit.png";
+        let out = ts.ellipsize(long, 14.0, false, false, 120.0).expect("cut");
+        assert!(out.ends_with('\u{2026}'));
+        let kept = out.trim_end_matches('\u{2026}');
+        assert!(!kept.is_empty() && long.starts_with(kept));
+        let (w, _) = ts.measure_styled(&out, 14.0, 1.0e6, false, false);
+        assert!(w <= 121.0, "ellipsized width {w} exceeds the box");
+        // Only the first line is kept, and it's marked as cut.
+        assert_eq!(ts.ellipsize("one\ntwo", 14.0, false, false, 500.0).as_deref(), Some("one\u{2026}"));
+        // Too narrow for any character: just the ellipsis.
+        assert_eq!(ts.ellipsize(long, 14.0, false, false, 2.0).as_deref(), Some("\u{2026}"));
+    }
+
+    fn sys() -> TextSystem {
+        TextSystem::new()
+    }
+
+    fn style(font_size: f32) -> TextStyle {
+        TextStyle::new(font_size)
+    }
+
+    /// A plain (non-editor, wrapping) text box.
+    fn tbox(width: f32, height: f32, align: TextAlign) -> TextBox {
+        TextBox { width, height, align, single_line: false, scroll_x: 0.0, editor: false }
+    }
+
+    // ── TextBox placement rules ──────────────────────────────────────────────
+
+    #[test]
+    fn wrap_width_is_box_plus_one_or_unbounded_for_single_line() {
+        let b = tbox(100.0, 20.0, TextAlign::Left);
+        assert_eq!(b.wrap_width(), 101.0);
+        let single = TextBox { single_line: true, ..b };
+        assert_eq!(single.wrap_width(), 1.0e6);
+    }
+
+    #[test]
+    fn origin_applies_alignment_scroll_and_vertical_centering() {
+        let b = tbox(200.0, 50.0, TextAlign::Center);
+        assert_eq!(b.origin(100.0, 20.0), (50.0, 15.0));
+        let r = tbox(200.0, 50.0, TextAlign::Right);
+        assert_eq!(r.origin(100.0, 20.0), (100.0, 15.0));
+        // Wider-than-box text never shifts negative.
+        assert_eq!(b.origin(300.0, 20.0), (0.0, 15.0));
+        // Single-line input: panned by scroll_x.
+        let s = TextBox { single_line: true, scroll_x: 30.0, ..tbox(200.0, 50.0, TextAlign::Left) };
+        assert_eq!(s.origin(500.0, 20.0), (-30.0, 15.0));
+    }
+
+    #[test]
+    fn multiline_editor_is_top_aligned_single_line_editor_is_centered() {
+        let ml = TextBox { editor: true, ..tbox(200.0, 100.0, TextAlign::Left) };
+        assert_eq!(ml.origin(50.0, 20.0).1, 0.0);
+        let sl = TextBox { editor: true, single_line: true, ..tbox(200.0, 100.0, TextAlign::Left) };
+        assert_eq!(sl.origin(50.0, 20.0).1, 40.0);
+    }
+
+    // ── hit_test ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn hit_test_empty_text_is_zero() {
+        let mut s = sys();
+        let p = s.hit_test("", &style(16.0), &tbox(200.0, 20.0, TextAlign::Left), 10.0, 0.0);
+        assert_eq!(p.offset, 0);
+    }
+
+    #[test]
+    fn hit_test_left_edges() {
+        let mut s = sys();
+        let b = tbox(200.0, 20.0, TextAlign::Left);
+        assert_eq!(s.hit_test("hello", &style(16.0), &b, 0.0, 5.0).offset, 0);
+        assert_eq!(s.hit_test("hello", &style(16.0), &b, 1e6, 5.0).offset, 5);
+    }
+
+    #[test]
+    fn hit_test_center_and_right_match_left_at_the_drawn_position() {
+        let mut s = sys();
+        let text = "a centred line";
+        let st = style(16.0);
+        let left = tbox(300.0, 20.0, TextAlign::Left);
+        let w = s.shape_in_box(text, &st, &left).width();
+        for (align, shift) in [(TextAlign::Center, (300.0 - w) / 2.0), (TextAlign::Right, 300.0 - w)] {
+            let b = tbox(300.0, 20.0, align);
+            for x0 in [1.0, 16.0, 42.0] {
+                assert_eq!(
+                    s.hit_test(text, &st, &b, shift + x0, 5.0).offset,
+                    s.hit_test(text, &st, &left, x0, 5.0).offset,
+                    "align={align:?} x0={x0}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hit_test_compensates_vertical_centering() {
+        // The same text in a taller box is drawn lower by (h - text_h)/2; a
+        // click at the drawn glyphs must resolve to the same character as the
+        // equivalent click in a snug box.
+        let mut s = sys();
+        let text = "aaa bbb ccc ddd eee fff";
+        let st = style(16.0);
+        let th = s.shape_in_box(text, &st, &tbox(60.0, 0.0, TextAlign::Left)).height();
+        let snug = tbox(60.0, th, TextAlign::Left);
+        let tall = tbox(60.0, th + 200.0, TextAlign::Left);
+        for y0 in [2.0, th / 2.0, th - 2.0] {
+            assert_eq!(
+                s.hit_test(text, &st, &tall, 10.0, 100.0 + y0).offset,
+                s.hit_test(text, &st, &snug, 10.0, y0).offset,
+                "y0={y0}"
+            );
+        }
+    }
+
+    #[test]
+    fn hit_test_single_line_accounts_for_scroll() {
+        let mut s = sys();
+        let text = "the quick brown fox jumps";
+        let st = style(16.0);
+        let unscrolled = TextBox { single_line: true, ..tbox(80.0, 20.0, TextAlign::Left) };
+        let scrolled = TextBox { scroll_x: 40.0, ..unscrolled };
+        // What's drawn at x once the text is panned left by 40 is what sat 40px
+        // further along the unscrolled text.
+        assert_eq!(
+            s.hit_test(text, &st, &scrolled, 10.0, 5.0).offset,
+            s.hit_test(text, &st, &unscrolled, 50.0, 5.0).offset,
+        );
+    }
+
+    #[test]
+    fn hit_test_right_of_a_hard_newline_stays_on_that_line() {
+        // Regression: the previous hand-rolled Cluster-side mapping returned
+        // the offset AFTER the '\n' for a click right of "line one", putting
+        // the caret at the start of the NEXT line.
+        let mut s = sys();
+        let text = "line one\nline two";
+        let b = TextBox { editor: true, ..tbox(400.0, 0.0, TextAlign::Left) };
+        let p = s.hit_test(text, &style(16.0), &b, 390.0, 3.0);
+        assert_eq!(p.offset, "line one".chars().count());
+    }
+
+    #[test]
+    fn hit_test_respects_soft_wraps() {
+        let mut s = sys();
+        let st = style(16.0);
+        let text = "aaa bbb ccc ddd eee";
+        let b = TextBox { editor: true, ..tbox(40.0, 0.0, TextAlign::Left) };
+        let lines = s.shape_in_box(text, &st, &b).line_ranges();
+        assert!(lines.len() > 1, "text should wrap into >1 line");
+        // A point on each visual line resolves inside that line's byte range.
+        for (ls, le, top, bot, _) in &lines {
+            let p = s.hit_test(text, &st, &b, 1.0, (top + bot) / 2.0);
+            let byte = text.char_indices().nth(p.offset).map(|(i, _)| i).unwrap_or(text.len());
+            assert!(byte >= *ls && byte <= *le, "offset {} outside line {ls}..{le}", p.offset);
+        }
+    }
+
+    #[test]
+    fn hit_test_line_height_moves_lines_like_the_renderer() {
+        // With a large explicit lineHeight the second line sits much lower; a
+        // point inside it (per the same shaped layout the renderer draws) must
+        // land on it — the old hit-test shaped WITHOUT lineHeight.
+        let mut s = sys();
+        let text = "one\ntwo";
+        let st = TextStyle { line_height: Some(60.0), ..style(16.0) };
+        let b = TextBox { editor: true, ..tbox(400.0, 0.0, TextAlign::Left) };
+        let lines = s.shape_in_box(text, &st, &b).line_ranges();
+        let (_, _, top2, bot2, _) = lines[1];
+        assert!(top2 >= 50.0, "lineHeight should push line 2 down, top={top2}");
+        let p = s.hit_test(text, &st, &b, 1.0, (top2 + bot2) / 2.0);
+        assert!(p.offset >= "one\n".chars().count(), "got {}", p.offset);
+    }
+
+    #[test]
+    fn caret_rect_round_trips_through_hit_test() {
+        let mut s = sys();
+        let st = style(16.0);
+        let text = "aaa bbb ccc ddd eee fff";
+        for b in [
+            TextBox { editor: true, ..tbox(60.0, 0.0, TextAlign::Left) },
+            tbox(300.0, 120.0, TextAlign::Center),
+            tbox(300.0, 120.0, TextAlign::Right),
+        ] {
+            for off in [0usize, 5, 9, 14, 20] {
+                let c = s.caret_rect(text, &st, &b, TextPosition::new(off));
+                let p = s.hit_test(text, &st, &b, c.x, c.y + c.height / 2.0);
+                assert_eq!(p.offset, off, "box={b:?} caret={c:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn char_at_x_uses_the_same_boundary_rule_as_hit_test() {
+        let mut s = sys();
+        let text = "hello world";
+        let b = TextBox { single_line: true, ..tbox(400.0, 20.0, TextAlign::Left) };
+        for x in [0.0, 3.0, 17.0, 40.0, 1e6] {
+            assert_eq!(
+                s.char_at_x(text, 16.0, 1.0e6, x),
+                s.hit_test(text, &style(16.0), &b, x, 5.0).offset,
+                "x={x}"
+            );
+        }
+    }
+
+    // ── line_ranges / selection types ────────────────────────────────────────
+
+    #[test]
+    fn line_ranges_right_edge_is_glyph_tight_not_box_width() {
+        let mut s = sys();
+        // Short single line in a wide box: right edge must be the text width,
+        // NOT the box width (inline_max_coord) — so selection highlights don't
+        // paint over the empty space past the last word.
+        let l = s.shape("hello", 16.0, 400.0, FontWeight::NORMAL, Alignment::Start);
+        let (_, _, _, _, right) = l.line_ranges()[0];
+        assert_eq!(right, l.width());
+
+        // Explicit newline: "hi" on line 2 must end at its own advance, not 200.
+        let n = s.shape("line one\nhi", 16.0, 200.0, FontWeight::NORMAL, Alignment::Start);
+        let hi_w = s.label("hi", 16.0).width();
+        let line2 = &n.line_ranges()[1];
+        assert!((line2.4 - hi_w).abs() < 0.01, "right={} hi_w={hi_w}", line2.4);
+    }
+
+    #[test]
+    fn selection_types_normalize_in_offset_order() {
+        let s = TextSelection::new(TextPosition::new(5), TextPosition::new(2));
+        let (a, b) = s.normalized();
+        assert_eq!(a.offset, 2);
+        assert_eq!(b.offset, 5);
+        assert!(!s.is_collapsed());
+        assert!(TextSelection::collapsed().is_collapsed());
+    }
+
+    // ── TextAccess (screen-reader text runs + selection) ─────────────────────
+
+    #[cfg(feature = "accesskit")]
+    fn build(access: &mut TextAccess, text: &str, layout: &TextLayout) -> (accesskit::TreeUpdate, accesskit::Node) {
+        let mut update = accesskit::TreeUpdate {
+            nodes: vec![],
+            tree: None,
+            tree_id: accesskit::TreeId::ROOT,
+            focus: accesskit::NodeId(1),
+        };
+        let mut parent = accesskit::Node::new(accesskit::Role::TextInput);
+        let mut next = 1000u64;
+        access.build_runs(text, layout, &mut update, &mut parent, || { next += 1; accesskit::NodeId(next) }, (10.0, 20.0));
+        (update, parent)
+    }
+
+    #[cfg(feature = "accesskit")]
+    #[test]
+    fn text_access_builds_runs_covering_the_whole_text() {
+        let mut s = sys();
+        let text = "hello world\nsecond line";
+        let b = TextBox { editor: true, ..tbox(400.0, 0.0, TextAlign::Left) };
+        let layout = s.shape_in_box(text, &style(16.0), &b);
+        let mut access = TextAccess::default();
+        let (update, parent) = build(&mut access, text, &layout);
+        assert!(!update.nodes.is_empty());
+        assert_eq!(parent.children().len(), update.nodes.len());
+        // Every run is a TextRun, and their values concatenate to the text.
+        let joined: String = update.nodes.iter()
+            .inspect(|(_, n)| assert_eq!(n.role(), accesskit::Role::TextRun))
+            .map(|(_, n)| n.value().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(joined, text);
+    }
+
+    #[cfg(feature = "accesskit")]
+    #[test]
+    fn text_access_selection_round_trips_in_both_directions() {
+        let mut s = sys();
+        let text = "the quick brown fox\njumps over";
+        let b = TextBox { editor: true, ..tbox(90.0, 0.0, TextAlign::Left) }; // wraps
+        let layout = s.shape_in_box(text, &style(16.0), &b);
+        let mut access = TextAccess::default();
+        build(&mut access, text, &layout);
+        for (a, f) in [(0, 0), (4, 9), (15, 3), (20, 25), (text.chars().count(), 0)] {
+            let sel = TextSelection::new(TextPosition::new(a), TextPosition::new(f));
+            let ak = access.to_access_selection(text, &layout, sel).expect("maps to access");
+            let back = access.from_access_selection(text, &layout, &ak).expect("maps back");
+            assert_eq!(back, sel, "anchor={a} focus={f}");
+        }
+    }
+
+    #[cfg(feature = "accesskit")]
+    #[test]
+    fn text_access_run_ids_stay_stable_across_edits() {
+        // Screen readers track nodes by id: re-building runs for edited text
+        // must reuse the ids of runs that still exist.
+        let mut s = sys();
+        let b = TextBox { editor: true, ..tbox(400.0, 0.0, TextAlign::Left) };
+        let mut access = TextAccess::default();
+        let l1 = s.shape_in_box("hello", &style(16.0), &b);
+        let (u1, _) = build(&mut access, "hello", &l1);
+        let l2 = s.shape_in_box("hello!", &style(16.0), &b);
+        let (u2, _) = build(&mut access, "hello!", &l2);
+        assert_eq!(u1.nodes[0].0, u2.nodes[0].0);
+    }
+
+    #[cfg(feature = "accesskit")]
+    #[test]
+    fn text_access_handles_empty_text() {
+        // An empty field still needs a caret position for the AT.
+        let mut s = sys();
+        let b = TextBox { editor: true, ..tbox(200.0, 0.0, TextAlign::Left) };
+        let layout = s.shape_in_box("", &style(16.0), &b);
+        let mut access = TextAccess::default();
+        build(&mut access, "", &layout);
+        let sel = TextSelection::collapsed();
+        let ak = access.to_access_selection("", &layout, sel).expect("caret maps");
+        assert_eq!(access.from_access_selection("", &layout, &ak), Some(sel));
+    }
+
+    #[test]
+    fn text_align_parses_prop_values() {
+        assert_eq!(TextAlign::from_prop(Some("center")), TextAlign::Center);
+        assert_eq!(TextAlign::from_prop(Some("right")), TextAlign::Right);
+        assert_eq!(TextAlign::from_prop(Some("left")), TextAlign::Left);
+        assert_eq!(TextAlign::from_prop(None), TextAlign::Left);
+    }
 }

@@ -149,8 +149,32 @@ export function installStubs() {
   };
   globalThis.__glyx_removeNode   = (id) => { _nodeTree.delete(id); };
   globalThis.__glyx_setRoot      = (id) => { globalThis.__glyx_rootId = id; };
+  // `hostConfig.js` batches append/insertBefore/update/remove/setRoot into
+  // one `__glyx_flushSceneOps(flatOps)` call per commit (see its "Scene-op
+  // batching" comment) instead of calling the individual bindings above
+  // directly. `flatOps` is ONE FLAT array — `[opcode, ...args, opcode, ...]`
+  // — not an array of per-op arrays. Replay each queued op through those
+  // same stubs so the simulated `_nodeTree` stays accurate under tests.
+  globalThis.__glyx_flushSceneOps = (ops) => {
+    let i = 0;
+    while (i < ops.length) {
+      switch (ops[i]) {
+        case 0: globalThis.__glyx_appendChild(ops[i + 1], ops[i + 2]); i += 3; break;
+        case 1: globalThis.__glyx_insertBefore(ops[i + 1], ops[i + 2], ops[i + 3]); i += 4; break;
+        case 2: globalThis.__glyx_updateNode(ops[i + 1], ops[i + 2]); i += 3; break;
+        case 3: globalThis.__glyx_removeNode(ops[i + 1]); i += 2; break;
+        case 4: globalThis.__glyx_setRoot(ops[i + 1]); i += 2; break;
+        default: i = ops.length; break; // unknown opcode — stop, don't misread the rest
+      }
+    }
+    return true;
+  };
   globalThis.__glyx_pollEvents   = () => [];
-  globalThis.__glyx_getLayout    = () => ({ x: 0, y: 0, width: 0, height: 0 });
+  globalThis.__glyx_getLayout    = () => ({
+    x: 0, y: 0, width: 0, height: 0,
+    // Unclipped box (see the native binding) — equals x/y/width/height unclipped.
+    boxX: 0, boxY: 0, boxWidth: 0, boxHeight: 0,
+  });
   globalThis.__glyx_getTime      = () => Date.now();
   globalThis.__glyx_request_frame = stub;
   globalThis.__glyx_log          = () => {};
@@ -161,6 +185,21 @@ export function installStubs() {
     // Approximate: assume monospace 0.6em per char for testing purposes.
     const charW = (_fontSize ?? 14) * 0.6;
     return Math.min(Math.max(0, Math.round(x / charW)), String(text ?? '').length);
+  };
+  // Text hit-testing — mirrors the native contract (see glyx-runtime's
+  // bind_core.rs): `opts` is the Text node's own props (+ boxWidth/boxHeight),
+  // coordinates are relative to the text box. Monospace 0.6em approximation,
+  // single line, left-aligned — enough for component logic tests; real
+  // shaping/placement is covered by glyx-text's Rust tests.
+  globalThis.__glyx_text_pos_at = (text, x, _y, opts) => {
+    const charW = ((opts && opts.fontSize) ?? 14) * 0.6;
+    const scroll = (opts && opts.textScrollX) || 0;
+    return Math.min(Math.max(0, Math.round((x + scroll) / charW)), String(text ?? '').length);
+  };
+  globalThis.__glyx_text_caret_at = (text, offset, opts) => {
+    const fs = (opts && opts.fontSize) ?? 14;
+    const n = Math.min(Math.max(0, offset | 0), String(text ?? '').length);
+    return { x: n * fs * 0.6 - ((opts && opts.textScrollX) || 0), y: 0, height: fs * 1.2 };
   };
 
   // Window
@@ -179,7 +218,7 @@ export function installStubs() {
   globalThis.__glyx_restart        = stub;
   globalThis.__glyx_window_create  = () => sp('0');
   globalThis.__glyx_ipc_send       = stub;
-  globalThis.__glyx_ipc_poll       = () => '[]';
+  globalThis.__glyx_ipc_poll       = () => [];
 
   // FS
   globalThis.__glyx_readFile       = () => sp('');
@@ -349,6 +388,8 @@ async function _getReconciler() {
 
     createInstance(type, props) {
       const id = _mkNode(type, props);
+      // The real host tells a component its native node id; Pressable registers its handlers with it.
+      if (typeof props._glyxOnMount === 'function') props._glyxOnMount(id);
       return id;
     },
     createTextInstance(text) {
@@ -470,14 +511,14 @@ export async function render(element) {
 
   if (reconciler) {
     const container = { rootId: null };
+    // A legacy (synchronous) root: a concurrent root waits on a scheduler this in-memory host
+    // does not have, so `render` never finished. Updates land as soon as they are made.
     const root = reconciler.createContainer(
-      container, /* tag=Concurrent */ 1, null, false, null, '', {}, null,
+      container, /* tag=Legacy */ 0, null, false, null, '', {}, null,
     );
-    await new Promise((resolve) => {
-      reconciler.updateContainer(element, root, null, resolve);
+    reconciler.flushSync(() => {
+      reconciler.updateContainer(element, root, null, null);
     });
-    // Flush sync work
-    reconciler.flushSync(() => {});
 
     const rootId = container.rootId;
     const queries = _buildQueries(rootId);

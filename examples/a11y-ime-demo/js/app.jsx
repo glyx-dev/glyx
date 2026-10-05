@@ -12,6 +12,10 @@ import {
 //     Tab through the controls below. Each should announce its role
 //     (button/checkbox/switch/radio/combobox/slider/textbox), its label,
 //     and its current state (checked/toggled/value) — not just "control."
+//  3. Screen-reader text — in a text field the reader should read its value
+//     (and the placeholder AS a placeholder while it's empty), read by
+//     character/word/line with its own reading keys, and selecting text with
+//     the reader's selection commands should select it in the field too.
 //
 // Neither of these is verifiable by a sighted developer just looking at the
 // screen — the visual state lines below are a sanity check for the person
@@ -31,6 +35,9 @@ function Section({ title, children }) {
 
 function App() {
   const [text, setText] = useState('');
+  const [notes, setNotes] = useState(
+    'First line of notes.\nA second line that is long enough to soft-wrap across the field width when it is narrow.'
+  );
   const [checked, setChecked] = useState(false);
   const [enabled, setEnabled] = useState(true);
   const [choice, setChoice] = useState('b');
@@ -57,6 +64,19 @@ function App() {
         />
         <Text style={{ fontSize: 12, color: '#6c7086', marginTop: 6 }}>
           value: {text || '(empty)'}
+        </Text>
+      </Section>
+
+      <Section title="Multiline TextInput (screen-reader text + selection)">
+        <TextInput
+          value={notes}
+          onChangeText={setNotes}
+          multiline
+          minLines={3}
+          style={{ width: '100%' }}
+        />
+        <Text style={{ fontSize: 12, color: '#6c7086', marginTop: 6 }}>
+          {`${notes.length} characters`}
         </Text>
       </Section>
 

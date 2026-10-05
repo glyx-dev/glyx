@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Glyx favicon — simplified for 16–32px. Dark tile carries its own ground. -->
+  <rect width="32" height="32" rx="6" fill="#0A0A0E"/>
+  <g transform="skewX(-12)" transform-origin="16 16">
+    <rect x="8.5" y="7" width="11" height="18" rx="2" fill="#F59E0B"/>
+    <rect x="22.5" y="7" width="4.5" height="18" rx="1.5" fill="#FBBF24"/>
+    <rect x="29.5" y="7" width="2" height="18" rx="1" fill="#8B5CF6"/>
+  </g>
+</svg>

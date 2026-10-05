@@ -15,6 +15,11 @@ Thumbs.db
 *.db
 *.db-shm
 *.db-wal
-# Compiled JS bundles in example apps are intentionally committed so
-# `cargo build` works on a fresh checkout without requiring `bun build`.
-# User-created projects exclude their dist/ via their own .gitignore.
+# Example-app build output. Bundles are loaded from disk at RUNTIME
+# (`AppConfig::from_config`), never `include_str!`-ed, so `cargo build`
+# works on a fresh checkout without them; `glyx dev` / `glyx build`
+# regenerate them. Covered here at the root so a new example is ignored
+# even before it gets its own .gitignore.
+examples/*/js/dist/
+examples/*/dist/
+examples/*/target/

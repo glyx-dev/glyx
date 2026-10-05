@@ -19,6 +19,63 @@ pub struct Manifest {
     pub version: String,
     pub url:     String,
     pub sha256:  String,    // lowercase hex
+    /// The FFmpeg runtime libraries that must sit beside the DLL, by file
+    /// name, with their SHA-256. Covered by the manifest signature, so a
+    /// swapped library is refused like a swapped DLL. Empty for manifests
+    /// written before this field existed (nothing to check).
+    #[serde(default)]
+    pub libs: std::collections::BTreeMap<String, String>,
+    /// The release archive that holds `libs`, so they can be downloaded.
+    #[serde(default)]
+    pub ffmpeg_archive: Option<ArchiveRef>,
+}
+
+/// A downloadable file named in the manifest.
+#[derive(serde::Deserialize, Clone)]
+pub struct ArchiveRef {
+    pub name:   String,
+    pub sha256: String,
+}
+
+/// A file name that is safe to join onto a directory: not empty, no path
+/// separators, no `..`, no drive or stream marker.
+pub fn is_plain_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', ':', '\0'])
+}
+
+/// SHA-256 of a file, read in chunks so a large library isn't held in memory.
+pub fn sha256_file(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        if n == 0 { break; }
+        h.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", h.finalize()))
+}
+
+/// Check every library the manifest lists against the files in `dir`.
+pub fn verify_libs(dir: &Path, libs: &std::collections::BTreeMap<String, String>) -> Result<(), String> {
+    for (name, want) in libs {
+        if !is_plain_file_name(name) {
+            return Err(format!("glyx-media: the manifest lists an unsafe library name {name:?}"));
+        }
+        let got = sha256_file(&dir.join(name))
+            .map_err(|e| format!("glyx-media: FFmpeg library {name}: {e}"))?;
+        if !got.eq_ignore_ascii_case(want) {
+            return Err(format!(
+                "glyx-media: FFmpeg library {name} does not match the signed manifest \
+                 (expected {want}, got {got}); re-download it"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Compute SHA-256 of `data` and return lowercase hex string.
@@ -147,6 +204,69 @@ pub fn verify_cached_dll(dll_path: &Path) -> Result<std::fs::File, String> {
         ));
     }
 
+    // The FFmpeg libraries the DLL loads from beside itself are part of what
+    // the signature vouches for. (They can't be held open across the load the
+    // way the DLL is, so a replacement in that instant isn't covered.)
+    verify_libs(dll_path.parent().unwrap_or_else(|| Path::new(".")), &manifest.libs)?;
+
     // Return the still-open handle so the caller can hold it across dlopen.
     Ok(dll_file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("glyx-media-verify-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn old_manifests_without_libs_still_parse() {
+        let m: Manifest = serde_json::from_str(r#"{"version":"1.0.0","url":"u","sha256":"ab"}"#).unwrap();
+        assert!(m.libs.is_empty() && m.ffmpeg_archive.is_none());
+    }
+
+    #[test]
+    fn manifests_list_libs_and_their_archive() {
+        let m: Manifest = serde_json::from_str(
+            r#"{"version":"0.2.0","url":"u","sha256":"ab",
+                "libs":{"avcodec-63.dll":"aa"},
+                "ffmpeg_archive":{"name":"glyx-ffmpeg-libs.tar.gz","sha256":"bb"}}"#).unwrap();
+        assert_eq!(m.libs["avcodec-63.dll"], "aa");
+        assert_eq!(m.ffmpeg_archive.unwrap().name, "glyx-ffmpeg-libs.tar.gz");
+    }
+
+    #[test]
+    fn plain_file_names_only() {
+        for ok in ["avcodec-63.dll", "libavcodec.63.dylib", "libavutil.so.61"] { assert!(is_plain_file_name(ok), "{ok}"); }
+        for bad in ["", ".", "..", "a/b", "..\\x", "../x", "c:evil", "a\0b"] { assert!(!is_plain_file_name(bad), "{bad:?}"); }
+    }
+
+    #[test]
+    fn libs_must_match_the_manifest() {
+        let dir = temp_dir("match");
+        std::fs::write(dir.join("a.dll"), b"hello").unwrap();
+        let good = sha256_hex(b"hello");
+        let libs = BTreeMap::from([("a.dll".to_string(), good.clone())]);
+        assert!(verify_libs(&dir, &libs).is_ok());
+
+        // a swapped library
+        std::fs::write(dir.join("a.dll"), b"evil").unwrap();
+        let err = verify_libs(&dir, &libs).unwrap_err();
+        assert!(err.contains("a.dll") && err.contains("does not match"), "{err}");
+
+        // a missing one
+        let libs = BTreeMap::from([("gone.dll".to_string(), good)]);
+        assert!(verify_libs(&dir, &libs).unwrap_err().contains("gone.dll"));
+
+        // an unsafe name never touches the disk
+        let libs = BTreeMap::from([("../a.dll".to_string(), "x".to_string())]);
+        assert!(verify_libs(&dir, &libs).unwrap_err().contains("unsafe"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

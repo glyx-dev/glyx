@@ -3638,6 +3638,7 @@ dependencies = [
  "env_logger",
  "flate2",
  "glyx-devtools",
+ "glyx-media",
  "glyx-verify",
  "ico",
  "image",
@@ -3762,13 +3763,14 @@ name = "glyx-media"
 version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
+ "flate2",
  "libloading 0.8.9",
  "log",
- "reqwest",
  "serde",
  "serde_json",
  "sha2",
- "tokio",
+ "tar",
+ "ureq 2.12.1",
 ]
 
 [[package]]

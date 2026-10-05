@@ -10,12 +10,13 @@
 #
 # Examples:
 #   ./generate-dev-manifest.sh                       # auto-detect everything
-#   ./generate-dev-manifest.sh 1.0.0 macos arm64
-#   ./generate-dev-manifest.sh 1.0.0 linux x64
+#   ./generate-dev-manifest.sh 0.2.0 macos arm64
+#   ./generate-dev-manifest.sh 0.2.0 linux x64
 
 set -euo pipefail
 
-VERSION="${1:-1.0.0}"
+# Default to the Glyx version: glyx looks for glyx-media-<that version>-... in its cache.
+VERSION="${1:-$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$(dirname "${BASH_SOURCE[0]}")/../crates/glyx-media/Cargo.toml" | head -n 1 | tr -d '\r')}"
 PLATFORM="${2:-}"
 ARCH="${3:-}"
 

@@ -85,21 +85,38 @@ jobs:
             /link /LIBPATH:"%FFMPEG_DIR%\lib" ^
             avformat.lib avcodec.lib swscale.lib swresample.lib avutil.lib
 
+      # The wrapper links to these at runtime; `glyx package` ships them next
+      # to it. Only the five it uses (no avfilter / avdevice). One archive per
+      # platform, named in the signed manifest, which the CLI downloads.
+      - name: Collect FFmpeg runtime libraries
+        run: |
+          New-Item -ItemType Directory ffmpeg-libs | Out-Null
+          Get-ChildItem (Join-Path $env:FFMPEG_DIR "bin\*.dll") |
+            Where-Object { $_.Name -match "^(avformat|avcodec|swscale|swresample|avutil)-\d+\.dll$" } |
+            Copy-Item -Destination ffmpeg-libs
+          if ((Get-ChildItem ffmpeg-libs\*.dll | Measure-Object).Count -ne 5) { throw "expected 5 FFmpeg libraries" }
+          Copy-Item (Join-Path $env:FFMPEG_DIR "LICENSE.txt") ffmpeg-libs -ErrorAction SilentlyContinue
+          @(
+            "These FFmpeg libraries are an unmodified LGPL-only shared build from",
+            "https://github.com/BtbN/FFmpeg-Builds (build scripts and the exact",
+            "configuration are public there), built from the FFmpeg source at",
+            "https://ffmpeg.org/download.html. They are separate shared libraries:",
+            "replace them with another build of the same library versions if you wish."
+          ) | Set-Content -Encoding ascii ffmpeg-libs\SOURCE.txt
+          tar -czf "glyx-ffmpeg-libs-$env:GLYX_MEDIA_VERSION-windows-x64.tar.gz" -C ffmpeg-libs .
+
+      - name: Install signing dependency
+        run: python -m pip install cryptography
+
       - name: Generate manifest + sign
         env:
           GLYX_MEDIA_SIGN_KEY: ${{ secrets.GLYX_MEDIA_SIGN_KEY }}
+          GLYX_MEDIA_REQUIRE_SIGNATURE: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '' }}
         run: |
           python3 .github/scripts/sign_manifest.py `
             glyx-media-$env:GLYX_MEDIA_VERSION-windows-x64.dll `
-            windows x64 $env:GLYX_MEDIA_VERSION
-
-      # The wrapper links to these at runtime; `glyx package` ships them next
-      # to it. Only the five it uses (no avfilter / avdevice).
-      - name: Collect FFmpeg runtime libraries
-        run: |
-          Get-ChildItem (Join-Path $env:FFMPEG_DIR "bin\*.dll") |
-            Where-Object { $_.Name -match "^(avformat|avcodec|swscale|swresample|avutil)-\d+\.dll$" } |
-            Copy-Item -Destination .
+            windows x64 $env:GLYX_MEDIA_VERSION `
+            --ffmpeg-archive glyx-ffmpeg-libs-$env:GLYX_MEDIA_VERSION-windows-x64.tar.gz
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -109,53 +126,103 @@ jobs:
             glyx-media-${{ env.GLYX_MEDIA_VERSION }}-windows-x64.dll
             glyx-media-${{ env.GLYX_MEDIA_VERSION }}-windows-x64.manifest.json
             glyx-media-${{ env.GLYX_MEDIA_VERSION }}-windows-x64.manifest.sig
-            avformat-*.dll
-            avcodec-*.dll
-            avutil-*.dll
-            swresample-*.dll
-            swscale-*.dll
+            glyx-ffmpeg-libs-${{ env.GLYX_MEDIA_VERSION }}-windows-x64.tar.gz
 
-  # ── macOS x64 + arm64 ────────────────────────────────────────────────────────
+  # ── macOS arm64 + x64 ────────────────────────────────────────────────────────
+  # FFmpeg is built from source as LGPL-only and bundled next to glyx-media
+  # (Homebrew's FFmpeg is GPL-linked, and Homebrew no longer supports Intel).
+  # x64 is cross-compiled on the Apple Silicon runner. The build is cached on the
+  # build script, so only the first run (or a script change) is slow.
   build-macos:
-    name: macOS
+    name: macOS ${{ matrix.arch }}
     needs: version
     runs-on: macos-latest
     env:
       GLYX_MEDIA_VERSION: ${{ needs.version.outputs.value }}
-    # Apple Silicon only. The Intel (x64) leg needed an x86_64 Homebrew under
-    # Rosetta, and Homebrew no longer supports Intel, so it can't be built
-    # this way. release.yml likewise ships macOS for aarch64 only.
+      FFMPEG_PREFIX: ${{ github.workspace }}/ffmpeg-lgpl-${{ matrix.arch }}
     strategy:
+      fail-fast: false
       matrix:
-        arch: [arm64]
         include:
           - arch: arm64
-            target: arm64-apple-macosx13.0
+            clang_arch: arm64
+          - arch: x64
+            clang_arch: x86_64
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ffmpeg (Homebrew)
-        run: brew install ffmpeg pkg-config
+      - name: Cache the LGPL FFmpeg build
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FFMPEG_PREFIX }}
+          key: ffmpeg-lgpl-macos-${{ matrix.arch }}-${{ hashFiles('glyx-media-c/build-ffmpeg-macos.sh') }}
+
+      - name: Install nasm (x86 assembly for the x64 build)
+        if: matrix.arch == 'x64' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: brew install nasm
+
+      - name: Build FFmpeg from source (LGPL only)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: bash glyx-media-c/build-ffmpeg-macos.sh ${{ matrix.arch }} "$FFMPEG_PREFIX"
 
       - name: Build glyx-media.dylib
         run: |
-          FFMPEG_CFLAGS=$(pkg-config --cflags libavformat libavcodec libswscale libswresample libavutil)
-          FFMPEG_LIBS=$(pkg-config --libs libavformat libavcodec libswscale libswresample libavutil)
-          clang -arch arm64 \
+          clang -arch ${{ matrix.clang_arch }} -mmacosx-version-min=13.0 \
             -shared -fPIC -O2 \
-            $FFMPEG_CFLAGS \
+            -I"$FFMPEG_PREFIX/include" \
             glyx-media-c/glyx_media.c \
-            $FFMPEG_LIBS \
+            -L"$FFMPEG_PREFIX/lib" -lavformat -lavcodec -lswscale -lswresample -lavutil \
+            -Wl,-rpath,@loader_path \
             -o glyx-media-${GLYX_MEDIA_VERSION}-macos-${{ matrix.arch }}.dylib
+          lipo -archs glyx-media-${GLYX_MEDIA_VERSION}-macos-${{ matrix.arch }}.dylib
+
+      # The library may depend only on the bundled FFmpeg (@rpath) and on the
+      # system: nothing from Homebrew, which users won't have.
+      - name: Check dependencies
+        run: |
+          extra="$(otool -L glyx-media-${GLYX_MEDIA_VERSION}-macos-${{ matrix.arch }}.dylib | tail -n +2 | awk '{print $1}' \
+            | grep -Ev '^(@rpath/|@loader_path/|/usr/lib/|/System/Library/)' || true)"
+          if [ -n "$extra" ]; then echo "::error::unexpected dependencies:"; echo "$extra"; exit 1; fi
+
+      # The wrapper loads these at runtime; `glyx package` ships them next to it.
+      # One archive per architecture (the file names are the same for both).
+      - name: Collect FFmpeg runtime libraries
+        run: |
+          mkdir ffmpeg-libs
+          for l in avformat avcodec avutil swscale swresample; do
+            # the soname file only (libavcodec.63.dylib), not the versioned duplicate
+            f="$(find "$FFMPEG_PREFIX/lib" -maxdepth 1 -name "lib$l.*.dylib" | grep -E "lib$l\.[0-9]+\.dylib$" | head -n 1)"
+            cp -L "$f" ffmpeg-libs/
+          done
+          cp "$FFMPEG_PREFIX"/share/licenses/ffmpeg/* ffmpeg-libs/
+          ls -l ffmpeg-libs
+          test "$(ls ffmpeg-libs/*.dylib | wc -l)" -eq 5
+          tar -czf glyx-ffmpeg-libs-${GLYX_MEDIA_VERSION}-macos-${{ matrix.arch }}.tar.gz -C ffmpeg-libs .
+
+      # Load check (arm64 runs natively): with only the bundled libraries next to
+      # it, dlopen must resolve everything, the same call the Rust loader makes.
+      - name: Check the library loads with its bundled FFmpeg
+        if: matrix.arch == 'arm64'
+        run: |
+          mkdir load-check
+          cp glyx-media-${GLYX_MEDIA_VERSION}-macos-arm64.dylib ffmpeg-libs/*.dylib load-check/
+          python3 -c "import ctypes, sys; ctypes.CDLL(sys.argv[1]); print('loaded', sys.argv[1])" \
+            "$PWD/load-check/glyx-media-${GLYX_MEDIA_VERSION}-macos-arm64.dylib"
+
+      - name: Install signing dependency
+        run: python3 -m pip install cryptography || python3 -m pip install --break-system-packages cryptography
 
       - name: Generate manifest + sign
         env:
           GLYX_MEDIA_SIGN_KEY: ${{ secrets.GLYX_MEDIA_SIGN_KEY }}
+          GLYX_MEDIA_REQUIRE_SIGNATURE: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '' }}
         run: |
           python3 .github/scripts/sign_manifest.py \
             glyx-media-${GLYX_MEDIA_VERSION}-macos-${{ matrix.arch }}.dylib \
-            macos ${{ matrix.arch }} ${GLYX_MEDIA_VERSION}
+            macos ${{ matrix.arch }} ${GLYX_MEDIA_VERSION} \
+            --ffmpeg-archive glyx-ffmpeg-libs-${GLYX_MEDIA_VERSION}-macos-${{ matrix.arch }}.tar.gz
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -165,8 +232,11 @@ jobs:
             glyx-media-${{ env.GLYX_MEDIA_VERSION }}-macos-${{ matrix.arch }}.dylib
             glyx-media-${{ env.GLYX_MEDIA_VERSION }}-macos-${{ matrix.arch }}.manifest.json
             glyx-media-${{ env.GLYX_MEDIA_VERSION }}-macos-${{ matrix.arch }}.manifest.sig
+            glyx-ffmpeg-libs-${{ env.GLYX_MEDIA_VERSION }}-macos-${{ matrix.arch }}.tar.gz
 
   # ── Linux x64 ────────────────────────────────────────────────────────────────
+  # The distro's FFmpeg is GPL-linked and too old, so this uses BtbN's LGPL shared
+  # build (the same source as the Windows job) and bundles its libraries.
   build-linux:
     name: Linux x64
     needs: version
@@ -177,30 +247,77 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ffmpeg (apt)
+      - name: Download FFmpeg (BtbN LGPL shared build)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libavformat-dev libavcodec-dev \
-            libswscale-dev libswresample-dev libavutil-dev pkg-config
+          curl -fsSL -o ffmpeg.tar.xz \
+            https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl-shared.tar.xz
+          mkdir ffmpeg-dist
+          tar -xJf ffmpeg.tar.xz -C ffmpeg-dist --strip-components=1
+          echo "FFMPEG_DIR=$PWD/ffmpeg-dist" >> "$GITHUB_ENV"
+
+      - name: Check FFmpeg is LGPL only
+        run: LD_LIBRARY_PATH="$FFMPEG_DIR/lib" bash .github/scripts/check_ffmpeg_lgpl.sh "$FFMPEG_DIR/bin/ffmpeg"
+
+      - name: Install patchelf
+        run: sudo apt-get update && sudo apt-get install -y patchelf
 
       - name: Build glyx-media.so
         run: |
-          FFMPEG_CFLAGS=$(pkg-config --cflags libavformat libavcodec libswscale libswresample libavutil)
-          FFMPEG_LIBS=$(pkg-config --libs libavformat libavcodec libswscale libswresample libavutil)
           gcc -shared -fPIC -O2 \
-            $FFMPEG_CFLAGS \
+            -I"$FFMPEG_DIR/include" \
             glyx-media-c/glyx_media.c \
-            $FFMPEG_LIBS \
-            -lpthread -lm -lz \
+            -L"$FFMPEG_DIR/lib" -lavformat -lavcodec -lswscale -lswresample -lavutil \
+            -lpthread -lm \
+            -Wl,-rpath,'$ORIGIN' -Wl,-rpath-link,"$FFMPEG_DIR/lib" \
             -o glyx-media-${GLYX_MEDIA_VERSION}-linux-x64.so
+
+      # The wrapper loads these at runtime; `glyx package` ships them next to it.
+      # They need their own $ORIGIN runpath to find each other when bundled.
+      - name: Collect FFmpeg runtime libraries
+        run: |
+          mkdir ffmpeg-libs
+          for l in avformat avcodec avutil swscale swresample; do
+            # the soname file only (libavcodec.so.63), not the versioned duplicate
+            f="$(find "$FFMPEG_DIR/lib" -maxdepth 1 -name "lib$l.so.*" | grep -E "lib$l\.so\.[0-9]+$" | head -n 1)"
+            cp -L "$f" ffmpeg-libs/
+          done
+          patchelf --set-rpath '$ORIGIN' ffmpeg-libs/*.so.*
+          cp "$FFMPEG_DIR/LICENSE.txt" ffmpeg-libs/
+          {
+            echo "These FFmpeg libraries are an unmodified LGPL-only shared build from"
+            echo "https://github.com/BtbN/FFmpeg-Builds (build scripts and the exact"
+            echo "configuration are public there), built from the FFmpeg source at"
+            echo "https://ffmpeg.org/download.html. They are separate shared libraries:"
+            echo "replace them with another build of the same library versions if you wish."
+          } > ffmpeg-libs/SOURCE.txt
+          ls -l ffmpeg-libs
+          test "$(ls ffmpeg-libs/*.so.* | wc -l)" -eq 5
+          tar -czf glyx-ffmpeg-libs-${GLYX_MEDIA_VERSION}-linux-x64.tar.gz -C ffmpeg-libs .
+
+      # Load check: with the libraries next to it, the loader must resolve everything.
+      - name: Check the library loads with its bundled FFmpeg
+        run: |
+          mkdir load-check
+          cp glyx-media-${GLYX_MEDIA_VERSION}-linux-x64.so ffmpeg-libs/*.so.* load-check/
+          ldd load-check/glyx-media-${GLYX_MEDIA_VERSION}-linux-x64.so
+          if ldd load-check/glyx-media-${GLYX_MEDIA_VERSION}-linux-x64.so | grep "not found"; then
+            echo "::error::unresolved libraries"; exit 1
+          fi
+          python3 -c "import ctypes, sys; ctypes.CDLL(sys.argv[1]); print('loaded', sys.argv[1])" \
+            "$PWD/load-check/glyx-media-${GLYX_MEDIA_VERSION}-linux-x64.so"
+
+      - name: Install signing dependency
+        run: python3 -m pip install cryptography || python3 -m pip install --break-system-packages cryptography
 
       - name: Generate manifest + sign
         env:
           GLYX_MEDIA_SIGN_KEY: ${{ secrets.GLYX_MEDIA_SIGN_KEY }}
+          GLYX_MEDIA_REQUIRE_SIGNATURE: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '' }}
         run: |
           python3 .github/scripts/sign_manifest.py \
             glyx-media-${GLYX_MEDIA_VERSION}-linux-x64.so \
-            linux x64 ${GLYX_MEDIA_VERSION}
+            linux x64 ${GLYX_MEDIA_VERSION} \
+            --ffmpeg-archive glyx-ffmpeg-libs-${GLYX_MEDIA_VERSION}-linux-x64.tar.gz
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -210,6 +327,7 @@ jobs:
             glyx-media-${{ env.GLYX_MEDIA_VERSION }}-linux-x64.so
             glyx-media-${{ env.GLYX_MEDIA_VERSION }}-linux-x64.manifest.json
             glyx-media-${{ env.GLYX_MEDIA_VERSION }}-linux-x64.manifest.sig
+            glyx-ffmpeg-libs-${{ env.GLYX_MEDIA_VERSION }}-linux-x64.tar.gz
 
   # ── Publish to GitHub Release ────────────────────────────────────────────────
   release:
@@ -234,8 +352,16 @@ jobs:
             glyx-media-*.so
             glyx-media-*.manifest.json
             glyx-media-*.manifest.sig
+            glyx-ffmpeg-libs-*.tar.gz
           body: |
-            glyx-media DLL release — ffmpeg-backed media codec for Glyx apps.
+            glyx-media release — ffmpeg-backed media codec for Glyx apps.
 
-            Download the DLL for your platform and cache it at:
-            `~/.glyx/cache/media/glyx-media-{version}-{platform}-{arch}.{ext}`
+            You don't need to download these by hand: `glyx dev` and `glyx package`
+            fetch the files for your Glyx version into `~/.glyx/cache/media/`
+            (`%USERPROFILE%\.glyx\cache\media\` on Windows) and check them against
+            the signed `.manifest.json` / `.manifest.sig`.
+
+            The FFmpeg libraries it needs are LGPL-only builds, shipped separately so
+            you can replace them: `glyx-ffmpeg-libs-{version}-{platform}-{arch}.tar.gz`,
+            with the licence texts and where the source is. `glyx package` bundles
+            them into your app.

@@ -5,7 +5,7 @@
 #
 # Prerequisites (installed automatically if missing):
 #   sudo apt-get install libavformat-dev libavcodec-dev libswscale-dev \
-#        libswresample-dev libavutil-dev libavfilter-dev pkg-config
+#        libswresample-dev libavutil-dev pkg-config
 #
 # Usage:
 #   ./build-linux.sh            # version 1.0.0
@@ -26,7 +26,7 @@ if ! command -v pkg-config &>/dev/null || ! pkg-config --exists libavformat 2>/d
     sudo apt-get update -qq
     sudo apt-get install -y \
         libavformat-dev libavcodec-dev libswscale-dev \
-        libswresample-dev libavutil-dev libavfilter-dev \
+        libswresample-dev libavutil-dev \
         pkg-config gcc
 fi
 

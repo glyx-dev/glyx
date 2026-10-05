@@ -14,6 +14,7 @@ members = [
     "crates/glyx-ai",
     "crates/glyx-sysapi",
     "crates/glyx-perf",
+    "crates/glyx-devtools",
     "crates/glyx-cli",
     "crates/glyx-runner",
     "examples/hello-world",
@@ -43,7 +44,7 @@ members = [
 [workspace.dependencies]
 # Windowing + GPU
 winit     = "0.30"
-wgpu      = { version = "29", features = ["counters"] }
+wgpu      = { version = "29" }
 
 # 2D Rendering
 vello     = "0.9"

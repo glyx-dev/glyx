@@ -255,7 +255,9 @@ fn rgba_premul_srgb_to_peniko(mut bytes: Vec<u8>, w: u32, h: u32) -> Option<peni
 /// render loop mid-transition.
 pub(crate) fn tick_transitions(state: &mut PerWindowState) -> bool {
     if state.transitions.is_empty() && state.animations.is_empty() { return false; }
-    let now = Instant::now();
+    // Paused by devtools: nothing moves, so no frames are needed.
+    if state.motion_clock.paused() { return false; }
+    let now = state.motion_clock.now();
     let dirty_nodes = &mut state.dirty_nodes;
     state.transitions.retain(|&id, t| {
         let (_, finished) = t.sample(now);
@@ -271,6 +273,133 @@ pub(crate) fn tick_transitions(state: &mut PerWindowState) -> bool {
     running || !state.transitions.is_empty()
 }
 
+/// Frames after a precision-device (touchpad) scroll event in which scroll
+/// updates apply instantly: the frame whose JS handles the event, one more for
+/// React to commit the new offset, and one of slack.
+pub(crate) const PRECISE_SCROLL_FRAMES: u8 = 3;
+
+/// A ScrollView's new `scrollOffsetY` becomes a spring target instead of a
+/// jump. `props.scroll_offset_y` is rewritten to the offset to *display* now,
+/// so everything downstream (render, hit-testing, damage, the scrollbar thumb)
+/// keeps reading one field and needs no idea a spring exists. Snaps when the
+/// scrollbar thumb is being dragged (it must track the pointer 1:1), when the
+/// input is from a touchpad, or while devtools has the motion clock paused.
+fn sync_scroll(state: &mut PerWindowState, id: u32, props: &mut NodeProps) {
+    if props.smooth_scroll != Some(true) || motion::reduced() {
+        state.scroll_springs.remove(&id);
+        return;
+    }
+    let Some(node) = state.js_nodes.get(&id) else { return };
+    let target = props.scroll_offset_y.unwrap_or(0.0) as f64;
+
+    if let Some(sp) = state.scroll_springs.get_mut(&id) {
+        if sp.target == target {
+            // Same target re-sent by an unrelated re-render: keep easing.
+            props.scroll_offset_y = Some(sp.pos as f32);
+            return;
+        }
+    }
+
+    let shown = state.scroll_springs.get(&id).map_or(node.props.scroll_offset_y.unwrap_or(0.0) as f64, |s| s.pos);
+    let dragging = state.scrollbar_drag.as_ref().map_or(false, |d| d.node_id == id);
+    let precise  = state.precise_scroll_frames > 0;
+    if dragging || precise || state.motion_clock.paused() || (shown - target).abs() < 0.5 {
+        state.scroll_springs.remove(&id);
+        return;
+    }
+
+    let now = state.motion_clock.now();
+    let sp = state.scroll_springs.entry(id).or_insert_with(|| motion::ScrollSpring::new(shown, target, now));
+    sp.retarget(target);
+    props.scroll_offset_y = Some(sp.pos as f32);
+    (state.request_redraw)();
+}
+
+/// Advance every smooth-scroll spring one frame, writing the displayed offset
+/// into the node and marking it (and, since leaf scenes bake in absolute
+/// y-positions, its descendants) dirty. `true` while any spring still moves.
+pub(crate) fn tick_scroll(state: &mut PerWindowState) -> bool {
+    if state.scroll_springs.is_empty() || state.motion_clock.paused() { return false; }
+    let now = state.motion_clock.now();
+    let (nodes, dirty, cascade) = (&mut state.js_nodes, &mut state.dirty_nodes, &mut state.descendant_cascade_nodes);
+    let mut running = false;
+    state.scroll_springs.retain(|&id, sp| {
+        let Some(node) = nodes.get_mut(&id) else { return false };
+        let moving = sp.step(now);
+        node.props.scroll_offset_y = Some(sp.pos as f32);
+        dirty.insert(id);
+        cascade.insert(id);
+        running |= moving;
+        moving
+    });
+    running
+}
+
+/// A canvas with a `transition` prop eases from what it was showing to its new
+/// command list instead of jumping (called with the new list, before it
+/// replaces `canvas_cmds[id]`, the previous target). JS draws the final state
+/// once per update; the frame loop moves the drawn commands toward it.
+///
+/// Nothing eases when the canvas was resized (it would trail the window) or on
+/// its first draw: those just replace. Otherwise the two lists are lined up
+/// (see `motion::CanvasTween::between`): what pairs eases, the rest appears or
+/// disappears at once.
+fn sync_canvas_tween(state: &mut PerWindowState, id: u32, to: &[CanvasCmd]) {
+    let Some(node) = state.js_nodes.get(&id) else { return };
+    let px = |v: &Option<LengthValue>| match v { Some(LengthValue::Px(p)) => Some(*p), _ => None };
+    let size = (px(&node.props.width), px(&node.props.height));
+    let pace = motion::Pace::from_props(&node.props);
+    let resized = state.canvas_size.insert(id, size).map_or(false, |prev| prev != size);
+
+    // How often this canvas is being redrawn: a running average of the gap
+    // between redraws. A long pause starts it over (the next gap is the new
+    // average), so one stray update after a quiet minute isn't a cadence.
+    let now = state.motion_clock.now();
+    // (A negative stored average means "none yet": there was no previous draw.)
+    let cadence = match state.canvas_cadence.get(&id) {
+        Some(&(last, avg)) => {
+            let gap = now.saturating_duration_since(last).as_secs_f64() * 1000.0;
+            Some(if avg < 0.0 || gap > 2000.0 { gap } else { avg * 0.6 + gap * 0.4 })
+        }
+        None => None,
+    };
+    state.canvas_cadence.insert(id, (now, cadence.unwrap_or(-1.0)));
+
+    let pace = if motion::reduced() { None } else { pace };
+    let (Some(pace), false, Some(prev_to)) = (pace, resized, state.canvas_cmds.get(&id)) else {
+        state.canvas_tweens.remove(&id);
+        return;
+    };
+    let pace = motion::adapt_pace(pace, cadence);
+    // From what is on screen now, mid-flight included.
+    let old  = state.canvas_tweens.get(&id);
+    let from = match old { Some(t) => t.sample(prev_to, now).0, None => prev_to.clone() };
+    match motion::CanvasTween::between(from, to, pace, now) {
+        Some(mut t) => {
+            if let Some(old) = old { t.inherit_velocity(to, old, prev_to, now); }
+            state.canvas_tweens.insert(id, t);
+            (state.request_redraw)();
+        }
+        None => { state.canvas_tweens.remove(&id); }
+    }
+}
+
+/// Advance every canvas tween one frame, marking its node dirty so it redraws
+/// (the commands change with no new `CanvasUpdate` behind them), and dropping
+/// the ones that have arrived. `true` while any is still moving.
+pub(crate) fn tick_canvas(state: &mut PerWindowState) -> bool {
+    if state.canvas_tweens.is_empty() || state.motion_clock.paused() { return false; }
+    let now = state.motion_clock.now();
+    let (cmds, dirty) = (&state.canvas_cmds, &mut state.dirty_nodes);
+    state.canvas_tweens.retain(|&id, t| {
+        let Some(to) = cmds.get(&id) else { return false };
+        let done = t.sample(to, now).1;
+        dirty.insert(id);
+        !done
+    });
+    !state.canvas_tweens.is_empty()
+}
+
 /// Start, restart or stop node `id`'s keyframe animation to match `props`.
 /// Re-sent identical props (every React re-render) leave a running
 /// animation alone; a changed spec restarts it from the beginning.
@@ -278,7 +407,7 @@ fn sync_animation(state: &mut PerWindowState, id: u32, props: &NodeProps) {
     match motion::AnimSpec::from_props(props) {
         Some(spec) => {
             if motion::needs_restart(state.animations.get(&id), &spec) {
-                state.animations.insert(id, motion::Animation { spec, start: Instant::now(), settled: false });
+                state.animations.insert(id, motion::Animation { spec, start: state.motion_clock.now(), settled: false });
                 (state.request_redraw)();
             }
         }
@@ -293,6 +422,11 @@ fn sync_animation(state: &mut PerWindowState, id: u32, props: &NodeProps) {
 pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<SceneCommand>) -> bool {
     if commands.is_empty() {
         return false;
+    }
+    #[cfg(feature = "dev")]
+    {
+        state.tree_version += 1;
+        if let Some(notify) = &state.devtools_notify { notify(); }
     }
     // Mark the a11y tree dirty whenever any scene command actually ran, rather
     // than rebuilding it every rendered frame regardless of activity — the
@@ -393,7 +527,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 layout_changed   = true;
                 structure_changed = true;
             }
-            SceneCommand::UpdateNode { id, props } => {
+            SceneCommand::UpdateNode { id, mut props } => {
                 // Check layout-prop changes before mutating — need old props for comparison.
                 // Also detect prop changes that must cascade dirty state to all descendants:
                 //   • opacity  — child_opacity is a running product; parent change affects leaves
@@ -422,12 +556,16 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 // (or retargets) a Rust-owned interpolation instead of snapping.
                 // `from` is what's on screen NOW — mid-flight values included —
                 // read before the old props are overwritten below.
-                if let (Some(old), Some(ms)) = (state.js_nodes.get(&id), props.transition_ms) {
+                // A spring needs no duration (it settles when it settles); the
+                // `1` only satisfies `between`, which `into_spring` then replaces.
+                let spring = motion::Spring::from_props(&props);
+                let declared = if motion::reduced() { None } else { props.transition_ms.or(spring.map(|_| 1)) };
+                if let (Some(old), Some(ms)) = (state.js_nodes.get(&id), declared) {
                     let (old_v, new_v) = (motion::Visual::of(&old.props), motion::Visual::of(&props));
                     // Unrelated updates (text, layout, …) leave a running
                     // transition alone — restarting its clock would stall it.
                     if old_v != new_v {
-                        let now  = Instant::now();
+                        let now  = state.motion_clock.now();
                         let from = match state.transitions.get(&id) {
                             Some(t) => t.current(&old_v, now),
                             None    => old_v,
@@ -435,7 +573,18 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         let mask   = motion::property_mask(props.transition_property.as_deref());
                         let easing = motion::Easing::parse(props.transition_easing.as_deref());
                         match motion::Transition::between(&from, &new_v, mask, ms, easing, now) {
-                            Some(t) => { state.transitions.insert(id, t); }
+                            Some(t) => {
+                                let t = match spring {
+                                    Some(sp) => {
+                                        // Interrupting a running spring keeps its momentum.
+                                        let mut t = t.into_spring(sp);
+                                        if let Some(prev) = state.transitions.get(&id) { t.inherit_velocity(prev, now); }
+                                        t
+                                    }
+                                    None => t,
+                                };
+                                state.transitions.insert(id, t);
+                            }
                             // Only non-transitioned properties changed: they snap.
                             None    => { state.transitions.remove(&id); }
                         }
@@ -455,6 +604,9 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         }
                     }
                 }
+
+                // Smooth scrolling: swap JS's scroll target for the offset to show now.
+                sync_scroll(state, id, &mut props);
 
                 if let Some(node) = state.js_nodes.get_mut(&id) {
                     node.props = props.clone();
@@ -514,6 +666,11 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 state.canvas_cmds.remove(&id);
                 state.transitions.remove(&id);
                 state.animations.remove(&id);
+                state.scroll_springs.remove(&id);
+                state.canvas_tweens.remove(&id);
+                state.canvas_size.remove(&id);
+                state.canvas_cadence.remove(&id);
+                state.canvas_drawn.remove(&id);
                 #[cfg(feature = "canvas3d")]
                 {
                     state.canvas3d_scenes.remove(&id);
@@ -570,11 +727,12 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         next_focus(&order, None, false)
                     });
                     state.window.set_ime_allowed(state.focused_node.is_some());
-                    if let Some(new_focus) = state.focused_node {
-                        // Same event JS already handles for AT/Tab-driven
-                        // focus moves — keeps onFocus/styling in sync when
-                        // focus moves off a removed node, not just when a
-                        // human presses Tab.
+                    // Tell JS (onFocus + ring) only when the ring was already
+                    // showing, i.e. focus came by keyboard/AT. After a mouse
+                    // click the move stays silent: native focus (IME, a11y
+                    // tree) still moves, but no ring appears on some other
+                    // control the user never tabbed to.
+                    if let Some(new_focus) = state.focused_node.filter(|_| state.focus_visible) {
                         state.runtime.push_event(InputEvent::AccessibilityFocus { node_id: new_focus });
                         reveal_focus_if_needed(state, new_focus);
                     }
@@ -644,8 +802,11 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
             SceneCommand::CanvasUpdate { id, cmds, append } => {
                 if append {
                     // Overflow continuation: extend the existing command list.
+                    // The frame is still being assembled, so nothing eases.
                     state.canvas_cmds.entry(id).or_default().extend(cmds);
+                    state.canvas_tweens.remove(&id);
                 } else {
+                    sync_canvas_tween(state, id, &cmds);
                     state.canvas_cmds.insert(id, cmds);
                 }
                 state.dirty_nodes.insert(id);
@@ -931,8 +1092,11 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 let (seek_tx, seek_rx) = std::sync::mpsc::sync_channel::<f64>(4);
                 let events = Arc::new(Mutex::new(std::collections::VecDeque::<String>::new()));
 
+                // Audio is the master clock; the video thread follows it.
+                let clock = Arc::new(crate::av_clock::AvClock::default());
                 // Audio thread owns its OutputStream + Sink (!Send) — reads volume + pause_flag each poll.
-                spawn_video_audio(&url, Arc::clone(&stop_flag), Arc::clone(&audio_stop_flag), Arc::clone(&pause_flag), Arc::clone(&video_volume), 0.0);
+                spawn_video_audio(&url, Arc::clone(&stop_flag), Arc::clone(&audio_stop_flag), Arc::clone(&pause_flag), Arc::clone(&video_volume), 0.0, Arc::clone(&clock));
+                let clock_clone = Arc::clone(&clock);
 
                 let url_stored  = url.clone(); // keep a copy for SeekVideo audio restart
                 let buf_clone   = Arc::clone(&frame_buf);
@@ -977,6 +1141,13 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
 
                     let mut wall_start: Option<std::time::Instant> = None;
                     let mut pts_start  = 0f64;
+                    let mut last_shown = std::time::Instant::now();
+                    // After a seek, frames before the target (the decoder lands on the
+                    // keyframe before it) are skipped without being shown.
+                    let mut seek_target: Option<f64> = None;
+                    // A/V drift of shown frames and frames dropped, logged every 2 s at debug level.
+                    let (mut drift_sum, mut drift_max, mut drift_n, mut dropped) = (0f64, 0f64, 0u32, 0u32);
+                    let mut last_stats = std::time::Instant::now();
 
                     // Push timeupdate events at most 4× per second (250ms throttle).
                     let timeupdate_interval = std::time::Duration::from_millis(250);
@@ -995,23 +1166,96 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         while let Ok(secs) = seek_rx.try_recv() {
                             media.decoder_seek(&dec, secs);
                             wall_start = None;
+                            seek_target = Some(secs);
                         }
 
                         match media.decoder_next_frame(&dec, &mut rgba_buf) {
                             Ok(Some(pts)) => {
-                                *buf_clone.lock() = Some((w, h, rgba_buf.clone()));
-                                (redraw)(); // wake the event loop so this frame is painted immediately
+                                use crate::av_clock::{frame_timing, FrameTiming};
+                                // A jump arrived while this frame decoded: it's from before
+                                // the jump, so drop it and seek (the loop starts over).
+                                macro_rules! take_seek { () => {
+                                    if let Ok(mut secs) = seek_rx.try_recv() {
+                                        while let Ok(s) = seek_rx.try_recv() { secs = s; }
+                                        media.decoder_seek(&dec, secs);
+                                        wall_start = None;
+                                        seek_target = Some(secs);
+                                        continue;
+                                    }
+                                } }
+                                take_seek!();
+                                if let Some(t) = seek_target {
+                                    // Half a frame of slack so the frame at the target counts.
+                                    if pts + 0.5 / fps.max(1.0) < t { continue; }
+                                    seek_target = None;
+                                    last_shown = std::time::Instant::now();
+                                }
+                                let show = |buf: &[u8]| {
+                                    *buf_clone.lock() = Some((w, h, buf.to_vec()));
+                                    (redraw)(); // wake the event loop so this frame is painted immediately
+                                };
 
-                                let ws = wall_start.get_or_insert_with(|| {
-                                    pts_start = pts;
-                                    std::time::Instant::now()
-                                });
+                                // Audio still opening (after start or a seek): show this
+                                // frame as a poster and wait for it, up to 2 s.
+                                if clock_clone.is_pending() {
+                                    show(&rgba_buf);
+                                    last_shown = std::time::Instant::now();
+                                    let t0 = std::time::Instant::now();
+                                    while clock_clone.is_pending() && t0.elapsed().as_secs_f64() < 2.0
+                                        && !stop_clone.load(std::sync::atomic::Ordering::Relaxed)
+                                    {
+                                        std::thread::sleep(std::time::Duration::from_millis(5));
+                                    }
+                                    take_seek!();
+                                }
 
-                                let video_pos = pts - pts_start;
-                                let to_sleep  = video_pos - ws.elapsed().as_secs_f64();
-                                if to_sleep > 0.001 {
-                                    std::thread::sleep(
-                                        std::time::Duration::from_secs_f64(to_sleep));
+                                let clock_gen = clock_clone.generation();
+                                if let Some(audio_pos) = clock_clone.position() {
+                                    // Follow the audio: wait if early, drop if late.
+                                    wall_start = None;
+                                    match frame_timing(pts, audio_pos, last_shown.elapsed().as_secs_f64()) {
+                                        FrameTiming::Drop => { dropped += 1; continue; }
+                                        FrameTiming::ShowNow => { show(&rgba_buf); last_shown = std::time::Instant::now(); }
+                                        FrameTiming::ShowAfter(secs) => {
+                                            // Wait in short steps so a jump isn't held up.
+                                            let until = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs);
+                                            while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+                                                if stop_clone.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                                                take_seek!();
+                                                std::thread::sleep(left.min(std::time::Duration::from_millis(5)));
+                                            }
+                                            take_seek!();
+                                            show(&rgba_buf);
+                                            last_shown = std::time::Instant::now();
+                                        }
+                                    }
+                                    // (Not across a jump: the clock restarted after this frame showed.)
+                                    if let Some(now_pos) = clock_clone.position().filter(|_| clock_clone.generation() == clock_gen) {
+                                        let d = (pts - now_pos).abs();
+                                        drift_sum += d; drift_n += 1; drift_max = drift_max.max(d);
+                                    }
+                                    if last_stats.elapsed().as_secs_f64() >= 2.0 {
+                                        log::debug!(
+                                            "[video] {handle_id}: a/v drift avg {:.1} ms, max {:.1} ms over {drift_n} frames; {dropped} late frames dropped",
+                                            drift_sum / drift_n.max(1) as f64 * 1000.0, drift_max * 1000.0,
+                                        );
+                                        (drift_sum, drift_max, drift_n, dropped) = (0.0, 0.0, 0, 0);
+                                        last_stats = std::time::Instant::now();
+                                    }
+                                } else {
+                                    // No audio: pace by the wall clock.
+                                    show(&rgba_buf);
+                                    last_shown = std::time::Instant::now();
+                                    let ws = wall_start.get_or_insert_with(|| {
+                                        pts_start = pts;
+                                        std::time::Instant::now()
+                                    });
+                                    let video_pos = pts - pts_start;
+                                    let to_sleep  = video_pos - ws.elapsed().as_secs_f64();
+                                    if to_sleep > 0.001 {
+                                        std::thread::sleep(
+                                            std::time::Duration::from_secs_f64(to_sleep));
+                                    }
                                 }
 
                                 // Throttled timeupdate event.
@@ -1045,6 +1289,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     latest_image: None,
                     video_volume,
                     url: url_stored,
+                    clock,
                 });
             }
 
@@ -1064,6 +1309,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         Arc::clone(&stream.pause_flag),
                         Arc::clone(&stream.video_volume),
                         seconds,
+                        Arc::clone(&stream.clock),
                     );
                 }
             }
@@ -1133,10 +1379,11 @@ pub(crate) fn update_dirty_from_layout(state: &mut PerWindowState) -> bool {
     any_changed
 }
 
-/// Compute the union damage rect for this frame from the dirty node set.
+/// Compute the damage rects for this frame from the dirty node set.
 ///
-/// Returns `Some((x, y, w, h))` when every visual change this frame is
-/// provably contained in that rect, `None` when a full-frame render is
+/// Returns `Some(rects)` (a few disjoint `(x, y, w, h)`, see
+/// `damage_rects::coalesce`) when every visual change this frame is
+/// provably contained in them, `None` when a full-frame render is
 /// required.  Used by the software present path to redraw + push only the
 /// changed region (a hover repaints one button, a keystroke one line).
 ///
@@ -1157,9 +1404,10 @@ pub(crate) fn update_dirty_from_layout(state: &mut PerWindowState) -> bool {
 /// as the damage contribution — its own rect is absolute-correct and clips
 /// its content, so it bounds the node's old and new visual positions.
 pub(crate) fn compute_frame_damage(
-    state:     &PerWindowState,
-    overrides: &std::collections::HashMap<u32, crate::motion::Overrides>,
-) -> Option<(f64, f64, f64, f64)> {
+    state:         &PerWindowState,
+    overrides:     &std::collections::HashMap<u32, crate::motion::Overrides>,
+    canvas_damage: &std::collections::HashMap<u32, [f64; 4]>,
+) -> Option<Vec<crate::damage_rects::Rect>> {
     if state.dirty_nodes.is_empty() {
         return None;
     }
@@ -1168,16 +1416,15 @@ pub(crate) fn compute_frame_damage(
     let resolved: std::collections::HashMap<NodeId, &ResolvedLayout> =
         state.resolved.iter().map(|(nid, rl)| (*nid, rl)).collect();
 
-    let mut ltrb: Option<(f64, f64, f64, f64)> = None;
+    // Every change contributes its own rect; `coalesce` merges the ones worth
+    // merging at the end, so two distant changes aren't joined by a box
+    // around everything in between.
+    let mut rects: Vec<crate::damage_rects::Rect> = Vec::new();
 
-    fn add(ltrb: &mut Option<(f64, f64, f64, f64)>, x: f64, y: f64, w: f64, h: f64) {
+    fn add(rects: &mut Vec<crate::damage_rects::Rect>, x: f64, y: f64, w: f64, h: f64) {
         // Padding covers anti-aliased edges and 1px layout rounding.
         const PAD: f64 = 4.0;
-        let (l, t, r, b) = (x - PAD, y - PAD, x + w + PAD, y + h + PAD);
-        *ltrb = Some(match *ltrb {
-            None                     => (l, t, r, b),
-            Some((ul, ut, ur, ub))   => (ul.min(l), ut.min(t), ur.max(r), ub.max(b)),
-        });
+        rects.push((x - PAD, y - PAD, w + 2.0 * PAD, h + 2.0 * PAD));
     }
 
     let rect_of = |id: u32| -> Option<(f64, f64, f64, f64)> {
@@ -1188,25 +1435,40 @@ pub(crate) fn compute_frame_damage(
     for &id in &state.dirty_nodes {
         if !state.js_nodes.contains_key(&id) { return None; }
 
+        // A canvas that changed only in part damages just that part (see
+        // `canvas_damage`) — but only while it is where it was, unscrolled and
+        // untransformed; anything else repaints the whole node as before.
+        if let Some(local) = canvas_damage.get(&id) {
+            let prev = state.prev_resolved.get(&id).map(|p| (p.x as f64, p.y as f64, p.width as f64, p.height as f64));
+            let scrolled = outermost_scrolled_ancestor(&state.js_nodes, id).is_some();
+            if let (Some(rect), Some((bl, bt, br, bb))) = (rect_of(id), visual_bounds(&state.js_nodes, &rect_of, overrides, id)) {
+                if let Some((x, y, w, h)) = crate::canvas_damage::partial_rect(rect, (bl, bt, br, bb), prev, scrolled, *local) {
+                    add(&mut rects, x, y, w, h);
+                    continue;
+                }
+            }
+        }
+
         // Outermost scrolled ancestor bounds this node's visual position.
         // Walks the persistent `parent` pointers maintained by
         // `apply_scene_commands` — no per-frame child→parent map needed.
         let target = outermost_scrolled_ancestor(&state.js_nodes, id).unwrap_or(id);
         let (l, t, r, b) = visual_bounds(&state.js_nodes, &rect_of, overrides, target)?;
-        add(&mut ltrb, l, t, r - l, b - t);
+        add(&mut rects, l, t, r - l, b - t);
 
         // Include where it was drawn LAST frame so moved/shrunk/rotated nodes
         // erase their old pixels.
         if let Some(&(pl, pt, pr, pb)) = state.prev_visual.get(&target) {
-            add(&mut ltrb, pl, pt, pr - pl, pb - pt);
+            add(&mut rects, pl, pt, pr - pl, pb - pt);
         }
         if let Some(prl) = state.prev_resolved.get(&target) {
-            add(&mut ltrb, prl.x as f64, prl.y as f64,
+            add(&mut rects, prl.x as f64, prl.y as f64,
                 prl.width as f64, prl.height as f64);
         }
     }
 
-    ltrb.map(|(l, t, r, b)| (l, t, r - l, b - t))
+    let rects = crate::damage_rects::coalesce(rects);
+    (!rects.is_empty()).then_some(rects)
 }
 
 /// Screen-space bounds `(l, t, r, b)` of what node `id` draws: its layout
@@ -1584,10 +1846,14 @@ fn spawn_video_audio(
     pause_flag:      Arc<std::sync::atomic::AtomicBool>,
     volume:          Arc<Mutex<f32>>,
     start_secs:      f64,
+    clock:           Arc<crate::av_clock::AvClock>,
 ) {
     use rodio::Source;
+    // A new audio stream: the video waits for it (or for `no_audio`).
+    let gen = clock.restart();
     // Only local files — skip network streams.
     if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("rtsp://") {
+        clock.no_audio(gen);
         return;
     }
     let path = url
@@ -1596,6 +1862,11 @@ fn spawn_video_audio(
         .to_string();
 
     std::thread::spawn(move || {
+        // Whatever happens below, when this thread is done the video paces itself.
+        struct Done(Arc<crate::av_clock::AvClock>, u64);
+        impl Drop for Done { fn drop(&mut self) { self.0.no_audio(self.1); } }
+        let _done = Done(Arc::clone(&clock), gen);
+
         let Some(media) = glyx_media::get_media() else {
             log::debug!("[video-audio] glyx-media not available");
             return;
@@ -1627,6 +1898,8 @@ fn spawn_video_audio(
             buf_pos:     0,
             buf_valid:   0,
             done:        false,
+            clock:       Arc::clone(&clock),
+            gen,
         };
 
         if start_secs > 0.001 {
@@ -1644,6 +1917,8 @@ fn spawn_video_audio(
         } else {
             sink.append(source);
         }
+        // The clock counts from here: samples handed to the output from `start_secs`.
+        clock.start(gen, start_secs, sample_rate as u64 * channels.max(1) as u64);
         sink.play();
         log::debug!("[video-audio] audio playing via ffmpeg ({sample_rate}Hz/{channels}ch), start={start_secs:.2}s");
 
@@ -1679,6 +1954,9 @@ struct FfmpegAudioSource {
     buf_pos:    usize,
     buf_valid:  usize,
     done:       bool,
+    /// Counts samples out, as the video's clock.
+    clock:      Arc<crate::av_clock::AvClock>,
+    gen:        u64,
 }
 
 // SAFETY: FfmpegAudioSource owns a VmAudioDecoder (opaque C pointer, no TLS).
@@ -1724,6 +2002,7 @@ impl Iterator for FfmpegAudioSource {
         }
         let s = self.buf[self.buf_pos];
         self.buf_pos += 1;
+        self.clock.advance(self.gen, 1);
         Some(s)
     }
 }
@@ -1744,8 +2023,11 @@ fn spawn_video_audio(
     _pause_flag:      Arc<std::sync::atomic::AtomicBool>,
     _volume:          Arc<Mutex<f32>>,
     _start_secs:      f64,
+    clock:            Arc<crate::av_clock::AvClock>,
 ) {
-    // audio feature not enabled — video plays without sound
+    // audio feature not enabled — video plays without sound, paced by the wall clock
+    let gen = clock.restart();
+    clock.no_audio(gen);
 }
 
 #[cfg(test)]

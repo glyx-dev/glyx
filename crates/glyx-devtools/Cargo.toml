@@ -1,0 +1,22 @@
+[package]
+name    = "glyx-devtools"
+version = "0.1.0"
+edition = "2021"
+description = "Glyx DevTools Protocol (GDP): message types and the secured WebSocket transport. No dependency on glyx-core; the domains live there."
+
+[dependencies]
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+tokio             = { workspace = true, features = ["net", "rt", "sync", "macros", "time"] }
+tokio-tungstenite = { workspace = true }
+futures-util      = { workspace = true }
+parking_lot       = { workspace = true }
+getrandom         = "0.2"
+log               = { workspace = true }
+sysinfo           = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "sync", "macros", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Memory"] }

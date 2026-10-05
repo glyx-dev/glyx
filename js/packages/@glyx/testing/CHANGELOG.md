@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- `render()` hung forever: it created a concurrent React root, which waits on a scheduler the in-memory host does not have. It now uses a synchronous root, so updates land as soon as they are made.
+- The test host now tells a component its node id (`_glyxOnMount`) as the real host does, so `Pressable` registers its handlers and can be driven with real mouse events through `dispatchEvents`.
+
 ### Changed
 - `__glyx_text_pos_at` stub follows the new native signature `(text, x, y, opts)`, where `opts` is the Text node's own props plus `boxWidth`/`boxHeight`.
 - Added a `__glyx_text_caret_at(text, offset, opts)` stub (inverse of `__glyx_text_pos_at`).

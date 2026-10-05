@@ -260,6 +260,17 @@ impl LayoutTree {
         self.tree.style(node).cloned().map_err(LayoutError::Taffy)
     }
 
+    /// The node's last computed layout (size, content size, padding, border,
+    /// margin), as Taffy produced it. Devtools uses it to explain sizes.
+    pub fn computed(&self, node: NodeId) -> Result<taffy::Layout, LayoutError> {
+        self.tree.layout(node).copied().map_err(LayoutError::Taffy)
+    }
+
+    /// Whether the node's size comes from measuring text.
+    pub fn is_text(&self, node: NodeId) -> bool {
+        self.tree.get_node_context(node).is_some()
+    }
+
     /// Look up metadata for a node.
     pub fn meta(&self, node: NodeId) -> Option<&NodeMeta> {
         self.meta.get(&node)

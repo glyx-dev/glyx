@@ -246,7 +246,7 @@ pub(crate) fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
 use super::{
     read_project_name, host_os, platform_to_rust_target, binary_name,
     find_workspace_root, read_app_metadata, read_icon_path, read_deeplink_scheme,
-    copy_runtime_files, copy_media_dll_if_needed, install_license_files,
+    copy_app_payload, install_license_files,
     write_file,
     png_to_ico, png_to_icns,
     DEFAULT_ICON_PNG,
@@ -314,10 +314,10 @@ pub(super) fn package_windows(name: &str, bin: &Path) -> Result<()> {
     let exe_name = binary_name(name);
     let exe_dest = app_dir.join(&exe_name);
     std::fs::copy(bin, &exe_dest).with_context(|| format!("copy {}", bin.display()))?;
-    copy_runtime_files(&app_dir)?;
-    copy_media_dll_if_needed(&app_dir)?;
+    copy_app_payload(&app_dir, bin)?;
     let win_meta = read_app_metadata();
     install_license_files(&app_dir.join("LICENSES"), win_meta.license.as_deref())?;
+    crate::ffmpeg_notice::install_and_report(&app_dir.join("LICENSES"), &app_dir)?;
 
     // Generate icon.ico — use the app's configured icon, or fall back to the
     // embedded Glyx logo so every package always has a proper icon.
@@ -399,15 +399,18 @@ pub(super) fn package_windows(name: &str, bin: &Path) -> Result<()> {
 
     let zip_path = format!("target/glyx/dist/{name}-{}-windows.zip", win_meta.version);
     println!("Packaging for Windows: {zip_path}");
-    let status = Command::new("powershell")
-        .args(["-Command", &format!("Compress-Archive -Path '{}/*' -DestinationPath '{}' -Force", app_dir.display(), zip_path)])
-        .status();
-    match status {
-        Ok(s) if s.success() => {
+    // Written here rather than with PowerShell's Compress-Archive, which
+    // (Windows PowerShell 5.1) stores `js\app.js`-style paths: the zip format
+    // wants `/`, and other unzip tools turn those into odd flat file names.
+    match zip_dir(&app_dir, Path::new(&zip_path)) {
+        Ok(()) => {
             println!("✓ Package: {zip_path}");
             println!("  Unzip and run {exe_name} from the extracted folder");
         }
-        _ => { println!("✓ Folder: {}", app_dir.display()); }
+        Err(e) => {
+            println!("  ⚠ could not write {zip_path}: {e:#}");
+            println!("✓ Folder: {}", app_dir.display());
+        }
     }
     Ok(())
 }
@@ -462,15 +465,23 @@ pub(super) fn package_macos(name: &str, bin: &Path) -> Result<()> {
 </dict>
 </plist>"#);
     write_file(bundle_root.join("Contents/Info.plist"), &plist)?;
-    copy_media_dll_if_needed(&app_dir)?;
+    copy_app_payload(&app_dir, bin)?;
     let macos_meta = read_app_metadata();
     install_license_files(&res_dir.join("LICENSES"), macos_meta.license.as_deref())?;
+    crate::ffmpeg_notice::install_and_report(&res_dir.join("LICENSES"), &app_dir)?;
     println!("✓ Package: {}", bundle_root.display());
     Ok(())
 }
 
 pub(super) fn package_linux(name: &str, bin: &Path) -> Result<()> {
     std::fs::create_dir_all("target/glyx/dist")?;
+    // The app ships as one folder: binary, its files and licences, archived
+    // together (the archive used to hold only the binary).
+    let app_dir = PathBuf::from(format!("target/glyx/dist/{name}-linux"));
+    if app_dir.exists() { std::fs::remove_dir_all(&app_dir).with_context(|| format!("remove {}", app_dir.display()))?; }
+    std::fs::create_dir_all(&app_dir)?;
+    std::fs::copy(bin, app_dir.join(binary_name(name))).with_context(|| format!("copy {}", bin.display()))?;
+    copy_app_payload(&app_dir, bin)?;
 
     // Copy icon PNG alongside binary so xdg-icon-resource / AppImage can use it.
     let icon_field = if let Some(icon_png) = read_icon_path() {
@@ -499,22 +510,16 @@ pub(super) fn package_linux(name: &str, bin: &Path) -> Result<()> {
         println!("  To activate: xdg-desktop-menu install --novendor {name}.desktop");
     }
 
+    let linux_meta = read_app_metadata();
+    install_license_files(&app_dir.join("LICENSES"), linux_meta.license.as_deref())?;
+    crate::ffmpeg_notice::install_and_report(&app_dir.join("LICENSES"), &app_dir)?;
+
     let archive = format!("target/glyx/dist/{name}-linux.tar.gz");
     println!("Packaging for Linux: {archive}");
-    let status = Command::new("tar")
-        .args(["-czf", &archive, "-C", bin.parent().unwrap().to_str().unwrap(), &binary_name(name)])
-        .status();
-    match status {
-        Ok(s) if s.success() => { println!("✓ Package: {archive}"); }
-        _ => {
-            let dest = format!("target/glyx/dist/{name}");
-            std::fs::copy(bin, &dest)?;
-            println!("✓ Binary: {dest}");
-        }
+    match tar_gz_dir(&app_dir, Path::new(&archive), &format!("{name}-linux")) {
+        Ok(()) => println!("✓ Package: {archive}"),
+        Err(e) => { println!("  ⚠ could not write {archive}: {e:#}"); println!("✓ Folder: {}", app_dir.display()); }
     }
-    copy_media_dll_if_needed(&PathBuf::from("target/glyx/dist"))?;
-    let linux_meta = read_app_metadata();
-    install_license_files(&PathBuf::from("target/glyx/dist/LICENSES"), linux_meta.license.as_deref())?;
     Ok(())
 }
 
@@ -996,4 +1001,84 @@ pub(super) fn dir_size_kb(path: &Path) -> u64 {
         }).sum()).unwrap_or(0)
     }
     bytes(path) / 1024
+}
+
+/// Zip `dir`'s contents (not `dir` itself) into `out`, with `/` paths as the
+/// zip format requires.
+pub(crate) fn zip_dir(dir: &Path, out: &Path) -> Result<()> {
+    use std::io::Write;
+    fn add(zip: &mut zip::ZipWriter<std::fs::File>, root: &Path, cur: &Path, opts: zip::write::SimpleFileOptions) -> Result<()> {
+        let mut entries: Vec<_> = std::fs::read_dir(cur)?.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let path = e.path();
+            let rel = path.strip_prefix(root)?.components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>().join("/");
+            if e.file_type()?.is_dir() {
+                zip.add_directory(format!("{rel}/"), opts)?;
+                add(zip, root, &path, opts)?;
+            } else {
+                zip.start_file(rel, opts)?;
+                zip.write_all(&std::fs::read(&path)?)?;
+            }
+        }
+        Ok(())
+    }
+    if let Some(parent) = out.parent() { std::fs::create_dir_all(parent)?; }
+    let _ = std::fs::remove_file(out);
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(out)?);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .large_file(true);
+    add(&mut zip, dir, dir, opts)?;
+    zip.finish()?;
+    Ok(())
+}
+
+/// `dir` as a gzipped tarball whose entries sit under `prefix/`.
+pub(crate) fn tar_gz_dir(dir: &Path, out: &Path, prefix: &str) -> Result<()> {
+    let _ = std::fs::remove_file(out);
+    let gz = flate2::write::GzEncoder::new(std::fs::File::create(out)?, flate2::Compression::default());
+    let mut tar = tar::Builder::new(gz);
+    tar.append_dir_all(prefix, dir)?;
+    tar.into_inner()?.finish()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod zip_tests {
+    #[test]
+    fn linux_tarball_holds_the_whole_app_folder() {
+        let base = std::env::temp_dir().join(format!("glyx-tar-test-{}", std::process::id()));
+        let dir = base.join("app");
+        std::fs::create_dir_all(dir.join("js")).unwrap();
+        std::fs::write(dir.join("app"), b"bin").unwrap();
+        std::fs::write(dir.join("icudtl.dat"), b"icu").unwrap();
+        std::fs::write(dir.join("js").join("app.js"), b"js").unwrap();
+        let out = base.join("app.tar.gz");
+        tar_gz_dir(&dir, &out, "notes-linux").unwrap();
+        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(std::fs::File::open(&out).unwrap()));
+        let mut names: Vec<String> = ar.entries().unwrap().map(|e| e.unwrap().path().unwrap().to_string_lossy().replace('\\', "/")).collect();
+        names.sort();
+        assert!(names.contains(&"notes-linux/app".to_string()) && names.contains(&"notes-linux/icudtl.dat".to_string()) && names.contains(&"notes-linux/js/app.js".to_string()), "{names:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    use super::*;
+
+    #[test]
+    fn zip_paths_use_forward_slashes() {
+        let base = std::env::temp_dir().join(format!("glyx-zip-test-{}", std::process::id()));
+        let dir = base.join("app");
+        std::fs::create_dir_all(dir.join("js").join("dist")).unwrap();
+        std::fs::write(dir.join("app.exe"), b"exe").unwrap();
+        std::fs::write(dir.join("js").join("dist").join("app.js"), b"js").unwrap();
+        let out = base.join("app.zip");
+        zip_dir(&dir, &out).unwrap();
+        let mut z = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+        let names: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().to_string()).collect();
+        assert_eq!(names, vec!["app.exe", "js/", "js/dist/", "js/dist/app.js"]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

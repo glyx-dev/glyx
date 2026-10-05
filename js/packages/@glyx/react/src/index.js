@@ -4,8 +4,13 @@ import './polyfills.js';
 
 import React from 'react';
 import Reconciler from 'react-reconciler';
-import HostConfig from './hostConfig.js';
-import { dispatchEvents, addGlobalClickListener, removeGlobalClickListener, addKeyListener, removeKeyListener, registerInput, unregisterInput, registerScrollView, unregisterScrollView, registerDraggable, unregisterDraggable } from './events.js';
+import HostConfig, { markLibraryComponents, setDevRoot } from './hostConfig.js';
+import * as coreExports from './core.js';
+import * as controlsExports from './controls.js';
+import * as canvasExports from './canvas.js';
+import * as mediaExports from './media.js';
+import * as popoverExports from './popover.js';
+import { dispatchEvents, setKeyFlush, addGlobalClickListener, removeGlobalClickListener, addKeyListener, removeKeyListener, registerInput, unregisterInput, registerScrollView, unregisterScrollView, registerDraggable, unregisterDraggable } from './events.js';
 import {
   _pollWebSockets, _pollIpc, _pollDeeplinks, _pollGamepads,
   _pollGlobalShortcuts, _pollPerfViolations, _pollLeakWarnings,
@@ -18,6 +23,8 @@ import { PopoverHost } from './popover.js';
 // Re-export from sub-modules
 export * from './api.js';
 export * from './core.js';
+export { MenuBar } from './menuBarView.js';
+export { StyleSheet, flattenStyle } from './style.js';
 export * from './popover.js';
 export * from './controls.js';
 export * from './canvas.js';
@@ -38,6 +45,16 @@ const rootContainer = GlyxReconciler.createContainer(
   (err) => __glyx_log('[React] Recoverable error: ' + err.message),
   null
 );
+// Devtools element IDs walk React's current tree from here (hostConfig.js).
+setDevRoot(rootContainer);
+
+// Devtools component names skip past Glyx's own components (hostConfig.js).
+for (const m of [coreExports, controlsExports, canvasExports, mediaExports, popoverExports]) {
+  markLibraryComponents(Object.values(m));
+}
+
+// Text-input keys commit one at a time (see setKeyFlush in events.js).
+setKeyFlush((fn) => GlyxReconciler.flushSync(fn));
 
 // ── Frame callback ────────────────────────────────────────────────────────────
 //

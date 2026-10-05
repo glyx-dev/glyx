@@ -30,6 +30,9 @@ const inputRegistry = new Map();
 // ScrollViews register here so scroll events can be routed to whichever
 // scroll view the cursor is currently over.
 const scrollRegistry = new Map();
+// nodeId -> (e: { deltaY, ctrl, shift, x, y }) => boolean. Offered each wheel event
+// before any ScrollView; returning true consumes it.
+const wheelRegistry = new Map();
 
 // Map from nodeId -> { onDragStart?, onDragMove?, onDragEnd? }
 // Draggable nodes (e.g. Slider thumb) register here.
@@ -69,8 +72,15 @@ const systemWatchRegistry = new Map();
 // Listeners notified on window resize: Array<(size: {width, height}) => void>
 const windowSizeListeners = [];
 
-// Listeners notified on every key event: Array<(ev: {key, ctrl, shift, pressed}) => void>
+// Listeners notified on every key event: Array<(ev: {key, ctrl, shift, alt, super, pressed}) => boolean|void>
+// (returning true consumes the key)
 const keyListeners = [];
+
+// Listeners notified when a native menu bar item is chosen: Array<(ev: {id, checked?}) => void>
+const menuBarListeners = [];
+
+// Listeners notified of tray icon and tray menu events (parsed): Array<(ev: object) => void>
+const trayListeners = [];
 
 // Listeners called on every mouse-button press, regardless of which node was hit.
 // Used by dropdowns / overlays to close on outside click.
@@ -112,6 +122,8 @@ let hoveredPressableId = null;
 // Modifier key state — updated on every keyInput (pressed AND released).
 let ctrlHeld  = false;
 let shiftHeld = false;
+let altHeld   = false;
+let superHeld = false;
 
 // Last cursor position seen this frame (updated by cursorMoved events).
 let cursorX = 0;
@@ -214,6 +226,24 @@ export function registerScrollView(nodeId, handlers) {
  */
 export function unregisterScrollView(nodeId) {
   scrollRegistry.delete(nodeId);
+}
+
+/**
+ * Offer wheel/trackpad scrolling over `nodeId` to `handler` before the ScrollView
+ * underneath. `handler({ deltaY, ctrl, shift, x, y })` gets the delta, the held
+ * modifiers and the pointer position relative to the node; return `true` to
+ * consume the event (the ScrollView then doesn't scroll), anything else to let
+ * it through. The deepest registered node under the pointer is asked first.
+ * @param {number} nodeId
+ * @param {(e: { deltaY: number, ctrl: boolean, shift: boolean, x: number, y: number }) => boolean | void} handler
+ */
+export function registerWheel(nodeId, handler) {
+  wheelRegistry.set(nodeId, handler);
+}
+
+/** Remove a handler added with `registerWheel`. */
+export function unregisterWheel(nodeId) {
+  wheelRegistry.delete(nodeId);
 }
 
 /**
@@ -342,6 +372,65 @@ export function removeKeyListener(fn) {
   if (idx >= 0) keyListeners.splice(idx, 1);
 }
 
+const EDIT_CHORDS = { copy: 'KeyC', cut: 'KeyX', paste: 'KeyV', selectAll: 'KeyA' };
+
+/**
+ * Run an editing command (`copy`, `cut`, `paste`, `selectAll`) on the focused text field, by replaying
+ * its Ctrl chord through the same dispatcher real keys use, so the field handles it exactly as typed.
+ * Returns false for an unknown command or without a runtime.
+ * @param {'copy'|'cut'|'paste'|'selectAll'} role
+ */
+export function runEditCommand(role) {
+  const key = EDIT_CHORDS[role];
+  if (!key || typeof globalThis.__glyx_pollEvents === 'undefined') return false;
+  const chord = [
+    { type: 'keyInput', key: 'ControlLeft', pressed: true },
+    { type: 'keyInput', key, pressed: true },
+    { type: 'keyInput', key, pressed: false },
+    { type: 'keyInput', key: 'ControlLeft', pressed: false },
+  ];
+  const prev = globalThis.__glyx_pollEvents;
+  globalThis.__glyx_pollEvents = () => chord;
+  try { dispatchEvents(); } finally { globalThis.__glyx_pollEvents = prev; }
+  return true;
+}
+
+/**
+ * Subscribe to tray events (pushed by the runtime). Returns nothing; use removeTrayListener.
+ * @param {(ev: object) => void} fn  e.g. `{ MenuItemClick: { tray_id, item_id } }`
+ */
+export function addTrayListener(fn) {
+  trayListeners.push(fn);
+}
+
+/** Unsubscribe from tray events. */
+export function removeTrayListener(fn) {
+  const idx = trayListeners.indexOf(fn);
+  if (idx >= 0) trayListeners.splice(idx, 1);
+}
+
+/** How many tray listeners there are, so the first and last can switch the runtime push on and off. */
+export function trayListenerCount() {
+  return trayListeners.length;
+}
+
+/**
+ * Subscribe to native menu bar choices (pushed by the runtime when an item is clicked).
+ * @param {(ev: {id: string, checked?: boolean}) => void} fn
+ */
+export function addMenuBarListener(fn) {
+  menuBarListeners.push(fn);
+}
+
+/**
+ * Unsubscribe from native menu bar choices.
+ * @param {(ev: {id: string, checked?: boolean}) => void} fn
+ */
+export function removeMenuBarListener(fn) {
+  const idx = menuBarListeners.indexOf(fn);
+  if (idx >= 0) menuBarListeners.splice(idx, 1);
+}
+
 /**
  * Subscribe to every mouse-button press event (regardless of which node was hit).
  * Useful for dropdowns/overlays that need to close on outside click.
@@ -358,6 +447,11 @@ export function addGlobalClickListener(fn) {
 export function removeGlobalClickListener(fn) {
   const idx = globalClickListeners.indexOf(fn);
   if (idx >= 0) globalClickListeners.splice(idx, 1);
+}
+
+/** The id of the text input that has focus right now, or null. */
+export function getFocusedInput() {
+  return focusedNodeId;
 }
 
 /**
@@ -408,6 +502,20 @@ function hitTest(nodeId, px, py) {
     px >= layout.x && px < layout.x + layout.width &&
     py >= layout.y && py < layout.y + layout.height
   );
+}
+
+// Commits React updates made while handling one text-input key before the
+// next key is handled. A text field computes each edit from its `value` prop
+// and caret state as of the last render; when several keys arrive in one
+// frame (fast typing, a barcode scanner, automation), without this every key
+// edits the same stale value and only the last one survives. Set by
+// index.js to the reconciler's `flushSync`; a plain call elsewhere (tests).
+let flushKey = (fn) => fn();
+export function setKeyFlush(fn) { flushKey = fn; }
+
+/** Keys that press a focused button (winit physical key names). */
+export function isActivationKey(key) {
+  return key === 'Enter' || key === 'NumpadEnter' || key === 'Space';
 }
 
 /** True when the node is in the disabled registry. */
@@ -505,6 +613,7 @@ export function dispatchEvents() {
         // fallthrough to pressables/inputs rendered beneath it in z-order.
         const topmostId = ev.target;
         let inputTarget;
+        let keepFocusPress = false;   // the press landed on a `keepFocus` Pressable (a menu bar item)
 
         if (topmostId !== null) {
           // Walk up the parent chain to find the nearest pressable ancestor
@@ -517,6 +626,7 @@ export function dispatchEvents() {
           }
           if (pressableTarget !== undefined) {
             const ph = pressableRegistry.get(pressableTarget);
+            if (ph && ph.keepFocus) keepFocusPress = true;
             if (ph && !isDisabled(pressableTarget)) {
               const layout = __glyx_getLayout(pressableTarget);
               const pev = {
@@ -574,7 +684,7 @@ export function dispatchEvents() {
         // longer touches `__glyx_setFocus` — see its comment) since this
         // path bypasses `setFocus()` entirely (there's no new input target
         // to focus, just a plain click on non-input ground).
-        if (focusedNodeId !== null && focusedNodeId !== inputTarget) {
+        if (focusedNodeId !== null && focusedNodeId !== inputTarget && !keepFocusPress) {
           inputRegistry.get(focusedNodeId)?.onBlur?.();
           focusedNodeId = null;
           if (typeof __glyx_setFocus !== 'undefined') {
@@ -594,11 +704,22 @@ export function dispatchEvents() {
           shiftHeld = ev.pressed;
           break;
         }
+        if (ev.key === 'AltLeft' || ev.key === 'AltRight') {
+          altHeld = ev.pressed;
+          break;
+        }
+        if (ev.key === 'SuperLeft' || ev.key === 'SuperRight') {
+          superHeld = ev.pressed;
+          break;
+        }
 
         // Notify global key listeners (used for app-focused shortcuts).
         if (keyListeners.length > 0) {
-          const kev = { key: ev.key, ctrl: ctrlHeld, shift: shiftHeld, pressed: ev.pressed };
-          for (const fn of keyListeners) try { fn(kev); } catch {}
+          const kev = { key: ev.key, ctrl: ctrlHeld, shift: shiftHeld, alt: altHeld, super: superHeld, pressed: ev.pressed };
+          // A listener that returns true has consumed the key: nothing else (a focused field, scrolling) sees it.
+          let consumed = false;
+          for (const fn of keyListeners) try { if (fn(kev) === true) consumed = true; } catch {}
+          if (consumed) break;
         }
 
         if (!ev.pressed) break;
@@ -637,13 +758,33 @@ export function dispatchEvents() {
         if (!handlers) {
           // Not a text input: a focused control that handles keys itself
           // (a chart's arrow-key navigation, say) via Pressable `onKeyDown`.
-          focusVisualRegistry.get(focusedNodeId)?.onKeyDown?.({
+          const kev = {
             key: ev.key, ctrl: ctrlHeld, shift: shiftHeld,
-          });
+            defaultPrevented: false,
+            preventDefault() { this.defaultPrevented = true; },
+          };
+          focusVisualRegistry.get(focusedNodeId)?.onKeyDown?.(kev);
+          // Enter / Space press a focused button, as on the web and native
+          // toolkits. `onKeyDown` can call `e.preventDefault()` to keep them.
+          if (!kev.defaultPrevented && isActivationKey(ev.key)) {
+            const id = focusedNodeId;
+            const ph = pressableRegistry.get(id);
+            if (ph && !isDisabled(id)) {
+              const layout = typeof __glyx_getLayout === 'function' ? __glyx_getLayout(id) : null;
+              const cx = layout ? boxOriginX(layout) + layout.width / 2 : 0;
+              const cy = layout ? boxOriginY(layout) + layout.height / 2 : 0;
+              ph.onPress?.({
+                x: cx, y: cy,
+                locationX: layout ? layout.width / 2 : 0,
+                locationY: layout ? layout.height / 2 : 0,
+                keyboard: true,
+              });
+            }
+          }
           break;
         }
 
-        handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld });
+        flushKey(() => handlers.onKeyPress?.({ key: ev.key, text: ev.text, ctrl: ctrlHeld, shift: shiftHeld }));
         break;
       }
 
@@ -699,7 +840,7 @@ export function dispatchEvents() {
             cursorEnd: ev.cursorEnd ?? 0,
           });
         } else if (ev.kind === 'commit') {
-          handlers.onImeCommit?.(ev.text ?? '');
+          flushKey(() => handlers.onImeCommit?.(ev.text ?? ''));
         } else if (ev.kind === 'disabled') {
           handlers.onImePreedit?.({ text: '', cursorStart: 0, cursorEnd: 0 });
         }
@@ -726,6 +867,20 @@ export function dispatchEvents() {
       }
 
       case 'scroll': {
+        // Wheel handlers (e.g. Ctrl+wheel zoom on a chart) get the first offer.
+        let wheelNode = null;
+        for (const nodeId of wheelRegistry.keys()) {
+          if (!hitTest(nodeId, cursorX, cursorY) || isDisabled(nodeId)) continue;
+          if (wheelNode === null || isAncestorOf(wheelNode, nodeId)) wheelNode = nodeId;
+        }
+        if (wheelNode !== null) {
+          const l = __glyx_getLayout(wheelNode);
+          const consumed = wheelRegistry.get(wheelNode)({
+            deltaY: ev.deltaY, ctrl: ctrlHeld, shift: shiftHeld,
+            x: l ? cursorX - boxOriginX(l) : 0, y: l ? cursorY - boxOriginY(l) : 0,
+          });
+          if (consumed === true) break;
+        }
         // Route the scroll delta to the DEEPEST ScrollView the cursor is over.
         // Registration order is unreliable for nesting (children mount before
         // parents, and side-by-side panes can re-register in any order): a
@@ -770,6 +925,19 @@ export function dispatchEvents() {
       case 'resize': {
         const size = { width: ev.width, height: ev.height };
         for (const fn of windowSizeListeners) fn(size);
+        break;
+      }
+
+      case 'tray': {
+        let tev = null;
+        try { tev = JSON.parse(ev.json); } catch { /* ignore a malformed event */ }
+        if (tev) for (const fn of trayListeners.slice()) try { fn(tev); } catch {}
+        break;
+      }
+
+      case 'menuBar': {
+        const mev = ev.checked === undefined ? { id: ev.id } : { id: ev.id, checked: ev.checked };
+        for (const fn of menuBarListeners.slice()) try { fn(mev); } catch {}
         break;
       }
 

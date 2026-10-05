@@ -278,13 +278,19 @@ export class GlyxCanvasContext {
   lineTo(x, y) { this._path.push(x, y); }
   closePath() { this._pathClosed = true; }
 
-  /** Arc from `a0`→`a1` radians (set `ccw` for counter-clockwise). */
-  arc(cx, cy, r, a0, a1, ccw = false) {
+  /**
+   * Arc from `a0`→`a1` radians (set `ccw` for counter-clockwise). It is split
+   * into line segments: by default as many as its sweep needs (more for a
+   * wider arc). Pass `segments` to fix the count instead, so a shape whose
+   * angle changes keeps the same number of points — which is what lets a
+   * canvas with a `transition` ease between two draws of it.
+   */
+  arc(cx, cy, r, a0, a1, ccw = false, segments) {
     let start = a0, end = a1;
     if (ccw && end > start) end -= Math.PI * 2;
     if (!ccw && end < start) end += Math.PI * 2;
     const sweep = Math.abs(end - start);
-    const segs  = Math.max(6, Math.ceil(sweep / (Math.PI / 16)));
+    const segs  = segments > 0 ? Math.ceil(segments) : Math.max(6, Math.ceil(sweep / (Math.PI / 16)));
     for (let i = 0; i <= segs; i++) {
       const t = start + (end - start) * (i / segs);
       this._path.push(cx + Math.cos(t) * r, cy + Math.sin(t) * r);
@@ -303,11 +309,18 @@ export class GlyxCanvasContext {
     }
   }
 
-  bezierCurveTo(c1x, c1y, c2x, c2y, x, y) {
+  /**
+   * Cubic curve to (x, y). It is split into line segments: 20 by default. Pass
+   * `segments` to choose the count: a curve that spans only a few pixels needs
+   * far fewer, and every vertex costs when the path is stroked. Keep the count
+   * independent of the data (derive it from the geometry) when the canvas has a
+   * `transition`, so consecutive draws keep the same number of points.
+   */
+  bezierCurveTo(c1x, c1y, c2x, c2y, x, y, segments) {
     const n = this._path.length;
     const x0 = n >= 2 ? this._path[n - 2] : c1x;
     const y0 = n >= 2 ? this._path[n - 1] : c1y;
-    const segs = 20;
+    const segs = segments > 0 ? Math.ceil(segments) : 20;
     for (let i = 1; i <= segs; i++) {
       const t = i / segs, mt = 1 - t;
       const a = mt * mt * mt, b = 3 * mt * mt * t, c = 3 * mt * t * t, d = t * t * t;

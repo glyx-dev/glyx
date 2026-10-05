@@ -23,6 +23,7 @@
     "js/packages/@glyx/icons",
     "js/packages/@glyx/rich-text",
     "js/packages/glyx-cli",
+    "tools/glyx-devtools-ui",
     "examples/*"
   ],
   "scripts": {

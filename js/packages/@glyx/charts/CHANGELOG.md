@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added (chart types and sizing)
+- **Grouped and stacked bars:** `BarChart` takes `series`; several series sit side by side, or pile up with `stacked`. Stacked areas too: `AreaChart stacked`.
+- **New charts:** `ScatterChart` (bubbles when points have a `size`), `CandlestickChart`, `Sparkline`.
+- **Charts can follow their container:** `width="100%"` / `height="100%"` (any percentage string) measures the container and redraws at its size. Numeric sizes behave as before.
+- **Wheel zoom:** with `zoomPan`, Ctrl + wheel (or a trackpad pinch) zooms about the pointer; a plain wheel still scrolls the page.
+- `examples/chart-gallery` shows all of them.
+
+### Added (motion and realtime)
+- **Charts ease to new data.** Each update draws the final chart once and the native engine moves the previous drawing toward it (`<Canvas transition>`), with no JavaScript per frame. A resized chart redraws instantly. `animate={false}` turns it off.
+- **A gliding tooltip.** One persistent tooltip card moves between points on a spring and fades in and out. `tooltipMotion={false}` makes it appear and disappear at each point as before.
+- **`useChartStream({ capacity, maxHz, initial })`** keeps a fixed-length window over a live feed and hands it to the charts at most `maxHz` times a second, so the UI does the same work whether 20 or 1000 values arrive per second. A window that keeps its length is what lets the chart ease between updates. `examples/realtime-chart` shows it.
+- Curves use about one segment per pixel instead of twenty per point (roughly a third less stroke cost, no visible change), and pie arcs use a fixed segment count so a slice keeps its point count while it eases.
+
+### Fixed
+- `PieChart` ignored a percentage `width`/`height`, the one chart that didn't follow its container. It now does, like the others.
+- Axis and legend labels are a little brighter in the dark theme (they measured 4.06:1 against a card, below the 4.5:1 WCAG AA asks for).
+
 ### Changed
 - **A visual redesign of every chart.**
   - Axes use round tick values (0, 500, 1000…) instead of values like 449.5.

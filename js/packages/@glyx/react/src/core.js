@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, createContext, useCont
 import {
   registerPressable, unregisterPressable,
   registerScrollView, unregisterScrollView,
+  registerWheel, unregisterWheel,
   registerDraggable, unregisterDraggable,
   registerDisabledNode, unregisterDisabledNode,
   addWindowSizeListener, removeWindowSizeListener,
@@ -11,6 +12,7 @@ import {
   setFocus,
 } from './events.js';
 import { glyxWindow, clipboard, input } from './api.js';
+import { flattenStyle } from './style.js';
 
 // ── Host components ───────────────────────────────────────────────────────────
 
@@ -50,7 +52,8 @@ export function textLineLimit(numberOfLines, style) {
   return undefined;
 }
 
-export function Text({ children, style, showCursor, numberOfLines, ...props }) {
+export function Text({ children, style: styleProp, showCursor, numberOfLines, ...props }) {
+  const style = flattenStyle(styleProp);
   // Flatten mixed children (strings + expressions) to a single string,
   // matching browser behaviour where <Text>= {val}</Text> just works.
   const text = Array.isArray(children)
@@ -63,7 +66,8 @@ export function Text({ children, style, showCursor, numberOfLines, ...props }) {
   });
 }
 
-export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', onError, style, ...props }) {
+export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', onError, style: styleProp, ...props }) {
+  const style = flattenStyle(styleProp);
   // Display-size hint: lets the engine rasterize SVGs at the rendered size
   // (bitmaps ignore it). style.width/height win over the props, matching layout.
   const hintW = typeof style?.width  === 'number' ? style.width  : (typeof width  === 'number' ? width  : 0);
@@ -102,7 +106,13 @@ export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', 
 // always delegate to the latest closure values without needing re-registration
 // on every render.
 
-export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, onPointerMove, onKeyDown, disabled, feedback = true, style, _glyxOnMount: externalOnMount, ...props }) {
+// Hover, press and focus changes ease in on a spring instead of snapping: stiff
+// and critically damped, so it feels immediate (no bounce) and an interrupted
+// hover turns around smoothly. Rust interpolates it — no JS per frame. Opt out
+// per Pressable with `transition={false}`, or pass your own `transition`.
+const PRESSABLE_TRANSITION = { spring: { stiffness: 600, damping: 48 }, properties: 'all' };
+
+export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, onPointerMove, onKeyDown, disabled, keepFocus, feedback = true, transition = PRESSABLE_TRANSITION, style, _glyxOnMount: externalOnMount, ...props }) {
   const nodeIdRef    = useRef(null);
   const handlersRef  = useRef(null);
   const [pressed, setPressed] = useState(false);
@@ -143,6 +153,7 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
     onHoverOut: () => { setHovered(false); onHoverOut?.(); },
     onPointerMove: (e) => onPointerMove?.(e),
     onKeyDown: (e) => onKeyDown?.(e),
+    keepFocus: !!keepFocus,
   };
 
   // Called synchronously by createInstance the moment the native node exists.
@@ -157,6 +168,8 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
       onHoverIn:  () => handlersRef.current.onHoverIn(),
       onHoverOut: () => handlersRef.current.onHoverOut(),
       onPointerMove: (e) => handlersRef.current.onPointerMove(e),
+      // Read at press time: a press on a `keepFocus` Pressable does not blur the focused text field.
+      get keepFocus() { return handlersRef.current.keepFocus; },
     });
     registerDisabledNode(id, !!disabled);
     // Keyboard-focus-visible only — NOT `registerInput` (that registry is
@@ -210,7 +223,7 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
   //   style={({ pressed, hovered }) => ({ ... })}
   // Function styles handle their own feedback, so opacity feedback is skipped.
   const styleIsFn = typeof style === 'function';
-  const resolvedStyle = styleIsFn ? style({ pressed, hovered, focused }) : style;
+  const resolvedStyle = flattenStyle(styleIsFn ? style({ pressed, hovered, focused }) : style);
   const baseOpacity = resolvedStyle?.opacity ?? 1;
   const feedbackStyle = (!styleIsFn && feedback && pressed && !disabled)
     ? { ...resolvedStyle, opacity: baseOpacity * 0.65 }
@@ -233,7 +246,7 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
     'view',
     // pressable:true tells the Rust drag-check that this node is interactive,
     // so glyxDraggable regions skip the window drag when this is under cursor.
-    { _glyxOnMount: onMount, style: mergedStyle, pressable: true, ...props },
+    { _glyxOnMount: onMount, style: mergedStyle, pressable: true, transition, ...props },
     children
   );
 }
@@ -263,6 +276,23 @@ export function useDraggable(handlers) {
   return onMount;
 }
 
+// Low-level wheel hook. Returns an `_glyxOnMount` callback to spread onto a View;
+// wheel/trackpad scrolling over it is offered to `handler` first:
+//   handler({ deltaY, ctrl, shift, x, y }) → true to consume the event (a
+//   ScrollView underneath then doesn't scroll), anything else to let it through.
+// Used for Ctrl+wheel zoom; combine with other mounts by calling both.
+export function useWheel(handler) {
+  const idRef = useRef(null);
+  const hRef  = useRef(handler);
+  hRef.current = handler;
+  const onMount = useCallback((id) => {
+    idRef.current = id;
+    registerWheel(id, (e) => hRef.current?.(e));
+  }, []);
+  useEffect(() => () => { if (idRef.current !== null) unregisterWheel(idRef.current); }, []);
+  return onMount;
+}
+
 // ── ScrollView ────────────────────────────────────────────────────────────────
 //
 // A vertically-scrollable container backed by a Vello clip layer.
@@ -270,6 +300,10 @@ export function useDraggable(handlers) {
 // The native view receives two extra props that the Rust renderer handles:
 //   clip: true          — push a Vello clip layer around children
 //   scrollOffsetY: n    — shift children upward by n pixels
+//   smoothScroll: true  — Rust eases the drawn offset toward each new
+//                         scrollOffsetY (a spring, no JS per frame) instead of
+//                         jumping; scrollbar drags and touchpads still apply
+//                         instantly. Opt out with `smoothScroll={false}`.
 //
 // Scroll deltas arrive via the `scroll` input event, routed by events.js to
 // whichever ScrollView the cursor is currently over.  The component converts
@@ -278,14 +312,16 @@ export function useDraggable(handlers) {
 
 export function ScrollView({
   children,
-  style,
+  style: styleProp,
   height,               // layout height — only set if you need a fixed height
   contentHeight,        // explicit content height override (more reliable than auto-detect)
   showScrollbar   = true,
   scrollbarWidth  = 8,
   scrollbarColor  = '#8c8caa99',
+  smoothScroll    = true,
   ...props
 }) {
+  const style = flattenStyle(styleProp);
   const nodeIdRef    = useRef(null);
   const maxScrollRef = useRef(0);
   const [scrollY, setScrollY] = useState(0);
@@ -375,11 +411,12 @@ export function ScrollView({
     // Rust: push Vello clip layer + shift children by scrollOffsetY.
     clip:           true,
     scrollOffsetY:  scrollY,
+    smoothScroll,
     // Scrollbar visual props
     showScrollbar,
     scrollbarWidth,
     scrollbarColor,
-    ...style,
+    ...flattenStyle(style),
   };
 
   const finalStyle = height != null ? { ...viewStyle, height } : viewStyle;
@@ -516,7 +553,7 @@ export function VirtualizedList({
     scrollbarWidth,
     scrollbarColor,
     scrollContentH: totalContentH,
-    ...style,
+    ...flattenStyle(style),
   };
 
   return React.createElement(
@@ -830,13 +867,13 @@ export function WindowControls({ style } = {}) {
       _wc_mac(maximized ? '⊡' : '⊞', toggleMax, '#28c840'),
     ];
     return React.createElement(View, {
-      style: { flexDirection: 'row', gap: 6, alignItems: 'center', marginLeft: 8, ...style },
+      style: { flexDirection: 'row', gap: 6, alignItems: 'center', marginLeft: 8, ...flattenStyle(style) },
     }, ...buttons);
   }
 
   // Windows / Linux: icon-only buttons, no gap (touch), close on far right
   return React.createElement(View, {
-    style: { flexDirection: 'row', alignItems: 'center', ...style },
+    style: { flexDirection: 'row', alignItems: 'center', ...flattenStyle(style) },
   },
     React.createElement(_WcWin, { label: '─', onPress: minimize }),
     React.createElement(_WcWin, { label: maximized ? '❐' : '☐', onPress: toggleMax }),

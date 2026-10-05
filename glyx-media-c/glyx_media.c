@@ -207,6 +207,50 @@ struct VmEncoder {
     uint8_t*          rgba_buf;
 };
 
+/* H.264 encoders to try, best first. `libx264` exists only in GPL FFmpeg
+ * builds (Glyx ships LGPL); the OS / hardware encoders need no GPL code.
+ * FFmpeg's own MPEG-4 encoder is the last resort: always present, and still
+ * plays in .mp4 files everywhere. */
+static const char* const ENCODERS[] = {
+    "libx264", "h264_mf", "h264_nvenc", "h264_qsv", "h264_amf",
+    "h264_videotoolbox", "h264_vaapi", "libopenh264", "mpeg4", NULL
+};
+
+/* The pixel format to feed `codec`: YUV420P when it takes it, else NV12,
+ * else its first. */
+static enum AVPixelFormat pick_pix_fmt(const AVCodec* codec) {
+    const enum AVPixelFormat* fmts = NULL;
+    int n = 0;
+    if (avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0, (const void**)&fmts, &n) < 0 || !fmts || n == 0)
+        return AV_PIX_FMT_YUV420P;
+    for (int i = 0; i < n; i++) if (fmts[i] == AV_PIX_FMT_YUV420P) return AV_PIX_FMT_YUV420P;
+    for (int i = 0; i < n; i++) if (fmts[i] == AV_PIX_FMT_NV12) return AV_PIX_FMT_NV12;
+    return fmts[0];
+}
+
+/* Open the first encoder in ENCODERS that works on this machine. */
+static AVCodecContext* open_encoder(const AVFormatContext* fmt, int width, int height, int fps, const AVCodec** out_codec) {
+    for (int i = 0; ENCODERS[i]; i++) {
+        const AVCodec* codec = avcodec_find_encoder_by_name(ENCODERS[i]);
+        if (!codec) continue;
+        AVCodecContext* c = avcodec_alloc_context3(codec);
+        if (!c) continue;
+        c->width     = width;
+        c->height    = height;
+        c->time_base = (AVRational){1, fps};
+        c->framerate = (AVRational){fps, 1};
+        c->pix_fmt   = pick_pix_fmt(codec);
+        c->bit_rate  = 2000000;
+        c->gop_size  = fps; /* one I-frame per second */
+        av_opt_set(c->priv_data, "preset", "fast", 0);  /* x264 / nvenc; ignored elsewhere */
+        if (fmt->oformat->flags & AVFMT_GLOBALHEADER)
+            c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        if (avcodec_open2(c, codec, NULL) == 0) { *out_codec = codec; return c; }
+        avcodec_free_context(&c);   /* e.g. no such GPU: try the next */
+    }
+    return NULL;
+}
+
 VmEncoder* vm_encoder_open(const char* output_path, int width, int height, int fps) {
     VmEncoder* enc = (VmEncoder*)calloc(1, sizeof(VmEncoder));
     if (!enc) return NULL;
@@ -216,27 +260,11 @@ VmEncoder* vm_encoder_open(const char* output_path, int width, int height, int f
         free(enc); return NULL;
     }
 
-    const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_H264);
-    if (!codec) { avformat_free_context(enc->fmt_ctx); free(enc); return NULL; }
-
-    enc->stream    = avformat_new_stream(enc->fmt_ctx, codec);
-    enc->codec_ctx = avcodec_alloc_context3(codec);
-    if (!enc->stream || !enc->codec_ctx) {
-        avformat_free_context(enc->fmt_ctx); free(enc); return NULL;
-    }
-
-    enc->codec_ctx->width     = width;
-    enc->codec_ctx->height    = height;
-    enc->codec_ctx->time_base = (AVRational){1, fps};
-    enc->codec_ctx->pix_fmt   = AV_PIX_FMT_YUV420P;
-    enc->codec_ctx->bit_rate  = 2000000;
-    enc->codec_ctx->gop_size  = fps; /* one I-frame per second */
-    av_opt_set(enc->codec_ctx->priv_data, "preset", "fast", 0);
-
-    if (enc->fmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)
-        enc->codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-
-    if (avcodec_open2(enc->codec_ctx, codec, NULL) < 0) {
+    const AVCodec* codec = NULL;
+    enc->codec_ctx = open_encoder(enc->fmt_ctx, width, height, fps, &codec);
+    if (!enc->codec_ctx) { avformat_free_context(enc->fmt_ctx); free(enc); return NULL; }
+    enc->stream = avformat_new_stream(enc->fmt_ctx, codec);
+    if (!enc->stream) {
         avcodec_free_context(&enc->codec_ctx);
         avformat_free_context(enc->fmt_ctx); free(enc); return NULL;
     }
@@ -258,14 +286,14 @@ VmEncoder* vm_encoder_open(const char* output_path, int width, int height, int f
 
     /* RGBA → YUV420P scaler */
     enc->sws_ctx = sws_getContext(width, height, AV_PIX_FMT_RGBA,
-                                  width, height, AV_PIX_FMT_YUV420P,
+                                  width, height, enc->codec_ctx->pix_fmt,
                                   SWS_BILINEAR, NULL, NULL, NULL);
 
     enc->yuv_frame  = av_frame_alloc();
     enc->rgba_frame = av_frame_alloc();
     enc->packet     = av_packet_alloc();
 
-    enc->yuv_frame->format = AV_PIX_FMT_YUV420P;
+    enc->yuv_frame->format = enc->codec_ctx->pix_fmt;
     enc->yuv_frame->width  = width;
     enc->yuv_frame->height = height;
     av_frame_get_buffer(enc->yuv_frame, 0);
@@ -342,6 +370,11 @@ struct VmAudioDecoder {
     int16_t*           overflow;
     int                overflow_count;  /* total i16 values stored   */
     int                overflow_pos;    /* next i16 index to read    */
+    /* After a seek: drop decoded audio before `skip_to` seconds, so playback
+     * starts exactly where it was asked to (the container seek lands on a
+     * packet at or before it). */
+    int                skipping;
+    double             skip_to;
 };
 
 VmAudioDecoder* vm_audio_decoder_open(const char* source_url,
@@ -419,6 +452,25 @@ int vm_audio_decoder_next_samples(VmAudioDecoder* dec, int16_t* buf, int max_sam
         int ret = avcodec_receive_frame(dec->codec_ctx, dec->frame);
         if (ret == 0) {
             int nb = dec->frame->nb_samples;
+            /* Frames before the seek target are dropped, the first one after
+             * it trimmed to the exact sample. */
+            int drop = 0;
+            if (dec->skipping) {
+                int64_t pts = dec->frame->best_effort_timestamp;
+                if (pts == AV_NOPTS_VALUE) {
+                    dec->skipping = 0;
+                } else {
+                    AVRational tb = dec->fmt_ctx->streams[dec->audio_stream_idx]->time_base;
+                    double start = pts * av_q2d(tb);
+                    double end   = start + (double)nb / dec->sample_rate;
+                    if (end <= dec->skip_to) { av_frame_unref(dec->frame); continue; }
+                    if (start < dec->skip_to) {
+                        drop = (int)((dec->skip_to - start) * dec->sample_rate + 0.5);
+                        if (drop > nb) drop = nb;
+                    }
+                    dec->skipping = 0;
+                }
+            }
             /* Allocate temporary packed S16 buffer for this frame. */
             int alloc = nb * dec->channels;
             int16_t* tmp = (int16_t*)av_malloc(alloc * sizeof(int16_t));
@@ -429,11 +481,12 @@ int vm_audio_decoder_next_samples(VmAudioDecoder* dec, int16_t* buf, int max_sam
                                         &out_plane, nb,
                                         (const uint8_t**)dec->frame->data, nb);
             av_frame_unref(dec->frame);
-            if (converted <= 0) { av_free(tmp); continue; }
+            if (converted <= drop) { av_free(tmp); continue; }
 
-            int total = converted * dec->channels;
+            int16_t* src = tmp + drop * dec->channels;
+            int total = (converted - drop) * dec->channels;
             int copy  = (total < max_samples) ? total : max_samples;
-            memcpy(buf, tmp, copy * sizeof(int16_t));
+            memcpy(buf, src, copy * sizeof(int16_t));
             written     += copy;
             buf         += copy;
             max_samples -= copy;
@@ -446,7 +499,7 @@ int vm_audio_decoder_next_samples(VmAudioDecoder* dec, int16_t* buf, int max_sam
                 dec->overflow_count   = remain;
                 dec->overflow_pos     = 0;
                 if (dec->overflow)
-                    memcpy(dec->overflow, tmp + copy, remain * sizeof(int16_t));
+                    memcpy(dec->overflow, src + copy, remain * sizeof(int16_t));
             }
             av_free(tmp);
             continue;
@@ -471,9 +524,17 @@ int vm_audio_decoder_next_samples(VmAudioDecoder* dec, int16_t* buf, int max_sam
 void vm_audio_decoder_seek(VmAudioDecoder* dec, double seconds)
 {
     if (!dec) return;
-    int64_t ts = (int64_t)(seconds * AV_TIME_BASE);
-    avformat_seek_file(dec->fmt_ctx, -1, INT64_MIN, ts, INT64_MAX, 0);
+    if (seconds < 0) seconds = 0;
+    /* Seek the audio stream itself, landing at or before the target (never
+     * after: the old any-direction seek on the default stream could start
+     * hundreds of ms late), then trim to it exactly while decoding. */
+    AVStream* st = dec->fmt_ctx->streams[dec->audio_stream_idx];
+    int64_t ts = av_rescale_q((int64_t)(seconds * AV_TIME_BASE), AV_TIME_BASE_Q, st->time_base);
+    if (avformat_seek_file(dec->fmt_ctx, dec->audio_stream_idx, INT64_MIN, ts, ts, 0) < 0)
+        avformat_seek_file(dec->fmt_ctx, dec->audio_stream_idx, INT64_MIN, ts, INT64_MAX, 0);
     avcodec_flush_buffers(dec->codec_ctx);
+    dec->skipping = 1;
+    dec->skip_to  = seconds;
     /* Reset overflow buffer so no stale pre-seek samples are replayed */
     dec->overflow_pos   = 0;
     dec->overflow_count = 0;

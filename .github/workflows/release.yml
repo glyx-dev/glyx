@@ -9,6 +9,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_LOG: warn
 
+jobs:
   # ── Version guard ──────────────────────────────────────────────────────────
   # Every build job waits on this: the tag must equal the version of every
   # crate and npm package (bun run release:version sets them together), or
@@ -21,7 +22,6 @@ env:
       - uses: oven-sh/setup-bun@v2
       - run: bun scripts/release/check.mjs "${{ github.ref_name }}"
 
-jobs:
   # ── Lean glyx-runner binary ────────────────────────────────────────────────
   # One runner artifact pair (lean prod + dev) per (platform, engine) —
   # engine selection lives in glyx.config's "engine" field (default "v8");
@@ -134,6 +134,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}-cli
+
+      # The CLI embeds the DevTools UI (`glyx inspect`) at compile time
+      # (crates/glyx-cli/build.rs); without this step it would ship only a
+      # "not built" placeholder page.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Build the DevTools UI
+        shell: bash
+        run: bun install --frozen-lockfile && (cd tools/glyx-devtools-ui && bun run build)
 
       - name: Build CLI
         run: cargo build --release -p glyx-cli --target ${{ matrix.target }}

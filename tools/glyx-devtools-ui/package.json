@@ -1,0 +1,14 @@
+{
+  "name": "@glyx-dev/devtools-ui",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Glyx DevTools: the web UI served by `glyx inspect` and embedded in the Glyx CLI.",
+  "type": "module",
+  "scripts": {
+    "build": "bun build.mjs"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
+}

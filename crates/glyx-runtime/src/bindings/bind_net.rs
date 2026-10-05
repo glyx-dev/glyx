@@ -248,13 +248,17 @@ pub fn ws_connect_callback(
             let inbox = Arc::new(Mutex::new(VecDeque::<String>::new()));
             let (outbox_tx, mut outbox_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-            // Read task: push incoming messages into inbox.
+            // Read task: push incoming messages into inbox. They're delivered
+            // on the next frame, so ask for one: an idle app still sees them.
             let inbox_read = Arc::clone(&inbox);
+            let wake_redraw = redraw.clone();
             tokio::spawn(async move {
+                let wake = || if let Some(w) = &wake_redraw { w() };
                 while let Some(msg) = stream.next().await {
                     match msg {
                         Ok(WsMessage::Text(text)) => {
                             inbox_read.lock().push_back(text.to_string());
+                            wake();
                         }
                         Ok(WsMessage::Close(_)) | Err(_) => {
                             inbox_read.lock().push_back("__GLYX_WS_CLOSED__".to_string());
@@ -265,6 +269,7 @@ pub fn ws_connect_callback(
                 }
                 // Ensure a close sentinel is always pushed (handles clean server closes).
                 inbox_read.lock().push_back("__GLYX_WS_CLOSED__".to_string());
+                wake();
             });
 
             // Write task: forward outbox messages to the socket.

@@ -1,0 +1,5 @@
+# Compiled output of `tsc -p .` (rebuilt by vscode:prepublish before packaging).
+/out/
+
+# `vsce package` output.
+*.vsix

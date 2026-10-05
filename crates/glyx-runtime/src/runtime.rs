@@ -77,12 +77,33 @@ fn glyx_create_params(snapshot: Option<Vec<u8>>, max_heap_mb: usize) -> v8::Crea
     }
 }
 
+/// Keeps a runtime's isolate entered (V8's "current" isolate on this
+/// thread) for the length of a call; exits on drop.
+///
+/// Every window's isolate lives on the event-loop thread. rusty_v8 enters an
+/// isolate when it's created and requires the isolate a scope works in to be
+/// the current one, so with a second window every call into the first would
+/// run in the wrong isolate (a panic, or heap corruption in GC). Each call
+/// enters its own isolate instead.
+struct Entered(*const v8::Isolate);
+
+impl Drop for Entered {
+    fn drop(&mut self) {
+        // SAFETY: paired with the `enter` in `V8Runtime::enter`, same thread,
+        // and the isolate outlives the guard (it lives in the runtime).
+        unsafe { (*self.0).exit(); }
+    }
+}
+
 pub struct V8Runtime {
     // ⚠ DROP ORDER MATTERS: inspector holds V8 references; it must be
     //   dropped before `isolate`. Rust drops fields in declaration order.
     /// CDP inspector -- present only in dev mode when GLYX_INSPECT_PORT is set.
     #[cfg(feature = "dev")]
     pub inspector: Option<GlyxInspector>,
+    /// DevTools CPU profiler session, made on first use (also before `isolate`).
+    #[cfg(feature = "dev")]
+    profiler: Option<crate::profiler::JsProfiler>,
     isolate:      v8::OwnedIsolate,
     context:      v8::Global<v8::Context>,
     queue:        CompletionQueue,
@@ -109,7 +130,24 @@ pub struct V8Runtime {
     state_ptr: StatePtrUsize,
 }
 
+impl Drop for V8Runtime {
+    fn drop(&mut self) {
+        // `OwnedIsolate`'s own drop exits the isolate and requires it to be
+        // current; enter it so windows can close in any order.
+        // SAFETY: balanced by that exit, on the owning thread.
+        unsafe { self.isolate.enter(); }
+    }
+}
+
 impl V8Runtime {
+    /// Make this runtime's isolate current until the guard drops.
+    fn enter(&self) -> Entered {
+        let isolate: &v8::Isolate = &self.isolate;
+        // SAFETY: exited by `Entered::drop` on this thread.
+        unsafe { isolate.enter(); }
+        Entered(isolate as *const v8::Isolate)
+    }
+
     /// Create a new V8Runtime with a fresh isolate.
     ///
     /// Uses a private IPC bus and handle 0 -- suitable for single-window apps
@@ -206,13 +244,24 @@ impl V8Runtime {
             .and_then(|v| v.parse::<u16>().ok())
             .map(|port| GlyxInspector::new(&mut isolate, &context, port, &inspect_handle, Arc::clone(&cdp_log_tx)));
 
-        Self {
+        let mut rt = Self {
             #[cfg(feature = "dev")]
             inspector,
+            #[cfg(feature = "dev")]
+            profiler: None,
             isolate, context, queue, scene, events, layout_cache,
             perf_state, deeplink_url_queue, db_pools, video_events, webview_events,
             raycast_requests, raycast_results, state_ptr,
+        };
+        // V8's built-in `console` prints nowhere without an inspector; route
+        // it through `__glyx_log` like the snapshot and QuickJS paths do.
+        if let Err(e) = rt.eval(crate::console_js::CONSOLE_POLYFILL) {
+            log::warn!("[v8] console install failed: {e}");
         }
+        // Built (rusty_v8 enters an isolate on creation); from here on it's
+        // entered only while in use. See `enter`.
+        unsafe { rt.isolate.exit(); }
+        rt
     }
 
     /// Create a new GlyxRuntime from a snapshot blob (pre-executed JS heap).
@@ -313,13 +362,18 @@ impl V8Runtime {
             .and_then(|v| v.parse::<u16>().ok())
             .map(|port| GlyxInspector::new(&mut isolate, &context, port, &inspect_handle, Arc::clone(&cdp_log_tx)));
 
-        Ok(Self {
+        let rt = Self {
             #[cfg(feature = "dev")]
             inspector,
+            #[cfg(feature = "dev")]
+            profiler: None,
             isolate, context, queue, scene, events, layout_cache,
             perf_state, deeplink_url_queue, db_pools, video_events, webview_events,
             raycast_requests, raycast_results, state_ptr,
-        })
+        };
+        // As in `new_with_ipc`: entered only while in use from here on.
+        unsafe { rt.isolate.exit(); }
+        Ok(rt)
     }
 
     // ── Plugin hot-reload (dev mode) ──────────────────────────────────────────
@@ -327,6 +381,7 @@ impl V8Runtime {
     /// Re-eval a plugin IIFE and refresh its exported commands in `js_backend_commands`.
     /// Called by glyx-core's dev-mode event handler on file-change rebuild.
     pub fn reload_plugin(&mut self, global_name: &str, prefix: Option<&str>, bundled_js: &str) {
+        let _entered = self.enter();
         v8::scope_with_context!(let scope, &mut self.isolate, &self.context);
         reload_plugin_in_scope(scope, self.state_ptr, global_name, prefix, bundled_js);
     }
@@ -335,6 +390,7 @@ impl V8Runtime {
 
     /// Call each extension's `register()` so it can add its own __myapp_* bindings.
     pub fn register_extensions(&mut self, extensions: &[Box<dyn crate::GlyxExtension>]) {
+        let _entered = self.enter();
         if extensions.is_empty() { return; }
         v8::scope_with_context!(let scope, &mut self.isolate, &self.context);
         let ctx    = v8::Local::new(&scope, &self.context);
@@ -348,6 +404,7 @@ impl V8Runtime {
     // ── Script execution ──────────────────────────────────────────────────────
 
     pub fn eval(&mut self, source: &str) -> Result<String, RuntimeError> {
+        let _entered = self.enter();
         // All V8 handle-scope work is in a nested block so every borrow of
         // `self.isolate` is released before `low_memory_notification()` runs.
         let result = {
@@ -362,8 +419,13 @@ impl V8Runtime {
             // of "vm".  With --source-map=inline in bun and --enable_source_maps
             // in V8 (dev builds), positions are automatically translated back to
             // the original .jsx/.tsx source file and line.
+            // A trailing `//# sourceURL=` names the script instead (DevTools
+            // names the app bundle so profiles can map it to source files).
+            let name = source.trim_end().rsplit_once('\n')
+                .map_or(source.trim_end(), |(_, last)| last)
+                .strip_prefix("//# sourceURL=").unwrap_or("app.js");
             let resource_name: v8::Local<v8::Value> =
-                v8::String::new(try_catch, "app.js").unwrap().into();
+                v8::String::new(try_catch, name).unwrap().into();
             let source_map_url: v8::Local<v8::Value> =
                 v8::String::new(try_catch, "").unwrap().into();
             let origin = v8::ScriptOrigin::new(
@@ -437,6 +499,7 @@ impl V8Runtime {
     /// setup fails, only `__glyx_canvas_protocol = "json"` is set and JS uses
     /// the JSON `__glyx_canvas_update` path.
     pub fn init_canvas_buffers(&mut self, protocol: &str, buffer_kb: usize) {
+        let _entered = self.enter();
         v8::scope_with_context!(let scope, &mut self.isolate, &self.context);
         let ctx    = v8::Local::new(&scope, &self.context);
         let global = ctx.global(&scope);
@@ -493,6 +556,7 @@ impl V8Runtime {
     /// Drain the completion queue and resolve any pending JS Promises.
     /// Must be called from the V8 thread (same thread that created the isolate).
     pub fn tick(&mut self) {
+        let _entered = self.enter();
         let completions: Vec<(usize, Result<String, String>)> = {
             let mut q = self.queue.lock();
             q.drain(..).map(|c| (c.resolver_ptr.into_raw(), c.result)).collect()
@@ -540,6 +604,7 @@ impl V8Runtime {
     ///
     /// Returns `Some(error_message)` if a JS exception was thrown, `None` on success.
     pub fn frame_tick(&mut self) -> Option<String> {
+        let _entered = self.enter();
         // Pump pending CDP messages before running JS, so DevTools commands
         // (e.g. Runtime.evaluate) execute at a predictable point each frame.
         #[cfg(feature = "dev")]
@@ -602,6 +667,7 @@ impl V8Runtime {
     // ── Scene commands ────────────────────────────────────────────────────────
 
     pub fn drain_scene_commands(&mut self) -> Vec<SceneCommand> {
+        let _entered = self.enter();
         let local = crate::bindings::take_frame_scene(self.state_ptr);
         let mut q = self.scene.lock();
         if !local.is_empty() {
@@ -615,6 +681,7 @@ impl V8Runtime {
     /// (e.g. initial render deferred via Promise.resolve().then()) is committed
     /// and its scene commands are in the queue before `drain_scene_commands()`.
     pub fn flush_microtasks(&mut self) {
+        let _entered = self.enter();
         v8::scope_with_context!(let scope, &mut self.isolate, &self.context);
         scope.perform_microtask_checkpoint();
     }
@@ -628,6 +695,7 @@ impl V8Runtime {
     /// collection that reclaims them.  The call typically takes <2 ms for the
     /// heap sizes Glyx uses and is invisible to the user.
     pub fn gc_hint(&mut self) {
+        let _entered = self.enter();
         self.isolate.low_memory_notification();
     }
 
@@ -635,11 +703,33 @@ impl V8Runtime {
     ///
     /// Clearing the map drops the `SqlitePool` values, which triggers SQLx's
     /// graceful pool shutdown (waits for in-flight queries, then closes connections).
+    /// Start sampling JS (DevTools CPU profiler), every `interval_us`.
+    #[cfg(feature = "dev")]
+    pub fn profile_start(&mut self, interval_us: u32) -> Result<(), String> {
+        let _entered = self.enter();
+        if self.inspector.is_some() {
+            return Err("the CPU profiler isn't available while Chrome DevTools is attached (--inspect); use its Performance panel".into());
+        }
+        let profiler = self.profiler.get_or_insert_with(|| crate::profiler::JsProfiler::new(&mut self.isolate, &self.context));
+        profiler.start(&mut self.isolate, &self.context, interval_us)
+    }
+
+    /// Stop sampling; the `cpuProfile` JSON.
+    #[cfg(feature = "dev")]
+    pub fn profile_stop(&mut self) -> Result<serde_json::Value, String> {
+        let _entered = self.enter();
+        match self.profiler.as_mut() {
+            Some(p) => p.stop(&mut self.isolate, &self.context),
+            None => Err("not recording".into()),
+        }
+    }
+
     pub fn shutdown_db_pools(&self) {
         self.db_pools.lock().clear();
     }
 
     pub fn heap_stats(&mut self) -> HeapStats {
+        let _entered = self.enter();
         let stats = self.isolate.get_heap_statistics();
         HeapStats {
             used_heap_size: stats.used_heap_size(),
@@ -738,6 +828,16 @@ impl JsRuntime for V8Runtime {
     fn gc_hint(&mut self) {
         self.gc_hint();
     }
+
+    #[cfg(feature = "dev")]
+    fn profile_start(&mut self, interval_us: u32) -> Result<(), String> {
+        self.profile_start(interval_us)
+    }
+
+    #[cfg(feature = "dev")]
+    fn profile_stop(&mut self) -> Result<serde_json::Value, String> {
+        self.profile_stop()
+    }
 }
 
 #[cfg(test)]
@@ -749,6 +849,41 @@ mod tests {
     /// — one JS plugin loaded, for exercising `register_all`/`__glyx_backend_call`'s
     /// JS-command path end to end on the V8 side, which (unlike QuickJS) had no
     /// plugin-specific test coverage at all before this.
+    /// Two windows: each runtime works in its own isolate whatever order they
+    /// were made in, and they can be dropped in any order. (Before, after a
+    /// second window opened, calls into the first ran in the second's isolate:
+    /// a "do not belong to the same Isolate" panic, or heap corruption in GC.)
+    #[test]
+    fn runtimes_work_and_drop_in_any_order() {
+        let mut first = new_runtime_with_plugin(None, "", "__unused_a");
+        let mut second = new_runtime_with_plugin(None, "", "__unused_b");
+        first.eval("globalThis.who = 'first'").expect("eval in the first runtime");
+        second.eval("globalThis.who = 'second'").expect("eval in the second runtime");
+        first.gc_hint();
+        first.flush_microtasks();
+        assert_eq!(first.eval("who").unwrap(), "first");
+        assert_eq!(second.eval("who").unwrap(), "second");
+        drop(first); // not the reverse of creation order
+        second.gc_hint();
+        assert_eq!(second.eval("who").unwrap(), "second");
+    }
+
+    /// The DevTools CPU profiler samples JS and names the functions it saw.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn cpu_profile_finds_the_busy_function() {
+        let mut rt = new_runtime_with_plugin(None, "", "__unused_p");
+        rt.profile_start(100).expect("start");
+        assert!(rt.profile_start(100).is_err(), "already recording");
+        rt.eval("function busyLoop() { let x = 0; const end = Date.now() + 150; while (Date.now() < end) x += Math.sqrt(x + 1); return x; } busyLoop();").unwrap();
+        let profile = rt.profile_stop().expect("stop");
+        let names: Vec<&str> = profile["nodes"].as_array().unwrap().iter()
+            .filter_map(|n| n["callFrame"]["functionName"].as_str()).collect();
+        assert!(names.contains(&"busyLoop"), "{names:?}");
+        assert!(!profile["samples"].as_array().unwrap().is_empty());
+        assert!(rt.profile_stop().is_err(), "not recording any more");
+    }
+
     fn new_runtime_with_plugin(prefix: Option<&str>, bundled_js: &str, global_name: &str) -> V8Runtime {
         // Must run exactly once per process before any V8Runtime/isolate is
         // created — safe to call repeatedly (see `crate::init_v8`'s doc

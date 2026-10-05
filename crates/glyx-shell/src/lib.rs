@@ -49,6 +49,14 @@ pub enum GlyxUserEvent {
     Quit,
     /// Quit then re-launch the same executable (for OTA apply / settings reload).
     Restart,
+    /// Something outside the event loop (a devtools request) needs the app's
+    /// attention; forwarded as `ShellEvent::Wake` so an idle app handles it
+    /// without waiting for its next frame.
+    Wake,
+    /// Synthetic input (devtools automation): delivered to the handler
+    /// exactly like the real event, then the windows are redrawn, as real
+    /// input does.
+    Inject(ShellEvent),
     /// Routed from `accesskit_winit::Adapter` (created with `with_event_loop_proxy`)
     /// — initial-tree requests, AT action requests, and deactivation.
     #[cfg(feature = "a11y")]
@@ -85,6 +93,8 @@ impl std::fmt::Debug for A11yUpdateFn {
 /// All fields use primitive Rust types — no winit types leak through.
 #[derive(Debug, Clone)]
 pub enum ShellEvent {
+    /// See `GlyxUserEvent::Wake`.
+    Wake,
     /// The pre-init splash window (see `ShellConfig::splash_window`) is open
     /// and ready to be painted. Fired, at most once, before the real
     /// `WindowReady` for the main window — deliberately NOT part of the
@@ -119,7 +129,9 @@ pub enum ShellEvent {
     /// Cursor moved to physical pixel position.
     CursorMoved { window_handle: u32, x: f64, y: f64 },
     /// Vertical scroll (positive = scroll down).
-    Scroll { window_handle: u32, delta_y: f32 },
+    /// `precise`: a touchpad / pixel-delta device, whose deltas are already
+    /// smooth (a wheel's line notches are not).
+    Scroll { window_handle: u32, delta_y: f32, precise: bool },
     /// Window became occluded (hidden/minimised) or visible again.
     /// `occluded = true` means the window is no longer visible on screen.
     Occluded { window_handle: u32, occluded: bool },
@@ -565,6 +577,13 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
                 self.restart_requested = true;
                 event_loop.exit();
             }
+            GlyxUserEvent::Wake => {
+                (self.handler)(ShellEvent::Wake);
+            }
+            GlyxUserEvent::Inject(ev) => {
+                (self.handler)(ev);
+                for w in self.window_arcs.values() { w.request_redraw(); }
+            }
             #[cfg(feature = "a11y")]
             GlyxUserEvent::Accesskit(accesskit_winit::Event { window_id, window_event }) => {
                 let Some(&handle) = self.windows.get(&window_id) else { return };
@@ -780,11 +799,12 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                let precise = matches!(delta, MouseScrollDelta::PixelDelta(_));
                 let delta_y = match delta {
                     MouseScrollDelta::LineDelta(_, y)   => y * 40.0,
                     MouseScrollDelta::PixelDelta(pos)   => pos.y as f32,
                 };
-                (self.handler)(ShellEvent::Scroll { window_handle: handle, delta_y });
+                (self.handler)(ShellEvent::Scroll { window_handle: handle, delta_y, precise });
                 if let Some(w) = self.window_arcs.get(&handle) {
                     w.request_redraw();
                 }

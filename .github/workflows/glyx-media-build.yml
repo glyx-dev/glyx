@@ -58,8 +58,10 @@ jobs:
 
       - name: Install ffmpeg build deps (vcpkg)
         run: |
-          # Use pre-built static ffmpeg from BtbN's GitHub releases
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+          # Pre-built shared ffmpeg from BtbN's GitHub releases. LGPL, not GPL:
+          # a GPL build (libx264 etc.) would put GPL obligations on every app
+          # that ships it. Recording picks an LGPL-safe H.264 encoder at runtime.
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip"
           Invoke-WebRequest $url -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-dist
           $dir = Get-ChildItem ffmpeg-dist | Select-Object -First 1 -ExpandProperty FullName
@@ -81,7 +83,7 @@ jobs:
             glyx-media-c\glyx_media.c ^
             /Fe:glyx-media-%GLYX_MEDIA_VERSION%-windows-x64.dll ^
             /link /LIBPATH:"%FFMPEG_DIR%\lib" ^
-            avformat.lib avcodec.lib avfilter.lib swscale.lib swresample.lib avutil.lib
+            avformat.lib avcodec.lib swscale.lib swresample.lib avutil.lib
 
       - name: Generate manifest + sign
         env:
@@ -91,6 +93,14 @@ jobs:
             glyx-media-$env:GLYX_MEDIA_VERSION-windows-x64.dll `
             windows x64 $env:GLYX_MEDIA_VERSION
 
+      # The wrapper links to these at runtime; `glyx package` ships them next
+      # to it. Only the five it uses (no avfilter / avdevice).
+      - name: Collect FFmpeg runtime libraries
+        run: |
+          Get-ChildItem (Join-Path $env:FFMPEG_DIR "bin\*.dll") |
+            Where-Object { $_.Name -match "^(avformat|avcodec|swscale|swresample|avutil)-\d+\.dll$" } |
+            Copy-Item -Destination .
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -99,6 +109,11 @@ jobs:
             glyx-media-${{ env.GLYX_MEDIA_VERSION }}-windows-x64.dll
             glyx-media-${{ env.GLYX_MEDIA_VERSION }}-windows-x64.manifest.json
             glyx-media-${{ env.GLYX_MEDIA_VERSION }}-windows-x64.manifest.sig
+            avformat-*.dll
+            avcodec-*.dll
+            avutil-*.dll
+            swresample-*.dll
+            swscale-*.dll
 
   # ── macOS x64 + arm64 ────────────────────────────────────────────────────────
   build-macos:

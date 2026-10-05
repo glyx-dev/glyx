@@ -42,3 +42,32 @@ test('pushClip / popClip are recorded in order', () => {
   c.popClip();
   expect(c._cmds.map((x) => x.type)).toEqual(['pushClip', 'fillCircle', 'popClip']);
 });
+
+test('arc() uses more segments for a wider sweep by default, or exactly `segments` when given', () => {
+  const count = (a1, segments) => {
+    const c = ctx();
+    c.beginPath();
+    c.arc(0, 0, 50, 0, a1, false, segments);
+    return c._path.length / 2;
+  };
+  // Default: the wider arc needs more points.
+  expect(count(Math.PI * 1.5)).toBeGreaterThan(count(Math.PI * 0.2));
+  // Fixed: one more point than segments, whatever the sweep.
+  expect(count(Math.PI * 1.5, 40)).toBe(41);
+  expect(count(Math.PI * 0.2, 40)).toBe(41);
+  expect(count(0.001, 40)).toBe(41);
+});
+
+test('bezierCurveTo() splits into 20 segments by default, or exactly `segments` when given', () => {
+  const count = (segments) => {
+    const c = ctx();
+    c.beginPath();
+    c.moveTo(0, 0);
+    const before = c._path.length / 2;
+    c.bezierCurveTo(10, 0, 20, 30, 30, 30, segments);
+    return c._path.length / 2 - before;
+  };
+  expect(count()).toBe(20);       // unchanged for every existing caller
+  expect(count(6)).toBe(6);
+  expect(count(4.2)).toBe(5);     // rounded up, never fewer than asked
+});

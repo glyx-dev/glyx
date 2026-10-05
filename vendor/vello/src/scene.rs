@@ -44,6 +44,11 @@ use vello_encoding::{
 #[derive(Clone, Default)]
 pub struct Scene {
     encoding: Encoding,
+    /// Glyx patch: how many 16x16 pixel tiles the shapes drawn into this scene cover
+    /// (bounding boxes, summed). Not used for rendering; it tells the renderer when a
+    /// scene asks much more of the GPU than the last one without having more paths
+    /// (see `adaptive`).
+    tiles: u64,
     #[cfg(feature = "bump_estimate")]
     estimator: vello_encoding::BumpEstimator,
 }
@@ -58,8 +63,15 @@ impl Scene {
     /// Removes all content from the scene.
     pub fn reset(&mut self) {
         self.encoding.reset();
+        self.tiles = 0;
         #[cfg(feature = "bump_estimate")]
         self.estimator.reset();
+    }
+
+    /// Glyx patch: tiles (16x16 pixels) covered by the shapes in this scene, from their
+    /// bounding boxes. An overestimate (clipping and overlap are ignored); see `adaptive`.
+    pub fn tile_estimate(&self) -> u64 {
+        self.tiles
     }
 
     /// Tally up the bump allocator estimate for the current state of the encoding,
@@ -206,6 +218,7 @@ impl Scene {
         transform: Affine,
         clip: &impl Shape,
     ) {
+        self.tiles += tile_cover(clip, &transform, 0.0);
         // The logic for encoding the clip shape differs between fill and stroke style clips, but
         // the logic is otherwise similar.
         //
@@ -293,6 +306,7 @@ impl Scene {
 
         self.encoding.encode_fill_style(Fill::NonZero);
         if self.encoding.encode_shape(&shape, true) {
+            self.tiles += tile_cover(shape, &transform, 0.0);
             let brush_transform =
                 Transform::from_kurbo(&transform.pre_translate(rect.center().to_vec2()));
             if self.encoding.encode_transform(brush_transform) {
@@ -325,6 +339,7 @@ impl Scene {
         self.encoding.encode_transform(t);
         self.encoding.encode_fill_style(style);
         if self.encoding.encode_shape(shape, true) {
+            self.tiles += tile_cover(shape, &transform, 0.0);
             if let Some(brush_transform) = brush_transform
                 && self
                     .encoding
@@ -373,6 +388,7 @@ impl Scene {
             }
             let encode_result = self.stroke_gpu_inner(style, transform, shape);
             if encode_result {
+                self.tiles += tile_cover(shape, &transform, style.width * 0.5);
                 if let Some(brush_transform) = brush_transform
                     && self
                         .encoding
@@ -478,7 +494,29 @@ impl Scene {
         self.encoding.flags |= pending;
         #[cfg(feature = "bump_estimate")]
         self.estimator.append(&other.estimator, t.as_ref());
+        // Glyx patch: the child's coverage, scaled by what the transform does to area.
+        let area_scale = transform.map_or(1.0, |a| a.determinant().abs());
+        self.tiles += (other.tiles as f64 * area_scale) as u64;
     }
+}
+
+/// Glyx patch: tiles (16x16 pixels) the bounding box of `shape`, transformed and grown by
+/// `inflate`, covers, on average. At least one; each side capped so a shape far larger
+/// than any window does not make the estimate meaningless.
+fn tile_cover(shape: &impl Shape, transform: &Affine, inflate: f64) -> u64 {
+    const TILE: f64 = 16.0;
+    const MAX_SIDE: f64 = 8192.0;
+    let b = transform
+        .transform_rect_bbox(shape.bounding_box())
+        .inflate(inflate, inflate);
+    let (w, h) = (b.width(), b.height());
+    if !(w.is_finite() && h.is_finite()) {
+        return 0;
+    }
+    let (w, h) = (w.clamp(0.0, MAX_SIDE), h.clamp(0.0, MAX_SIDE));
+    // A box w pixels wide touches about w/16 + 1 tiles across (it rarely starts on a
+    // tile edge). Rounding w up to whole tiles instead hides growth between sizes.
+    ((w / TILE + 1.0) * (h / TILE + 1.0)).ceil() as u64
 }
 
 impl From<Encoding> for Scene {
@@ -487,6 +525,7 @@ impl From<Encoding> for Scene {
         // removed at some point - see https://github.com/linebender/vello/issues/541
         Self {
             encoding,
+            tiles: 0,
             #[cfg(feature = "bump_estimate")]
             estimator: vello_encoding::BumpEstimator::default(),
         }
@@ -674,6 +713,9 @@ impl<'a> DrawGlyphs<'a> {
         // that is opaque to the current encoding.
         // See <https://github.com/linebender/vello/issues/424>
         self.scene.encoding.force_next_transform_and_style();
+        // Glyx patch: each glyph covers about a glyph-sized box of tiles.
+        let cells = ((self.run.font_size as f64 / 16.0).ceil() + 1.0).powi(2) as u64;
+        self.scene.tiles += self.run.glyphs.len() as u64 * cells;
         self.run.glyphs.len()
     }
 

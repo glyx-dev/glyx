@@ -33,8 +33,14 @@ Charts are drawn with the Canvas path API (fill/stroke/arc + fillText) and only 
 
 - `LineChart(props)` — line chart component.
 - `AreaChart(props)` — filled area chart component.
-- `BarChart(props)` — bar chart component.
+- `BarChart(props)` — bar chart component; `series` + `stacked` for grouped and stacked bars.
 - `PieChart(props)` — pie/donut chart component.
+- `ScatterChart(props)` — scatter plot; points with a `size` make a bubble chart.
+- `CandlestickChart(props)` — OHLC candles.
+- `Sparkline(props)` — a small axis-less line.
+- `useChartStream(options)` — a fixed-length window over a live feed.
+
+`width`/`height` accept a percentage string (`'100%'`) to follow the container. `AreaChart` takes `stacked`; `zoomPan` charts also zoom with Ctrl + wheel.
 - `Legend({ items, onToggle, disabled, style })` — standalone legend, with optional series toggling (`onToggle`) and a `disabled` list to grey out hidden series.
 
 All chart components take `data`, `width`, and `height` at minimum; consult each component's props in `src/index.js` for series-specific options (colors, axis formatting, hover/tooltip behavior).

@@ -44,7 +44,7 @@ render(<Counter />);
 ### Core primitives (`core.js`)
 - `View`, `RepaintBoundary`, `Text`, `Image`, `Pressable` — base layout/content/interaction primitives.
 - `useDraggable(handlers)` — low-level drag gesture hook used by higher-level packages (`@glyx-dev/drag-drop`, `@glyx-dev/split-pane`, `@glyx-dev/table`, …).
-- `ScrollView`, `VirtualizedList` — scrollable and virtualized-list containers.
+- `ScrollView`, `VirtualizedList` — scrollable and virtualized-list containers. `ScrollView` scrolls smoothly by default (`smoothScroll={false}` opts out).
 - `useWindowSize()`, `useScreenSize()`, `useMediaQuery(minWidth)` — layout/responsive hooks.
 - `getEnv(name)`, `measureText(text, fontSize, maxWidth)` — environment and text-measurement utilities.
 - `SelectionArea`, `SelectableText`, `SelectColorsContext`, `SelectColorsProvider`, `SELECT_COLORS_DARK` — text-selection support.
@@ -70,4 +70,4 @@ Namespaced objects/functions wrapping native bindings, each gated by the matchin
 - `hasAccessibility()` — capability query for whether a11y support is available.
 
 ### Event-registry helpers
-Used internally by companion packages (`@glyx-dev/context-menu`, `@glyx-dev/rich-text`, `@glyx-dev/drag-drop`, …): `addGlobalClickListener`, `removeGlobalClickListener`, `addKeyListener`, `removeKeyListener`, `registerInput`, `unregisterInput`, `registerScrollView`, `unregisterScrollView`, `registerDraggable`, `unregisterDraggable`.
+Used internally by companion packages (`@glyx-dev/context-menu`, `@glyx-dev/rich-text`, `@glyx-dev/drag-drop`, …): `addGlobalClickListener`, `removeGlobalClickListener`, `addKeyListener`, `removeKeyListener`, `registerInput`, `unregisterInput`, `registerScrollView`, `unregisterScrollView`, `registerDraggable`, `unregisterDraggable`, `registerWheel`, `unregisterWheel`.

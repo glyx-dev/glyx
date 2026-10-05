@@ -130,6 +130,8 @@ mod bind_updater;
 mod bind_tray;
 #[cfg(all(feature = "v8", feature = "shell"))]
 mod bind_shell;
+#[cfg(feature = "v8")]
+mod bind_print;
 
 #[cfg(feature = "v8")]
 pub use self::bind_core::*;
@@ -153,6 +155,8 @@ pub use self::bind_updater::*;
 pub use self::bind_tray::*;
 #[cfg(all(feature = "v8", feature = "shell"))]
 pub use self::bind_shell::*;
+#[cfg(feature = "v8")]
+pub use self::bind_print::*;
 
 // IPC bus 
 //
@@ -317,6 +321,14 @@ pub enum InputEvent {
     /// A Rust-side system watcher (battery/memory/darkMode/…) detected a
     /// CHANGE.  Pushed only on deltas — JS stays idle between changes.
     SystemWatch { id: u32, payload: String },
+    /// A native menu bar item was chosen (mouse, mnemonic or accelerator-less
+    /// menu navigation). `checked` is the new state of a checkable item.
+    /// Pushed by the click itself, so JS never polls for menus.
+    MenuBar { id: String, checked: Option<bool> },
+    /// A tray icon or tray menu event, as the JSON `TrayEvent` serializes to
+    /// (`{"MenuItemClick":{"tray_id":1,"item_id":"quit"}}`). Pushed only while
+    /// something listens, so JS does not poll for the tray.
+    Tray { json: String },
     /// IME composition event, routed only to the currently-focused node
     /// (see `PerWindowState.focused_node`). `kind` is one of "enabled" /
     /// "preedit" / "commit" / "disabled"; `cursor` is a byte-offset (start,
@@ -1092,6 +1104,12 @@ pub struct NodeProps {
     /// CSS easing: `linear`, `ease`, `ease-in`, `ease-out`, `ease-in-out` or
     /// `cubic-bezier(x1,y1,x2,y2)`. `None` → ease-out cubic.
     pub transition_easing: Option<String>,
+    /// Spring transition: stiffness / damping (mass 1). Setting either makes
+    /// the transition a spring (missing one takes its default) that keeps its
+    /// velocity when retargeted; `transition_ms` and `transition_easing` are
+    /// then ignored. `None` for both → a timed, eased transition.
+    pub transition_stiffness: Option<f32>,
+    pub transition_damping: Option<f32>,
     /// `@glyx-dev/motion` keyframe animation: JSON `[[offset, {props}], ...]`
     /// with offsets in 0..=1 (built by `@glyx-dev/react` from the
     /// `animation` prop). Animatable props as for transitions.
@@ -1141,9 +1159,13 @@ pub struct NodeProps {
     pub scrollbar_color: Option<String>,
     /// When false, the scrollbar is hidden entirely (default true).
     pub show_scrollbar: Option<bool>,
+    /// `Some(true)`: Rust eases the displayed `scroll_offset_y` toward each new
+    /// value instead of jumping. Set by `ScrollView` (opt out with
+    /// `smoothScroll={false}`); other scrolling nodes snap as before.
+    pub smooth_scroll: Option<bool>,
 }
 
-//  Canvas 2D draw commands 
+//  Canvas 2D draw commands
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -1621,6 +1643,7 @@ pub fn register_all(
 
     register!("__glyx_request_frame", request_frame_callback);
     register!("__glyx_log",         js_log);
+    register!("__glyx_devNet",      js_dev_net);
     register!("__glyx_getEnv",      get_env_callback);
     register!("__glyx_readFile",      read_file_callback);
     register!("__glyx_readFileBytes", read_file_bytes_callback);
@@ -1703,10 +1726,23 @@ pub fn register_all(
     register!("__glyx_tray_update_menu",   tray_update_menu_callback);
     register!("__glyx_tray_set_tooltip",   tray_set_tooltip_callback);
     register!("__glyx_tray_poll_events",   tray_poll_events_callback);
+    register!("__glyx_tray_listen",        tray_listen_callback);
+
+    // Native window menu bar
+    register!("__glyx_menubar_set",         menubar_set_callback);
+    register!("__glyx_menubar_clear",       menubar_clear_callback);
+    register!("__glyx_menubar_set_enabled", menubar_set_enabled_callback);
+    register!("__glyx_menubar_set_checked", menubar_set_checked_callback);
+    register!("__glyx_menubar_supported",   menubar_supported_callback);
 
     //  Shell (Tier 1: scoped exec)
     #[cfg(feature = "shell")]
     register!("__glyx_shell_run", shell_run_callback);
+
+    //  Printing
+    register!("__glyx_print_listPrinters",      print_list_printers_callback);
+    register!("__glyx_print_getDefaultPrinter",  print_get_default_printer_callback);
+    register!("__glyx_print_file",               print_file_callback);
 
     //  Network
     #[cfg(feature = "fetch")]
@@ -1781,6 +1817,9 @@ pub fn register_all(
     //  Deep links 
     register!("__glyx_deeplink_getInitialUrl", deeplink_get_initial_url_callback);
     register!("__glyx_deeplink_poll",          deeplink_poll_callback);
+    register!("__glyx_autostart_isEnabled",         autostart_is_enabled_callback);
+    register!("__glyx_autostart_setEnabled",        autostart_set_enabled_callback);
+    register!("__glyx_autostart_wasOpenedAtLogin",  autostart_was_opened_at_login_callback);
 
     //  Canvas 2D / 3D 
     register!("__glyx_canvas_update",   canvas_update_callback);
@@ -2442,6 +2481,8 @@ fn parse_props(
     props.transition_ms       = get_num_prop(scope, obj, "transitionMs").map(|n| n as u32);
     props.transition_property = get_str_prop(scope, obj, "transitionProperty");
     props.transition_easing   = get_str_prop(scope, obj, "transitionEasing");
+    props.transition_stiffness = get_num_prop(scope, obj, "transitionStiffness");
+    props.transition_damping   = get_num_prop(scope, obj, "transitionDamping");
     props.animation_keyframes  = get_str_prop(scope, obj, "animationKeyframes");
     props.animation_ms         = get_num_prop(scope, obj, "animationMs").map(|n| n as u32);
     props.animation_easing     = get_str_prop(scope, obj, "animationEasing");
@@ -2464,6 +2505,7 @@ fn parse_props(
     props.scrollbar_width  = get_num_prop(scope, obj, "scrollbarWidth");
     props.scrollbar_color  = get_str_prop(scope, obj, "scrollbarColor");
     props.show_scrollbar   = get_bool_prop(scope, obj, "showScrollbar");
+    props.smooth_scroll    = get_bool_prop(scope, obj, "smoothScroll");
 
     props
 }

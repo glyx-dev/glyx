@@ -16,7 +16,7 @@ default = ["v8", "dev", "camera", "canvas3d", "audio", "gamepad", "hid", "ai", "
 # mobile or lightweight-desktop build.
 v8       = ["glyx-runtime/v8"]
 quickjs  = ["glyx-runtime/quickjs"]
-dev      = ["notify", "glyx-runtime/dev", "ffmpeg-sidecar", "arboard"]
+dev      = ["notify", "glyx-runtime/dev", "dep:glyx-devtools", "ffmpeg-sidecar", "arboard", "glyx-gpu/counters"]
 camera   = ["dep:nokhwa", "glyx-runtime/camera"]
 canvas3d = ["dep:glyx-3d", "glyx-runtime/canvas3d", "glyx-renderer/canvas3d"]
 audio    = ["glyx-runtime/audio", "dep:rodio"]
@@ -39,6 +39,7 @@ glyx-text     = { path = "../glyx-text" }
 glyx-layout   = { path = "../glyx-layout" }
 glyx-runtime  = { path = "../glyx-runtime", default-features = false }
 glyx-perf     = { path = "../glyx-perf" }
+glyx-devtools = { path = "../glyx-devtools", optional = true }
 winit          = { workspace = true }
 tokio          = { workspace = true }
 pollster       = { workspace = true }
@@ -78,6 +79,7 @@ windows-sys = { workspace = true, features = [
     "Win32_Security_Authorization",
     "Win32_System_Threading",
     "Win32_System_Memory",
+    "Win32_System_ProcessStatus",
 ] }
 # Direct2D present target (experimental `renderMode: 'direct2d'` backend, see
 # d2d_present.rs). Uses the higher-level `windows` crate (COM wrapper methods)

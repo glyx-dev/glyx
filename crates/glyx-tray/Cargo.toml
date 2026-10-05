@@ -8,3 +8,6 @@ log       = { workspace = true }
 serde     = { workspace = true, features = ["derive"] }
 tray-icon = { workspace = true }
 muda      = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

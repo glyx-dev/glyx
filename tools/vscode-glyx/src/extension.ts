@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { openDevtools, stopDevtools } from './devtools';
 
 // ── State ──────────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,13 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('glyx.package',      cmdPackage),
     vscode.commands.registerCommand('glyx.openConfig',   cmdOpenConfig),
     vscode.commands.registerCommand('glyx.createProject', cmdCreateProject),
+    vscode.commands.registerCommand('glyx.openDevtools', () => {
+      const root = getProjectRoot() ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!root) { vscode.window.showErrorMessage('Open a folder first.'); return; }
+      return openDevtools(context, getCli(), root);
+    }),
+    vscode.commands.registerCommand('glyx.openDevtoolsPanel', () => cmdOpenDevtoolsPanel(context)),
+    vscode.commands.registerCommand('glyx.copyMcpConfig', cmdCopyMcpConfig),
   );
 
   // Task provider so glyx tasks work in tasks.json
@@ -73,6 +81,7 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
+  stopDevtools();
   devTerminal?.dispose();
 }
 
@@ -214,6 +223,37 @@ async function cmdPackage() {
   term.sendText(`${getCli()} package${target.value ? ' ' + target.value : ''}`);
 }
 
+const DEVTOOLS_PANELS: { id: string; label: string }[] = [
+  { id: 'overview',    label: 'Overview' },
+  { id: 'inspector',   label: 'Inspector' },
+  { id: 'console',     label: 'Console' },
+  { id: 'performance', label: 'Performance' },
+  { id: 'animations',  label: 'Animations' },
+  { id: 'memory',      label: 'Memory' },
+  { id: 'layout',      label: 'Layout' },
+  { id: 'network',     label: 'Network' },
+  { id: 'cpu',         label: 'CPU profiler' },
+];
+
+async function cmdOpenDevtoolsPanel(context: vscode.ExtensionContext) {
+  const root = getProjectRoot() ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!root) { vscode.window.showErrorMessage('Open a folder first.'); return; }
+  const picked = await vscode.window.showQuickPick(
+    DEVTOOLS_PANELS.map(p => ({ label: p.label, id: p.id })),
+    { title: 'Open Glyx DevTools on…', placeHolder: 'Pick a panel' }
+  );
+  if (!picked) return;
+  return openDevtools(context, getCli(), root, picked.id);
+}
+
+function cmdCopyMcpConfig() {
+  const cli = getCli();
+  const config = { mcpServers: { glyx: { command: cli, args: ['mcp'] } } };
+  const text = JSON.stringify(config, null, 2);
+  vscode.env.clipboard.writeText(text);
+  vscode.window.showInformationMessage('Glyx MCP config copied — paste it into your agent’s MCP settings.');
+}
+
 function cmdOpenConfig() {
   const root = getProjectRoot();
   if (!root) return;
@@ -279,6 +319,9 @@ class GlyxTreeDataProvider implements vscode.TreeDataProvider<GlyxItem> {
       new GlyxCmdItem('Build', 'glyx.build', 'package'),
       new GlyxCmdItem('Package for Distribution', 'glyx.package', 'archive'),
       new GlyxCmdItem('Open Config', 'glyx.openConfig', 'settings-gear'),
+      new GlyxCmdItem('Open DevTools', 'glyx.openDevtools', 'inspect'),
+      new GlyxCmdItem('Open DevTools on…', 'glyx.openDevtoolsPanel', 'inspect'),
+      new GlyxCmdItem('Copy MCP Server Config', 'glyx.copyMcpConfig', 'copy'),
     );
 
     return items;

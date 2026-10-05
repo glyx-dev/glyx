@@ -18,6 +18,9 @@ pub(crate) struct RenderCtx<'a> {
     pub text_sys: &'a mut TextSystem,
     pub label_cache: &'a mut lru::LruCache<LabelKey, CachedLabel>,
     pub canvas_cmds: &'a std::collections::HashMap<u32, Vec<CanvasCmd>>,
+    /// Interpolated command lists for canvases easing toward new data: drawn
+    /// in place of `canvas_cmds` (their target) while they move.
+    pub canvas_anim: &'a std::collections::HashMap<u32, Vec<CanvasCmd>>,
     /// Accumulated (canvas3d_id, x, y, w, h) for post-Vello 3D overlay rendering.
     #[cfg(feature = "canvas3d")]
     pub canvas3d_overlays: &'a mut Vec<(u32, f32, f32, f32, f32)>,
@@ -78,6 +81,7 @@ impl<'a> RenderCtx<'a> {
 fn apply_opacity(c: peniko::Color, opacity: f32) -> peniko::Color {
     if opacity >= 1.0 { c } else { c.multiply_alpha(opacity) }
 }
+
 
 pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut RenderCtx<'_>) {
     // ── O4b: clean-node fast path ────────────────────────────────────────
@@ -562,7 +566,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             }
             // Clip all canvas draw commands to the node's layout rect.
             ctx.frame.push_layer(rx, ry, rw, rh);
-            if let Some(cmds) = ctx.canvas_cmds.get(&id) {
+            if let Some(cmds) = ctx.canvas_anim.get(&id).or_else(|| ctx.canvas_cmds.get(&id)) {
                 // Clip pushes still open, so a canvas with unbalanced
                 // pushClip/popClip can't leak clips into the rest of the frame.
                 let mut clip_depth = 0usize;
@@ -572,13 +576,19 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                         // it's handled here (where ctx is available) rather than in
                         // the frame-only `draw_canvas_cmd`.
                         CanvasCmd::FillText { text, x, y, font_size, color, bold } => {
-                            let layout = if *bold {
-                                ctx.text_sys.styled_label(text, *font_size, f32::MAX, true, false, None)
-                            } else {
-                                ctx.text_sys.label(text, *font_size)
-                            };
+                            // Shaping is most of a label's cost, and a canvas draws
+                            // the same few strings (a chart's axis labels) every
+                            // frame — so share the Text-node label cache. Same
+                            // inputs as `TextSystem::label`/`bold_label` (single
+                            // line, no wrapping), so the layout is identical.
+                            let key = LabelKey::new(text, *font_size, f32::MAX, *bold, false, None);
+                            if ctx.label_cache.peek(&key).is_none() {
+                                let lbl = CachedLabel::new(ctx.text_sys, text, *font_size, f32::MAX, *color, *bold, false, None);
+                                ctx.label_cache.put(LabelKey::new(text, *font_size, f32::MAX, *bold, false, None), lbl);
+                            }
+                            let label = ctx.label_cache.get(&key).unwrap();
                             ctx.frame.draw_text(
-                                &layout, rx + *x as f64, ry + *y as f64,
+                                &label.layout, rx + *x as f64, ry + *y as f64,
                                 apply_opacity(rgba_to_vello(*color), child_opacity),
                             );
                         }
@@ -722,7 +732,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     }
 }
 
-fn draw_canvas_cmd(frame: &mut AnyFrame, cmd: &CanvasCmd, ox: f64, oy: f64, opacity: f32) {
+pub(crate) fn draw_canvas_cmd(frame: &mut AnyFrame, cmd: &CanvasCmd, ox: f64, oy: f64, opacity: f32) {
     use CanvasCmd::*;
     match cmd {
         Clear => {

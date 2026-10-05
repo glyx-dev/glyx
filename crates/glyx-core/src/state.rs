@@ -20,7 +20,7 @@ use crate::d2d_present::D2DPresent;
 
 /// How rendered pixels reach the window.
 ///
-/// `Gpu` — wgpu device + swapchain (Vello / FemtoVG, or TinySkia when soft
+/// `Gpu` — wgpu device + swapchain (Vello, or TinySkia when soft
 /// present is disabled via `GLYX_NO_SOFT_PRESENT=1`).
 /// `Soft` — softbuffer OS blit (TinySkia only). No wgpu objects exist at all.
 pub(super) enum Present {
@@ -153,6 +153,8 @@ pub(super) struct VideoStream {
     pub(super) latest_image:    Option<peniko::ImageData>,
     pub(super) video_volume:    Arc<Mutex<f32>>,
     pub(super) url:             String,
+    /// Audio position the video follows (see `av_clock`).
+    pub(super) clock:           Arc<crate::av_clock::AvClock>,
 }
 
 // ── Image cache ───────────────────────────────────────────────────────────────
@@ -254,6 +256,32 @@ pub(super) struct PerWindowState {
     /// Running keyframe animations (`animation` prop), keyed by node id —
     /// see `crate::motion::Animation` and `scene::tick_transitions`.
     pub(super) animations:  std::collections::HashMap<u32, crate::motion::Animation>,
+    /// Smooth-scrolling springs, keyed by ScrollView node id — see
+    /// `scene::sync_scroll` / `scene::tick_scroll`. While one runs, the node's
+    /// `props.scroll_offset_y` holds the *displayed* offset (so render, hit
+    /// testing and damage all agree); the spring's `target` is JS's value.
+    pub(super) scroll_springs: std::collections::HashMap<u32, crate::motion::ScrollSpring>,
+    /// Canvases easing toward a new command list, keyed by canvas node id —
+    /// see `scene::tick_canvas`. `canvas_cmds[id]` is always the target; the
+    /// tween holds where it started, and the frame loop samples what to draw.
+    pub(super) canvas_tweens: std::collections::HashMap<u32, crate::motion::CanvasTween>,
+    /// Each canvas's width/height (px) at its last draw. A canvas that was
+    /// resized redraws instantly: easing a resize would lag behind the window.
+    pub(super) canvas_size: std::collections::HashMap<u32, (Option<f32>, Option<f32>)>,
+    /// When each canvas was last redrawn, and the running average gap (ms)
+    /// between its redraws — see `motion::adapt_pace`.
+    pub(super) canvas_cadence: std::collections::HashMap<u32, (std::time::Instant, f64)>,
+    /// What each canvas looked like when last drawn, so the next redraw can be
+    /// limited to the part that changed — see `canvas_damage`.
+    pub(super) canvas_drawn: std::collections::HashMap<u32, crate::canvas_damage::CanvasDrawn>,
+    /// Frames left in which scrolling is from a precision device (touchpad):
+    /// its deltas are already smooth, so they apply with no easing. Counted in
+    /// frames, not time: a frame can take longer than any fixed window, and the
+    /// JS handler only runs when the next frame does.
+    pub(super) precise_scroll_frames: u8,
+    /// The clock `transitions` / `animations` run on (the real clock unless
+    /// devtools changes its rate).
+    pub(super) motion_clock: crate::motion::MotionClock,
     pub(super) images:       std::collections::HashMap<u32, peniko::ImageData>,
     pub(super) images_by_path: ByteBudgetImageCache,
     pub(super) image_cache_hits: u64,
@@ -301,6 +329,11 @@ pub(super) struct PerWindowState {
     /// cycling (see `focus.rs`). Drives IME composition routing (attach to
     /// this node's rect) and the accessibility tree's reported focus.
     pub(super) focused_node: Option<u32>,
+    /// Focus arrived by keyboard or assistive tech (Tab, AT focus action), so
+    /// its ring is showing. Cleared by any mouse press, like the web's
+    /// `:focus-visible`. When the focused node is removed and focus moves on,
+    /// the ring only follows if this is set.
+    pub(super) focus_visible: bool,
     /// Tracks Shift key state for Tab-cycling direction. Independent of
     /// `DevModeState::shift_down`, which only exists under the `dev`
     /// feature and is scoped to the dev-overlay shortcut — this one is
@@ -411,6 +444,61 @@ pub(super) struct PerWindowState {
     pub(super) pipeline_cache_saved: bool,
     #[cfg(feature = "dev")]
     pub(super) dev_mode: Option<DevModeState>,
+    /// Devtools `Inspector.highlightNode` target, outlined on every frame.
+    #[cfg(feature = "dev")]
+    pub(super) devtools_highlight: Option<u32>,
+    /// Per-frame damage records while a devtools client subscribes
+    /// (`Inspector.enableDamage`); `None` otherwise, so nothing is kept.
+    #[cfg(feature = "dev")]
+    pub(super) damage_log: Option<Vec<DamageRecord>>,
+    /// Devtools select mode (`Inspector.setInspectMode`): pointer moves
+    /// outline the element under the pointer, a left click picks it instead
+    /// of reaching the app, Escape cancels.
+    #[cfg(feature = "dev")]
+    pub(super) inspect_mode: bool,
+    /// Picks and cancels from select mode, drained by the devtools pump.
+    #[cfg(feature = "dev")]
+    pub(super) inspect_events: Vec<InspectEvent>,
+    /// Bumped whenever scene commands change the element tree, so devtools
+    /// can tell the Inspector to refresh (`Inspector.treeChanged`).
+    #[cfg(feature = "dev")]
+    pub(super) tree_version: u64,
+    /// Set by devtools while a client subscribes to a stream (tree, frames,
+    /// animations, damage): called when the tree changes or a frame is
+    /// recorded, it wakes the event loop once more so the change is sent
+    /// even if the app then goes idle. `None` otherwise (costs nothing).
+    #[cfg(feature = "dev")]
+    pub(super) devtools_notify: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    /// Devtools paint flashing (`Inspector.setOverlay { paintFlashing }`):
+    /// each frame's redrawn area flashes briefly.
+    #[cfg(feature = "dev")]
+    pub(super) paint_flash: bool,
+    /// Flashes still fading: area `[x, y, w, h]` and when it was drawn.
+    #[cfg(feature = "dev")]
+    pub(super) flashes: Vec<([f64; 4], std::time::Instant)>,
+    /// A devtools overlay (highlight, paint flashes) was drawn last frame:
+    /// the next frame renders the whole window, so partial redraws never
+    /// leave stale overlay pixels behind once it's gone.
+    #[cfg(feature = "dev")]
+    pub(super) overlay_was_drawn: bool,
+    /// Per-frame "why did this render" records while a devtools client
+    /// streams frames with detail (`Performance.enableFrames { detail }`).
+    #[cfg(feature = "dev")]
+    pub(super) frame_details: Option<std::collections::VecDeque<FrameDetail>>,
+    /// `Automation.screenshot` on a wgpu-presented window: set while a
+    /// capture is wanted, filled with the swapchain texture's pixels (0RGB,
+    /// same layout as `SoftPresent::last_frame`) by the render loop right
+    /// before `present()`, just once, then read and cleared by the devtools
+    /// pump. `None` the rest of the time — costs nothing when not screenshotting.
+    #[cfg(feature = "dev")]
+    pub(super) gpu_screenshot: Option<GpuScreenshotSlot>,
+}
+
+/// See `PerWindowState::gpu_screenshot`.
+#[cfg(feature = "dev")]
+#[derive(Default)]
+pub(super) struct GpuScreenshotSlot {
+    pub(super) result: Option<(u32, u32, Vec<u32>)>,
 }
 
 impl PerWindowState {
@@ -481,6 +569,37 @@ pub(super) enum DevBuildEvent {
         prefix:      Option<String>,
         bundled_js:  String,
     },
+}
+
+/// What one frame redrew and why (devtools `Performance.getFrameDetail`).
+#[cfg(feature = "dev")]
+#[derive(Debug, Clone)]
+pub(crate) struct FrameDetail {
+    /// The perf record's `frame_seq`.
+    pub seq: u64,
+    /// Elements marked dirty for this frame (capped).
+    pub dirty: Vec<u32>,
+    pub dirty_total: usize,
+    /// The redrawn area the dirty elements add up to; `None` = whole window.
+    pub damage: Option<[f64; 4]>,
+}
+
+/// Something the user did in devtools select mode.
+#[cfg(feature = "dev")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum InspectEvent {
+    Picked(u32),
+    Cancelled,
+}
+
+/// One rendered frame's damage, for the devtools damage stream.
+#[cfg(feature = "dev")]
+#[derive(Debug, Clone)]
+pub(crate) struct DamageRecord {
+    /// Redrawn area `[x, y, w, h]`; `None` = the whole window.
+    pub rect: Option<[f64; 4]>,
+    pub dirty_nodes: usize,
+    pub timestamp_ms: u64,
 }
 
 #[cfg(feature = "dev")]

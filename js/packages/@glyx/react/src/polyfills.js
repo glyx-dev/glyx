@@ -11,6 +11,13 @@ if (typeof performance === 'undefined') {
   };
 }
 
+// Glyx DevTools (CPU profiler, Components view): the development reconciler
+// only times renders ("ProfileMode") when a React DevTools hook exists as it
+// loads. A disabled placeholder is enough; nothing connects to it.
+if (globalThis.__glyx_devtools && typeof globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__ === 'undefined') {
+  globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__ = { isDisabled: true, supportsFiber: true, renderers: new Map() };
+}
+
 // V8 is embedded without ICU data, so locale-aware builtins throw
 // "Internal error. Icu error.".  Replace localeCompare with a plain
 // code-unit comparison (sufficient for sorting file names etc.).

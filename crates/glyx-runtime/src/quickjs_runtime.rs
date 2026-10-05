@@ -257,56 +257,7 @@ impl QuickJsRuntime {
     /// matching the (otherwise-unused-at-runtime) snapshot stub script's
     /// own console shim in `snapshot.rs`.
     fn install_polyfills(&self) -> Result<(), RuntimeError> {
-        const POLYFILL: &str = r#"
-        (function() {
-            function _fmt(args) {
-                return Array.prototype.map.call(args, function(x) {
-                    return typeof x === 'object' ? JSON.stringify(x) : String(x);
-                }).join(' ');
-            }
-            function _table(data) {
-                if (data == null || typeof data !== 'object') { __glyx_log(String(data)); return; }
-                var rows = Array.isArray(data) ? data.map(function(v, i) { return [String(i), v]; })
-                                                : Object.keys(data).map(function(k) { return [k, data[k]]; });
-                var cols = [];
-                rows.forEach(function(r) {
-                    var v = r[1];
-                    if (v != null && typeof v === 'object') {
-                        Object.keys(v).forEach(function(k) { if (cols.indexOf(k) === -1) cols.push(k); });
-                    } else if (cols.indexOf('Values') === -1) {
-                        cols.push('Values');
-                    }
-                });
-                var headers = ['(index)'].concat(cols);
-                var lines = rows.map(function(r) {
-                    var v = r[1];
-                    var cells = cols.map(function(c) {
-                        if (v != null && typeof v === 'object') {
-                            return c in v ? String(v[c]) : '';
-                        }
-                        return c === 'Values' ? String(v) : '';
-                    });
-                    return [r[0]].concat(cells);
-                });
-                var widths = headers.map(function(h, i) {
-                    return Math.max(h.length, lines.reduce(function(m, l) { return Math.max(m, l[i].length); }, 0));
-                });
-                var pad = function(s, w) { return s + Array(w - s.length + 1).join(' '); };
-                var sep = '+-' + widths.map(function(w) { return Array(w + 1).join('-'); }).join('-+-') + '-+';
-                var fmtRow = function(cells) { return '| ' + cells.map(function(c, i) { return pad(c, widths[i]); }).join(' | ') + ' |'; };
-                var out = [sep, fmtRow(headers), sep].concat(lines.map(fmtRow)).concat([sep]);
-                __glyx_log(out.join('\n'));
-            }
-            globalThis.console = {
-                log:   function() { __glyx_log(_fmt(arguments)); },
-                info:  function() { __glyx_log(_fmt(arguments)); },
-                warn:  function() { __glyx_log('[warn] ' + _fmt(arguments)); },
-                error: function() { __glyx_log('[error] ' + _fmt(arguments)); },
-                debug: function() { __glyx_log('[debug] ' + _fmt(arguments)); },
-                table: function(data) { _table(data); },
-            };
-        })();
-        "#;
+        const POLYFILL: &str = crate::console_js::CONSOLE_POLYFILL;
         self.ctx.with(|ctx| ctx.eval::<(), _>(POLYFILL))
             .map_err(|e| RuntimeError::CompileError(format!("quickjs polyfill install: {e}")))
     }
@@ -546,15 +497,23 @@ struct RegisterState {
 fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
-    let log_fn = Function::new(ctx.clone(), |msg: String| {
+    let window_id = reg.my_handle;
+    let log_fn = Function::new(ctx.clone(), move |msg: String| {
         log::info!("[js] {msg}");
+        crate::log_bus::publish(Some(window_id), &msg);
     })?;
     globals.set("__glyx_log", log_fn)?;
+
+    // DevTools Network panel feed (see `net_bus`).
+    let net_fn = Function::new(ctx.clone(), move |json: String| {
+        crate::net_bus::publish(Some(window_id), json);
+    })?;
+    globals.set("__glyx_devNet", net_fn)?;
 
     let time_fn = Function::new(ctx.clone(), || -> f64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as f64)
+            .map(|d| d.as_secs_f64() * 1000.0) // fractional ms, like V8's
             .unwrap_or(0.0)
     })?;
     globals.set("__glyx_getTime", time_fn)?;
@@ -564,8 +523,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     {
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let request_frame_fn = Function::new(ctx.clone(), move |ms: Opt<f64>| {
-            let ms = ms.0.unwrap_or(16.0).max(0.0) as u64;
+        let request_frame_fn = Function::new(ctx.clone(), move |ms: Opt<Option<f64>>| {
+            let ms = ms.0.flatten().unwrap_or(16.0).max(0.0) as u64;
             if let Some(redraw) = redraw.clone() {
                 tokio.spawn(async move {
                     if ms > 0 {
@@ -696,14 +655,14 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     }
     {
         let frame = Rc::clone(&reg.frame_scene);
-        let set_focus_fn = Function::new(ctx.clone(), move |id: Opt<u32>| {
-            frame.borrow_mut().push(SceneCommand::SetFocus { id: id.0 });
+        let set_focus_fn = Function::new(ctx.clone(), move |id: Opt<Option<u32>>| {
+            frame.borrow_mut().push(SceneCommand::SetFocus { id: id.0.flatten() });
             true
         })?;
         globals.set("__glyx_setFocus", set_focus_fn)?;
     }
     {
-        let create_image_fn = Function::new(ctx.clone(), move |_path: String, _w: Opt<f64>, _h: Opt<f64>| -> u32 {
+        let create_image_fn = Function::new(ctx.clone(), move |_path: String, _w: Opt<Option<f64>>, _h: Opt<Option<f64>>| -> u32 {
             // Image loading isn't ported yet (needs glyx_security path
             // resolution + SceneCommand::CreateImage wiring) — returns an
             // id so callers don't crash, but nothing will actually render.
@@ -762,13 +721,13 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     // ── Text measurement (table auto-sizing, caret hit-testing) ────────
     {
         let text_measure = Arc::clone(&reg.text_measure);
-        let measure_text_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>, text: String, font_size: Opt<f64>, max_width: Opt<f64>, style: Opt<String>, line_height: Opt<f64>| -> rquickjs::Result<rquickjs::Value<'js>> {
-            let font_size = font_size.0.unwrap_or(14.0) as f32;
-            let mw = max_width.0.unwrap_or(0.0);
+        let measure_text_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>, text: String, font_size: Opt<Option<f64>>, max_width: Opt<Option<f64>>, style: Opt<Option<String>>, line_height: Opt<Option<f64>>| -> rquickjs::Result<rquickjs::Value<'js>> {
+            let font_size = font_size.0.flatten().unwrap_or(14.0) as f32;
+            let mw = max_width.0.flatten().unwrap_or(0.0);
             let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
-            let style = style.0.unwrap_or_default();
+            let style = style.0.flatten().unwrap_or_default();
             let (bold, italic) = (style.contains("bold"), style.contains("italic"));
-            let line_height = line_height.0.map(|v| v as f32);
+            let line_height = line_height.0.flatten().map(|v| v as f32);
             let mut tm = text_measure.lock();
             let (w, h) = if bold || italic || line_height.is_some() {
                 let layout = tm.styled_label(&text, font_size, max_width, bold, italic, line_height);
@@ -785,12 +744,12 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     }
     {
         let text_measure = Arc::clone(&reg.text_measure);
-        let char_at_x_fn = Function::new(ctx.clone(), move |text: String, font_size: Opt<f64>, max_width: Opt<f64>, x: Opt<f64>, style: Opt<String>| -> u32 {
-            let font_size = font_size.0.unwrap_or(16.0) as f32;
-            let mw = max_width.0.unwrap_or(0.0);
+        let char_at_x_fn = Function::new(ctx.clone(), move |text: String, font_size: Opt<Option<f64>>, max_width: Opt<Option<f64>>, x: Opt<Option<f64>>, style: Opt<Option<String>>| -> u32 {
+            let font_size = font_size.0.flatten().unwrap_or(16.0) as f32;
+            let mw = max_width.0.flatten().unwrap_or(0.0);
             let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
-            let x = x.0.unwrap_or(0.0) as f32;
-            let style = style.0.unwrap_or_default();
+            let x = x.0.flatten().unwrap_or(0.0) as f32;
+            let style = style.0.flatten().unwrap_or_default();
             let (bold, italic) = (style.contains("bold"), style.contains("italic"));
             text_measure.lock().char_at_x_styled(&text, font_size, max_width, x, bold, italic) as u32
         })?;
@@ -798,12 +757,12 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     }
     {
         let text_measure = Arc::clone(&reg.text_measure);
-        let cursor_x_fn = Function::new(ctx.clone(), move |text: String, font_size: Opt<f64>, max_width: Opt<f64>, char_idx: Opt<f64>, style: Opt<String>| -> f64 {
-            let font_size = font_size.0.unwrap_or(16.0) as f32;
-            let mw = max_width.0.unwrap_or(0.0);
+        let cursor_x_fn = Function::new(ctx.clone(), move |text: String, font_size: Opt<Option<f64>>, max_width: Opt<Option<f64>>, char_idx: Opt<Option<f64>>, style: Opt<Option<String>>| -> f64 {
+            let font_size = font_size.0.flatten().unwrap_or(16.0) as f32;
+            let mw = max_width.0.flatten().unwrap_or(0.0);
             let max_width = if mw.is_finite() && mw > 0.0 { mw as f32 } else { 1.0e6 };
-            let char_idx = char_idx.0.unwrap_or(0.0).max(0.0) as usize;
-            let style = style.0.unwrap_or_default();
+            let char_idx = char_idx.0.flatten().unwrap_or(0.0).max(0.0) as usize;
+            let style = style.0.flatten().unwrap_or_default();
             let (bold, italic) = (style.contains("bold"), style.contains("italic"));
             text_measure.lock().cursor_x_at_styled(&text, font_size, max_width, char_idx, bold, italic) as f64
         })?;
@@ -815,19 +774,19 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     // exactly like render.rs, so both engines and the renderer agree.
     {
         let text_measure = Arc::clone(&reg.text_measure);
-        let pos_at_fn = Function::new(ctx.clone(), move |text: String, x: Opt<f64>, y: Opt<f64>, opts: Opt<Value<'js>>| -> u32 {
+        let pos_at_fn = Function::new(ctx.clone(), move |text: String, x: Opt<Option<f64>>, y: Opt<Option<f64>>, opts: Opt<Value<'js>>| -> u32 {
             let (style, bx) = text_geometry_from_opts(opts.0);
-            let x = x.0.unwrap_or(0.0) as f32;
-            let y = y.0.unwrap_or(0.0) as f32;
+            let x = x.0.flatten().unwrap_or(0.0) as f32;
+            let y = y.0.flatten().unwrap_or(0.0) as f32;
             text_measure.lock().hit_test(&text, &style, &bx, x, y).offset as u32
         })?;
         globals.set("__glyx_text_pos_at", pos_at_fn)?;
     }
     {
         let text_measure = Arc::clone(&reg.text_measure);
-        let caret_at_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>, text: String, offset: Opt<f64>, opts: Opt<Value<'js>>| -> rquickjs::Result<rquickjs::Value<'js>> {
+        let caret_at_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>, text: String, offset: Opt<Option<f64>>, opts: Opt<Value<'js>>| -> rquickjs::Result<rquickjs::Value<'js>> {
             let (style, bx) = text_geometry_from_opts(opts.0);
-            let offset = offset.0.unwrap_or(0.0).max(0.0) as usize;
+            let offset = offset.0.flatten().unwrap_or(0.0).max(0.0) as usize;
             let c = text_measure.lock()
                 .caret_rect(&text, &style, &bx, glyx_text::TextPosition::new(offset));
             let obj = Object::new(ctx)?;
@@ -862,7 +821,7 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let setter = w.set_maximized.clone();
         globals.set("__glyx_setMaximized", Function::new(ctx.clone(), move |v: bool| setter(v))?)?;
         let setter = w.set_minimized.clone();
-        globals.set("__glyx_setMinimized", Function::new(ctx.clone(), move |v: Opt<bool>| setter(v.0.unwrap_or(true)))?)?;
+        globals.set("__glyx_setMinimized", Function::new(ctx.clone(), move |v: Opt<Option<bool>>| setter(v.0.flatten().unwrap_or(true)))?)?;
         let getter = w.is_fullscreen.clone();
         globals.set("__glyx_isFullscreen", Function::new(ctx.clone(), move || getter())?)?;
         let getter = w.is_maximized.clone();
@@ -873,6 +832,14 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_setTitle", Function::new(ctx.clone(), move |v: String| setter(v))?)?;
         let setter = w.set_cursor.clone();
         globals.set("__glyx_setCursor", Function::new(ctx.clone(), move |v: String| setter(v))?)?;
+
+        // Native window menu bar: the window handle comes from this window's controller.
+        let hwnd = w.hwnd;
+        let (events, redraw) = (reg.events.clone(), reg.redraw.clone());
+        globals.set("__glyx_menubar_set", Function::new(ctx.clone(), move |json: String| {
+            crate::menubar_api::set(hwnd, &json, crate::menubar_api::sink(Arc::clone(&events), redraw.clone()))
+        })?)?;
+        globals.set("__glyx_menubar_clear", Function::new(ctx.clone(), move || crate::menubar_api::clear(hwnd))?)?;
     }
 
     // `__glyx_battery_getStatus() -> Promise<JSON | null>` — real
@@ -944,8 +911,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let queue = reg.queue.clone();
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, sql: String, params: Opt<String>| {
-            crate::quickjs_db::db_query(ctx, handle, sql, params.0.unwrap_or_default(), pools.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, sql: String, params: Opt<Option<String>>| {
+            crate::quickjs_db::db_query(ctx, handle, sql, params.0.flatten().unwrap_or_default(), pools.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_db_query", f)?;
     }
@@ -954,8 +921,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let queue = reg.queue.clone();
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, sql: String, params: Opt<String>| {
-            crate::quickjs_db::db_run(ctx, handle, sql, params.0.unwrap_or_default(), pools.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, sql: String, params: Opt<Option<String>>| {
+            crate::quickjs_db::db_run(ctx, handle, sql, params.0.flatten().unwrap_or_default(), pools.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_db_run", f)?;
     }
@@ -1005,8 +972,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let queue = reg.queue.clone();
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, table: String, id: String, vec_json: String, meta: Opt<String>| {
-            crate::quickjs_db::vectordb_upsert(ctx, handle, table, id, vec_json, meta.0.unwrap_or_default(), stores.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, table: String, id: String, vec_json: String, meta: Opt<Option<String>>| {
+            crate::quickjs_db::vectordb_upsert(ctx, handle, table, id, vec_json, meta.0.flatten().unwrap_or_default(), stores.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_vectorDb_upsert", f)?;
     }
@@ -1015,8 +982,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let queue = reg.queue.clone();
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, table: String, query_json: String, limit: Opt<u32>| {
-            crate::quickjs_db::vectordb_search(ctx, handle, table, query_json, limit.0.unwrap_or(10), stores.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32, table: String, query_json: String, limit: Opt<Option<u32>>| {
+            crate::quickjs_db::vectordb_search(ctx, handle, table, query_json, limit.0.flatten().unwrap_or(10), stores.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_vectorDb_search", f)?;
     }
@@ -1037,7 +1004,7 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let queue = reg.queue.clone();
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, bin: String, args: Opt<String>| {
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, bin: String, args: Opt<Option<String>>| {
             crate::quickjs_shell::shell_run(ctx, bin, args, Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_shell_run", f)?;
@@ -1049,8 +1016,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let queue = reg.queue.clone();
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, url: String, opts: Opt<String>| {
-            crate::quickjs_net::fetch(ctx, url, opts.0.unwrap_or_default(), Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, url: String, opts: Opt<Option<String>>| {
+            crate::quickjs_net::fetch(ctx, url, opts.0.flatten().unwrap_or_default(), Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_fetch", f)?;
     }
@@ -1091,8 +1058,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let queue = reg.queue.clone();
         let tokio = reg.tokio.clone();
         let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, service_type: String, timeout_ms: Opt<u32>| {
-            crate::quickjs_net::mdns_discover(ctx, service_type, timeout_ms.0.unwrap_or(5000) as u64, Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, service_type: String, timeout_ms: Opt<Option<u32>>| {
+            crate::quickjs_net::mdns_discover(ctx, service_type, timeout_ms.0.flatten().unwrap_or(5000) as u64, Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_mdns_discover", f)?;
     }
@@ -1102,15 +1069,15 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     //    from the rest of bind_sys.rs) ────────────────────────────────────
     {
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, filters: Opt<String>, multiple: Opt<bool>| {
-            crate::quickjs_sys::dialog_open_file(ctx, filters.0.unwrap_or_default(), multiple.0.unwrap_or(false), Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, filters: Opt<Option<String>>, multiple: Opt<Option<bool>>| {
+            crate::quickjs_sys::dialog_open_file(ctx, filters.0.flatten().unwrap_or_default(), multiple.0.flatten().unwrap_or(false), Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_dialog_openFile", f)?;
     }
     {
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, name: Opt<String>, filters: Opt<String>| {
-            crate::quickjs_sys::dialog_save_file(ctx, name.0.unwrap_or_default(), filters.0.unwrap_or_default(), Arc::clone(&queue), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, name: Opt<Option<String>>, filters: Opt<Option<String>>| {
+            crate::quickjs_sys::dialog_save_file(ctx, name.0.flatten().unwrap_or_default(), filters.0.flatten().unwrap_or_default(), Arc::clone(&queue), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_dialog_saveFile", f)?;
     }
@@ -1178,13 +1145,37 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_deeplink_poll", f)?;
     }
     {
+        let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+            crate::quickjs_sys::print_list_printers(ctx, Arc::clone(&queue), tokio.clone(), redraw.clone())
+        })?;
+        globals.set("__glyx_print_listPrinters", f)?;
+    }
+    {
+        let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+            crate::quickjs_sys::print_get_default_printer(ctx, Arc::clone(&queue), tokio.clone(), redraw.clone())
+        })?;
+        globals.set("__glyx_print_getDefaultPrinter", f)?;
+    }
+    {
+        let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, path: String, printer: String| {
+            crate::quickjs_sys::print_file(ctx, path, printer, Arc::clone(&queue), tokio.clone(), redraw.clone())
+        })?;
+        globals.set("__glyx_print_file", f)?;
+    }
+    globals.set("__glyx_autostart_isEnabled", Function::new(ctx.clone(), crate::quickjs_sys::autostart_is_enabled)?)?;
+    globals.set("__glyx_autostart_setEnabled", Function::new(ctx.clone(), crate::quickjs_sys::autostart_set_enabled)?)?;
+    globals.set("__glyx_autostart_wasOpenedAtLogin", Function::new(ctx.clone(), crate::quickjs_sys::autostart_was_opened_at_login)?)?;
+    {
         let perf = Arc::clone(&reg.perf_state);
         let f = Function::new(ctx.clone(), move || crate::quickjs_sys::perf_snapshot(&perf))?;
         globals.set("__glyx_perf_snapshot", f)?;
     }
     {
         let perf = Arc::clone(&reg.perf_state);
-        let f = Function::new(ctx.clone(), move |ms: Opt<f64>| crate::quickjs_sys::perf_set_budget(&perf, ms.0.unwrap_or(16.667)))?;
+        let f = Function::new(ctx.clone(), move |ms: Opt<Option<f64>>| crate::quickjs_sys::perf_set_budget(&perf, ms.0.flatten().unwrap_or(16.667)))?;
         globals.set("__glyx_perf_set_budget", f)?;
     }
     {
@@ -1216,8 +1207,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     }
     {
         let events = reg.events.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'_>, kind: String, interval_ms: Opt<f64>| {
-            crate::quickjs_sys::system_watch(ctx, kind, interval_ms.0.unwrap_or(0.0), Arc::clone(&events), tokio.clone(), redraw.clone())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'_>, kind: String, interval_ms: Opt<Option<f64>>| {
+            crate::quickjs_sys::system_watch(ctx, kind, interval_ms.0.flatten().unwrap_or(0.0), Arc::clone(&events), tokio.clone(), redraw.clone())
         })?;
         globals.set("__glyx_system_watch", f)?;
         let f = Function::new(ctx.clone(), move |id: u32| crate::quickjs_sys::system_unwatch(id))?;
@@ -1232,9 +1223,9 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let trackers = reg.audio_trackers.clone();
         let next_id = Arc::clone(&reg.next_audio_id);
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, src: String, opts: Opt<String>| {
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, src: String, opts: Opt<Option<String>>| {
             crate::quickjs_media::audio_play(
-                ctx, src, opts.0.unwrap_or_else(|| "{}".to_string()), Arc::clone(&device),
+                ctx, src, opts.0.flatten().unwrap_or_else(|| "{}".to_string()), Arc::clone(&device),
                 sinks.clone(), trackers.clone(), Arc::clone(&next_id), Arc::clone(&queue), tokio.clone(), redraw.clone(),
             )
         })?;
@@ -1311,8 +1302,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     }
     {
         let guards = reg.sleep_guards.clone(); let next_id = Arc::clone(&reg.next_guard_id);
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, reason: Opt<String>| {
-            crate::quickjs_sys::power_prevent_sleep(ctx, reason.0.unwrap_or_default(), guards.clone(), Arc::clone(&next_id))
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, reason: Opt<Option<String>>| {
+            crate::quickjs_sys::power_prevent_sleep(ctx, reason.0.flatten().unwrap_or_default(), guards.clone(), Arc::clone(&next_id))
         })?;
         globals.set("__glyx_power_preventSleep", f)?;
 
@@ -1405,9 +1396,9 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let commands = reg.backend_commands.clone();
         let js_backend_commands = Rc::clone(&reg.js_backend_commands);
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, name: String, args_json: Opt<String>| {
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, name: String, args_json: Opt<Option<String>>| {
             crate::quickjs_ipc::backend_call(
-                ctx, name, args_json.0.unwrap_or_else(|| "{}".to_string()), commands.clone(),
+                ctx, name, args_json.0.flatten().unwrap_or_else(|| "{}".to_string()), commands.clone(),
                 Rc::clone(&js_backend_commands),
                 Arc::clone(&queue), tokio.clone(), redraw.clone(),
             )
@@ -1437,8 +1428,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         #[cfg(not(feature = "ai"))]
         let ai_cap = reg.ai_cap;
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, prompt: String, opts: Opt<String>| {
-            let opts_raw = opts.0.unwrap_or_else(|| "{}".to_string());
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, prompt: String, opts: Opt<Option<String>>| {
+            let opts_raw = opts.0.flatten().unwrap_or_else(|| "{}".to_string());
             #[cfg(feature = "ai")]
             { crate::quickjs_ai::ai_generate(ctx, prompt, opts_raw, model_cache.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone()) }
             #[cfg(not(feature = "ai"))]
@@ -1451,9 +1442,9 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         #[cfg(not(feature = "ai"))]
         let ai_cap = reg.ai_cap;
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, audio_path: String, opts: Opt<String>| {
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, audio_path: String, opts: Opt<Option<String>>| {
             #[cfg(feature = "ai")]
-            { let opts_raw = opts.0.unwrap_or_else(|| "{}".to_string());
+            { let opts_raw = opts.0.flatten().unwrap_or_else(|| "{}".to_string());
               crate::quickjs_ai::ai_transcribe(ctx, audio_path, opts_raw, model_cache.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone()) }
             #[cfg(not(feature = "ai"))]
             { let _ = &opts; crate::quickjs_ai::ai_transcribe(ctx, audio_path, ai_cap, Arc::clone(&queue), tokio.clone(), redraw.clone()) }
@@ -1546,8 +1537,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
 
     // ── System tray (crate::quickjs_tray) ────────────────────────────────
     {
-        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, rgba: rquickjs::TypedArray<'js, u8>, width: u32, height: u32, tooltip: String, menu_json: Opt<String>| {
-            crate::quickjs_tray::tray_create(ctx, rgba, width, height, tooltip, menu_json.0.unwrap_or_default())
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, rgba: Option<rquickjs::TypedArray<'js, u8>>, width: u32, height: u32, tooltip: String, menu_json: Opt<Option<String>>| {
+            crate::quickjs_tray::tray_create(ctx, rgba, width, height, tooltip, menu_json.0.flatten().unwrap_or_default())
         })?;
         globals.set("__glyx_tray_create", f)?;
 
@@ -1555,6 +1546,13 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_tray_update_menu", Function::new(ctx.clone(), crate::quickjs_tray::tray_update_menu)?)?;
         globals.set("__glyx_tray_set_tooltip", Function::new(ctx.clone(), crate::quickjs_tray::tray_set_tooltip)?)?;
         globals.set("__glyx_tray_poll_events", Function::new(ctx.clone(), crate::quickjs_tray::tray_poll_events)?)?;
+        let (events, redraw) = (reg.events.clone(), reg.redraw.clone());
+        globals.set("__glyx_tray_listen", Function::new(ctx.clone(), move |on: bool| {
+            crate::menubar_api::tray_listen(on, Arc::clone(&events), redraw.clone())
+        })?)?;
+        globals.set("__glyx_menubar_set_enabled", Function::new(ctx.clone(), |id: String, on: bool| crate::menubar_api::set_enabled(&id, on))?)?;
+        globals.set("__glyx_menubar_set_checked", Function::new(ctx.clone(), |id: String, on: bool| crate::menubar_api::set_checked(&id, on))?)?;
+        globals.set("__glyx_menubar_supported", Function::new(ctx.clone(), crate::menubar_api::supported)?)?;
     }
 
     // ── Canvas / webview messaging (crate::quickjs_canvas) ──────────────
@@ -1721,6 +1719,15 @@ fn input_events_to_array<'js>(
                 obj.set("type", "systemWatch")?;
                 obj.set("id", *id as f64)?;
                 obj.set("payload", payload.as_str())?;
+            }
+            InputEvent::MenuBar { id, checked } => {
+                obj.set("type", "menuBar")?;
+                obj.set("id", id.as_str())?;
+                if let Some(c) = checked { obj.set("checked", *c)?; }
+            }
+            InputEvent::Tray { json } => {
+                obj.set("type", "tray")?;
+                obj.set("json", json.as_str())?;
             }
             InputEvent::AccessibilityFocus { node_id } => {
                 obj.set("type", "accessibilityFocus")?;
@@ -2110,6 +2117,22 @@ mod tests {
     }
 
     #[test]
+    fn optional_arguments_accept_null_like_undefined() {
+        // rquickjs's `Opt<T>` alone accepts a missing or undefined argument
+        // but throws on an explicit null, which JS passes routinely (the
+        // event layer calls `__glyx_setFocus(null)` to clear focus on click).
+        let (_tokio_rt, mut rt) = new_runtime();
+        for call in [
+            "__glyx_setFocus(null)",
+            "__glyx_measure_text('ab', null, null, null, null)",
+            "__glyx_text_cursor_x('ab', null, null, null, null)",
+            "__glyx_text_char_at_x('ab', null, null, null, null)",
+        ] {
+            rt.eval(call).unwrap_or_else(|e| panic!("{call} threw: {e}"));
+        }
+    }
+
+    #[test]
     fn frame_tick_is_a_no_op_when_no_callback_is_registered() {
         let (_tokio_rt, mut rt) = new_runtime();
         assert_eq!(rt.frame_tick(), None);
@@ -2441,6 +2464,8 @@ mod tests {
             "__glyx_system_getInfo", "__glyx_system_getDarkMode", "__glyx_system_getBatterySaver",
             "__glyx_storage_getDrives", "__glyx_credentials_set", "__glyx_credentials_get",
             "__glyx_credentials_delete", "__glyx_deeplink_getInitialUrl", "__glyx_deeplink_poll",
+            "__glyx_autostart_isEnabled", "__glyx_autostart_setEnabled", "__glyx_autostart_wasOpenedAtLogin",
+            "__glyx_print_listPrinters", "__glyx_print_getDefaultPrinter", "__glyx_print_file",
             "__glyx_perf_snapshot", "__glyx_perf_set_budget", "__glyx_perf_poll_violations",
             "__glyx_perf_poll_leak_warnings", "__glyx_quit", "__glyx_window_close", "__glyx_restart",
             "__glyx_platform", "__glyx_getEnv", "__glyx_collect_memory", "__glyx_open_external",

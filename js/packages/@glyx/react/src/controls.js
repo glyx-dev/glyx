@@ -11,6 +11,7 @@ import {
 import { View, Text, Image, ScrollView, Pressable, measureText, useWindowSize } from './core.js';
 import { openPopover, closePopover } from './popover.js';
 import { clipboard, dialog } from './api.js';
+import { flattenStyle } from './style.js';
 
 // ── Control width resolution ──────────────────────────────────────────────────
 //
@@ -22,7 +23,8 @@ import { clipboard, dialog } from './api.js';
 //      (so stretch parents don't blow it up) + its default width.
 // "Use the defaults or override" — stretching is one style away:
 //   style={{ alignSelf: 'stretch' }}   or   style={{ flex: 1 }} (in a row).
-function _sizedRootStyle(style, defaultWidth) {
+function _sizedRootStyle(styleProp, defaultWidth) {
+  const style = flattenStyle(styleProp);
   const sized = !!style && (
     style.width != null || style.flex != null || style.flexGrow != null ||
     style.minWidth != null || style.alignSelf != null
@@ -127,9 +129,10 @@ export function TextInput({
   secureTextEntry = false,   // mask characters (password fields)
   keyboardType = 'default',  // 'default' | 'numeric' | 'decimal'
   textAlign = 'left',        // passed to the inner Text; hit-testing respects it too
-  style,
+  style: styleProp,
   ...props
 }) {
+  const style = flattenStyle(styleProp);
   const nodeIdRef   = useRef(null);
   // Inner `text` node — hit-tests measure from ITS box (see textBoxInView).
   const textNodeIdRef = useRef(null);
@@ -647,7 +650,7 @@ export function TextInput({
     alignItems: 'flex-start',
     padding: innerPadding,
     clip: true,   // prevent text from rendering outside the input bounds
-    ...style,
+    ...flattenStyle(style),
     // Vertical scroll state (after the user-style spread — not overridable).
     // `showScrollbar`/`scrollbarWidth`/`scrollbarColor` use the same native
     // clip+scroll mechanism (and the same visual defaults) as
@@ -739,7 +742,7 @@ export function Checkbox({ checked = false, onChange, disabled = false, label, s
 
   return React.createElement(Pressable, {
     onPress: () => { if (!disabled && onChange) onChange(!checked); },
-    style: { flexDirection: 'row', alignItems: 'center', gap: 8, ...style },
+    style: { flexDirection: 'row', alignItems: 'center', gap: 8, ...flattenStyle(style) },
     role: 'checkbox',
     checked,
     ariaLabel: label != null ? String(label) : undefined,
@@ -763,7 +766,7 @@ export function Switch({ value = false, onValueChange, disabled = false, style, 
       justifyContent: 'center',
       alignItems: value ? 'flex-end' : 'flex-start',
       padding: 2,
-      ...style,
+      ...flattenStyle(style),
     },
     role: 'switch',
     checked: value,
@@ -787,7 +790,7 @@ export function RadioGroup({ value, onValueChange, children, style, ...rest }) {
   return React.createElement(
     _RadioCtx.Provider,
     { value: { value, onValueChange } },
-    React.createElement(View, { style: { gap: 8, ...style }, ...rest }, children)
+    React.createElement(View, { style: { gap: 8, ...flattenStyle(style) }, ...rest }, children)
   );
 }
 
@@ -821,7 +824,7 @@ export function Radio({ value, label, disabled = false, style, ...rest }) {
 
   return React.createElement(Pressable, {
     onPress: () => { if (!disabled && ctx && ctx.onValueChange) ctx.onValueChange(value); },
-    style: { flexDirection: 'row', alignItems: 'center', gap: 8, ...style },
+    style: { flexDirection: 'row', alignItems: 'center', gap: 8, ...flattenStyle(style) },
     role: 'radio',
     checked: selected,
     ariaLabel: label != null ? String(label) : undefined,
@@ -889,7 +892,7 @@ export function FileInput({
       justifyContent: 'center',
       alignItems: 'center',
       flexShrink: 0,
-      ...style,
+      ...flattenStyle(style),
     },
     ...rest,
   },
@@ -915,10 +918,11 @@ export function FileInput({
 export function Slider({
   value = 0, onValueChange, onChange,
   min = 0, max = 1, step = 0,
-  disabled = false, style,
+  disabled = false, style: styleProp,
   width: widthProp = 200,
   ...rest
 }) {
+  const style = flattenStyle(styleProp);
   const _cb = onValueChange ?? onChange;
   const THUMB = 20;
   const TRACK = 4;
@@ -1038,7 +1042,7 @@ export function Slider({
     _glyxOnMount: onTrackMount,
     width: widthProp,
     pressable: true, // mark interactive so clicks hit-test to this node
-    style: { flexDirection: 'row', alignItems: 'center', ...style },
+    style: { flexDirection: 'row', alignItems: 'center', ...flattenStyle(style) },
     role: 'slider',
     numericValue: value,
     numericMin: min,

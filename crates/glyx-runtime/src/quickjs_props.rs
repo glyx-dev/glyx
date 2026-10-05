@@ -192,6 +192,8 @@ pub(crate) fn parse_props_value(props: Value<'_>) -> NodeProps {
     out.transition_ms       = get_num(&obj, "transitionMs").map(|n| n as u32);
     out.transition_property = get_str(&obj, "transitionProperty");
     out.transition_easing   = get_str(&obj, "transitionEasing");
+    out.transition_stiffness = get_num(&obj, "transitionStiffness");
+    out.transition_damping   = get_num(&obj, "transitionDamping");
     out.animation_keyframes  = get_str(&obj, "animationKeyframes");
     out.animation_ms         = get_num(&obj, "animationMs").map(|n| n as u32);
     out.animation_easing     = get_str(&obj, "animationEasing");
@@ -212,6 +214,7 @@ pub(crate) fn parse_props_value(props: Value<'_>) -> NodeProps {
     out.scrollbar_width = get_num(&obj, "scrollbarWidth");
     out.scrollbar_color = get_str(&obj, "scrollbarColor");
     out.show_scrollbar  = get_bool(&obj, "showScrollbar");
+    out.smooth_scroll   = get_bool(&obj, "smoothScroll");
 
     out
 }

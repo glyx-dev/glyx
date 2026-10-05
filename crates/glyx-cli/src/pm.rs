@@ -217,23 +217,91 @@ fn raw_cmd_with_args(bin: &str, args: &[&str]) -> Command {
 /// that there's no PM-specific dlx invocation to build.
 ///
 /// `minify`     — set to true for production bundles
-/// `source_map` — inline source map (useful for dev + crash reports)
+/// `source_map` — where the source map goes (see [`SourceMap`])
 pub fn js_bundle(
+    pm:         Pm,
+    entry:      &str,
+    output:     &str,
+    minify:     bool,
+    source_map: SourceMap,
+    strip_test_ids: bool,
+) -> Result<()> {
+    js_bundle_with_react(pm, entry, output, minify, source_map, strip_test_ids, ReactBuild::Production)
+}
+
+/// Where a bundle's source map goes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SourceMap {
+    None,
+    /// Inside the bundle. Dev only: a source map carries the app's full
+    /// source text, so anything shipped with one ships the source.
+    Inline,
+    /// Release builds: a separate file in `target/glyx/sourcemaps/`, kept on
+    /// the developer's machine (never packaged) to decode crash stack traces.
+    Kept,
+}
+
+/// Folder `SourceMap::Kept` maps are written to.
+pub const SOURCEMAP_DIR: &str = "target/glyx/sourcemaps";
+
+/// Which React build a bundle gets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReactBuild {
+    /// Fast, no dev checks. Every build except `glyx dev --devtools`.
+    Production,
+    /// React's development build: its warnings, and the render timings the
+    /// DevTools CPU profiler's Components view needs. `glyx dev --devtools`.
+    Development,
+}
+
+impl ReactBuild {
+    pub fn node_env_define(self) -> &'static str {
+        match self {
+            ReactBuild::Production => "process.env.NODE_ENV='production'",
+            ReactBuild::Development => "process.env.NODE_ENV='development'",
+        }
+    }
+}
+
+pub fn js_bundle_with_react(
     _pm:        Pm,
     entry:      &str,
     output:     &str,
     minify:     bool,
-    source_map: bool,
+    source_map: SourceMap,
+    strip_test_ids: bool,
+    react:      ReactBuild,
 ) -> Result<()> {
-    let mut args = vec![
-        "build".to_string(), entry.to_string(),
-        "--outfile".to_string(), output.to_string(),
+    // Bun writes a separate map only with --outdir: then the output is named
+    // by --entry-naming (a literal file name here) inside that folder.
+    let out_path = std::path::Path::new(output);
+    let out_target: Vec<String> = if source_map == SourceMap::Kept {
+        let dir = out_path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        let name = out_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "app.js".into());
+        vec!["--outdir".into(), dir.to_string_lossy().into_owned(), format!("--entry-naming={name}")]
+    } else {
+        vec!["--outfile".into(), output.to_string()]
+    };
+    let mut args = vec!["build".to_string(), entry.to_string()];
+    args.extend(out_target);
+    args.extend([
         "--target".to_string(), "browser".to_string(),
         "--format".to_string(), "iife".to_string(),
-        "--define".to_string(), "process.env.NODE_ENV='production'".to_string(),
-    ];
+        "--define".to_string(), react.node_env_define().to_string(),
+    ]);
     if minify     { args.push("--minify".to_string()); }
-    if source_map { args.push("--sourcemap=inline".to_string()); }
+    // Release builds: the React host config drops `testID` props before they
+    // reach native (see @glyx-dev/react hostConfig.js).
+    if strip_test_ids {
+        args.push("--define".to_string());
+        args.push("__GLYX_STRIP_TEST_IDS__=true".to_string());
+    }
+    match source_map {
+        SourceMap::None => {}
+        SourceMap::Inline => args.push("--sourcemap=inline".to_string()),
+        // `external`: `<output>.map`, and no reference to it in the bundle.
+        SourceMap::Kept => args.push("--sourcemap=external".to_string()),
+    }
 
     let run = || -> std::io::Result<std::process::Output> {
         #[cfg(target_os = "windows")]
@@ -259,5 +327,24 @@ pub fn js_bundle(
         let stderr = String::from_utf8_lossy(&out.stderr);
         bail!("bun build failed:\n{stderr}");
     }
+    if source_map == SourceMap::Kept { keep_source_map(output)?; }
     Ok(())
+}
+
+/// Move `<output>.map` out of the app's files into [`SOURCEMAP_DIR`], so it
+/// can never be packaged. Returns where it went.
+fn keep_source_map(output: &str) -> Result<Option<std::path::PathBuf>> {
+    let map = std::path::PathBuf::from(format!("{output}.map"));
+    if !map.exists() { return Ok(None); }
+    let name = std::path::Path::new(output).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "app.js".into());
+    let dir = std::path::Path::new(SOURCEMAP_DIR);
+    std::fs::create_dir_all(dir)?;
+    let dest = dir.join(format!("{name}.map"));
+    let _ = std::fs::remove_file(&dest);
+    if std::fs::rename(&map, &dest).is_err() {
+        std::fs::copy(&map, &dest)?;
+        std::fs::remove_file(&map)?;
+    }
+    println!("  Source map kept at {} (not packaged; use it to read crash stack traces)", dest.display());
+    Ok(Some(dest))
 }

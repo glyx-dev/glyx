@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-05
+
 ### Added
 - **`glyx package` writes FFmpeg's licence notice.** When an app ships FFmpeg libraries, `LICENSES/ffmpeg/` gets a `NOTICE.txt` (which libraries, the licence and version they report, and that they are separate replaceable libraries) plus the matching licence texts (LGPL 3 also adds the GPL 3 it refers to). The licence is read from the libraries themselves and the strictest one wins; GPL or unrecognised builds print a warning. Covers Windows, macOS and Linux packages.
 - **Glyx DevTools.** `glyx dev --devtools [port]` serves the Glyx DevTools Protocol on both JS engines (default port 9228; the address and a session token go to `target/glyx/devtools.json`), and `--open` opens the UI attached to the app. `glyx inspect [--port <p>] [--no-open]` serves the DevTools UI on `127.0.0.1` (default port 9227) and lists the dev apps running in the project, its subfolders, or anywhere with `GLYX_DEVTOOLS_PORT` set. Panels: Overview, Inspector, Console, Performance, Animations, Memory, Layout, Network, CPU profiler. Dev builds only.

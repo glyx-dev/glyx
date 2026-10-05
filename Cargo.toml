@@ -96,7 +96,7 @@ base64              = "0.22"
 tokio-tungstenite   = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
 futures-util        = "0.3"
 mdns-sd             = "0.11"
-battery             = "0.7"
+battery             = { package = "starship-battery", version = "0.12" }
 sysinfo             = "0.33"
 keepawake           = "0.5"
 gilrs               = "0.11"

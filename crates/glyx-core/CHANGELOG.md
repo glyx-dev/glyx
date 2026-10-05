@@ -4,6 +4,8 @@ Changes to the native runtime and renderer (`glyx-core`, and the crates it drive
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-05
+
 ### Added
 - **The app icon is available to the tray.** The window icon decoded at startup is registered with `glyx-tray`, so a tray icon created without pixels uses it, on both JS engines.
 - **Native menu bar (Windows and macOS).** A `menubar` capability and `__glyx_menubar_*` bindings on both JS engines (shared logic in `glyx-runtime`'s `menubar_api`), built on `muda` in `glyx-tray`. On Windows the menu attaches to the window; on macOS it becomes the app menu with a standard application menu (About, Services, Hide, Quit) in front. The tray and the menu bar share one `muda` event handler, which routes a click to the menu bar when its id belongs there and to the tray otherwise, and cannot panic out of the window procedure. A click is pushed into the window's JS event queue (`InputEvent::MenuBar`) and wakes the frame loop, so nothing polls. The macOS path compiles but has not run on a Mac; elsewhere a native menu bar is reported as unavailable.

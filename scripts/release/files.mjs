@@ -23,10 +23,14 @@ export function crateTomls() {
     .map((d) => join(crates, d.name, 'Cargo.toml'));
 }
 
+/** The VS Code extension isn't on npm, but it ships in lockstep with everything else. */
+export const EXTENSION_DIR = join(ROOT, 'tools/vscode-glyx');
+
 export function readState() {
-  const pkgs = packageDirs().map((d) => ({ file: join(d, 'package.json'), json: JSON.parse(readFileSync(join(d, 'package.json'), 'utf8')) }));
+  const pkgs = [...packageDirs(), EXTENSION_DIR].map((d) => ({ file: join(d, 'package.json'), json: JSON.parse(readFileSync(join(d, 'package.json'), 'utf8')) }));
   const crates = crateTomls().map((f) => ({ file: f, text: readFileSync(f, 'utf8') }));
-  const changelogs = packageDirs()
+  // npm packages and crates both keep a CHANGELOG.md beside their manifest.
+  const changelogs = [...packageDirs(), EXTENSION_DIR, ...crateTomls().map((f) => join(f, '..'))]
     .map((d) => join(d, 'CHANGELOG.md'))
     .filter(existsSync)
     .map((f) => ({ file: f, text: readFileSync(f, 'utf8') }));

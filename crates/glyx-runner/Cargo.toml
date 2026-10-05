@@ -1,6 +1,6 @@
 [package]
 name    = "glyx-runner"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Prebuilt runtime binary for Glyx apps (no Rust toolchain required by app developers)"
 

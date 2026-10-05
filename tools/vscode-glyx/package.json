@@ -2,7 +2,7 @@
   "name": "vscode-glyx",
   "displayName": "Glyx",
   "description": "Official VS Code extension for Glyx — run, build, and develop Glyx desktop apps from the editor.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "glyx",
   "icon": "assets/icon.png",
   "repository": {

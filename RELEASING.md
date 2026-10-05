@@ -26,13 +26,29 @@ It needs a clean working tree (commit your work first). It then:
 - rolls each changelog's `[Unreleased]` notes into `[<version>] - <date>`;
 - refreshes `Cargo.lock`, and prints the commands to finish.
 
-Review the diff, then commit, tag and push:
+Run it on `dev`, with your work already merged there. Review the diff, then
+land the version bump on `main` through pull requests:
 
 ```bash
+git checkout -b release/v0.2.0
 git commit -am "chore: release 0.2.0"
-git tag v0.2.0 js-v0.2.0
-git push && git push origin v0.2.0 js-v0.2.0
+git push -u origin release/v0.2.0
 ```
+
+1. Open a PR from `release/v0.2.0` into `dev` and merge it once CI is green.
+2. Open a PR from `dev` into `main` and merge it.
+
+Use a **merge commit** for the PR into `main`, not squash or rebase: those
+create a new commit, and the tag must point at the commit that carries the
+bumped versions. Then tag the merged `main` and push the tags:
+
+```bash
+git checkout main && git pull
+git tag v0.2.0 js-v0.2.0
+git push origin v0.2.0 js-v0.2.0
+```
+
+Check that `git log -1` shows the merge of the release PR before tagging.
 
 - `v0.2.0` builds and publishes the CLI, runners and signed capability
   modules (`.github/workflows/release.yml`).

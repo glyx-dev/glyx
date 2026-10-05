@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-05
+
 ### Fixed
 - `render()` hung forever: it created a concurrent React root, which waits on a scheduler the in-memory host does not have. It now uses a synchronous root, so updates land as soon as they are made.
 - The test host now tells a component its node id (`_glyxOnMount`) as the real host does, so `Pressable` registers its handlers and can be driven with real mouse events through `dispatchEvents`.

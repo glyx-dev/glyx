@@ -1,6 +1,6 @@
 [package]
 name    = "glyx-cap-abi"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Stable C ABI contract for optional Glyx capabilities (audio, AI, camera, gamepad, HID)."
 

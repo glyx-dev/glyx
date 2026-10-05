@@ -73,13 +73,14 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      # The second line is the build-time set for glyx-tray (tray-icon/muda →
-      # gtk → glib-sys), which every app links through glyx-runtime.
+      # The second line is what every app links through glyx-core/glyx-runtime
+      # (see `cargo tree -p calculator`): audio (cpal → alsa-sys), D-Bus
+      # (keyring, ashpd), and glyx-tray (tray-icon/muda → gtk → glib-sys).
       - name: Install display + window-system libs
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxrandr2 libxi6 fonts-dejavu-core
-          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+          sudo apt-get install -y libasound2-dev libdbus-1-dev libfontconfig1-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
       - run: bun install --frozen-lockfile
       - name: Bundle the calculator's JS
         working-directory: examples/calculator

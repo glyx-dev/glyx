@@ -72,7 +72,8 @@ static IDS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashS
 /// True where a native menu bar can be attached.
 pub fn supported() -> bool { cfg!(any(target_os = "windows", target_os = "macos")) }
 
-
+// Only the native menu bar (Windows, macOS) and the tests read this.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 fn collect_checked(items: &[MenuBarItem], out: &mut HashMap<String, bool>) {
     for item in items {
         if !item.children.is_empty() {

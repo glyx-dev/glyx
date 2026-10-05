@@ -153,7 +153,10 @@ pub(crate) struct Summary {
     pub dir: PathBuf,
     pub licence: Licence,
     pub version: Option<String>,
+    // Not printed in the report; the tests check what was written.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub libraries: Vec<String>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub files: Vec<String>,
 }
 

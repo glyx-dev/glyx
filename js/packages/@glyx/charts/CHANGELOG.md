@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-05
+
 ### Added (chart types and sizing)
 - **Grouped and stacked bars:** `BarChart` takes `series`; several series sit side by side, or pile up with `stacked`. Stacked areas too: `AreaChart stacked`.
 - **New charts:** `ScatterChart` (bubbles when points have a `size`), `CandlestickChart`, `Sparkline`.

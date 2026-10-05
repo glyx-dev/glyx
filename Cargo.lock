@@ -3503,7 +3503,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-3d"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "glam",
@@ -3518,7 +3518,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-ai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -3535,11 +3535,11 @@ dependencies = [
 
 [[package]]
 name = "glyx-cap-abi"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "glyx-cap-ai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glyx-ai",
  "glyx-cap-abi",
@@ -3550,7 +3550,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-cap-audio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glyx-cap-abi",
  "log",
@@ -3561,7 +3561,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-cap-camera"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glyx-cap-abi",
  "image",
@@ -3572,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-cap-gamepad"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gilrs",
  "glyx-cap-abi",
@@ -3582,7 +3582,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-cap-hid"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glyx-cap-abi",
  "hidapi",
@@ -3593,7 +3593,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-cap-webview"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glyx-cap-abi",
  "log",
@@ -3607,7 +3607,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3633,7 +3633,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "accesskit",
  "arboard",
@@ -3680,7 +3680,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-db"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "libsqlite3-sys",
@@ -3693,7 +3693,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-devtools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "getrandom 0.2.17",
@@ -3709,7 +3709,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-gpu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
  "thiserror 1.0.69",
@@ -3719,7 +3719,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-layout"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
  "taffy",
@@ -3728,7 +3728,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3737,7 +3737,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-media"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "libloading 0.8.9",
@@ -3751,11 +3751,11 @@ dependencies = [
 
 [[package]]
 name = "glyx-perf"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "glyx-renderer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glyx-3d",
  "glyx-gpu",
@@ -3778,7 +3778,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-runner"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crc32fast",
  "env_logger",
@@ -3790,7 +3790,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3848,7 +3848,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-security"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "globset",
  "log",
@@ -3858,7 +3858,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-shell"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -3869,7 +3869,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-snapshot"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -3881,7 +3881,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-sysapi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "battery",
  "cpal",
@@ -3896,7 +3896,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-text"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "accesskit",
  "log",
@@ -3908,7 +3908,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-tray"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
  "muda",
@@ -3919,7 +3919,7 @@ dependencies = [
 
 [[package]]
 name = "glyx-verify"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "log",

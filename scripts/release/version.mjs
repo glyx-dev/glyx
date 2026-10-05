@@ -76,11 +76,19 @@ if (problems.length) {
 }
 
 console.log(`
-Done. Review the diff, then:
+Done. Review the diff, then land it on main through PRs (see RELEASING.md):
 
+  git checkout -b release/v${version}
   git commit -am "chore: release ${version}"
+  git push -u origin release/v${version}
+
+Merge that PR into dev, then dev into main (a merge commit, not squash:
+the tag must point at the commit that carries these versions). Then tag
+the merged main:
+
+  git checkout main && git pull
   git tag v${version} js-v${version}
-  git push && git push origin v${version} js-v${version}
+  git push origin v${version} js-v${version}
 
 v${version} builds the CLI, runners and capability modules (release.yml);
 js-v${version} publishes the npm packages (npm-publish.yml).`);

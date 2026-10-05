@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-05
+
 ### Added
 - A pane can be a render function, `({ width, height }) => node`, that receives the pane's own size. Use it for content that needs pixel dimensions and should follow the divider.
 

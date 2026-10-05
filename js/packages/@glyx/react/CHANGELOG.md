@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-05
+
 ### Added
 - **`tray.create(null, 0, 0, tooltip, menu)` uses the app's own icon.** Before, a tray icon needed pixels from the app and never carried its logo. With `null` it reuses the window icon (the `icon` in `glyx.config`, else the Glyx default). Pixels still work as before.
 - **`menubar`: a native menu bar** (requires `menubar: true`). `menubar.set([...])` builds a File / Edit / View bar from one description, with `&` mnemonics, separators, submenus, checkable items (`checked: false` is an unchecked check item), and accelerators; `menubar.onSelect` reports `{ id, checked?, role? }` for mouse, Alt-key and accelerator choices; `setEnabled`, `setChecked`, `clear` and `supported` round it out. Windows (under the title bar) and macOS (the app menu, with the usual application menu added in front; it compiles and follows the menu library's documented use but has not run on a Mac). Elsewhere `set` throws. Choices are pushed through the native event stream, so there is no polling timer. A frameless window attaches the menu but draws no bar. Typed as `MenuItem` and `menubar`; see `examples/menubar-demo`.
@@ -78,7 +80,6 @@
 - Click and hover hit-testing (`findTopmostSolid` in `events.js`) is no longer computed in JS at all — it's resolved natively when an input event is captured and attached to the event before JS ever sees it, instead of JS calling a native layout query once per candidate element on every click and every cursor move. As a result, the JS-side bookkeeping that only existed to support that lookup (the solid-node registry and the per-node z-index map, along with `registerSolid`/`unregisterSolid`/`setNodeZIndex`) has been removed entirely — one fewer Map write on every node's creation, update, and removal. (An earlier point release in this same cycle had fixed an O(n²) bug in that registry's removal path; this change removes the registry altogether, superseding that fix.) No public API changed — these were internal to `hostConfig.js`/`events.js`, never re-exported.
 - `TextInput`'s multiline auto-height calculation is now memoized (`useMemo`) instead of running unconditionally in the render body on every render, including ones triggered by unrelated parent/context changes. It now only re-measures when text, font size, field width, or the min/max line props actually change. No behavior change.
 - `src/api.js` (previously one ~2200-line file covering every native API) is now split into one file per domain under `src/api/` (`fs.js`, `db.js`, `clipboard.js`, `autostart.js`, `print.js`, …), re-exported from `src/api/index.js`. `api.js` itself is now a one-line re-export, so this is a no-op for every documented way of importing from the package. Internal only — mentioned here in case anything deep-imported `src/api.js` directly.
-
 
 ## [0.1.0] - 2026-08-07
 

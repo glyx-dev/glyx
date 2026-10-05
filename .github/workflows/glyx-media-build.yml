@@ -122,46 +122,27 @@ jobs:
     runs-on: macos-latest
     env:
       GLYX_MEDIA_VERSION: ${{ needs.version.outputs.value }}
+    # Apple Silicon only. The Intel (x64) leg needed an x86_64 Homebrew under
+    # Rosetta, and Homebrew no longer supports Intel, so it can't be built
+    # this way. release.yml likewise ships macOS for aarch64 only.
     strategy:
       matrix:
-        arch: [x64, arm64]
+        arch: [arm64]
         include:
-          - arch: x64
-            target: x86_64-apple-macosx13.0
           - arch: arm64
             target: arm64-apple-macosx13.0
 
     steps:
       - uses: actions/checkout@v4
 
-      # macos-latest runners are Apple Silicon — /opt/homebrew's ffmpeg is
-      # arm64-only, so the x64 (Intel) leg needs its own x86_64 Homebrew
-      # under Rosetta at /usr/local instead. The arm64 leg uses the native
-      # /opt/homebrew install as before.
-      - name: Install ffmpeg (Homebrew, arm64)
-        if: matrix.arch == 'arm64'
+      - name: Install ffmpeg (Homebrew)
         run: brew install ffmpeg pkg-config
-
-      - name: Install ffmpeg (Rosetta Homebrew, x64)
-        if: matrix.arch == 'x64'
-        run: |
-          softwareupdate --install-rosetta --agree-to-license
-          if [ ! -x /usr/local/bin/brew ]; then
-            arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          fi
-          arch -x86_64 /usr/local/bin/brew install ffmpeg pkg-config
 
       - name: Build glyx-media.dylib
         run: |
-          if [ "${{ matrix.arch }}" = "x64" ]; then
-            export PKG_CONFIG_PATH="/usr/local/opt/ffmpeg/lib/pkgconfig:/usr/local/lib/pkgconfig"
-            PKG_CONFIG=/usr/local/bin/pkg-config
-          else
-            PKG_CONFIG=pkg-config
-          fi
-          FFMPEG_CFLAGS=$($PKG_CONFIG --cflags libavformat libavcodec libswscale libswresample libavutil)
-          FFMPEG_LIBS=$($PKG_CONFIG --libs libavformat libavcodec libswscale libswresample libavutil)
-          clang -arch ${{ matrix.arch == 'arm64' && 'arm64' || 'x86_64' }} \
+          FFMPEG_CFLAGS=$(pkg-config --cflags libavformat libavcodec libswscale libswresample libavutil)
+          FFMPEG_LIBS=$(pkg-config --libs libavformat libavcodec libswscale libswresample libavutil)
+          clang -arch arm64 \
             -shared -fPIC -O2 \
             $FFMPEG_CFLAGS \
             glyx-media-c/glyx_media.c \

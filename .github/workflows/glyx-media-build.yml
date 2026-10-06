@@ -50,6 +50,7 @@ jobs:
     name: Windows x64
     needs: version
     runs-on: windows-latest
+    environment: release
     env:
       GLYX_MEDIA_VERSION: ${{ needs.version.outputs.value }}
 
@@ -141,6 +142,7 @@ jobs:
     name: macOS ${{ matrix.arch }}
     needs: version
     runs-on: macos-latest
+    environment: release
     env:
       GLYX_MEDIA_VERSION: ${{ needs.version.outputs.value }}
       FFMPEG_PREFIX: ${{ github.workspace }}/ffmpeg-lgpl-${{ matrix.arch }}
@@ -189,7 +191,7 @@ jobs:
       # system: nothing from Homebrew, which users won't have.
       - name: Check dependencies
         run: |
-          extra="$(otool -L glyx-media-${GLYX_MEDIA_VERSION}-macos-${{ matrix.arch }}.dylib | tail -n +2 | awk '{print $1}' \
+          extra="$(otool -L glyx-media-${GLYX_MEDIA_VERSION}-macos-${{ matrix.arch }}.dylib | tail -n +3 | awk '{print $1}' \
             | grep -Ev '^(@rpath/|@loader_path/|/usr/lib/|/System/Library/)' || true)"
           if [ -n "$extra" ]; then echo "::error::unexpected dependencies:"; echo "$extra"; exit 1; fi
 
@@ -248,6 +250,7 @@ jobs:
     name: Linux x64
     needs: version
     runs-on: ubuntu-latest
+    environment: release
     env:
       GLYX_MEDIA_VERSION: ${{ needs.version.outputs.value }}
 

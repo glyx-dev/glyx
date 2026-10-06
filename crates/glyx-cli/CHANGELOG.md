@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+- **glyx-media is downloaded for you.** `glyx dev` and `glyx package` now fetch the glyx-media library and its FFmpeg libraries from the GitHub Release of your Glyx version into `~/.glyx/cache/media/` when an app declares `video`, `camera` or `microphone`, so updating Glyx brings the matching media library along, as it does for the runner. A cached file that no longer verifies is fetched again; a library you built yourself is never replaced. `GLYX_MEDIA_NO_DOWNLOAD=1` turns it off, and `GLYX_TOOLS_BASE` points it at a mirror (`$GLYX_TOOLS_BASE/media/`).
+
+### Fixed
+- **The FFmpeg libraries next to glyx-media are now verified.** The signed manifest lists each library and its SHA-256, and the loader refuses a library that doesn't match, instead of loading whatever was beside the signed library. `glyx package` copies exactly the libraries the manifest lists.
+- **glyx-media's version follows Glyx's** (it was fixed at 1.0.0, which no release produced), so the library a release builds is the one the CLI and runner look for.
+- The release workflow refuses to publish an unsigned glyx-media on a tag build.
+
+### Changed
+- **glyx-media on macOS and Linux ships an LGPL-only FFmpeg.** The release workflow no longer links against Homebrew's or the distribution's FFmpeg, which include GPL components (x264, x265). macOS builds FFmpeg 9.0.1 from source (LGPL, no external libraries) and Linux uses BtbN's LGPL shared build, the same source as Windows; both are bundled next to `glyx-media` (`glyx-ffmpeg-libs-<version>-<platform>-<arch>.tar.gz` on the release, with the licence texts and a source offer) so users no longer need FFmpeg installed. A check fails the build if the libraries are not LGPL-only. Without `libx264`, encoding uses the platform encoders (VideoToolbox, VAAPI, NVENC and others) or `mpeg4`.
+- **glyx-media for Intel Macs is back**, cross-compiled with the same LGPL FFmpeg. (The release workflow briefly dropped it when Homebrew stopped supporting Intel.)
+
 ## [0.2.0] - 2026-10-05
 
 ### Added

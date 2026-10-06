@@ -19,6 +19,63 @@ pub struct Manifest {
     pub version: String,
     pub url:     String,
     pub sha256:  String,    // lowercase hex
+    /// The FFmpeg runtime libraries that must sit beside the DLL, by file
+    /// name, with their SHA-256. Covered by the manifest signature, so a
+    /// swapped library is refused like a swapped DLL. Empty for manifests
+    /// written before this field existed (nothing to check).
+    #[serde(default)]
+    pub libs: std::collections::BTreeMap<String, String>,
+    /// The release archive that holds `libs`, so they can be downloaded.
+    #[serde(default)]
+    pub ffmpeg_archive: Option<ArchiveRef>,
+}
+
+/// A downloadable file named in the manifest.
+#[derive(serde::Deserialize, Clone)]
+pub struct ArchiveRef {
+    pub name:   String,
+    pub sha256: String,
+}
+
+/// A file name that is safe to join onto a directory: not empty, no path
+/// separators, no `..`, no drive or stream marker.
+pub fn is_plain_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', ':', '\0'])
+}
+
+/// SHA-256 of a file, read in chunks so a large library isn't held in memory.
+pub fn sha256_file(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        if n == 0 { break; }
+        h.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", h.finalize()))
+}
+
+/// Check every library the manifest lists against the files in `dir`.
+pub fn verify_libs(dir: &Path, libs: &std::collections::BTreeMap<String, String>) -> Result<(), String> {
+    for (name, want) in libs {
+        if !is_plain_file_name(name) {
+            return Err(format!("glyx-media: the manifest lists an unsafe library name {name:?}"));
+        }
+        let got = sha256_file(&dir.join(name))
+            .map_err(|e| format!("glyx-media: FFmpeg library {name}: {e}"))?;
+        if !got.eq_ignore_ascii_case(want) {
+            return Err(format!(
+                "glyx-media: FFmpeg library {name} does not match the signed manifest \
+                 (expected {want}, got {got}); re-download it"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Compute SHA-256 of `data` and return lowercase hex string.
@@ -50,6 +107,28 @@ fn skip_verify() -> bool {
     false
 }
 
+/// Check an Ed25519 signature over `manifest_bytes` against `pubkey`.
+///
+/// Refuses an all-zero key (the placeholder this repo shipped with: a build
+/// with no real signing key must not pretend to verify anything) and uses
+/// strict verification, which rejects weak keys and malleable signatures that
+/// the plain check would accept.
+fn verify_signature(pubkey: &[u8; 32], manifest_bytes: &[u8], sig_bytes: &[u8]) -> Result<(), String> {
+    use ed25519_dalek::{Signature, VerifyingKey};
+
+    if pubkey.iter().all(|&b| b == 0) {
+        return Err("glyx-media: this build has no signing key (crates/glyx-media/keys/glyx_media_verify.pub                     is the all-zero placeholder), so a signed media library cannot be verified".to_string());
+    }
+    let vk = VerifyingKey::from_bytes(pubkey)
+        .map_err(|e| format!("glyx-media: invalid public key: {e}"))?;
+    let sig_arr: [u8; 64] = sig_bytes
+        .try_into()
+        .map_err(|_| "glyx-media: signature must be 64 bytes".to_string())?;
+    let sig = Signature::from_bytes(&sig_arr);
+    vk.verify_strict(manifest_bytes, &sig)
+        .map_err(|_| "glyx-media: manifest Ed25519 signature invalid".to_string())
+}
+
 /// Verify the Ed25519 signature on a manifest.
 /// Returns the parsed `Manifest` on success.
 ///
@@ -58,18 +137,7 @@ fn skip_verify() -> bool {
 /// with DLLs built by `glyx-media-c/build-windows.ps1`.
 pub fn verify_manifest(manifest_bytes: &[u8], sig_bytes: &[u8]) -> Result<Manifest, String> {
     if !skip_verify() {
-        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-
-        let vk = VerifyingKey::from_bytes(PUBKEY)
-            .map_err(|e| format!("glyx-media: invalid public key: {e}"))?;
-
-        let sig_arr: [u8; 64] = sig_bytes
-            .try_into()
-            .map_err(|_| "glyx-media: signature must be 64 bytes".to_string())?;
-        let sig = Signature::from_bytes(&sig_arr);
-
-        vk.verify(manifest_bytes, &sig)
-            .map_err(|_| "glyx-media: manifest Ed25519 signature invalid".to_string())?;
+        verify_signature(PUBKEY, manifest_bytes, sig_bytes)?;
     } else {
         log::warn!("[glyx-media] GLYX_MEDIA_SKIP_VERIFY=1 — Ed25519 check bypassed (dev only)");
     }
@@ -147,6 +215,101 @@ pub fn verify_cached_dll(dll_path: &Path) -> Result<std::fs::File, String> {
         ));
     }
 
+    // The FFmpeg libraries the DLL loads from beside itself are part of what
+    // the signature vouches for. (They can't be held open across the load the
+    // way the DLL is, so a replacement in that instant isn't covered.)
+    verify_libs(dll_path.parent().unwrap_or_else(|| Path::new(".")), &manifest.libs)?;
+
     // Return the still-open handle so the caller can hold it across dlopen.
     Ok(dll_file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("glyx-media-verify-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn signatures_are_checked_strictly() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pk = sk.verifying_key().to_bytes();
+        let msg = br#"{"version":"0.2.0"}"#;
+        let sig = sk.sign(msg).to_bytes();
+
+        assert!(verify_signature(&pk, msg, &sig).is_ok());
+        // another message, another key, a short signature
+        assert!(verify_signature(&pk, b"other", &sig).is_err());
+        let other = SigningKey::from_bytes(&[8u8; 32]).verifying_key().to_bytes();
+        assert!(verify_signature(&other, msg, &sig).is_err());
+        assert!(verify_signature(&pk, msg, &sig[..63]).unwrap_err().contains("64 bytes"));
+    }
+
+    #[test]
+    fn the_placeholder_key_never_verifies() {
+        // The all-zero key (what the repo shipped with) refuses everything,
+        // including the identity-point forgery that a plain check would accept
+        // for a degenerate key.
+        let zero = [0u8; 32];
+        let mut forged = [0u8; 64];
+        forged[0] = 1; // R = the identity point, S = 0
+        let err = verify_signature(&zero, b"anything", &forged).unwrap_err();
+        assert!(err.contains("no signing key"), "{err}");
+        // and a small-order key is rejected by strict verification
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        assert!(verify_signature(&identity, b"anything", &forged).is_err());
+    }
+
+    #[test]
+    fn old_manifests_without_libs_still_parse() {
+        let m: Manifest = serde_json::from_str(r#"{"version":"1.0.0","url":"u","sha256":"ab"}"#).unwrap();
+        assert!(m.libs.is_empty() && m.ffmpeg_archive.is_none());
+    }
+
+    #[test]
+    fn manifests_list_libs_and_their_archive() {
+        let m: Manifest = serde_json::from_str(
+            r#"{"version":"0.2.0","url":"u","sha256":"ab",
+                "libs":{"avcodec-63.dll":"aa"},
+                "ffmpeg_archive":{"name":"glyx-ffmpeg-libs.tar.gz","sha256":"bb"}}"#).unwrap();
+        assert_eq!(m.libs["avcodec-63.dll"], "aa");
+        assert_eq!(m.ffmpeg_archive.unwrap().name, "glyx-ffmpeg-libs.tar.gz");
+    }
+
+    #[test]
+    fn plain_file_names_only() {
+        for ok in ["avcodec-63.dll", "libavcodec.63.dylib", "libavutil.so.61"] { assert!(is_plain_file_name(ok), "{ok}"); }
+        for bad in ["", ".", "..", "a/b", "..\\x", "../x", "c:evil", "a\0b"] { assert!(!is_plain_file_name(bad), "{bad:?}"); }
+    }
+
+    #[test]
+    fn libs_must_match_the_manifest() {
+        let dir = temp_dir("match");
+        std::fs::write(dir.join("a.dll"), b"hello").unwrap();
+        let good = sha256_hex(b"hello");
+        let libs = BTreeMap::from([("a.dll".to_string(), good.clone())]);
+        assert!(verify_libs(&dir, &libs).is_ok());
+
+        // a swapped library
+        std::fs::write(dir.join("a.dll"), b"evil").unwrap();
+        let err = verify_libs(&dir, &libs).unwrap_err();
+        assert!(err.contains("a.dll") && err.contains("does not match"), "{err}");
+
+        // a missing one
+        let libs = BTreeMap::from([("gone.dll".to_string(), good)]);
+        assert!(verify_libs(&dir, &libs).unwrap_err().contains("gone.dll"));
+
+        // an unsafe name never touches the disk
+        let libs = BTreeMap::from([("../a.dll".to_string(), "x".to_string())]);
+        assert!(verify_libs(&dir, &libs).unwrap_err().contains("unsafe"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

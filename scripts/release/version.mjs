@@ -87,7 +87,8 @@ the tag must point at the commit that carries these versions). Then tag
 the merged main:
 
   git checkout main && git pull
-  git tag v${version} js-v${version}
+  git tag v${version}
+  git tag js-v${version}
   git push origin v${version} js-v${version}
 
 v${version} builds the CLI, runners and capability modules (release.yml);

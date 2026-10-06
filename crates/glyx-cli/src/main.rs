@@ -1400,20 +1400,18 @@ fn copy_media_dll_if_needed(dest_root: &Path) -> Result<()> {
         .unwrap_or_else(|_| ".".to_string());
     let cache_dir = PathBuf::from(&home).join(".glyx").join("cache").join("media");
 
-    let version  = "1.0.0";
-    let platform = if cfg!(target_os = "windows") { "windows" }
-                   else if cfg!(target_os = "macos") { "macos" }
-                   else { "linux" };
-    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
-    let ext  = if cfg!(target_os = "windows") { "dll" }
-               else if cfg!(target_os = "macos") { "dylib" }
-               else { "so" };
-    let media_stem = format!("glyx-media-{version}-{platform}-{arch}");
+    // The media library is versioned with Glyx itself, so a newer glyx
+    // fetches the matching library (and FFmpeg) instead of reusing an old one.
+    let media_stem = glyx_media::download::dll_stem();
+    let ext        = glyx_media::download::dll_ext();
     let media_dll  = cache_dir.join(format!("{media_stem}.{ext}"));
 
+    ensure_media_cached(&cache_dir, &media_dll);
+
     if !media_dll.exists() {
-        println!("  ⚠ glyx-media DLL not found at {}", media_dll.display());
-        println!("    Run: cd glyx-media-c && .\\build-windows.ps1");
+        println!("  ⚠ glyx-media {} not found at {}", glyx_media::download::GLYX_MEDIA_VERSION, media_dll.display());
+        println!("    glyx downloads it from this Glyx release; check your network, or build it yourself:");
+        println!("    cd glyx-media-c && .\\build-windows.ps1 (see glyx-media-c/README.md)");
         return Ok(());
     }
 
@@ -1439,19 +1437,60 @@ fn copy_media_dll_if_needed(dest_root: &Path) -> Result<()> {
         println!("    artifact (DLL, manifest, signature and FFmpeg libraries) in {}.", cache_dir.display());
     }
 
-    // FFmpeg's runtime libraries the wrapper links to: only those, not
-    // whatever else is in the cache (older FFmpeg versions, avfilter…).
+    // FFmpeg's runtime libraries the wrapper links to. A signed manifest names
+    // exactly which ones (and their hashes), so copy those and nothing else;
+    // without a list (a local build) fall back to the names FFmpeg uses, but
+    // not whatever else is in the cache (older FFmpeg versions, avfilter…).
+    let listed = manifest_lib_names(&cache_dir.join(format!("{media_stem}.manifest.json")));
     if let Ok(entries) = std::fs::read_dir(&cache_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if !is_ffmpeg_runtime_lib(&name) { continue; }
+            let wanted = if listed.is_empty() { is_ffmpeg_runtime_lib(&name) } else { listed.contains(&name) };
+            if !wanted { continue; }
             let dest = dest_root.join(entry.file_name());
             std::fs::copy(entry.path(), &dest)
                 .with_context(|| format!("copy {} → {}", entry.path().display(), dest.display()))?;
             println!("  FFmpeg library: {name}");
         }
     }
+    if let Some(missing) = listed.iter().find(|n| !cache_dir.join(n).exists()) {
+        println!("  ⚠ the manifest lists FFmpeg library {missing}, which is not in {}: the packaged app won't load the media library.", cache_dir.display());
+    }
     Ok(())
+}
+
+/// Make sure the cache holds this version of glyx-media and its FFmpeg
+/// libraries, downloading them from this Glyx release when it doesn't. Never
+/// fails: a download problem is reported and the caller carries on without media.
+///
+/// A library built locally (a dev, unsigned manifest) or one with no manifest
+/// is the developer's own and is never replaced; a signed one that no longer
+/// verifies (corrupted, or its FFmpeg libraries changed) is fetched again.
+/// `GLYX_MEDIA_NO_DOWNLOAD=1` turns the download off.
+fn ensure_media_cached(cache_dir: &Path, media_dll: &Path) {
+    if std::env::var("GLYX_MEDIA_NO_DOWNLOAD").as_deref() == Ok("1") { return; }
+    if media_dll.exists() {
+        let manifest = media_dll.with_extension("manifest.json");
+        let sig = media_dll.with_extension("manifest.sig");
+        if !manifest.exists() || !sig.exists() || is_dev_signature(&sig) { return; }
+        if glyx_media::verify::verify_cached_dll(media_dll).is_ok() { return; }
+        println!("  glyx-media in the cache no longer verifies; downloading it again.");
+    }
+    println!("  Downloading glyx-media {}…", glyx_media::download::GLYX_MEDIA_VERSION);
+    match glyx_media::download::download_and_cache_media_to(cache_dir) {
+        Ok(path) => println!("  glyx-media cached: {}", path.display()),
+        Err(e)   => println!("  ⚠ could not download glyx-media: {e}"),
+    }
+}
+
+/// The FFmpeg libraries a manifest lists (empty for a missing, unreadable or
+/// older manifest, which lists none).
+fn manifest_lib_names(manifest: &Path) -> Vec<String> {
+    let Ok(bytes) = std::fs::read(manifest) else { return Vec::new() };
+    let json = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    serde_json::from_slice::<glyx_media::verify::Manifest>(json)
+        .map(|m| m.libs.into_keys().filter(|n| glyx_media::verify::is_plain_file_name(n)).collect())
+        .unwrap_or_default()
 }
 
 /// The FFmpeg libraries glyx-media links to (`avcodec-63.dll`,

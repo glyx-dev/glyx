@@ -44,7 +44,8 @@ bumped versions. Then tag the merged `main` and push the tags:
 
 ```bash
 git checkout main && git pull
-git tag v0.2.0 js-v0.2.0
+git tag v0.2.0
+git tag js-v0.2.0
 git push origin v0.2.0 js-v0.2.0
 ```
 

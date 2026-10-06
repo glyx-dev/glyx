@@ -4,13 +4,20 @@
 # glyx-media's verify.rs accepts it when GLYX_MEDIA_SKIP_VERIFY=1.
 #
 # Usage:
-#   .\generate-dev-manifest.ps1 -Version 1.0.0
+#   .\generate-dev-manifest.ps1 -Version 0.2.0   # default: the Glyx version
 
 param(
-    [string]$Version   = "1.0.0",
+    [string]$Version   = "",
     [string]$Platform  = "windows",
     [string]$Arch      = "x64"
 )
+
+$GlyxMediaToml = Join-Path $PSScriptRoot "..\crates\glyx-media\Cargo.toml"
+if (-not $Version) {
+    # Default to the Glyx version: glyx looks for glyx-media-<that version>-... in its cache.
+    $Version = (Select-String -Path $GlyxMediaToml -Pattern '^version\s*=\s*"(.+)"' |
+        Select-Object -First 1).Matches[0].Groups[1].Value
+}
 
 $Stem     = "glyx-media-$Version-$Platform-$Arch"
 $DllName  = "$Stem.dll"

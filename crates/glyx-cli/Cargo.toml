@@ -24,6 +24,7 @@ sha2       = { workspace = true }
 ureq       = "2"
 # `glyx inspect` / `glyx dev --devtools --open`: the DevTools relay + UI.
 glyx-devtools = { path = "../glyx-devtools" }
+glyx-media    = { path = "../glyx-media" }
 tokio         = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros", "io-std", "io-util"] }
 time       = { version = "0.3", default-features = false, features = ["std"] }
 # "signing" feature is a CLI-tooling-only escape hatch (never linked into the

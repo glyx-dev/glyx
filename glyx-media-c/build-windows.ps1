@@ -9,13 +9,20 @@
 #
 # Usage:
 #   .\build-windows.ps1
-#   .\build-windows.ps1 -Version 1.0.0   # override DLL version
+#   .\build-windows.ps1 -Version 0.2.0   # override DLL version (default: the Glyx version)
 #   .\build-windows.ps1 -FfmpegDir C:\ffmpeg  # use an existing ffmpeg build
 
 param(
-    [string]$Version    = "1.0.0",
+    [string]$Version    = "",
     [string]$FfmpegDir  = ""
 )
+
+$GlyxMediaToml = Join-Path $PSScriptRoot "..\crates\glyx-media\Cargo.toml"
+if (-not $Version) {
+    # Default to the Glyx version: glyx looks for glyx-media-<that version>-... in its cache.
+    $Version = (Select-String -Path $GlyxMediaToml -Pattern '^version\s*=\s*"(.+)"' |
+        Select-Object -First 1).Matches[0].Groups[1].Value
+}
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"

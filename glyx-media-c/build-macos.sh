@@ -7,12 +7,13 @@
 #   brew install ffmpeg pkg-config
 #
 # Usage:
-#   ./build-macos.sh            # version 1.0.0
+#   ./build-macos.sh            # the Glyx version
 #   ./build-macos.sh 1.2.0      # override version
 
 set -euo pipefail
 
-VERSION="${1:-1.0.0}"
+# Default to the Glyx version: glyx looks for glyx-media-<that version>-... in its cache.
+VERSION="${1:-$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$(dirname "${BASH_SOURCE[0]}")/../crates/glyx-media/Cargo.toml" | head -n 1 | tr -d '\r')}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Detect architecture

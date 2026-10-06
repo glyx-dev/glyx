@@ -34,8 +34,19 @@
 
 /* ── Version ─────────────────────────────────────────────────────────────── */
 
+/* The release workflow writes glyx_media_version.h (GLYX_MEDIA_VERSION_STR) so the
+ * library reports the Glyx version it was built for; a local build says "dev". */
+#if defined(__has_include)
+#  if __has_include("glyx_media_version.h")
+#    include "glyx_media_version.h"
+#  endif
+#endif
+#ifndef GLYX_MEDIA_VERSION_STR
+#  define GLYX_MEDIA_VERSION_STR "dev"
+#endif
+
 const char* glyx_media_version(void) {
-    return "1.0.0";
+    return GLYX_MEDIA_VERSION_STR;
 }
 
 void glyx_media_set_log_level(int level) {
@@ -221,8 +232,17 @@ static const char* const ENCODERS[] = {
 static enum AVPixelFormat pick_pix_fmt(const AVCodec* codec) {
     const enum AVPixelFormat* fmts = NULL;
     int n = 0;
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 13, 100)
+    /* FFmpeg 7.1+: AVCodec.pix_fmts is deprecated in favour of this query. */
     if (avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0, (const void**)&fmts, &n) < 0 || !fmts || n == 0)
         return AV_PIX_FMT_YUV420P;
+#else
+    /* Older FFmpeg (e.g. Ubuntu's 6.x): a NONE-terminated list on the codec. */
+    fmts = codec->pix_fmts;
+    if (!fmts) return AV_PIX_FMT_YUV420P;
+    while (fmts[n] != AV_PIX_FMT_NONE) n++;
+    if (n == 0) return AV_PIX_FMT_YUV420P;
+#endif
     for (int i = 0; i < n; i++) if (fmts[i] == AV_PIX_FMT_YUV420P) return AV_PIX_FMT_YUV420P;
     for (int i = 0; i < n; i++) if (fmts[i] == AV_PIX_FMT_NV12) return AV_PIX_FMT_NV12;
     return fmts[0];

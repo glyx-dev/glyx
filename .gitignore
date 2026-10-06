@@ -23,3 +23,6 @@ Thumbs.db
 examples/*/js/dist/
 examples/*/dist/
 examples/*/target/
+
+# Written by the glyx-media release workflow
+glyx-media-c/glyx_media_version.h

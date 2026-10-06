@@ -34,8 +34,19 @@
 
 /* ── Version ─────────────────────────────────────────────────────────────── */
 
+/* The release workflow writes glyx_media_version.h (GLYX_MEDIA_VERSION_STR) so the
+ * library reports the Glyx version it was built for; a local build says "dev". */
+#if defined(__has_include)
+#  if __has_include("glyx_media_version.h")
+#    include "glyx_media_version.h"
+#  endif
+#endif
+#ifndef GLYX_MEDIA_VERSION_STR
+#  define GLYX_MEDIA_VERSION_STR "dev"
+#endif
+
 const char* glyx_media_version(void) {
-    return "1.0.0";
+    return GLYX_MEDIA_VERSION_STR;
 }
 
 void glyx_media_set_log_level(int level) {

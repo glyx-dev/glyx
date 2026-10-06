@@ -107,6 +107,28 @@ fn skip_verify() -> bool {
     false
 }
 
+/// Check an Ed25519 signature over `manifest_bytes` against `pubkey`.
+///
+/// Refuses an all-zero key (the placeholder this repo shipped with: a build
+/// with no real signing key must not pretend to verify anything) and uses
+/// strict verification, which rejects weak keys and malleable signatures that
+/// the plain check would accept.
+fn verify_signature(pubkey: &[u8; 32], manifest_bytes: &[u8], sig_bytes: &[u8]) -> Result<(), String> {
+    use ed25519_dalek::{Signature, VerifyingKey};
+
+    if pubkey.iter().all(|&b| b == 0) {
+        return Err("glyx-media: this build has no signing key (crates/glyx-media/keys/glyx_media_verify.pub                     is the all-zero placeholder), so a signed media library cannot be verified".to_string());
+    }
+    let vk = VerifyingKey::from_bytes(pubkey)
+        .map_err(|e| format!("glyx-media: invalid public key: {e}"))?;
+    let sig_arr: [u8; 64] = sig_bytes
+        .try_into()
+        .map_err(|_| "glyx-media: signature must be 64 bytes".to_string())?;
+    let sig = Signature::from_bytes(&sig_arr);
+    vk.verify_strict(manifest_bytes, &sig)
+        .map_err(|_| "glyx-media: manifest Ed25519 signature invalid".to_string())
+}
+
 /// Verify the Ed25519 signature on a manifest.
 /// Returns the parsed `Manifest` on success.
 ///
@@ -115,18 +137,7 @@ fn skip_verify() -> bool {
 /// with DLLs built by `glyx-media-c/build-windows.ps1`.
 pub fn verify_manifest(manifest_bytes: &[u8], sig_bytes: &[u8]) -> Result<Manifest, String> {
     if !skip_verify() {
-        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-
-        let vk = VerifyingKey::from_bytes(PUBKEY)
-            .map_err(|e| format!("glyx-media: invalid public key: {e}"))?;
-
-        let sig_arr: [u8; 64] = sig_bytes
-            .try_into()
-            .map_err(|_| "glyx-media: signature must be 64 bytes".to_string())?;
-        let sig = Signature::from_bytes(&sig_arr);
-
-        vk.verify(manifest_bytes, &sig)
-            .map_err(|_| "glyx-media: manifest Ed25519 signature invalid".to_string())?;
+        verify_signature(PUBKEY, manifest_bytes, sig_bytes)?;
     } else {
         log::warn!("[glyx-media] GLYX_MEDIA_SKIP_VERIFY=1 — Ed25519 check bypassed (dev only)");
     }
@@ -223,6 +234,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn signatures_are_checked_strictly() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pk = sk.verifying_key().to_bytes();
+        let msg = br#"{"version":"0.2.0"}"#;
+        let sig = sk.sign(msg).to_bytes();
+
+        assert!(verify_signature(&pk, msg, &sig).is_ok());
+        // another message, another key, a short signature
+        assert!(verify_signature(&pk, b"other", &sig).is_err());
+        let other = SigningKey::from_bytes(&[8u8; 32]).verifying_key().to_bytes();
+        assert!(verify_signature(&other, msg, &sig).is_err());
+        assert!(verify_signature(&pk, msg, &sig[..63]).unwrap_err().contains("64 bytes"));
+    }
+
+    #[test]
+    fn the_placeholder_key_never_verifies() {
+        // The all-zero key (what the repo shipped with) refuses everything,
+        // including the identity-point forgery that a plain check would accept
+        // for a degenerate key.
+        let zero = [0u8; 32];
+        let mut forged = [0u8; 64];
+        forged[0] = 1; // R = the identity point, S = 0
+        let err = verify_signature(&zero, b"anything", &forged).unwrap_err();
+        assert!(err.contains("no signing key"), "{err}");
+        // and a small-order key is rejected by strict verification
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        assert!(verify_signature(&identity, b"anything", &forged).is_err());
     }
 
     #[test]

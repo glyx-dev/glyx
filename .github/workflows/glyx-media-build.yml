@@ -76,6 +76,10 @@ jobs:
         with:
           arch: x64
 
+      - name: Stamp the version
+        run: |
+          '#define GLYX_MEDIA_VERSION_STR "' + $env:GLYX_MEDIA_VERSION + '"' | Set-Content -Encoding ascii glyx-media-c\glyx_media_version.h
+
       - name: Build glyx-media.dll (MSVC)
         shell: cmd
         run: |
@@ -166,6 +170,9 @@ jobs:
       - name: Build FFmpeg from source (LGPL only)
         if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
         run: bash glyx-media-c/build-ffmpeg-macos.sh ${{ matrix.arch }} "$FFMPEG_PREFIX"
+
+      - name: Stamp the version
+        run: echo "#define GLYX_MEDIA_VERSION_STR \"${GLYX_MEDIA_VERSION}\"" > glyx-media-c/glyx_media_version.h
 
       - name: Build glyx-media.dylib
         run: |
@@ -260,6 +267,9 @@ jobs:
 
       - name: Install patchelf
         run: sudo apt-get update && sudo apt-get install -y patchelf
+
+      - name: Stamp the version
+        run: echo "#define GLYX_MEDIA_VERSION_STR \"${GLYX_MEDIA_VERSION}\"" > glyx-media-c/glyx_media_version.h
 
       - name: Build glyx-media.so
         run: |

@@ -57,6 +57,10 @@ cd "$WORK/ffmpeg-$FFMPEG_VERSION"
 # --disable-autodetect keeps it from picking up Homebrew libraries on the build
 # machine that users won't have. The system frameworks and zlib/bzip2/iconv
 # (in every macOS) are switched on explicitly.
+#
+# --extra-libs=-liconv: configure assumes iconv is part of the C library, but
+# on macOS it is the separate /usr/lib/libiconv, so without this libavcodec
+# fails to link ("Undefined symbols: _iconv, _iconv_open, _iconv_close").
 
 ./configure \
     --prefix="$PREFIX" \
@@ -68,7 +72,8 @@ cd "$WORK/ffmpeg-$FFMPEG_VERSION"
     --disable-programs --disable-doc --disable-avdevice --disable-avfilter \
     "${ARCH_ARGS[@]}" \
     --extra-cflags="-mmacosx-version-min=$MIN_MACOS" \
-    --extra-ldflags="-arch $CLANG_ARCH -mmacosx-version-min=$MIN_MACOS"
+    --extra-ldflags="-arch $CLANG_ARCH -mmacosx-version-min=$MIN_MACOS" \
+    --extra-libs="-liconv"
 
 # Licence guard: refuse to build anything that isn't LGPL-only.
 for flag in GPL NONFREE; do

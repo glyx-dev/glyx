@@ -2,7 +2,14 @@
   "name": "@glyx-dev/rich-text",
   "version": "0.2.0",
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/index.tsx",
+  "types": "types/index.d.ts",
+  "files": [
+    "src",
+    "types",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx"
+  ],
   "description": "Rich text editor for Glyx apps",
   "peerDependencies": {
     "@glyx-dev/react": "^0.2.0",

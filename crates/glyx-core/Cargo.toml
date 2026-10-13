@@ -39,6 +39,8 @@ glyx-text     = { path = "../glyx-text" }
 glyx-layout   = { path = "../glyx-layout" }
 glyx-runtime  = { path = "../glyx-runtime", default-features = false }
 glyx-perf     = { path = "../glyx-perf" }
+# Rebuilds in dev and plugin bundling. No download code here: the CLI caches esbuild first.
+glyx-bundler  = { path = "../glyx-bundler", default-features = false }
 glyx-devtools = { path = "../glyx-devtools", optional = true }
 winit          = { workspace = true }
 tokio          = { workspace = true }

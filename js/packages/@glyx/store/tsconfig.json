@@ -1,0 +1,5 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "include": ["src", "../../../runtime-globals.d.ts", "../../../glyx-native.d.ts"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
+}

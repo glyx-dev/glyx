@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+- **Written in TypeScript.** The source is now TypeScript (`src/*.ts`), strictly type-checked, and the package ships its declarations (`types/`). They cover the whole public API: every component and its props, `StyleProp`/`GlyxStyle`, `fs`, `db`, `dialog`, `clipboard`, `notification`, `audio`, `system`, `glyxWindow`, `tray`, `menubar`, ... The old hand-written file covered 46 of 119 exports.
+- `Pressable`'s `onPointerMove` event is typed `{ x, y, locationX, locationY }` (it always carried `locationX`/`locationY`).
+
+### Deprecated
+- Style keys the renderer ignores are still accepted, typed `@deprecated`, so TypeScript shows a strike-through: per-side border widths and colours (`borderTopWidth`, `borderTopColor`, ...), `fontFamily`, `cursor`.
+
 ## [0.2.0] - 2026-10-05
 
 ### Added

@@ -103,7 +103,7 @@ pub(super) fn read_config_json() -> Option<String> {
     }
 
     // 2. Pre-resolved by the CLI and passed via env var — avoids the runner
-    //    needing to re-run the config script with a hardcoded PM (bun).
+    //    needing to re-run the config script itself.
     //    glyx-cli resolves glyx.config.ts using the detected package manager
     //    and sets this before spawning the runner.
     if let Ok(json) = std::env::var("GLYX_CONFIG_JSON") {
@@ -114,36 +114,14 @@ pub(super) fn read_config_json() -> Option<String> {
     }
 
     // 3. Fallback: execute glyx.config.ts directly (standalone / native projects
-    //    where the runner is launched without the CLI, e.g. cargo run).
-    //    Uses `bun <file>` — NOT `bun run <file>` which triggers bun's server
-    //    detection heuristic on default-exported objects.
-    //    Falls back to `npx tsx` for non-bun environments.
+    //    where the runner is launched without the CLI, e.g. cargo run). Runs
+    //    with the shared bundler: esbuild + Node, or Bun if that is what the
+    //    machine has (so Bun is not required).
     if std::path::Path::new("glyx.config.ts").exists() {
-        let attempts: &[&[&str]] = &[
-            &["bun", "glyx.config.ts"],
-            &["npx", "tsx", "glyx.config.ts"],
-        ];
-        for args in attempts {
-            let result = if cfg!(target_os = "windows") {
-                let mut cmd = std::process::Command::new("cmd");
-                cmd.arg("/C");
-                for a in *args { cmd.arg(a); }
-                cmd.output()
-            } else {
-                let mut cmd = std::process::Command::new(args[0]);
-                for a in &args[1..] { cmd.arg(a); }
-                cmd.output()
-            };
-            if let Ok(out) = result {
-                if out.status.success() {
-                    if let Ok(json) = String::from_utf8(out.stdout) {
-                        let trimmed = json.trim().to_string();
-                        if !trimmed.is_empty() {
-                            return Some(trimmed);
-                        }
-                    }
-                }
-            }
+        match glyx_bundler::Bundler::auto().and_then(|b| b.eval_config("glyx.config.ts")) {
+            Ok(json) if !json.trim().is_empty() => return Some(json.trim().to_string()),
+            Ok(_) => log::warn!("[config] glyx.config.ts printed nothing"),
+            Err(e) => log::warn!("[config] could not run glyx.config.ts: {e}"),
         }
     }
 
@@ -163,7 +141,7 @@ pub(super) fn app_file(rel: &str) -> Option<std::path::PathBuf> {
         .into_iter().find(|p| p.exists())
 }
 
-/// Wrap a bun `--format cjs` bundle (which ends in `module.exports = ...`)
+/// Wrap a `--format cjs` bundle (which ends in `module.exports = ...`)
 /// in a standard browserify-style shim so its exports land on
 /// `globalThis.<global_name>` — the shape every plugin consumer expects.
 /// Shared by the initial load path (`bundle_plugin`) and the dev-mode
@@ -179,66 +157,32 @@ pub(super) fn wrap_cjs_as_global(cjs: &str, global_name: &str) -> String {
     )
 }
 
-/// Bundle a single plugin entry using bun.
+/// Bundle a plugin entry as CommonJS (`module.exports = …`) with the shared
+/// bundler: esbuild, or Bun when that is all the machine has. The result is
+/// wrapped by [`wrap_cjs_as_global`], which exposes its exports on a global
+/// (an anonymous IIFE would discard them).
+pub(super) fn bundle_plugin_cjs(entry: &str, safe_name: &str) -> Result<String, String> {
+    let tmp_out = std::env::temp_dir().join(format!("glyx_plugin_{safe_name}.js"));
+    let bundler = glyx_bundler::Bundler::auto()?;
+    let mut spec = glyx_bundler::BundleSpec::app(entry, tmp_out.to_string_lossy());
+    spec.format = glyx_bundler::Format::Cjs;
+    bundler.bundle(&spec)?;
+    let cjs = std::fs::read_to_string(&tmp_out)
+        .map_err(|e| format!("could not read the bundle for '{entry}': {e}"));
+    let _ = std::fs::remove_file(&tmp_out);
+    cjs
+}
+
+/// Bundle a single plugin entry and wrap it onto `globalThis.__glyx_plugin_<name>`.
 pub(super) fn bundle_plugin(entry: &str, safe_name: &str) -> Option<String> {
     let global_name = format!("__glyx_plugin_{safe_name}");
-    let tmp_out = std::env::temp_dir().join(format!("glyx_plugin_{safe_name}.js"));
-
-    let run = |args: &[&str]| -> std::io::Result<std::process::Output> {
-        #[cfg(target_os = "windows")]
-        {
-            match std::process::Command::new("bun").args(args).output() {
-                Ok(o) => return Ok(o),
-                Err(_) => {
-                    let mut cmd = vec!["/C", "bun"];
-                    cmd.extend_from_slice(args);
-                    return std::process::Command::new("cmd").args(&cmd).output();
-                }
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        std::process::Command::new("bun").args(args).output()
-    };
-
-    let out_str = tmp_out.to_str()?;
-    // `--global-name` is not a real `bun build` CLI flag (only `Bun.build()`'s
-    // JS API supports naming an IIFE global) — passing it here silently got
-    // misparsed by bun as a second entry-point path. Plain `--format iife`
-    // alone produces an anonymous closure that discards all exports, so
-    // there was no way to reach the plugin's exports afterwards either.
-    // Fix: bundle as CommonJS instead (produces a real `module.exports =
-    // ...`) and wrap it ourselves in a `module`/`exports` shim that exposes
-    // the result on `globalThis.<global_name>`, which is what every
-    // downstream consumer (register_all/reload_plugin_in_scope for V8,
-    // eval_js_plugins for QuickJS) already expects.
-    let bun_args = [
-        "build", entry,
-        "--outfile", out_str,
-        "--target", "browser",
-        "--format", "cjs",
-    ];
-
-    match run(&bun_args) {
-        Ok(o) if o.status.success() => {
-            match std::fs::read_to_string(&tmp_out) {
-                Ok(cjs) => {
-                    log::info!("[plugins] bundled '{entry}' → {global_name}");
-                    let _ = std::fs::remove_file(&tmp_out);
-                    Some(wrap_cjs_as_global(&cjs, &global_name))
-                }
-                Err(e) => {
-                    log::error!("[plugins] could not read bundle for '{entry}': {e}");
-                    None
-                }
-            }
-        }
-        Ok(o) => {
-            let msg = String::from_utf8_lossy(&o.stderr);
-            log::error!("[plugins] bun build failed for '{entry}': {msg}");
-            None
+    match bundle_plugin_cjs(entry, safe_name) {
+        Ok(cjs) => {
+            log::info!("[plugins] bundled '{entry}' → {global_name}");
+            Some(wrap_cjs_as_global(&cjs, &global_name))
         }
         Err(e) => {
-            log::error!("[plugins] failed to run bun for '{entry}': {e}");
+            log::error!("[plugins] could not bundle '{entry}': {e}");
             None
         }
     }

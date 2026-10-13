@@ -32,7 +32,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24   # ships an npm new enough for OIDC trusted publishing (>= 11.5.1)
           registry-url: 'https://registry.npmjs.org'
 
       - uses: oven-sh/setup-bun@v2
@@ -40,9 +40,6 @@ jobs:
       - name: Versions match the tag
         if: startsWith(github.ref, 'refs/tags/')
         run: bun scripts/release/check.mjs "${{ github.ref_name }}"
-
-      - name: Update npm (OIDC trusted publishing needs >= 11.5.1)
-        run: npm install -g npm@latest
 
       - name: Install workspace deps
         run: bun install
@@ -53,6 +50,11 @@ jobs:
         run: bun test
         env:
           GLYX_SKIP_DOWNLOAD: '1'
+
+      - name: Type-check and build the declarations (shipped in each package's types/)
+        run: |
+          bun run typecheck
+          bun run types:build
 
       - name: Publish all @glyx packages
         env:

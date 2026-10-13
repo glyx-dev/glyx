@@ -29,7 +29,16 @@
   "scripts": {
     "test": "bun test js/packages scripts",
     "release:version": "bun scripts/release/version.mjs",
-    "release:check": "bun scripts/release/check.mjs"
+    "release:check": "bun scripts/release/check.mjs",
+    "typecheck": "node scripts/typecheck.mjs",
+    "types:build": "node scripts/build-types.mjs",
+    "native:globals": "node scripts/gen-native-globals.mjs"
+  },
+  "devDependencies": {
+    "@types/react": "18",
+    "@types/react-dom": "18",
+    "@types/react-reconciler": "0.28",
+    "typescript": "^5"
   },
   "dependencies": {
     "@glyx-dev/react": "workspace:*",

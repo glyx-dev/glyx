@@ -1,0 +1,30 @@
+{
+  // Shared by every package under js/packages/@glyx (each has its own tsconfig.json that extends this).
+  // The packages are TypeScript source: the Glyx bundler (esbuild) compiles them with the app, and
+  // `bun run types:build` emits their .d.ts for publishing.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    // No ambient @types/*: what the runtime provides is declared in runtime-globals.d.ts and
+    // glyx-native.d.ts, so a stray Node or DOM API is an error, not a silent runtime failure.
+    "types": [],
+    "baseUrl": ".",
+    "paths": {
+      // Inside the repo a package's neighbours are read from source (so the check works before
+      // any declaration files are built); falls through to node_modules when a package isn't TypeScript yet.
+      // (No extension on purpose: spelling out `.ts` makes TypeScript 5.9 assert when it falls back to a .d.ts.)
+      "@glyx-dev/*": ["packages/@glyx/*/src/index"]
+    }
+  }
+}

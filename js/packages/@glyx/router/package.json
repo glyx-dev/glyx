@@ -2,8 +2,14 @@
   "name": "@glyx-dev/router",
   "version": "0.2.0",
   "type": "module",
-  "main": "src/index.js",
-  "types": "src/index.d.ts",
+  "main": "src/index.ts",
+  "types": "types/index.d.ts",
+  "files": [
+    "src",
+    "types",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx"
+  ],
   "peerDependencies": {
     "react": "^18.2.0"
   },

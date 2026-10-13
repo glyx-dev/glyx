@@ -105,8 +105,12 @@ Override via `glyx.config.ts`: `renderMode: 'auto' | 'skia' | 'gpu' | 'cpu' | 'd
 | Tool | Version |
 |---|---|
 | Node.js | 18+ |
-| Bun | 1.3+ |
 | Rust (stable) | 1.77+ — only needed if building the runner from source |
+
+Bun is **not required**. Glyx bundles your app with esbuild (used from your project's
+`node_modules` if it's there, otherwise downloaded once, checked against a pinned hash and
+cached in `~/.glyx/tools`), so `npm`, `pnpm` and `yarn` projects work as they are. Bun is used
+only if you ask for it (`GLYX_BUNDLER=bun`) or esbuild can't be fetched and Bun is installed.
 
 ## Quick start
 
@@ -117,8 +121,12 @@ glyx dev
 ```
 
 That starts the dev server with hot reload — sub-100ms refresh on save,
-state preserved across reloads. Edit `js/app.jsx` and changes appear
+state preserved across reloads. Edit `src/app.jsx` and changes appear
 instantly.
+
+Prefer TypeScript? `npx glyx-cli create my-app --typescript` writes `src/app.tsx` and a
+`tsconfig.json`; `glyx check` type-checks the project. Every `@glyx-dev/*` package ships
+declarations. See the [TypeScript guide](https://glyx.dev/docs/guides/typescript).
 
 To build for distribution:
 

@@ -9,8 +9,6 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "dev")]
 use notify::{RecursiveMode, Watcher};
-#[cfg(feature = "dev")]
-use std::process::Command;
 
 #[cfg(feature = "dev")]
 use glyx_renderer::{peniko, AnyFrame};
@@ -135,39 +133,22 @@ pub(super) fn start_dev_mode_worker(
             log::info!("[HMR] change detected — rebuilding… (cwd={:?})", cwd);
 
             // Same React build `glyx dev` made: development with DevTools on.
-            let node_env = if std::env::var_os("GLYX_DEVTOOLS_PORT").is_some() {
-                "process.env.NODE_ENV='development'"
+            let react = if std::env::var_os("GLYX_DEVTOOLS_PORT").is_some() {
+                glyx_bundler::ReactMode::Development
             } else {
-                "process.env.NODE_ENV='production'"
+                glyx_bundler::ReactMode::Production
             };
-            let run_bun = |cwd: &std::path::Path| -> std::io::Result<std::process::Output> {
-                let bun_args = [
-                    "build",
-                    app_jsx.to_str().unwrap_or(""),
-                    "--outfile",
-                    app_js.to_str().unwrap_or(""),
-                    "--target",      "browser",
-                    "--format",      "iife",
-                    "--define",      node_env,
-                    "--sourcemap=inline",
-                ];
-                #[cfg(target_os = "windows")]
-                {
-                    match Command::new("bun").args(&bun_args).current_dir(cwd).output() {
-                        Ok(o) => return Ok(o),
-                        Err(_) => {
-                            let mut cmd_args = vec!["/C", "bun"];
-                            cmd_args.extend_from_slice(&bun_args);
-                            return Command::new("cmd").args(&cmd_args).current_dir(cwd).output();
-                        }
-                    }
-                }
-                #[cfg(not(target_os = "windows"))]
-                Command::new("bun").args(&bun_args).current_dir(cwd).output()
-            };
+            // esbuild (cached by the CLI's first bundle), or Bun; the JSX mode is
+            // forced to match `react` whatever the project's tsconfig says.
+            let built = glyx_bundler::Bundler::auto().and_then(|bundler| {
+                let mut spec = glyx_bundler::BundleSpec::app(app_jsx.to_string_lossy(), app_js.to_string_lossy());
+                spec.react = react;
+                spec.source_map = glyx_bundler::SourceMap::Inline;
+                bundler.bundle(&spec)
+            });
 
-            match run_bun(&cwd) {
-                Ok(out) if out.status.success() => {
+            match built {
+                Ok(()) => {
                     match std::fs::read_to_string(&app_js) {
                         Ok(js) => {
                             log::info!("[HMR] build ok — reloading app");
@@ -179,24 +160,9 @@ pub(super) fn start_dev_mode_worker(
                         }
                     }
                 }
-                Ok(out) => {
-                    let mut msg = String::new();
-                    if !out.stderr.is_empty() {
-                        msg.push_str(&String::from_utf8_lossy(&out.stderr));
-                    }
-                    if !out.stdout.is_empty() {
-                        if !msg.is_empty() { msg.push('\n'); }
-                        msg.push_str(&String::from_utf8_lossy(&out.stdout));
-                    }
-                    if msg.is_empty() {
-                        msg = format!("bun build failed (exit {:?})", out.status.code());
-                    }
+                Err(msg) => {
                     log::warn!("[HMR] build error: {msg}");
                     let _ = out_tx.send(DevBuildEvent::BuildErr(msg));
-                }
-                Err(e) => {
-                    log::warn!("[HMR] failed to run bun: {e}  (is bun installed and in PATH?)");
-                    let _ = out_tx.send(DevBuildEvent::BuildErr(e.to_string()));
                 }
             }
             redraw();
@@ -258,55 +224,17 @@ pub(super) fn start_dev_mode_worker(
                 while change_rx.recv_timeout(Duration::from_millis(180)).is_ok() {}
                 log::info!("[plugin HMR] '{}' changed — rebundling", safe_name);
 
-                let run_bun = || -> std::io::Result<std::process::Output> {
-                    let entry_str = abs_entry.to_str().unwrap_or("");
-                    let tmp = std::env::temp_dir().join(format!("glyx_plugin_{safe_name}.js"));
-                    let tmp_str = tmp.to_str().unwrap_or("");
-                    // Same fix as `config::bundle_plugin` — `--global-name` isn't a
-                    // real `bun build` flag; bundle as CJS and wrap it ourselves
-                    // (see `config::wrap_cjs_as_global`) instead.
-                    let bun_args = [
-                        "build", entry_str, "--outfile", tmp_str,
-                        "--target", "browser", "--format", "cjs",
-                    ];
-                    #[cfg(target_os = "windows")]
-                    {
-                        match Command::new("bun").args(&bun_args).output() {
-                            Ok(o) => return Ok(o),
-                            Err(_) => {
-                                let mut cmd = vec!["/C", "bun"];
-                                cmd.extend_from_slice(&bun_args);
-                                return Command::new("cmd").args(&cmd).output();
-                            }
-                        }
+                let entry_str = abs_entry.to_string_lossy().into_owned();
+                match crate::config::bundle_plugin_cjs(&entry_str, &safe_name) {
+                    Ok(cjs) => {
+                        let _ = out_tx2.send(DevBuildEvent::PluginReload {
+                            global_name: global_name.clone(),
+                            prefix:      prefix.clone(),
+                            bundled_js:  crate::config::wrap_cjs_as_global(&cjs, &global_name),
+                        });
+                        redraw2();
                     }
-                    #[cfg(not(target_os = "windows"))]
-                    Command::new("bun").args(&bun_args).output()
-                };
-
-                match run_bun() {
-                    Ok(out) if out.status.success() => {
-                        let tmp = std::env::temp_dir().join(format!("glyx_plugin_{safe_name}.js"));
-                        match std::fs::read_to_string(&tmp) {
-                            Ok(cjs) => {
-                                let _ = std::fs::remove_file(&tmp);
-                                let _ = out_tx2.send(DevBuildEvent::PluginReload {
-                                    global_name: global_name.clone(),
-                                    prefix:      prefix.clone(),
-                                    bundled_js:  crate::config::wrap_cjs_as_global(&cjs, &global_name),
-                                });
-                                redraw2();
-                            }
-                            Err(e) => log::warn!("[plugin HMR] could not read bundle: {e}"),
-                        }
-                    }
-                    Ok(out) => {
-                        let msg = String::from_utf8_lossy(&out.stderr);
-                        log::warn!("[plugin HMR] build error for '{}': {msg}", safe_name);
-                    }
-                    Err(e) => {
-                        log::warn!("[plugin HMR] bun failed for '{}': {e}", safe_name);
-                    }
+                    Err(msg) => log::warn!("[plugin HMR] build error for '{}': {msg}", safe_name),
                 }
             }
         });

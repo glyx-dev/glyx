@@ -110,6 +110,9 @@ enum Commands {
               value_parser = ["blank", "notes", "dashboard", "settings"],
               verbatim_doc_comment)]
         template: String,
+        /// Write the app in TypeScript (app.tsx, tsconfig.json, `glyx check`)
+        #[arg(long, visible_alias = "ts")]
+        typescript: bool,
     },
     /// Start the dev server with hot reload
     ///
@@ -384,7 +387,7 @@ fn run() -> Result<()> {
     let pm = pm::detect(cli.pm.as_deref(), &config_json)?;
 
     match cli.command {
-        Commands::Create { name, native, template } => cmd_create(&name, native, &template, pm),
+        Commands::Create { name, native, template, typescript } => cmd_create(&name, native, &template, typescript, pm),
         Commands::Dev { inspect, devtools, open } => cmd_dev(inspect, devtools, open, pm, cli.icupkg.clone()),
         Commands::Inspect { port, no_open } => cmd_inspect::cmd_inspect(port, no_open),
         Commands::Mcp => unreachable!("handled above"),
@@ -815,22 +818,26 @@ fn glyx_home() -> Result<PathBuf> {
     }
 
     let exe = std::env::current_exe().context("Cannot determine executable path")?;
-    let mut dir = exe.as_path();
-    loop {
-        dir = dir.parent().context("Could not find glyx home directory")?;
-        let cargo_toml = dir.join("Cargo.toml");
-        if cargo_toml.exists() {
-            let content = std::fs::read_to_string(&cargo_toml).unwrap_or_default();
-            if content.contains("[workspace]") && content.contains("glyx-core") {
-                return Ok(dir.to_path_buf());
-            }
-        }
-        if dir.parent().is_none() { break; }
+    let is_workspace = |dir: &Path| {
+        let content = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap_or_default();
+        content.contains("[workspace]") && content.contains("glyx-core")
+    };
+    if let Some(workspace) = workspace_of_built_exe(&exe, is_workspace) {
+        return Ok(workspace);
     }
     anyhow::bail!(
         "Not running from inside the glyx source workspace — this is expected \
          for a published glyx-cli install and isn't an error by itself."
     )
+}
+
+/// The glyx workspace a binary at `exe` was *built into*: a folder above it that
+/// is a glyx workspace and whose `target/` holds the binary (`target/debug/glyx`).
+/// A binary that is merely somewhere inside a checkout, like the npm wrapper's
+/// `js/packages/glyx-cli/bin/glyx-bin`, is a downloaded release: it is not a build
+/// of that source, and must not make a project made with it link to the checkout.
+fn workspace_of_built_exe(exe: &Path, is_workspace: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    exe.ancestors().skip(1).find(|dir| exe.starts_with(dir.join("target")) && is_workspace(dir)).map(Path::to_path_buf)
 }
 
 fn relpath(from_dir: &Path, to: &Path) -> String {
@@ -888,41 +895,16 @@ fn read_project_name() -> Option<String> {
 /// Resolve the project config to a JSON string.
 fn resolve_config_json() -> Result<String> {
     if Path::new("glyx.config.ts").exists() {
-        // Execute glyx.config.ts directly — NOT via `bun run` (which triggers
-        // bun's server-detection heuristic on default-exported objects).
-        let out = exec_config_ts("glyx.config.ts")?;
-        if !out.status.success() {
-            bail!("glyx.config.ts execution failed:\n{}", String::from_utf8_lossy(&out.stderr));
-        }
-        let json = String::from_utf8(out.stdout)
-            .context("glyx.config.ts output is not valid UTF-8")?;
-        return Ok(json.trim().to_string());
+        // `defineConfig` prints the config as JSON and exits. Run it with the
+        // bundler's backend: esbuild + Node, or Bun if that is what is available.
+        let bundler = glyx_bundler::Bundler::auto().map_err(anyhow::Error::msg)?;
+        return bundler
+            .eval_config("glyx.config.ts")
+            .map_err(|e| anyhow::anyhow!("glyx.config.ts execution failed:
+{e}"));
     }
     std::fs::read_to_string("glyx.config.json")
         .context("neither glyx.config.ts nor glyx.config.json found")
-}
-
-/// Execute a TypeScript config file and return its output.
-/// Uses `bun <file>` (direct execution, no server detection) with `node --import tsx`
-/// as a fallback for non-bun environments.
-fn exec_config_ts(file: &str) -> std::io::Result<std::process::Output> {
-    // Try bun first (native TS support, direct file execution)
-    let bun_result = if cfg!(target_os = "windows") {
-        std::process::Command::new("cmd").args(["/C", "bun", file]).output()
-    } else {
-        std::process::Command::new("bun").arg(file).output()
-    };
-    if let Ok(out) = bun_result {
-        if out.status.success() || !out.stdout.is_empty() {
-            return Ok(out);
-        }
-    }
-    // Fallback: tsx (works with npm/pnpm/yarn projects that have tsx installed)
-    if cfg!(target_os = "windows") {
-        std::process::Command::new("cmd").args(["/C", "npx", "tsx", file]).output()
-    } else {
-        std::process::Command::new("npx").args(["tsx", file]).output()
-    }
 }
 
 // ── Icon helpers ──────────────────────────────────────────────────────────────
@@ -1735,5 +1717,26 @@ name = \"glyx-runner\"
         assert!(!stamp_is_stale(Some(&after), env!("CARGO_PKG_VERSION")));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod workspace_detection_tests {
+    use super::workspace_of_built_exe;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn only_a_binary_built_into_the_workspace_target_counts() {
+        let ws = Path::new("/src/glyx");
+        let is_ws = |d: &Path| d == ws;
+        // `cargo build`: target/debug/glyx
+        assert_eq!(workspace_of_built_exe(&ws.join("target/debug/glyx"), is_ws), Some(PathBuf::from("/src/glyx")));
+        assert_eq!(workspace_of_built_exe(&ws.join("target/x86_64-pc-windows-msvc/release/glyx.exe"), is_ws), Some(PathBuf::from("/src/glyx")));
+        // the npm wrapper's downloaded binary, inside the checkout: not a build of it
+        assert_eq!(workspace_of_built_exe(&ws.join("js/packages/glyx-cli/bin/glyx-bin"), is_ws), None);
+        // an installed copy elsewhere
+        assert_eq!(workspace_of_built_exe(Path::new("/usr/local/bin/glyx"), is_ws), None);
+        // a `target` folder that isn't under the workspace
+        assert_eq!(workspace_of_built_exe(Path::new("/other/target/debug/glyx"), is_ws), None);
     }
 }

@@ -2,7 +2,14 @@
   "name": "@glyx-dev/testing",
   "version": "0.2.0",
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/index.ts",
+  "types": "types/index.d.ts",
+  "files": [
+    "src",
+    "types",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx"
+  ],
   "exports": {
     ".": "./src/index.js",
     "./setup": "./setup.js"
@@ -10,7 +17,7 @@
   "scripts": {
     "test": "bun test"
   },
-  "description": "Test utilities for Glyx apps — compatible with Bun's test runner",
+  "description": "Test utilities for Glyx apps \u2014 compatible with Bun's test runner",
   "peerDependencies": {
     "react": ">=18",
     "react-dom": ">=18",

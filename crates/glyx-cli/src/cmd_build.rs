@@ -107,8 +107,25 @@ pub(super) fn build_snapshot_mode(target: Option<&str>, project_name: &str, p: p
     let bundle = build_app_bundle(project_name, &entry, p).context("app bundle build failed")?;
     println!("✓ App bundle: {} ({} KB)", bundle.display(), std::fs::metadata(&bundle)?.len() / 1024);
 
-    // 2. Create V8 snapshot (stubs + polyfills ONLY — app is eval'd separately at runtime)
-    let snap = create_snapshot_for_build(project_name).context("V8 snapshot creation failed")?;
+    // 2. Create V8 snapshot (stubs + polyfills ONLY — app is eval'd separately
+    // at runtime).  A published CLI has no snapshot toolchain available (it
+    // needs the glyx source workspace), so fall back to bundle mode instead
+    // of hard-failing the build.
+    let snap = match create_snapshot_for_build(project_name) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("Not running from inside the glyx source workspace")
+                || msg.contains("Could not find glyx home directory")
+                || msg.contains("Failed to build glyx-snapshot")
+                || msg.contains("glyx-snapshot binary not found")
+            {
+                println!("⚠  V8 snapshot unavailable for this CLI install; falling back to bundle mode");
+                return build_bundle_mode(target, project_name, p);
+            }
+            return Err(e).context("V8 snapshot creation failed");
+        }
+    };
 
     // 3. Resolve config to JSON and embed it
     let abs_bundle = std::env::current_dir()?.join(&bundle);

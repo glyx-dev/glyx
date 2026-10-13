@@ -2,7 +2,14 @@
   "name": "@glyx-dev/drizzle",
   "version": "0.2.0",
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/index.ts",
+  "types": "types/index.d.ts",
+  "files": [
+    "src",
+    "types",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx"
+  ],
   "description": "Drizzle ORM adapter for Glyx SQLite bindings",
   "peerDependencies": {
     "drizzle-orm": ">=0.36.0"

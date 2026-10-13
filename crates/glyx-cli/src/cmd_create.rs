@@ -5,7 +5,7 @@ use super::{
     glyx_home, relpath, write_file, copy_glyx_mark_to, pm,
 };
 
-pub(super) fn cmd_create(name: &str, native: bool, template: &str, p: pm::Pm) -> Result<()> {
+pub(super) fn cmd_create(name: &str, native: bool, template: &str, typescript: bool, p: pm::Pm) -> Result<()> {
     let dest = PathBuf::from(name);
     if dest.exists() { anyhow::bail!("directory '{}' already exists", name); }
 
@@ -18,18 +18,23 @@ pub(super) fn cmd_create(name: &str, native: bool, template: &str, p: pm::Pm) ->
         );
     }
 
-    // Workspace checkout → wire local path/file deps (contributor fast-iteration).
+    // Workspace checkout → wire local path/file deps (contributor fast-iteration),
+    // but only for a project made inside that checkout (or when asked with
+    // GLYX_LINK_LOCAL=1): a CLI built from the source on a developer's machine must
+    // not write `file:` paths into projects made anywhere else.
     // Standalone CLI → npm versions + git deps pinned to this CLI's release tag.
-    let glyx_home = glyx_home().ok();
+    let glyx_home = glyx_home().ok().filter(|home| {
+        links_to_checkout(&dest, home, std::env::var("GLYX_LINK_LOCAL").as_deref() == Ok("1"))
+    });
 
     if native {
         println!("Creating Glyx project (native): {name}/");
-        println!("  Template: {template}  |  Includes Cargo.toml + src/main.rs");
-        cmd_create_native(name, &dest, glyx_home.as_deref(), template)?;
+        println!("  Template: {template}  |  Includes Cargo.toml + src/main.rs{}", if typescript { "  |  TypeScript" } else { "" });
+        cmd_create_native(name, &dest, glyx_home.as_deref(), template, typescript)?;
     } else {
         println!("Creating Glyx project: {name}/");
-        println!("  Template: {template}  |  JS-only mode — no Rust toolchain required.");
-        cmd_create_js(name, &dest, glyx_home.as_deref(), template)?;
+        println!("  Template: {template}  |  {}  |  JS-only mode — no Rust toolchain required.", if typescript { "TypeScript" } else { "JavaScript" });
+        cmd_create_js(name, &dest, glyx_home.as_deref(), template, typescript)?;
     }
 
     println!();
@@ -38,12 +43,33 @@ pub(super) fn cmd_create(name: &str, native: bool, template: &str, p: pm::Pm) ->
     println!("Next steps:");
     println!("  cd {name}");
     println!("  {} install", p.name());
+    if typescript {
+        println!("  glyx check    # type-check (TypeScript)");
+    }
     if native {
         println!("  glyx dev      # hot-reload dev server (requires Rust toolchain)");
     } else {
         println!("  glyx dev      # hot-reload dev server (no Rust required)");
     }
     Ok(())
+}
+
+/// Whether a new project at `dest` links to the packages in the glyx checkout at
+/// `home` (`file:` dependencies): when it is made inside the checkout, or `force`.
+fn links_to_checkout(dest: &Path, home: &Path, force: bool) -> bool {
+    if force {
+        return true;
+    }
+    // `dest` doesn't exist yet: resolve its folder and add its name back.
+    let abs = |p: &Path| -> Option<PathBuf> {
+        let p = if p.is_absolute() { p.to_path_buf() } else { std::env::current_dir().ok()?.join(p) };
+        let name = p.file_name()?.to_owned();
+        Some(p.parent()?.canonicalize().ok()?.join(name))
+    };
+    match (abs(dest), home.canonicalize().ok()) {
+        (Some(dest), Some(home)) => dest.starts_with(home),
+        _ => false,
+    }
 }
 
 /// npm/file dep specifiers for the four @glyx JS packages.
@@ -64,7 +90,7 @@ fn js_dep_specs(dest: &Path, glyx_home: Option<&Path>) -> (String, String, Strin
     }
 }
 
-pub(super) fn cmd_create_js(name: &str, dest: &Path, glyx_home: Option<&Path>, template: &str) -> Result<()> {
+pub(super) fn cmd_create_js(name: &str, dest: &Path, glyx_home: Option<&Path>, template: &str, typescript: bool) -> Result<()> {
     std::fs::create_dir_all(dest.join("src"))?;
     std::fs::create_dir_all(dest.join("src/components"))?;
     std::fs::create_dir_all(dest.join("public"))?;
@@ -72,24 +98,8 @@ pub(super) fn cmd_create_js(name: &str, dest: &Path, glyx_home: Option<&Path>, t
 
     let (react_dep, router_dep, design_dep, config_dep) = js_dep_specs(dest, glyx_home);
 
-    write_file(dest.join("src/app.jsx"), &app_jsx_for_template(name, template))?;
-    write_file(dest.join("glyx.config.ts"), &glyx_config_ts_js_template(name))?;
-    write_file(dest.join("package.json"), &format!(
-        r#"{{
-  "name": "{name}",
-  "version": "0.1.0",
-  "private": true,
-  "dependencies": {{
-    "react":          "^18",
-    "@glyx-dev/react":   "{react_dep}",
-    "@glyx-dev/router":  "{router_dep}",
-    "@glyx-dev/design":  "{design_dep}"
-  }},
-  "devDependencies": {{
-    "@glyx-dev/config": "{config_dep}"
-  }}
-}}
-"#))?;
+    write_app_files(name, dest, template, "src", glyx_config_ts_js_template(name), typescript,
+                    (&react_dep, &router_dep, &design_dep, &config_dep))?;
     // target/ holds generated files, including target/glyx/devtools.json
     // (the DevTools token): never commit it.
     write_file(dest.join(".gitignore"), "/node_modules\n/dist/\n/target/\n")?;
@@ -97,7 +107,7 @@ pub(super) fn cmd_create_js(name: &str, dest: &Path, glyx_home: Option<&Path>, t
     Ok(())
 }
 
-pub(super) fn cmd_create_native(name: &str, dest: &Path, glyx_home: Option<&Path>, template: &str) -> Result<()> {
+pub(super) fn cmd_create_native(name: &str, dest: &Path, glyx_home: Option<&Path>, template: &str, typescript: bool) -> Result<()> {
     std::fs::create_dir_all(dest.join("src"))?;
     std::fs::create_dir_all(dest.join("ui"))?;
     std::fs::create_dir_all(dest.join("ui/components"))?;
@@ -171,8 +181,43 @@ quickjs = ["glyx-core/quickjs"]
 [dependencies]
 {rust_deps}"#))?;
     write_file(dest.join("src/main.rs"), "#![cfg_attr(all(target_os = \"windows\", not(debug_assertions)), windows_subsystem = \"windows\")]\n\nfn main() {\n    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(\"info\"))\n        .format_timestamp(None)\n        .format_module_path(false)\n        .init();\n    glyx_core::run(glyx_core::AppConfig::from_config());\n}\n")?;
-    write_file(dest.join("ui/app.jsx"), &app_jsx_for_template(name, template))?;
-    write_file(dest.join("glyx.config.ts"), &glyx_config_ts_native_template(name))?;
+    write_app_files(name, dest, template, "ui", glyx_config_ts_native_template(name), typescript,
+                    (&react_dep, &router_dep, &design_dep, &config_dep))?;
+    write_file(dest.join(".gitignore"), "/target\n/node_modules\n/dist/\n/target/glyx/glyx.config.resolved.json\n")?;
+    write_file(dest.join(".claude/SKILLS.md"), &skills_md_template())?;
+    Ok(())
+}
+
+/// The files both project kinds share: the app source, `glyx.config.ts`,
+/// `package.json` and, for TypeScript, `tsconfig.json`. `ui` is the source folder.
+fn write_app_files(
+    name: &str,
+    dest: &Path,
+    template: &str,
+    ui: &str,
+    config_ts: String,
+    typescript: bool,
+    (react_dep, router_dep, design_dep, config_dep): (&str, &str, &str, &str),
+) -> Result<()> {
+    let ext = if typescript { "tsx" } else { "jsx" };
+    let app = if typescript { app_tsx_for_template(name, template) } else { app_jsx_for_template(name, template) };
+    write_file(dest.join(format!("{ui}/app.{ext}")), &app)?;
+    // The config names the entry file: point it at the one just written.
+    write_file(dest.join("glyx.config.ts"), &config_ts.replace(&format!("{ui}/app.jsx"), &format!("{ui}/app.{ext}")))?;
+    // JSX is not set up by a tsconfig for a JavaScript project, and for a
+    // TypeScript one the bundler forces the JSX mode itself, so this file is
+    // for the editor and `glyx check` only.
+    if typescript {
+        write_file(dest.join("tsconfig.json"), &tsconfig_template(ui))?;
+    }
+    let (dev_extra, scripts) = if typescript {
+        (
+            ",\n    \"typescript\":   \"^5\",\n    \"@types/react\": \"^18\"",
+            ",\n  \"scripts\": {\n    \"check\": \"glyx check\"\n  }",
+        )
+    } else {
+        ("", "")
+    };
     write_file(dest.join("package.json"), &format!(
         r#"{{
   "name": "{name}",
@@ -185,13 +230,70 @@ quickjs = ["glyx-core/quickjs"]
     "@glyx-dev/design":  "{design_dep}"
   }},
   "devDependencies": {{
-    "@glyx-dev/config": "{config_dep}"
-  }}
+    "@glyx-dev/config": "{config_dep}"{dev_extra}
+  }}{scripts}
 }}
 "#))?;
-    write_file(dest.join(".gitignore"), "/target\n/node_modules\n/dist/\n/target/glyx/glyx.config.resolved.json\n")?;
-    write_file(dest.join(".claude/SKILLS.md"), &skills_md_template())?;
     Ok(())
+}
+
+/// A TypeScript project's `tsconfig.json`.
+pub(super) fn tsconfig_template(ui: &str) -> String {
+    format!(r#"{{
+  "compilerOptions": {{
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": []
+  }},
+  "include": ["{ui}", "glyx.config.ts"]
+}}
+"#)
+}
+
+/// The edits that turn a template's JSX into TypeScript: its components' props,
+/// and the data they carry, get types. Each `from` must match exactly once (a
+/// test checks every template, so changing one without the other is caught).
+fn tsx_edits(template: &str) -> &'static [(&'static str, &'static str)] {
+    match template {
+        "notes" => &[
+            ("const NOTES = [",
+             "interface Note {\n  id: number;\n  title: string;\n  body: string;\n}\n\nconst NOTES: Note[] = ["),
+            ("function Sidebar({ notes, selectedId, onSelect, onNew }) {",
+             "function Sidebar({ notes, selectedId, onSelect, onNew }: {\n  notes: Note[];\n  selectedId: number;\n  onSelect: (id: number) => void;\n  onNew: () => void;\n}) {"),
+            ("function NoteView({ note }) {",
+             "function NoteView({ note }: { note: Note | null }) {"),
+        ],
+        "dashboard" => &[
+            ("const STATS = [",
+             "interface Stat {\n  label: string;\n  value: string;\n  delta: string;\n  variant: 'success' | 'warning' | 'error';\n}\n\nconst STATS: Stat[] = ["),
+            ("function Sidebar({ active, onSelect }) {",
+             "function Sidebar({ active, onSelect }: { active: string; onSelect: (item: string) => void }) {"),
+            ("function StatCard({ label, value, delta, variant }) {",
+             "function StatCard({ label, value, delta, variant }: Stat) {"),
+        ],
+        "settings" => &[
+            ("function SettingRow({ label, description, children }) {",
+             "function SettingRow({ label, description, children }: {\n  label: string;\n  description?: string;\n  children?: React.ReactNode;\n}) {"),
+            ("function Section({ title, children }) {",
+             "function Section({ title, children }: { title: string; children?: React.ReactNode }) {"),
+        ],
+        _ => &[],
+    }
+}
+
+/// The TypeScript (`app.tsx`) version of a template.
+pub(super) fn app_tsx_for_template(name: &str, template: &str) -> String {
+    let mut src = app_jsx_for_template(name, template);
+    for (from, to) in tsx_edits(template) {
+        src = src.replacen(from, to, 1);
+    }
+    src.replace("app.jsx", "app.tsx")
 }
 
 pub(super) fn app_jsx_for_template(name: &str, template: &str) -> String {
@@ -618,4 +720,97 @@ export default defineConfig({{
     watch:  ['ui'],
   }},
 }});"#)
+}
+
+#[cfg(test)]
+mod typescript_tests {
+    use super::*;
+
+    const TEMPLATES: [&str; 4] = ["blank", "notes", "dashboard", "settings"];
+
+    #[test]
+    fn every_typescript_edit_matches_its_template_exactly_once() {
+        for t in TEMPLATES {
+            let jsx = app_jsx_for_template("demo", t);
+            for (from, _) in tsx_edits(t) {
+                assert_eq!(jsx.matches(from).count(), 1, "template {t}: `{from}` must appear once");
+            }
+        }
+    }
+
+    #[test]
+    fn typescript_templates_have_typed_props_and_no_jsx_leftovers() {
+        for t in TEMPLATES {
+            let tsx = app_tsx_for_template("demo", t);
+            assert!(!tsx.contains("app.jsx"), "template {t} still points at app.jsx");
+            assert!(tsx.contains("render("), "template {t}");
+            // no component takes destructured props without a type (strict mode rejects them)
+            for line in tsx.lines().filter(|l| l.starts_with("function ") && l.contains("({")) {
+                assert!(line.contains(": {") || line.contains("}: "), "template {t}: untyped props in `{line}`");
+            }
+        }
+        assert!(app_tsx_for_template("demo", "notes").contains("interface Note"));
+        assert!(app_tsx_for_template("demo", "dashboard").contains("variant: 'success' | 'warning' | 'error'"));
+        assert!(app_tsx_for_template("demo", "settings").contains("children?: React.ReactNode"));
+    }
+
+    #[test]
+    fn the_generated_tsconfig_is_json_and_sets_the_standard_jsx_mode() {
+        for ui in ["src", "ui"] {
+            let v: serde_json::Value = serde_json::from_str(&tsconfig_template(ui)).expect("valid JSON");
+            // react-jsx is what editors and `tsc` expect; the bundler forces the build's mode itself.
+            assert_eq!(v["compilerOptions"]["jsx"], "react-jsx");
+            assert_eq!(v["compilerOptions"]["strict"], true);
+            assert_eq!(v["include"][0], ui);
+        }
+    }
+
+    #[test]
+    fn creating_a_typescript_project_writes_the_typescript_files() {
+        let root = std::env::temp_dir().join(format!("glyx-create-ts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (template, ui, native) in [("blank", "src", false), ("notes", "ui", true)] {
+            let dest = root.join(format!("{template}-{native}"));
+            let cfg = if native { glyx_config_ts_native_template("demo") } else { glyx_config_ts_js_template("demo") };
+            write_app_files("demo", &dest, template, ui, cfg, true, ("^0.2.0", "^0.2.0", "^0.2.0", "^0.2.0")).unwrap();
+            assert!(dest.join(format!("{ui}/app.tsx")).exists() && !dest.join(format!("{ui}/app.jsx")).exists());
+            let config = std::fs::read_to_string(dest.join("glyx.config.ts")).unwrap();
+            assert!(config.contains(&format!("entry:  '{ui}/app.tsx'")), "config entry: {config}");
+            let pkg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dest.join("package.json")).unwrap()).unwrap();
+            assert_eq!(pkg["devDependencies"]["typescript"], "^5");
+            assert_eq!(pkg["devDependencies"]["@types/react"], "^18");
+            assert_eq!(pkg["scripts"]["check"], "glyx check");
+            assert!(dest.join("tsconfig.json").exists());
+        }
+        // a JavaScript project is unchanged: no tsconfig, no TypeScript dependencies
+        let js = root.join("js");
+        write_app_files("demo", &js, "blank", "src", glyx_config_ts_js_template("demo"), false, ("^0.2.0", "^0.2.0", "^0.2.0", "^0.2.0")).unwrap();
+        assert!(js.join("src/app.jsx").exists() && !js.join("tsconfig.json").exists());
+        let pkg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(js.join("package.json")).unwrap()).unwrap();
+        assert!(pkg["devDependencies"].get("typescript").is_none() && pkg.get("scripts").is_none());
+        let config = std::fs::read_to_string(js.join("glyx.config.ts")).unwrap();
+        assert!(config.contains("entry:  'src/app.jsx'"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::links_to_checkout;
+
+    #[test]
+    fn a_project_links_to_the_checkout_only_when_made_inside_it() {
+        let root = std::env::temp_dir().join(format!("glyx-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("glyx");
+        let outside = root.join("elsewhere");
+        std::fs::create_dir_all(home.join("examples")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        assert!(links_to_checkout(&home.join("examples").join("my-app"), &home, false), "inside the checkout");
+        assert!(!links_to_checkout(&outside.join("my-app"), &home, false), "anywhere else: published packages");
+        assert!(!links_to_checkout(&root.join("glyx-sibling").join("x"), &home, false), "a sibling folder with the same prefix is not inside");
+        assert!(links_to_checkout(&outside.join("my-app"), &home, true), "GLYX_LINK_LOCAL=1 asks for it");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

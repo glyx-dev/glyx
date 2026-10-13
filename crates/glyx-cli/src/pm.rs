@@ -199,22 +199,14 @@ fn raw_cmd_with_args(bin: &str, args: &[&str]) -> Command {
 
 // ── Bundling ──────────────────────────────────────────────────────────────────
 
-/// Bundle JS via `bun build` — Bun's own built-in bundler, not a separate
-/// `esbuild` package.
+/// Bundle the app's JavaScript/TypeScript into the single script the runner
+/// loads (see the `glyx-bundler` crate).
 ///
-/// Previously this shelled out to `esbuild` via the configured PM's dlx/npx
-/// mechanism, on the assumption that "esbuild is a peer dep of
-/// @glyx-dev/react so it is always in node_modules after install" — that
-/// assumption doesn't hold (no such peer dep exists, `esbuild` is not
-/// actually installed), so dlx fell back to fetching a fresh copy over the
-/// network on every call, which fails in restricted/offline environments
-/// with a `Cannot find module '...esbuild/bin/esbuild'` error. `dev_mode.rs`
-/// already bundles this way for incremental HMR rebuilds and it works
-/// reliably with no external dependency — this unifies both bundling paths
-/// onto that same, already-proven mechanism. `pm` is accepted for call-site
-/// compatibility (this always used bun regardless of the configured PM
-/// before too, dlx_cmd's fallback path already assumed bun) but unused now
-/// that there's no PM-specific dlx invocation to build.
+/// esbuild does the work, from the project's `node_modules` or a pinned,
+/// checksum-verified download cached in `~/.glyx/tools`, so Bun is not
+/// required; Bun is only a fallback when esbuild can't be had. TypeScript
+/// (`.ts`/`.tsx`) bundles like JavaScript. `pm` is accepted for call-site
+/// compatibility.
 ///
 /// `minify`     — set to true for production bundles
 /// `source_map` — where the source map goes (see [`SourceMap`])
@@ -272,61 +264,22 @@ pub fn js_bundle_with_react(
     strip_test_ids: bool,
     react:      ReactBuild,
 ) -> Result<()> {
-    // Bun writes a separate map only with --outdir: then the output is named
-    // by --entry-naming (a literal file name here) inside that folder.
-    let out_path = std::path::Path::new(output);
-    let out_target: Vec<String> = if source_map == SourceMap::Kept {
-        let dir = out_path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
-        let name = out_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "app.js".into());
-        vec!["--outdir".into(), dir.to_string_lossy().into_owned(), format!("--entry-naming={name}")]
-    } else {
-        vec!["--outfile".into(), output.to_string()]
+    let bundler = glyx_bundler::Bundler::auto().map_err(anyhow::Error::msg)?;
+    let mut spec = glyx_bundler::BundleSpec::app(entry, output);
+    spec.minify = minify;
+    spec.strip_test_ids = strip_test_ids;
+    // The JSX transform is forced to match this, whatever the project's tsconfig says.
+    spec.react = match react {
+        ReactBuild::Production => glyx_bundler::ReactMode::Production,
+        ReactBuild::Development => glyx_bundler::ReactMode::Development,
     };
-    let mut args = vec!["build".to_string(), entry.to_string()];
-    args.extend(out_target);
-    args.extend([
-        "--target".to_string(), "browser".to_string(),
-        "--format".to_string(), "iife".to_string(),
-        "--define".to_string(), react.node_env_define().to_string(),
-    ]);
-    if minify     { args.push("--minify".to_string()); }
-    // Release builds: the React host config drops `testID` props before they
-    // reach native (see @glyx-dev/react hostConfig.js).
-    if strip_test_ids {
-        args.push("--define".to_string());
-        args.push("__GLYX_STRIP_TEST_IDS__=true".to_string());
-    }
-    match source_map {
-        SourceMap::None => {}
-        SourceMap::Inline => args.push("--sourcemap=inline".to_string()),
-        // `external`: `<output>.map`, and no reference to it in the bundle.
-        SourceMap::Kept => args.push("--sourcemap=external".to_string()),
-    }
-
-    let run = || -> std::io::Result<std::process::Output> {
-        #[cfg(target_os = "windows")]
-        {
-            match Command::new("bun").args(&args).output() {
-                Ok(o) => Ok(o),
-                Err(_) => {
-                    let mut cmd_args = vec!["/C".to_string(), "bun".to_string()];
-                    cmd_args.extend(args.iter().cloned());
-                    Command::new("cmd").args(&cmd_args).output()
-                }
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        Command::new("bun").args(&args).output()
+    spec.source_map = match source_map {
+        SourceMap::None => glyx_bundler::SourceMap::None,
+        SourceMap::Inline => glyx_bundler::SourceMap::Inline,
+        // `<output>.map`, with no reference in the bundle; moved out below.
+        SourceMap::Kept => glyx_bundler::SourceMap::External,
     };
-
-    let out = run().map_err(|e| anyhow::anyhow!(
-        "Failed to run `bun build`: {e}\nMake sure bun is installed and on PATH."
-    ))?;
-
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        bail!("bun build failed:\n{stderr}");
-    }
+    bundler.bundle(&spec).map_err(anyhow::Error::msg)?;
     if source_map == SourceMap::Kept { keep_source_map(output)?; }
     Ok(())
 }

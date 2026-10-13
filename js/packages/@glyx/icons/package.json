@@ -1,8 +1,15 @@
 {
   "name": "@glyx-dev/icons",
   "version": "0.2.0",
-  "description": "Icon set for Glyx apps — Lucide icons rendered as inline SVG.",
-  "main": "src/index.js",
+  "description": "Icon set for Glyx apps \u2014 Lucide icons rendered as inline SVG.",
+  "main": "src/index.ts",
+  "types": "types/index.d.ts",
+  "files": [
+    "src",
+    "types",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx"
+  ],
   "license": "MIT",
   "peerDependencies": {
     "@glyx-dev/react": "^0.2.0",

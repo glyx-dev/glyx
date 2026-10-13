@@ -26,3 +26,9 @@ examples/*/target/
 
 # Written by the glyx-media release workflow
 glyx-media-c/glyx_media_version.h
+
+# The npm wrapper downloads the platform binary here on install (never commit it)
+/js/packages/glyx-cli/bin/glyx-bin*
+
+# Declaration files built for publishing (scripts/build-types.mjs); never committed
+/js/packages/@glyx/*/types/

@@ -3556,6 +3556,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "glyx-bundler"
+version = "0.2.0"
+dependencies = [
+ "flate2",
+ "log",
+ "serde_json",
+ "sha2",
+ "tar",
+ "ureq 2.12.1",
+]
+
+[[package]]
 name = "glyx-cap-abi"
 version = "0.2.0"
 
@@ -3637,6 +3649,7 @@ dependencies = [
  "ed25519-dalek",
  "env_logger",
  "flate2",
+ "glyx-bundler",
  "glyx-devtools",
  "glyx-media",
  "glyx-verify",
@@ -3665,6 +3678,7 @@ dependencies = [
  "env_logger",
  "ffmpeg-sidecar",
  "glyx-3d",
+ "glyx-bundler",
  "glyx-cap-abi",
  "glyx-devtools",
  "glyx-gpu",

@@ -2,8 +2,15 @@
   "name": "@glyx-dev/charts",
   "version": "0.2.0",
   "type": "module",
-  "main": "src/index.js",
-  "description": "GPU-rendered charts for Glyx — built on Canvas 2D path primitives. No DOM, no SVG.",
+  "main": "src/index.ts",
+  "types": "types/index.d.ts",
+  "files": [
+    "src",
+    "types",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx"
+  ],
+  "description": "GPU-rendered charts for Glyx \u2014 built on Canvas 2D path primitives. No DOM, no SVG.",
   "peerDependencies": {
     "react": "^18.2.0",
     "@glyx-dev/react": "^0.2.0"

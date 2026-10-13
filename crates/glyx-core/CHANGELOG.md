@@ -4,6 +4,9 @@ Changes to the native runtime and renderer (`glyx-core`, and the crates it drive
 
 ## [Unreleased]
 
+### Changed
+- Hot-reload rebuilds, plugin bundling and the `glyx.config.ts` fallback use the shared `glyx-bundler` (esbuild, or Bun) instead of calling Bun directly, so they work on machines without Bun, and force the JSX transform to match the React build.
+
 ## [0.2.0] - 2026-10-05
 
 ### Added

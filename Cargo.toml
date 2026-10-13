@@ -28,6 +28,7 @@ members = [
     "examples/motion-demo",
     "crates/glyx-snapshot",
     "crates/glyx-media",
+    "crates/glyx-bundler",
     "crates/glyx-cap-abi",
     "crates/glyx-cap-audio",
     "crates/glyx-cap-ai",

@@ -57,7 +57,7 @@ jobs:
             echo "::error::warnings found in workspace crates"; exit 1
           fi
       - name: cargo test (tested crates)
-        run: cargo test -p glyx-security -p glyx-core -p glyx-runtime
+        run: cargo test -p glyx-security -p glyx-core -p glyx-runtime -p glyx-bundler
 
   # A real app driven through the devtools protocol (GDP): the calculator
   # example (QuickJS, so no V8 download; CPU renderer, so no GPU) under a
@@ -100,3 +100,24 @@ jobs:
       - run: bun test js/packages scripts tools/glyx-devtools-ui
       - name: Versions consistent (packages, crates, internal ranges)
         run: bun scripts/release/check.mjs
+      # The packages are TypeScript: every one must type-check, and the declarations must build.
+      - name: Type-check the packages
+        run: bun run typecheck
+      - name: Build the declarations
+        run: bun run types:build
+
+  # The bundler against the real thing: a real esbuild (downloaded and checked against
+  # its pinned hash), real Node, and projects whose tsconfig says react-jsx / react-jsxdev /
+  # classic: the production bundle must use the production JSX runtime (the `jsxDEV is not a
+  # function` crash), TypeScript and path aliases must bundle, and glyx.config.ts must run.
+  bundler-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bundler-e2e
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: cargo test -p glyx-bundler --test e2e -- --ignored --test-threads=1

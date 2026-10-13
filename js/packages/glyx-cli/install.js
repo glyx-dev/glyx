@@ -41,9 +41,24 @@ function download(url, dest, redirects = 5) {
   });
 }
 
+/** True when `pkgDir` is `js/packages/glyx-cli` of a glyx checkout (not a node_modules install). */
+function isSourceCheckout(pkgDir) {
+  const root = path.resolve(pkgDir, '..', '..', '..');
+  return path.basename(pkgDir) === 'glyx-cli'
+    && path.basename(path.dirname(pkgDir)) === 'packages'
+    && fs.existsSync(path.join(root, 'crates', 'glyx-cli', 'Cargo.toml'));
+}
+
 async function main() {
   if (process.env.GLYX_SKIP_DOWNLOAD === '1') {
     console.log('glyx-cli: GLYX_SKIP_DOWNLOAD=1 — skipping binary download');
+    return;
+  }
+  // Inside the glyx source checkout (this package is js/packages/glyx-cli next to
+  // Cargo.toml and crates/), `bun install` runs this too: the contributor builds the
+  // CLI with cargo, so don't download a release over it (or into the git tree).
+  if (isSourceCheckout(__dirname)) {
+    console.log('glyx-cli: inside the glyx source checkout — skipping binary download (build it with cargo)');
     return;
   }
   const t = target();

@@ -2,8 +2,14 @@
   "name": "@glyx-dev/design",
   "version": "0.2.0",
   "type": "module",
-  "main": "src/index.js",
-  "types": "src/index.d.ts",
+  "main": "src/index.tsx",
+  "types": "types/index.d.ts",
+  "files": [
+    "src",
+    "types",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx"
+  ],
   "description": "Design tokens, theming, and base styles for Glyx apps",
   "scripts": {
     "test": "bun test"

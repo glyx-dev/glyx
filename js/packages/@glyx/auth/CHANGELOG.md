@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+- `buildAuthorizationUrl` builds the query string without `URLSearchParams` (the Glyx runtime has none), and is exported with tests.
+
+### Added
+- **Written in TypeScript.** The source is now TypeScript (`src/index.ts`), strictly type-checked, and the package ships its declarations (`types/`), so TypeScript apps get types for the whole public API.
+
 ## [0.2.0] - 2026-10-05
 
 - No changes in this package; released alongside Glyx 0.2.0.

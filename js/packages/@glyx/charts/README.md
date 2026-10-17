@@ -43,4 +43,4 @@ Charts are drawn with the Canvas path API (fill/stroke/arc + fillText) and only 
 `width`/`height` accept a percentage string (`'100%'`) to follow the container. `AreaChart` takes `stacked`; `zoomPan` charts also zoom with Ctrl + wheel.
 - `Legend({ items, onToggle, disabled, style })` — standalone legend, with optional series toggling (`onToggle`) and a `disabled` list to grey out hidden series.
 
-All chart components take `data`, `width`, and `height` at minimum; consult each component's props in `src/index.js` for series-specific options (colors, axis formatting, hover/tooltip behavior).
+All chart components take `data`, `width`, and `height` at minimum; consult each component's props type (`LineChartProps`, `BarChartProps`, ...) for series-specific options (colors, axis formatting, hover/tooltip behavior).

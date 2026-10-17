@@ -10,11 +10,49 @@
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { View, Text, Pressable, VirtualizedList, measureText, useDraggable } from '@glyx-dev/react';
 
+export type SortDirection = 'asc' | 'desc';
+
+/** One column of a {@link DataTable}. */
+export interface DataTableColumn<Row = any> {
+  /** The property of each row this column shows, and the sort key. Also the React key, so keep it unique. */
+  key:        string;
+  /** Header text (shown in capitals). */
+  label:      string;
+  /** Fixed width in px. Without it the column is sized to its header and the first rows (between `minWidth` and 320). */
+  width?:     number;
+  /** The narrowest the column may be, including when the user drags its edge (default 64 for auto-sizing, 48 for dragging). */
+  minWidth?:  number;
+  /** Clicking the header sorts by this column. */
+  sortable?:  boolean;
+  /** Horizontal alignment of the cell content (default `'left'`). */
+  align?:     'left' | 'right';
+  /** Draws the cell yourself, instead of the value as text. */
+  render?:    (value: any, row: Row) => React.ReactNode;
+}
+
+export interface DataTableProps<Row = any> {
+  columns:      DataTableColumn<Row>[];
+  rows:         Row[];
+  /** Height of each row in px (default 44). */
+  rowHeight?:   number;
+  /** Total height of the table, header included. The body scrolls and is virtualized inside it. */
+  height:       number;
+  width?:       number;
+  /** Called with the row when it is pressed. */
+  onRowPress?:  (row: Row) => void;
+  /** Called when the user sorts by a column. The table sorts the rows itself; this is for you to remember or sync it. */
+  onSort?:      (key: string, direction: SortDirection) => void;
+  /** Show a checkbox column. */
+  selectable?:  boolean;
+  /** Identifies a row for selection (default: the row's `id` property, or its position when it has none). */
+  getRowId?:    (row: Row, index: number) => string | number;
+}
+
 const HEADER_FS = 12;
 const CELL_FS   = 13;
 
 // Auto-size a column to the widest of its header + sampled cell values.
-function autoWidth(col: { width: any; label: any; render: any; key: string | number; minWidth: any; }, rows: string | any[], sample = 40) {
+function autoWidth(col: DataTableColumn, rows: readonly any[], sample = 40): number {
   if (col.width) return col.width;
   let w = measureText(String(col.label).toUpperCase(), HEADER_FS).width + 24;
   const n = Math.min(rows.length, sample);
@@ -26,8 +64,17 @@ function autoWidth(col: { width: any; label: any; render: any; key: string | num
   return Math.max(col.minWidth || 64, Math.min(w, 320));
 }
 
-function ResizableHeaderCell({ col, width, sorted, dir, onSort, onResize }: Record<string, any>) {
-  const onHandle = useDraggable({ onDragMove: ({ dx }: Record<string, any>) => onResize(dx) });
+interface HeaderCellProps {
+  col:      DataTableColumn;
+  width:    number;
+  sorted:   boolean;
+  dir:      SortDirection;
+  onSort:   () => void;
+  onResize: (dx: number) => void;
+}
+
+function ResizableHeaderCell({ col, width, sorted, dir, onSort, onResize }: HeaderCellProps) {
+  const onHandle = useDraggable({ onDragMove: ({ dx }: { dx: number }) => onResize(dx) });
   return React.createElement(View, { style: { flexDirection: 'row', alignItems: 'stretch' } },
     React.createElement(Pressable, {
       onPress: () => col.sortable && onSort(),
@@ -47,22 +94,35 @@ function ResizableHeaderCell({ col, width, sorted, dir, onSort, onResize }: Reco
   );
 }
 
-export function DataTable({
+/**
+ * A table with sortable and resizable columns, optional row selection, and virtualized rows.
+ *
+ * ```tsx
+ * <DataTable
+ *   columns={[{ key: 'name', label: 'Name', sortable: true }, { key: 'size', label: 'Size', align: 'right' }]}
+ *   rows={files}
+ *   height={400}
+ *   onRowPress={(file) => open(file)}
+ * />
+ * ```
+ */
+export function DataTable<Row = any>({
   columns, rows, rowHeight = 44, height, width,
   onRowPress, onSort, selectable = false, getRowId,
-}: Record<string, any>) {
-  const idOf = getRowId || ((r: { id: any; }, i: any) => (r?.id ?? i));
+}: DataTableProps<Row>) {
+  const idOf: (row: Row, index: number) => string | number =
+    getRowId || ((r: any, i: number) => (r?.id ?? i));
 
-  const [widths, setWidths] = useState(() => columns.map((c: any) => autoWidth(c, rows)));
+  const [widths, setWidths] = useState<number[]>(() => columns.map((c) => autoWidth(c, rows)));
   // Recompute widths when the column list length changes or column keys change.
-  const colKey = columns.map((c: { key: any; }) => c.key).join(',');
+  const colKey = columns.map((c) => c.key).join(',');
   useEffect(() => {
-    setWidths(columns.map((c: any) => autoWidth(c, rows)));
+    setWidths(columns.map((c) => autoWidth(c, rows)));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [colKey]);
-  const [sortKey, setSortKey] = useState<any>(null);
-  const [sortDir, setSortDir] = useState('asc');
-  const [selected, setSelected] = useState(() => new Set());
+  const [sortKey, setSortKey] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<SortDirection>('asc');
+  const [selected, setSelected] = useState<Set<string | number>>(() => new Set());
 
   const HEADER_H = 40;
   const selW = selectable ? 40 : 0;
@@ -70,7 +130,7 @@ export function DataTable({
   const sortedRows = useMemo(() => {
     if (!sortKey) return rows;
     const copy = rows.slice();
-    copy.sort((a: { [x: string]: any; }, b: { [x: string]: any; }) => {
+    copy.sort((a: any, b: any) => {
       const av = a[sortKey], bv = b[sortKey];
       if (av === bv) return 0;
       const r = av > bv ? 1 : -1;
@@ -79,13 +139,13 @@ export function DataTable({
     return copy;
   }, [rows, sortKey, sortDir]);
 
-  const doSort = useCallback((key: React.SetStateAction<null>) => {
-    const dir = sortKey === key && sortDir === 'asc' ? 'desc' : 'asc';
+  const doSort = useCallback((key: string) => {
+    const dir: SortDirection = sortKey === key && sortDir === 'asc' ? 'desc' : 'asc';
     setSortKey(key); setSortDir(dir);
     onSort?.(key, dir);
   }, [sortKey, sortDir, onSort]);
 
-  const resize = useCallback((i: number, dx: any) => {
+  const resize = useCallback((i: number, dx: number) => {
     setWidths((w: number[]) => { const n = w.slice(); n[i] = Math.max(columns[i].minWidth || 48, n[i] + dx); return n; });
   }, [columns]);
 
@@ -94,17 +154,17 @@ export function DataTable({
     width, height: HEADER_H,
   },
     selectable && React.createElement(View, { width: selW, height: HEADER_H }),
-    ...columns.map((col: { key: null; }, i: number) => React.createElement(ResizableHeaderCell, {
+    ...columns.map((col, i) => React.createElement(ResizableHeaderCell, {
       key: String(col.key),
       col, width: widths[i],
       sorted: sortKey === col.key, dir: sortDir,
       onSort: () => doSort(col.key),
-      onResize: (dx: any) => resize(i, dx),
+      onResize: (dx: number) => resize(i, dx),
     })),
   );
 
-  const renderRow = useCallback((row: { [x: string]: any; }) => {
-    const rid = idOf(row);
+  const renderRow = useCallback((row: Row, index: number) => {
+    const rid = idOf(row, index);
     return React.createElement(Pressable, {
       onPress: () => onRowPress?.(row),
       width, height: rowHeight,
@@ -125,12 +185,12 @@ export function DataTable({
           backgroundColor: selected.has(rid) ? '#00A878' : 'transparent',
         },
       })),
-      ...columns.map((col: { key: string | number; align: string; render: (arg0: any, arg1: any) => string | number | boolean | React.ReactElement<any, string | React.JSXElementConstructor<any>> | Iterable<React.ReactNode> | React.ReactPortal | null | undefined; }, i: number) => React.createElement(View, {
+      ...columns.map((col, i) => React.createElement(View, {
         key: String(col.key), width: widths[i], height: rowHeight,
         style: { paddingHorizontal: 12, justifyContent: 'center', alignItems: col.align === 'right' ? 'flex-end' : 'flex-start' },
       },
-        col.render ? col.render(row[col.key], row)
-                   : React.createElement(Text, { fontSize: CELL_FS, style: { color: '#A0A0B2' } }, String(row[col.key] ?? '')),
+        col.render ? col.render((row as any)[col.key], row)
+                   : React.createElement(Text, { fontSize: CELL_FS, style: { color: '#A0A0B2' } }, String((row as any)[col.key] ?? '')),
       )),
     );
   }, [columns, widths, selected, selectable, rowHeight, width, onRowPress]); // eslint-disable-line
@@ -141,8 +201,8 @@ export function DataTable({
     header,
     React.createElement(VirtualizedList, {
       data: sortedRows, itemHeight: rowHeight, width, height: height - HEADER_H,
-      keyExtractor: (r: any, i: any) => String(idOf(r, i)),
-      renderItem: ({ item }: Record<string, any>) => renderRow(item),
+      keyExtractor: (r: Row, i: number) => String(idOf(r, i)),
+      renderItem: ({ item, index }: { item: Row; index: number }) => renderRow(item, index),
     }),
   );
 }

@@ -10,6 +10,7 @@
 
 import React from 'react';
 import { View, Text, Pressable, Image } from '@glyx-dev/react';
+import type { GlyxStyle } from '@glyx-dev/react';
 import { useTheme } from './theme.js';
 
 // ── Avatar ─────────────────────────────────────────────────────────────────────
@@ -24,7 +25,18 @@ import { useTheme } from './theme.js';
 //   color  — background color for initials fallback (defaults to theme primary)
 //   style  — additional style
 
-export function Avatar({ src, name, size = 40, color, style }: Record<string, any>) {
+export interface AvatarProps {
+  /** Image URL or path. Without it the initials of `name` are shown. */
+  src?:   string;
+  name?:  string;
+  /** Diameter in px (default 40). */
+  size?:  number;
+  /** Background colour behind the initials (default: the theme's primary). */
+  color?: string;
+  style?: GlyxStyle;
+}
+
+export function Avatar({ src, name, size = 40, color, style }: AvatarProps) {
   const { colors, fontSize, fontWeight } = useTheme();
 
   const initials = (() => {
@@ -38,7 +50,7 @@ export function Avatar({ src, name, size = 40, color, style }: Record<string, an
   const bg    = color ?? colors.primary;
   const inner = size - 4;  // slight inset so border is visible when used inside AvatarGroup
 
-  const containerStyle = {
+  const containerStyle: GlyxStyle = {
     width:           size,
     height:          size,
     borderRadius:    size / 2,
@@ -85,7 +97,18 @@ export function Avatar({ src, name, size = 40, color, style }: Record<string, an
 //   max     — max avatars before "+N" overflow (default 4)
 //   overlap — how many px each avatar overlaps the previous (default size * 0.3)
 
-export function AvatarGroup({ items = [], size = 36, max = 4, overlap, style }: Record<string, any>) {
+export interface AvatarGroupProps {
+  /** One avatar each: the same fields as {@link AvatarProps}, except `size`. */
+  items?:   Omit<AvatarProps, 'size'>[];
+  size?:    number;
+  /** How many avatars to show before "+N" (default 4). */
+  max?:     number;
+  /** How far each avatar overlaps the previous one, in px (default 30% of `size`). */
+  overlap?: number;
+  style?:   GlyxStyle;
+}
+
+export function AvatarGroup({ items = [], size = 36, max = 4, overlap, style }: AvatarGroupProps) {
   const { colors, fontSize, fontWeight } = useTheme();
   const ov     = overlap ?? Math.round(size * 0.3);
   const shown  = items.slice(0, max);
@@ -154,6 +177,17 @@ export function AvatarGroup({ items = [], size = 36, max = 4, overlap, style }: 
 //   variant    — 'default' | 'success' | 'warning' | 'error'
 //   size       — 'sm' | 'md' (default 'md')
 
+export interface ChipProps {
+  label:     string;
+  selected?: boolean;
+  onPress?:  () => void;
+  /** Shows a remove button, which calls this. */
+  onRemove?: () => void;
+  variant?:  'default' | 'success' | 'warning' | 'error';
+  size?:     'sm' | 'md';
+  style?:    GlyxStyle;
+}
+
 export function Chip({
   label,
   selected  = false,
@@ -162,7 +196,7 @@ export function Chip({
   variant   = 'default',
   size      = 'md',
   style,
-}: Record<string, any>) {
+}: ChipProps) {
   const { colors, space, radius, fontSize, fontWeight } = useTheme();
 
   const bg = selected || variant === 'success' ? colors.successSurface
@@ -233,7 +267,19 @@ export function Chip({
 //   action      — callback for the action button
 //   actionLabel — button label (default 'Get started')
 
-export function Empty({ icon, title, description, action, actionLabel = 'Get started', style }: Record<string, any>) {
+export interface EmptyProps {
+  /** An emoji or text glyph shown large above the title. */
+  icon?:        string;
+  title?:       string;
+  description?: string;
+  /** Called by the action button, which is shown only when this is set. */
+  action?:      () => void;
+  /** The action button's label (default `'Get started'`). */
+  actionLabel?: string;
+  style?:       GlyxStyle;
+}
+
+export function Empty({ icon, title, description, action, actionLabel = 'Get started', style }: EmptyProps) {
   const { colors, space, radius, fontSize, fontWeight } = useTheme();
 
   return (
@@ -312,7 +358,18 @@ export function Empty({ icon, title, description, action, actionLabel = 'Get sta
 //   positive — true = green trend, false = red trend (default: starts with '+')
 //   icon     — emoji / string shown to the left of the value
 
-export function Stat({ value, label, change, positive, icon, style }: Record<string, any>) {
+export interface StatProps {
+  value:     string | number;
+  label?:    string;
+  /** A change such as `'+12%'`. Shown green when it starts with `+`, unless `positive` says otherwise. */
+  change?:   string | number;
+  /** Overrides the colour of `change`. */
+  positive?: boolean;
+  icon?:     string;
+  style?:    GlyxStyle;
+}
+
+export function Stat({ value, label, change, positive, icon, style }: StatProps) {
   const { colors, space, radius, fontSize, fontWeight } = useTheme();
 
   const isPositive = positive ?? (typeof change === 'string' && change.startsWith('+'));
@@ -370,7 +427,17 @@ export function Stat({ value, label, change, positive, icon, style }: Record<str
 //   muted     — dims the value text (default false)
 //   border    — show bottom border (default true)
 
-export function KVRow({ label, value, onPress, muted = false, border = true, style }: Record<string, any>) {
+export interface KVRowProps {
+  label:    string;
+  value?:   React.ReactNode;
+  onPress?: () => void;
+  muted?:   boolean;
+  /** Draw a line under the row (default true). */
+  border?:  boolean;
+  style?:   GlyxStyle;
+}
+
+export function KVRow({ label, value, onPress, muted = false, border = true, style }: KVRowProps) {
   const { colors, space, fontSize } = useTheme();
 
   const Row = onPress ? Pressable : View;

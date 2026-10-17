@@ -90,6 +90,14 @@ export interface GlyxStyle {
   backgroundGradient?: string;
   opacity?:          number;
   borderRadius?:     number;
+  /** @deprecated Per-corner radii are not drawn yet: the renderer ignores them. Use `borderRadius`. */
+  borderTopLeftRadius?:     number;
+  /** @deprecated See `borderTopLeftRadius`. */
+  borderTopRightRadius?:    number;
+  /** @deprecated See `borderTopLeftRadius`. */
+  borderBottomLeftRadius?:  number;
+  /** @deprecated See `borderTopLeftRadius`. */
+  borderBottomRightRadius?: number;
   borderWidth?:      number;
   borderColor?:      string;
   /** @deprecated Per-side borders are not drawn yet: the renderer ignores them. Use `borderWidth`/`borderColor`, or a 1px `View` as a divider. */

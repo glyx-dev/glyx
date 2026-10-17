@@ -17,6 +17,7 @@
 
 import React from 'react';
 import { Canvas, View, Text, Pressable, useDraggable, useWheel, ViewProps } from '@glyx-dev/react';
+import type { GlyxStyle } from '@glyx-dev/react';
 
 const { useRef, useEffect, useState, useCallback, useMemo } = React;
 
@@ -196,6 +197,194 @@ function _ChartCanvas({ width, height, draw, deps, animate = true }: Record<stri
   return React.createElement(Canvas, { ref, width, height, ...(animate ? { transition: _DATA_TRANSITION } : null) });
 }
 
+// ── Public types ───────────────────────────────────
+
+export type ChartTheme = 'dark' | 'light';
+
+/** A chart's width or height: pixels, or a percentage of the container (`'100%'`) to follow its size. */
+export type ChartLength = number | `${number}%`;
+
+/** One point of a line, area or bar chart. */
+export interface ChartPoint {
+  /** The category or position shown on the x axis. */
+  x: string | number;
+  y: number;
+}
+
+/** A named, coloured set of points. */
+export interface ChartSeries<P = ChartPoint> {
+  name?:  string;
+  data:   P[];
+  /** Defaults to the next colour of the palette. */
+  color?: string;
+}
+
+/** What every chart accepts. */
+export interface ChartBaseProps {
+  /** Default 480 (260 for `PieChart`, 120 for `Sparkline`). */
+  width?:         ChartLength;
+  /** Default 260 (260 for `PieChart`, 32 for `Sparkline`). */
+  height?:        ChartLength;
+  theme?:         ChartTheme;
+  /** Describes the chart to screen readers (and heads the tooltip). */
+  title?:         string;
+  /** Ease new data in (default true). */
+  animate?:       boolean;
+  /** Show a card for the point under the pointer (default true). */
+  showTooltip?:   boolean;
+  /** Glide the tooltip between points (default true). */
+  tooltipMotion?: boolean;
+}
+
+/** Props shared by the charts that draw one or more series against axes. */
+export interface CartesianChartProps<P = ChartPoint> extends ChartBaseProps {
+  /** A single series. Use `series` for several. */
+  data?:         P[];
+  series?:       ChartSeries<P>[];
+  /** Colour of the single series in `data`. */
+  color?:        string;
+  /** Name of the single series in `data` (shown in the legend and tooltip). */
+  name?:         string;
+  /** Colours for the series, in order. */
+  palette?:      string[];
+  showGrid?:     boolean;
+  /** Draw the axis labels (default true). */
+  showLabels?:   boolean;
+  /** Draw the legend (default: when there is more than one series). */
+  showLegend?:   boolean;
+  formatValue?:  (value: number) => string;
+  /** Formats an x-axis label. */
+  formatLabel?:  (x: string | number) => string;
+  /** Called when a point is pressed (or activated from the keyboard). */
+  onPointPress?: (point: P, index: number) => void;
+}
+
+export interface LineChartProps extends CartesianChartProps {
+  lineWidth?: number;
+  /** Draw a dot on every point (default: when there are 14 or fewer). */
+  showDots?:  boolean;
+  /** Round the corners of the line (default true). */
+  smooth?:    boolean;
+  /** Zoom with Ctrl + wheel and pan by dragging, with zoom buttons. */
+  zoomPan?:   boolean;
+}
+
+export interface AreaChartProps extends LineChartProps {
+  /** Pile the series on top of each other. */
+  stacked?: boolean;
+}
+
+export interface BarChartProps extends CartesianChartProps {
+  /** Stack the series in one bar per x, instead of side by side. */
+  stacked?: boolean;
+}
+
+/** One slice of a pie chart. */
+export interface PieSlice {
+  /** The slice's label. */
+  x:      string | number;
+  /** Its size; negative values count as 0. */
+  y:      number;
+  color?: string;
+}
+
+export interface PieChartProps extends ChartBaseProps {
+  data?:         PieSlice[];
+  palette?:      string[];
+  /** Above 0 draws a donut: the hole's radius as a fraction of the pie's (0 to 1). */
+  innerRadius?:  number;
+  showLegend?:   boolean;
+  /** The caption in a donut's hole (default `'Total'`). */
+  centerLabel?:  string;
+  formatValue?:  (value: number) => string;
+  formatLabel?:  (x: string | number) => string;
+  onPointPress?: (slice: PieSlice, index: number) => void;
+}
+
+/** One point of a scatter or bubble chart. */
+export interface ScatterPoint {
+  x:      number;
+  y:      number;
+  /** Makes it a bubble: the point's radius follows this, relative to the largest. */
+  size?:  number;
+  color?: string;
+}
+
+export interface ScatterChartProps extends CartesianChartProps<ScatterPoint> {
+  /** Dot radius in px for plain points (default 4). */
+  radius?:  number;
+  formatX?: (x: number) => string;
+}
+
+/** One candle. */
+export interface Candle {
+  /** Its label on the x axis. */
+  x:     string | number;
+  open:  number;
+  high:  number;
+  low:   number;
+  close: number;
+}
+
+export interface CandlestickChartProps extends ChartBaseProps {
+  data?:         Candle[];
+  showGrid?:     boolean;
+  showLabels?:   boolean;
+  /** Colour of candles that closed at or above their open. */
+  upColor?:      string;
+  /** Colour of candles that closed below their open. */
+  downColor?:    string;
+  formatValue?:  (value: number) => string;
+  formatLabel?:  (x: string | number) => string;
+  onPointPress?: (candle: Candle, index: number) => void;
+}
+
+export interface SparklineProps extends Pick<ChartBaseProps, 'width' | 'height' | 'theme' | 'title' | 'animate'> {
+  /** Numbers, or points (only `y` is used). */
+  data?:        (number | { y: number })[];
+  color?:       string;
+  lineWidth?:   number;
+  /** Fill under the line (default true). */
+  fill?:        boolean;
+  smooth?:      boolean;
+  /** Mark the last point with a dot and its value (default true). */
+  showLast?:    boolean;
+  formatValue?: (value: number) => string;
+}
+
+export interface LegendItem {
+  label:  string;
+  color:  string;
+  value?: string | number;
+}
+
+export interface LegendProps {
+  items?:    LegendItem[];
+  /** Makes the items pressable, for example to hide a series. */
+  onToggle?: (index: number, item: LegendItem) => void;
+  /** The indexes of items shown as off. */
+  disabled?: number[];
+  theme?:    ChartTheme;
+  style?:    GlyxStyle;
+}
+
+export interface ChartStreamOptions {
+  /** How many of the latest points to keep (default 120). */
+  capacity?: number;
+  /** The most updates per second that reach React, however fast you push (default 30). */
+  maxHz?:    number;
+  /** Seeds the window. */
+  initial?:  ChartPoint[];
+}
+
+export interface ChartStream {
+  /** The window of the latest points: pass it to a chart. */
+  data:  ChartPoint[];
+  /** Adds a point, or several. */
+  push:  (points: ChartPoint | ChartPoint[]) => void;
+  clear: () => void;
+}
+
 // ── Following the container ─────────────────────────────────────────────────
 
 // A chart draws at a pixel size. `width`/`height` as a string ('100%', '50%')
@@ -255,8 +444,8 @@ function _Fit({ Inner, props }: Record<string, any>) {
   );
 }
 
-export function LineChart(props: any) { return _fit(_LineChartInner, props); }
-export function AreaChart(props: any) { return _fit(_AreaChartInner, props); }
+export function LineChart(props: LineChartProps): React.ReactElement { return _fit(_LineChartInner, props); }
+export function AreaChart(props: AreaChartProps): React.ReactElement { return _fit(_AreaChartInner, props); }
 
 // A soft fade-and-rise when a chart first appears. Native keyframes: no JS
 // runs per frame, and re-renders with the same spec don't restart it.
@@ -509,7 +698,7 @@ function _Interaction({
  * `onToggle(index, item)` makes items pressable (e.g. to hide a series);
  * `disabled` lists the indexes shown as off.
  */
-export function Legend({ items, onToggle, disabled = [], theme, style }: Record<string, any>) {
+export function Legend({ items, onToggle, disabled = [], theme, style }: LegendProps) {
   if (!items || items.length === 0) return null;
   const T = _theme(theme);
   return React.createElement(
@@ -1020,11 +1209,11 @@ function _BarChartInner(props: any) {
  * (grouped) by default, piled up with `stacked`. `width`/`height` can be
  * `'100%'` to follow the container.
  */
-export function BarChart(props: any) { return _fit(_BarChartInner, props); }
+export function BarChart(props: BarChartProps): React.ReactElement { return _fit(_BarChartInner, props); }
 
 // ── Pie / Donut ─────────────────────────────────────────────────────────────
 
-export function PieChart(props: any) { return _fit(_PieChartInner, props); }
+export function PieChart(props: PieChartProps): React.ReactElement { return _fit(_PieChartInner, props); }
 
 function _PieChartInner(props: any) {
   const {
@@ -1248,7 +1437,7 @@ class _ChartStream {
  * the data. Updates reach React at most `maxHz` times a second however fast
  * `push` is called. `initial` seeds the window.
  */
-export function useChartStream({ capacity = 120, maxHz = 30, initial }: Record<string, any> = {}) {
+export function useChartStream({ capacity = 120, maxHz = 30, initial }: ChartStreamOptions = {}): ChartStream {
   const [data, setData] = useState(() => (initial ? initial.slice(-capacity) : []));
   const latest = useRef(data);
   latest.current = data;
@@ -1344,7 +1533,7 @@ function _SparklineInner(props: any) {
  * Sparkline: a small line with no axes, labels or hover, to sit next to a
  * number or inside a table row. `data` is numbers or `{ y }` objects.
  */
-export function Sparkline(props: any) { return _fit(_SparklineInner, props); }
+export function Sparkline(props: SparklineProps): React.ReactElement { return _fit(_SparklineInner, props); }
 
 // ── Scatter / bubble ────────────────────────────────────────────────────────
 
@@ -1492,7 +1681,7 @@ function _ScatterChartInner(props: any) {
  * Scatter plot. Points are `{ x, y, size?, color? }` (numeric x and y), as
  * `data` or several `series`. Give points a `size` to make it a bubble chart.
  */
-export function ScatterChart(props: any) { return _fit(_ScatterChartInner, props); }
+export function ScatterChart(props: ScatterChartProps): React.ReactElement { return _fit(_ScatterChartInner, props); }
 
 // ── Candlestick ─────────────────────────────────────────────────────────────
 
@@ -1606,6 +1795,6 @@ function _CandlestickChartInner(props: any) {
  * Candlestick (OHLC) chart: one candle per `{ x, open, high, low, close }`,
  * `upColor` when it closed at or above its open, `downColor` below.
  */
-export function CandlestickChart(props: any) { return _fit(_CandlestickChartInner, props); }
+export function CandlestickChart(props: CandlestickChartProps): React.ReactElement { return _fit(_CandlestickChartInner, props); }
 
 export const _internals = { _sparkPoints, _scatterPoints, _bubbleRadius, _nearestPoint, _candle, _barScale, _barSegments, _barSlots, _niceScale, _niceStep, _fmt, _fmtTick, _normSeries, _theme, _cartesianSummary, _ChartStream, _smoothPath, _curveSegments, _zoomWindow, _cumulative };

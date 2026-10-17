@@ -33,9 +33,25 @@ import { tokens, darkTokens } from './tokens.js';
 
 // ── Context ───────────────────────────────────────────────────────────────────
 
-const ThemeContext = createContext(tokens);
+/** The design tokens: `colors`, `space`, `radius`, `fontSize`, `fontWeight`, `lineHeight`. */
+export type ThemeTokens = typeof tokens;
+
+type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K] };
+
+/** Overrides for the tokens; any subset, at any depth. */
+export type ThemeOverrides = DeepPartial<ThemeTokens>;
+
+const ThemeContext = createContext<ThemeTokens>(tokens);
 
 // ── ThemeProvider ─────────────────────────────────────────────────────────────
+
+export interface ThemeProviderProps {
+  /** `'system'` (the default) follows the OS and updates when it changes. */
+  colorScheme?: 'light' | 'dark' | 'system';
+  /** Token overrides, merged deeply into the light or dark tokens: `{ colors: { primary: '#ff0000' } }`. */
+  overrides?:   ThemeOverrides;
+  children?:    React.ReactNode;
+}
 
 /**
  * Provides design tokens to the component subtree.
@@ -49,7 +65,7 @@ const ThemeContext = createContext(tokens);
  *   E.g. `{ colors: { primary: '#ff0000' } }`.
  * @param {React.ReactNode} props.children
  */
-export function ThemeProvider({ colorScheme = 'system', overrides, children }: Record<string, any>) {
+export function ThemeProvider({ colorScheme = 'system', overrides, children }: ThemeProviderProps) {
   const [isDark, setIsDark] = useState(() => {
     if (colorScheme === 'dark') return true;
     if (colorScheme === 'light') return false;
@@ -133,7 +149,7 @@ export function ThemeProvider({ colorScheme = 'system', overrides, children }: R
  *
  * @returns {typeof import('./tokens.js').tokens}
  */
-export function useTheme() {
+export function useTheme(): ThemeTokens {
   return useContext(ThemeContext);
 }
 
@@ -146,7 +162,7 @@ export function useTheme() {
  * @param {object} overrides  Partial token overrides.
  * @returns {typeof tokens}
  */
-export function createTheme(base = 'light', overrides = {}) {
+export function createTheme(base: 'light' | 'dark' = 'light', overrides: ThemeOverrides = {}): ThemeTokens {
   const baseTokens = base === 'dark' ? darkTokens : tokens;
   return _deepMerge(baseTokens, overrides);
 }

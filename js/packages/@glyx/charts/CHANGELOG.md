@@ -4,6 +4,7 @@
 
 ### Added
 - **Written in TypeScript.** The source is now TypeScript (`src/index.ts`), strictly type-checked, and the package ships its declarations (`types/`), so TypeScript apps get types for the whole public API.
+- **Typed props for every chart** (`LineChartProps`, `BarChartProps`, `PieChartProps`, `ScatterChartProps`, `CandlestickChartProps`, `SparklineProps`, `LegendProps`), the point shapes (`ChartPoint`, `PieSlice`, `ScatterPoint`, `Candle`), and `useChartStream` returns a typed `ChartStream`. `width`/`height` accept a number or a percentage such as `'100%'`.
 
 ## [0.2.0] - 2026-10-05
 

@@ -7,6 +7,7 @@
 
 import React, { useState, useCallback } from 'react';
 import { View, Text, Pressable, TextInput } from '@glyx-dev/react';
+import type { GlyxStyle, TextInputProps } from '@glyx-dev/react';
 import { useTheme } from './theme.js';
 
 // ── TextField ─────────────────────────────────────────────────────────────────
@@ -28,6 +29,27 @@ import { useTheme } from './theme.js';
 //   style          — outer container style
 //   inputStyle     — style applied to the inner TextInput
 
+export interface TextFieldProps extends Omit<TextInputProps, 'style' | 'value' | 'onChangeText' | 'placeholder' | 'secureTextEntry' | 'multiline'> {
+  label?:           string;
+  value?:           string;
+  onChangeText?:    (text: string) => void;
+  placeholder?:     string;
+  helperText?:      string;
+  /** An error message; shown in red under the field. */
+  error?:           string;
+  disabled?:        boolean;
+  secureTextEntry?: boolean;
+  multiline?:       boolean;
+  /** Shown before the input. */
+  leftIcon?:        React.ReactNode;
+  /** Shown after the input. */
+  rightIcon?:       React.ReactNode;
+  /** Style of the whole field. */
+  style?:           GlyxStyle;
+  /** Style of the input itself. */
+  inputStyle?:      GlyxStyle;
+}
+
 export function TextField({
   label,
   value,
@@ -43,7 +65,7 @@ export function TextField({
   style,
   inputStyle,
   ...props
-}: Record<string, any>) {
+}: TextFieldProps) {
   const { colors, space, radius, fontSize, fontWeight } = useTheme();
   const [focused, setFocused] = useState(false);
 
@@ -143,6 +165,15 @@ export function TextField({
 // A full-width row with a label + optional description on the left and a
 // themed toggle switch on the right.
 
+export interface SwitchRowProps {
+  label:          string;
+  description?:   string;
+  value?:         boolean;
+  onValueChange?: (value: boolean) => void;
+  disabled?:      boolean;
+  style?:         GlyxStyle;
+}
+
 export function SwitchRow({
   label,
   description,
@@ -150,7 +181,7 @@ export function SwitchRow({
   onValueChange,
   disabled = false,
   style,
-}: Record<string, any>) {
+}: SwitchRowProps) {
   const { colors, space, fontSize, fontWeight } = useTheme();
 
   const trackBg = value ? colors.primary : colors.border;
@@ -214,13 +245,21 @@ export function SwitchRow({
 //
 // A checkbox with an inline label. Clicking anywhere on the row toggles it.
 
+export interface CheckboxRowProps {
+  label:     string;
+  checked?:  boolean;
+  onChange?: (checked: boolean) => void;
+  disabled?: boolean;
+  style?:    GlyxStyle;
+}
+
 export function CheckboxRow({
   label,
   checked,
   onChange,
   disabled = false,
   style,
-}: Record<string, any>) {
+}: CheckboxRowProps) {
   const { colors, space, radius, fontSize } = useTheme();
 
   return (
@@ -275,16 +314,28 @@ export function CheckboxRow({
 //   min / max / step — range constraints
 //   label    — label shown above
 
+export interface NumberInputProps {
+  label?:    string;
+  value?:    number;
+  onChange?: (value: number) => void;
+  min?:      number;
+  max?:      number;
+  /** How much the − and + buttons change the value (default 1). */
+  step?:     number;
+  disabled?: boolean;
+  style?:    GlyxStyle;
+}
+
 export function NumberInput({
   label,
-  value,
+  value = 0,
   onChange,
   min,
   max,
   step = 1,
   disabled = false,
   style,
-}: Record<string, any>) {
+}: NumberInputProps) {
   const { colors, space, radius, fontSize, fontWeight } = useTheme();
 
   const decrement = useCallback(() => {
@@ -365,13 +416,22 @@ export function NumberInput({
 //   placeholder  — defaults to 'Search…'
 //   onClear      — called (in addition to clearing the value) when ✕ is pressed
 
+export interface SearchInputProps {
+  value?:        string;
+  onChangeText?: (text: string) => void;
+  placeholder?:  string;
+  /** Called by the clear button. */
+  onClear?:      () => void;
+  style?:        GlyxStyle;
+}
+
 export function SearchInput({
   value,
   onChangeText,
   placeholder = 'Search…',
   onClear,
   style,
-}: Record<string, any>) {
+}: SearchInputProps) {
   const { colors, space, radius, fontSize } = useTheme();
 
   const handleClear = useCallback(() => {

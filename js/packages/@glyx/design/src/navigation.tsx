@@ -8,6 +8,7 @@
 
 import React, { useState, useCallback } from 'react';
 import { View, Text, Pressable, ScrollView } from '@glyx-dev/react';
+import type { GlyxStyle } from '@glyx-dev/react';
 import { useTheme } from './theme.js';
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -42,6 +43,28 @@ import { useTheme } from './theme.js';
 //   variant      — 'underline' | 'pill'  (default 'underline')
 //   scrollable   — wrap the tab bar in a horizontal ScrollView (default false)
 
+export interface TabItem {
+  /** Unique id; what `value`, `defaultValue` and `onChange` use. */
+  key:      string;
+  label:    string;
+  /** Shown under the tab bar while this tab is active. */
+  content?: React.ReactNode;
+}
+
+export interface TabsProps {
+  items?:        TabItem[];
+  /** The active tab's key, for controlled use. */
+  value?:        string;
+  onChange?:     (key: string) => void;
+  /** The tab that starts active, for uncontrolled use (default: the first). */
+  defaultValue?: string;
+  variant?:      'underline' | 'pill';
+  /** Wrap the tab bar in a horizontal scroll view. */
+  scrollable?:   boolean;
+  style?:        GlyxStyle;
+  contentStyle?: GlyxStyle;
+}
+
 export function Tabs({
   items        = [],
   value,
@@ -51,7 +74,7 @@ export function Tabs({
   scrollable   = false,
   style,
   contentStyle,
-}: Record<string, any>) {
+}: TabsProps) {
   const [internal, setInternal] = useState(
     defaultValue ?? items[0]?.key ?? null
   );
@@ -171,7 +194,24 @@ export function Tabs({
 //   multiple   — allow multiple sections open at once (default false)
 //   variant    — 'default' | 'flush'  (default 'default' — shows card borders)
 
-export function Accordion({ items = [], multiple = false, variant = 'default', style }: Record<string, any>) {
+export interface AccordionItem {
+  key:          string;
+  title:        string;
+  /** A string is drawn as text; anything else as-is. */
+  content?:     React.ReactNode;
+  defaultOpen?: boolean;
+}
+
+export interface AccordionProps {
+  items?:    AccordionItem[];
+  /** Allow several sections open at once. */
+  multiple?: boolean;
+  /** `'flush'` removes the card borders. */
+  variant?:  'default' | 'flush';
+  style?:    GlyxStyle;
+}
+
+export function Accordion({ items = [], multiple = false, variant = 'default', style }: AccordionProps) {
   const { colors, space, radius, fontSize, fontWeight } = useTheme();
 
   const [open, setOpen] = useState(() => {
@@ -280,7 +320,15 @@ export function Accordion({ items = [], multiple = false, variant = 'default', s
 //   current  — 0-based index of the active step
 //   style
 
-export function Stepper({ steps = [], current = 0, style }: Record<string, any>) {
+export interface StepperProps {
+  /** One label per step. */
+  steps?:   string[];
+  /** The 0-based index of the active step. */
+  current?: number;
+  style?:   GlyxStyle;
+}
+
+export function Stepper({ steps = [], current = 0, style }: StepperProps) {
   const { colors, space, radius, fontSize, fontWeight } = useTheme();
 
   return (
@@ -370,7 +418,19 @@ export function Stepper({ steps = [], current = 0, style }: Record<string, any>)
 //   items    — [{ label, onPress? }] — last item is current page (not pressable)
 //   separator — separator character (default '/')
 
-export function Breadcrumb({ items = [], separator = '/', style }: Record<string, any>) {
+export interface BreadcrumbItem {
+  label:    string;
+  /** Makes the crumb a link (ignored on the last one). */
+  onPress?: () => void;
+}
+
+export interface BreadcrumbProps {
+  items?:     BreadcrumbItem[];
+  separator?: string;
+  style?:     GlyxStyle;
+}
+
+export function Breadcrumb({ items = [], separator = '/', style }: BreadcrumbProps) {
   const { colors, space, fontSize } = useTheme();
 
   return (

@@ -9,17 +9,26 @@
 
 import React from 'react';
 import { View, Text, Pressable } from '@glyx-dev/react';
+import type { GlyxStyle } from '@glyx-dev/react';
 import { Icon } from '@glyx-dev/icons';
 import { useTheme } from './theme.js';
 
 // ── Button ────────────────────────────────────────────────────────────────────
+
+export interface ButtonProps {
+  label:     string;
+  onPress?:  () => void;
+  variant?:  'primary' | 'secondary' | 'ghost';
+  disabled?: boolean;
+  style?:    GlyxStyle;
+}
 
 /**
  * Themed pressable button.
  *
  * @param {{ label: string, onPress: function, variant?: 'primary'|'secondary'|'ghost', disabled?: boolean, style?: object }} props
  */
-export function Button({ label, onPress, variant = 'primary', disabled = false, style }: Record<string, any>) {
+export function Button({ label, onPress, variant = 'primary', disabled = false, style }: ButtonProps) {
   const { colors, space, radius, fontSize } = useTheme();
 
   const bg = disabled
@@ -60,12 +69,19 @@ export function Button({ label, onPress, variant = 'primary', disabled = false, 
 
 // ── Card ──────────────────────────────────────────────────────────────────────
 
+export interface CardProps {
+  children?: React.ReactNode;
+  style?:    GlyxStyle;
+  /** Inner padding in px (default: the theme's `space[4]`). */
+  padding?:  number;
+}
+
 /**
  * Elevated surface container.
  *
  * @param {{ children: React.ReactNode, style?: object, padding?: number }} props
  */
-export function Card({ children, style, padding }: Record<string, any>) {
+export function Card({ children, style, padding }: CardProps) {
   const { colors, space, radius } = useTheme();
   return (
     <View
@@ -85,12 +101,17 @@ export function Card({ children, style, padding }: Record<string, any>) {
 
 // ── Divider ───────────────────────────────────────────────────────────────────
 
+export interface DividerProps {
+  direction?: 'horizontal' | 'vertical';
+  style?:     GlyxStyle;
+}
+
 /**
  * Horizontal or vertical separator line.
  *
  * @param {{ direction?: 'horizontal'|'vertical', style?: object }} props
  */
-export function Divider({ direction = 'horizontal', style }: Record<string, any>) {
+export function Divider({ direction = 'horizontal', style }: DividerProps) {
   const { colors } = useTheme();
   const isH = direction === 'horizontal';
   return (
@@ -109,12 +130,20 @@ export function Divider({ direction = 'horizontal', style }: Record<string, any>
 
 // ── Label ─────────────────────────────────────────────────────────────────────
 
+export interface LabelProps {
+  children?: React.ReactNode;
+  size?:     'xs' | 'sm' | 'base' | 'md' | 'lg' | 'xl';
+  muted?:    boolean;
+  bold?:     boolean;
+  style?:    GlyxStyle;
+}
+
 /**
  * Themed body text with semantic size and weight variants.
  *
  * @param {{ children: React.ReactNode, size?: 'xs'|'sm'|'base'|'md'|'lg'|'xl', muted?: boolean, bold?: boolean, style?: object }} props
  */
-export function Label({ children, size = 'base', muted = false, bold = false, style }: Record<string, any>) {
+export function Label({ children, size = 'base', muted = false, bold = false, style }: LabelProps) {
   const { colors, fontSize, fontWeight } = useTheme();
   return (
     <Text
@@ -132,12 +161,18 @@ export function Label({ children, size = 'base', muted = false, bold = false, st
 
 // ── Heading ───────────────────────────────────────────────────────────────────
 
+export interface HeadingProps {
+  children?: React.ReactNode;
+  level?:    1 | 2 | 3 | 4;
+  style?:    GlyxStyle;
+}
+
 /**
  * Themed heading text.
  *
  * @param {{ children: React.ReactNode, level?: 1|2|3|4, style?: object }} props
  */
-export function Heading({ children, level = 1, style }: Record<string, any>) {
+export function Heading({ children, level = 1, style }: HeadingProps) {
   const { colors, fontSize, fontWeight } = useTheme();
   const sizes = { 1: '3xl', 2: '2xl', 3: 'xl', 4: 'lg' };
   return (
@@ -167,7 +202,20 @@ export function Heading({ children, level = 1, style }: Record<string, any>) {
 //   label    — accessibility label for screen readers (not rendered). Give every
 //              icon-only button one.
 
-export function IconButton({ icon, onPress, size = 36, variant = 'secondary', disabled = false, label, style }: Record<string, any>) {
+export interface IconButtonProps {
+  /** An icon name from `@glyx-dev/icons`, or an emoji / text glyph. */
+  icon:      string;
+  onPress?:  () => void;
+  /** Width and height in px (default 36). */
+  size?:     number;
+  variant?:  'primary' | 'secondary' | 'ghost' | 'danger';
+  disabled?: boolean;
+  /** Accessibility label for screen readers (not rendered). Give every icon-only button one. */
+  label?:    string;
+  style?:    GlyxStyle;
+}
+
+export function IconButton({ icon, onPress, size = 36, variant = 'secondary', disabled = false, label, style }: IconButtonProps) {
   const { colors, radius } = useTheme();
 
   const bg = disabled          ? colors.textDisabled
@@ -203,12 +251,18 @@ export function IconButton({ icon, onPress, size = 36, variant = 'secondary', di
 
 // ── Badge ─────────────────────────────────────────────────────────────────────
 
+export interface BadgeProps {
+  label:    string;
+  variant?: 'default' | 'success' | 'warning' | 'error';
+  style?:   GlyxStyle;
+}
+
 /**
  * Small status badge / pill.
  *
  * @param {{ label: string, variant?: 'default'|'success'|'warning'|'error', style?: object }} props
  */
-export function Badge({ label, variant = 'default', style }: Record<string, any>) {
+export function Badge({ label, variant = 'default', style }: BadgeProps) {
   const { colors, space, radius, fontSize } = useTheme();
 
   const bg = variant === 'success' ? colors.successSurface

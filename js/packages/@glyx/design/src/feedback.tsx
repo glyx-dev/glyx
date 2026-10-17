@@ -13,6 +13,7 @@ import React, {
   createContext, useContext,
 } from 'react';
 import { View, Text, Pressable } from '@glyx-dev/react';
+import type { GlyxStyle, GlyxLength } from '@glyx-dev/react';
 import { useTheme } from './theme.js';
 
 // ── Alert ─────────────────────────────────────────────────────────────────────
@@ -27,7 +28,16 @@ import { useTheme } from './theme.js';
 
 const ALERT_ICON = { info: 'ℹ', success: '✓', warning: '⚠', error: '✕' };
 
-export function Alert({ variant = 'info', title, message, onClose, style }: Record<string, any>) {
+export interface AlertProps {
+  variant?:  'info' | 'success' | 'warning' | 'error';
+  title?:    string;
+  message?:  string;
+  /** Shows a close button, which calls this. */
+  onClose?:  () => void;
+  style?:    GlyxStyle;
+}
+
+export function Alert({ variant = 'info', title, message, onClose, style }: AlertProps) {
   const { colors, space, radius, fontSize, fontWeight } = useTheme();
 
   const bg  = variant === 'success' ? colors.successSurface
@@ -101,6 +111,17 @@ export function Alert({ variant = 'info', title, message, onClose, style }: Reco
 //   color   — fill color (defaults to theme primary)
 //   label   — if provided, renders the label + percentage above the bar
 
+export interface ProgressBarProps {
+  value?:  number;
+  /** The value at which the bar is full (default 100). */
+  max?:    number;
+  /** Bar thickness in px (default 6). */
+  height?: number;
+  color?:  string;
+  label?:  string;
+  style?:  GlyxStyle;
+}
+
 export function ProgressBar({
   value = 0,
   max   = 100,
@@ -108,7 +129,7 @@ export function ProgressBar({
   color,
   label,
   style,
-}: Record<string, any>) {
+}: ProgressBarProps) {
   const { colors, space, radius, fontSize } = useTheme();
   const pct       = Math.min(100, Math.max(0, (value / max) * 100));
   const fillColor = color ?? colors.primary;
@@ -157,7 +178,14 @@ export function ProgressBar({
 //   size   — diameter in px (default 32)
 //   color  — dot color (defaults to theme primary)
 
-export function Spinner({ size = 32, color, style }: Record<string, any>) {
+export interface SpinnerProps {
+  /** Diameter in px (default 32). */
+  size?:  number;
+  color?: string;
+  style?: GlyxStyle;
+}
+
+export function Spinner({ size = 32, color, style }: SpinnerProps) {
   const { colors } = useTheme();
   const c = color ?? colors.primary;
   const [frame, setFrame] = useState(0);
@@ -214,7 +242,19 @@ export function Spinner({ size = 32, color, style }: Record<string, any>) {
 //   <Skeleton lines={3} height={14} gap={8} />
 //   — last line is automatically shorter (65% width) to look natural
 
-export function Skeleton({ width, height = 16, borderRadius, lines, gap, style }: Record<string, any>) {
+export interface SkeletonProps {
+  width?:        GlyxLength;
+  /** Height in px (default 16); with `lines`, the height of each line. */
+  height?:       number;
+  borderRadius?: number;
+  /** Draw this many text lines instead of one block (the last is shorter). */
+  lines?:        number;
+  /** Space between lines in px. */
+  gap?:          number;
+  style?:        GlyxStyle;
+}
+
+export function Skeleton({ width, height = 16, borderRadius, lines, gap, style }: SkeletonProps) {
   const { colors, radius } = useTheme();
   const [opacity, setOpacity] = useState(0.4);
 
@@ -278,9 +318,33 @@ export function Skeleton({ width, height = 16, borderRadius, lines, gap, style }
 //   action        — optional callback for an action button
 //   actionLabel   — label for the action button (default 'Action')
 
-const ToastCtx = createContext<any>(null);
+const ToastCtx = createContext<ToastApi | null>(null);
 
-export function ToastProvider({ children }: Record<string, any>) {
+export interface ToastProviderProps {
+  children?: React.ReactNode;
+}
+
+export interface ToastOptions {
+  message:       string;
+  variant?:      'default' | 'success' | 'warning' | 'error';
+  /** Milliseconds before it goes away (default 3000); 0 keeps it until dismissed. */
+  duration?:     number;
+  /** Stop the countdown while the pointer is over the toast (default true). */
+  pauseOnHover?: boolean;
+  /** Shows an action button, which calls this. */
+  action?:       () => void;
+  /** The action button's label (default `'Action'`). */
+  actionLabel?:  string;
+}
+
+/** What {@link useToast} returns. */
+export interface ToastApi {
+  /** Shows a toast and returns its id. */
+  showToast(options: ToastOptions): number;
+  dismiss(id: number): void;
+}
+
+export function ToastProvider({ children }: ToastProviderProps) {
   const [toasts, setToasts] = useState<any[]>([]);
   // id → { handle, remaining, startedAt }
   const timersRef = useRef(new Map());
@@ -342,7 +406,7 @@ export function ToastProvider({ children }: Record<string, any>) {
   );
 }
 
-export function useToast() {
+export function useToast(): ToastApi {
   const ctx = useContext(ToastCtx);
   if (!ctx) throw new Error('useToast must be called inside <ToastProvider>');
   return ctx;

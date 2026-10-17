@@ -13,18 +13,111 @@
 
 import React, { useState, useEffect, useRef, useCallback, useContext, useMemo, createContext } from 'react';
 import { View, Text, Pressable, addGlobalClickListener, removeGlobalClickListener, clipboard, registerInput, unregisterInput, registerScrollView, unregisterScrollView, registerDraggable, unregisterDraggable } from '@glyx-dev/react';
+import type { GlyxStyle } from '@glyx-dev/react';
+
+// ── The document model ───────────────────────────────
+
+/** A run of text with one set of formatting. */
+export interface Span {
+  text:       string;
+  bold?:      boolean;
+  italic?:    boolean;
+  underline?: boolean;
+  color?:     string;
+  fontSize?:  number;
+}
+
+export type ListType = 'bullet' | 'number';
+
+/** One paragraph: runs of text, and optionally a list marker with a nesting level. */
+export interface Paragraph {
+  spans:     Span[];
+  listType?: ListType | null;
+  /** Nesting level of a list item (0 = top level). */
+  indent?:   number;
+}
+
+export interface RichTextDocument {
+  paragraphs: Paragraph[];
+}
+
+/** A position in the document: a paragraph, and a character offset into its text. */
+export interface Cursor {
+  para:   number;
+  offset: number;
+}
+
+export interface Selection {
+  anchor: Cursor;
+  focus:  Cursor;
+}
+
+/** The character formats that can be toggled. */
+export type FormatKey = 'bold' | 'italic' | 'underline';
+
+/** The result of an edit: the new document and where the cursor ends up. */
+export interface EditResult {
+  doc:    RichTextDocument;
+  cursor: Cursor;
+}
+
+export interface RichTextEditorProps {
+  /** The document to show (controlled). Without it the editor starts empty and keeps its own. */
+  value?:       RichTextDocument;
+  /** Called with the new document on every edit. */
+  onChange?:    (doc: RichTextDocument) => void;
+  /** Editor width in px (default 600). */
+  width?:       number;
+  /** Editor height in px (default 400). */
+  height?:      number;
+  /** Default text size in px (default 14). */
+  fontSize?:    number;
+  /** Default text colour. */
+  color?:       string;
+  placeholder?: string;
+  /** Focus as soon as it mounts, with no click first. Use it when a parent opens or creates a document in code. */
+  autoFocus?:   boolean;
+  /** `true` (default) wraps long paragraphs to `width`; `false` keeps each paragraph on one line and scrolls sideways. */
+  wrap?:        boolean;
+  style?:       GlyxStyle;
+  /** Rendered inside the editor's context, so a {@link RichTextToolbar} can sit here or next to it. */
+  children?:    React.ReactNode;
+}
+
+export interface RichTextToolbarProps {
+  style?: GlyxStyle;
+}
+
+/** What {@link useEditorContext} returns, inside a {@link RichTextEditor}. */
+export interface EditorContextValue {
+  doc:                RichTextDocument;
+  setDoc:             (doc: RichTextDocument) => void;
+  cursor:             Cursor;
+  setCursor:          (cursor: Cursor) => void;
+  sel:                Selection;
+  setSel:             (sel: Selection) => void;
+  /** Runs `fn(doc, cursor)` and applies the document and cursor it returns. */
+  applyEdit:          (fn: (doc: RichTextDocument, cursor: Cursor) => EditResult) => void;
+  selectionHasFormat: (key: FormatKey) => boolean;
+  toggleFormat:       (key: FormatKey) => void;
+  toggleList:         (listType: ListType) => void;
+  /** Changes the nesting level of the list items in the selection by `delta`. */
+  indent:             (delta: number) => void;
+  isListActive:       (listType: ListType) => boolean;
+  fontSize:           number;
+}
 
 // ── Document helpers ──────────────────────────────────────────────────────────
 
-export function emptyDoc() {
+export function emptyDoc(): RichTextDocument {
   return { paragraphs: [{ spans: [{ text: '' }] }] };
 }
 
-export function paraText(para: { spans: any[]; }) {
-  return para.spans.map((s): { text: any; } => s.text).join('');
+export function paraText(para: Paragraph) {
+  return para.spans.map((s) => s.text).join('');
 }
 
-export function splitSpansAt(spans: any[], offset: number) {
+export function splitSpansAt(spans: Span[], offset: number): [Span[], Span[]] {
   const before = [], after = [];
   let rem = offset, split = false;
   for (const span of spans) {
@@ -39,7 +132,7 @@ export function splitSpansAt(spans: any[], offset: number) {
   return [before, after];
 }
 
-export function mergeSpans(spans: any[]) {
+export function mergeSpans(spans: Span[]): Span[] {
   const out: any[] = [];
   for (const s of spans) {
     if (!s.text) continue;
@@ -56,18 +149,18 @@ export function mergeSpans(spans: any[]) {
 
 // ── Cursor helpers ────────────────────────────────────────────────────────────
 
-export function cursorEq(a: { para: any; offset: any; }, b: { para: any; offset: any; })  { return a.para === b.para && a.offset === b.offset; }
-function cursorLt(a: { para: number; offset: number; }, b: { para: number; offset: number; })  { return a.para < b.para || (a.para === b.para && a.offset < b.offset); }
-export function hasSelection(s: { anchor: any; focus: any; }) { return !cursorEq(s.anchor, s.focus); }
-export function normSel(s: { anchor: any; focus: any; })      { return cursorLt(s.anchor, s.focus) ? s : { anchor: s.focus, focus: s.anchor }; }
+export function cursorEq(a: Cursor, b: Cursor)  { return a.para === b.para && a.offset === b.offset; }
+function cursorLt(a: Cursor, b: Cursor)  { return a.para < b.para || (a.para === b.para && a.offset < b.offset); }
+export function hasSelection(s: Selection) { return !cursorEq(s.anchor, s.focus); }
+export function normSel(s: Selection)      { return cursorLt(s.anchor, s.focus) ? s : { anchor: s.focus, focus: s.anchor }; }
 
-export function clampCursor(doc: { paragraphs: string | any[]; }, c: { para: any; offset: any; }) {
+export function clampCursor(doc: RichTextDocument, c: Cursor) {
   const para = Math.max(0, Math.min(doc.paragraphs.length - 1, c.para));
   const offset = Math.max(0, Math.min(paraText(doc.paragraphs[para]).length, c.offset));
   return { para, offset };
 }
 
-export function moveCursorBy(doc: { paragraphs: string | any[]; }, cursor: { para: any; offset: any; }, delta: number) {
+export function moveCursorBy(doc: RichTextDocument, cursor: Cursor, delta: number) {
   let { para, offset } = cursor;
   offset += delta;
   if (offset < 0 && para > 0) {
@@ -86,7 +179,7 @@ export function moveCursorBy(doc: { paragraphs: string | any[]; }, cursor: { par
 // to several visual lines or (when `wrap` is off) always exactly one — a
 // non-wrapping paragraph is just the degenerate `lines.length === 1` case
 // of the same math, so no separate code path is needed for it.
-function moveCursorVertical(layoutInfo: any, cursor: { para: any; offset: any; }, dir: number, lineHeight: number, fontSize: number) {
+function moveCursorVertical(layoutInfo: any, cursor: Cursor, dir: number, lineHeight: number, fontSize: number) {
   const items = layoutInfo.items;
   const item = items[cursor.para];
   let li = 0;
@@ -116,7 +209,7 @@ function moveCursorVertical(layoutInfo: any, cursor: { para: any; offset: any; }
 
 // ── Edit operations ───────────────────────────────────────────────────────────
 
-export function insertText(doc: { paragraphs: any; }, cursor: { para: any; offset: any; }, text: string | any[]) {
+export function insertText(doc: RichTextDocument, cursor: Cursor, text: string): EditResult {
   const paras = [...doc.paragraphs];
   const para = paras[cursor.para];
   const [before, after] = splitSpansAt(para.spans, cursor.offset);
@@ -125,7 +218,7 @@ export function insertText(doc: { paragraphs: any; }, cursor: { para: any; offse
   return { doc: { ...doc, paragraphs: paras }, cursor: { para: cursor.para, offset: cursor.offset + text.length } };
 }
 
-export function insertBreak(doc: { paragraphs: any; }, cursor: { para: any; offset: any; }) {
+export function insertBreak(doc: RichTextDocument, cursor: Cursor) {
   const paras = [...doc.paragraphs];
   const current = paras[cursor.para];
   // Enter on an EMPTY list item exits the list instead of creating another
@@ -143,7 +236,7 @@ export function insertBreak(doc: { paragraphs: any; }, cursor: { para: any; offs
   return { doc: { ...doc, paragraphs: paras }, cursor: { para: cursor.para + 1, offset: 0 } };
 }
 
-export function deleteChar(doc: { paragraphs: any; }, cursor: { offset: number; para: number; }, backward: boolean) {
+export function deleteChar(doc: RichTextDocument, cursor: Cursor, backward: boolean) {
   const paras = [...doc.paragraphs];
   if (backward) {
     if (cursor.offset === 0) {
@@ -174,7 +267,7 @@ export function deleteChar(doc: { paragraphs: any; }, cursor: { offset: number; 
   }
 }
 
-export function deleteSelection(doc: { paragraphs: any; }, sel: { anchor: { para: number; offset: number; }; focus: { para: number; offset: number; }; }) {
+export function deleteSelection(doc: RichTextDocument, sel: Selection) {
   const { anchor, focus } = normSel(sel);
   const paras = [...doc.paragraphs];
   if (anchor.para === focus.para) {
@@ -190,7 +283,7 @@ export function deleteSelection(doc: { paragraphs: any; }, sel: { anchor: { para
   return { doc: { ...doc, paragraphs: paras }, cursor: anchor };
 }
 
-export function applyFormat(doc: { paragraphs: any; }, sel: { anchor: { para: number; offset: number; }; focus: { para: number; offset: number; }; }, key: string, value: boolean) {
+export function applyFormat(doc: RichTextDocument, sel: Selection, key: FormatKey, value: boolean) {
   const { anchor, focus } = normSel(sel);
   const paras = [...doc.paragraphs];
   for (let pi = anchor.para; pi <= focus.para; pi++) {
@@ -204,7 +297,7 @@ export function applyFormat(doc: { paragraphs: any; }, sel: { anchor: { para: nu
   return { ...doc, paragraphs: paras };
 }
 
-export function selectionHasFormat(doc: { paragraphs: { [x: string]: { spans: any; }; }; }, sel: { anchor: { para: number; offset: number; }; focus: { para: number; offset: number; }; }, key: string) {
+export function selectionHasFormat(doc: RichTextDocument, sel: Selection, key: FormatKey): boolean {
   if (!hasSelection(sel)) return false;
   const { anchor, focus } = normSel(sel);
   for (let pi = anchor.para; pi <= focus.para; pi++) {
@@ -218,7 +311,7 @@ export function selectionHasFormat(doc: { paragraphs: { [x: string]: { spans: an
   return true;
 }
 
-export function selectedText(doc: { paragraphs: { [x: string]: any; }; }, sel: { anchor: { para: number; offset: number; }; focus: { para: number; offset: number; }; }) {
+export function selectedText(doc: RichTextDocument, sel: Selection) {
   if (!hasSelection(sel)) return '';
   const { anchor, focus } = normSel(sel);
   const parts = [];
@@ -302,7 +395,7 @@ function charAtXInSpan(span: any, localX: number, defaultFontSize: any) {
   return Math.round(localX / (fs * 0.55)); // fallback estimate
 }
 
-function measureCursorX(para: { spans: any; }, offset: number, defaultFontSize: number) {
+function measureCursorX(para: Paragraph, offset: number, defaultFontSize: number) {
   let x = 0, rem = offset;
   for (const span of para.spans) {
     if (rem <= 0) break;
@@ -324,7 +417,7 @@ function measureCursorX(para: { spans: any; }, offset: number, defaultFontSize: 
   return x;
 }
 
-function clickToOffset(para: { spans: any; }, clickX: number, defaultFontSize: number) {
+function clickToOffset(para: Paragraph, clickX: number, defaultFontSize: number) {
   let x = 0, charOffset = 0;
   for (const span of para.spans) {
     const spanW = measureSpan(span.text, span, defaultFontSize);
@@ -345,7 +438,7 @@ function clickToOffset(para: { spans: any; }, clickX: number, defaultFontSize: n
 // to the gap on either side), which is what let a double-click's word scan
 // start from the wrong side of that gap and pick up an adjacent space.
 // Containment removes the ambiguity: it always names one real character.
-export function charIndexAtPoint(para: { spans: any; }, clickX: number, defaultFontSize: number) {
+export function charIndexAtPoint(para: Paragraph, clickX: number, defaultFontSize: number) {
   let x = 0, charOffset = 0;
   for (const span of para.spans) {
     const spanW = measureSpan(span.text, span, defaultFontSize);
@@ -379,7 +472,7 @@ export function charIndexAtPoint(para: { spans: any; }, clickX: number, defaultF
 // `{ spans }` shape so the EXISTING `measureCursorX` / `clickToOffset` /
 // `charIndexAtPoint` functions can be reused verbatim against just that
 // one visual line, instead of duplicating per-line pixel math.
-export function wrapParagraph(para: { spans: any; }, maxWidth: number, fontSize: number) {
+export function wrapParagraph(para: Paragraph, maxWidth: number, fontSize: number) {
   const text = paraText(para);
   if (!text) return [{ start: 0, end: 0, pieces: [] }];
 
@@ -479,7 +572,7 @@ const MAX_INDENT   = 4;
 // `number` paragraphs; a shallower indent or a same-indent non-number
 // paragraph ends the run. Deeper-indented paragraphs (nested sub-lists) are
 // skipped over without breaking the outer count.
-export function computeListNumber(paragraphs: any[], idx: number) {
+export function computeListNumber(paragraphs: Paragraph[], idx: number): number {
   const p = paragraphs[idx];
   if (!p || p.listType !== 'number') return 1;
   const indent = p.indent ?? 0;
@@ -516,7 +609,7 @@ function markerWidth(para: any, fontSize: number, number: number | null) {
 
 // ── Context ───────────────────────────────────────────────────────────────────
 
-const EditorCtx = createContext<any>(null);
+const EditorCtx = createContext<EditorContextValue | null>(null);
 
 // ── RichTextEditor ────────────────────────────────────────────────────────────
 
@@ -543,7 +636,7 @@ export function RichTextEditor({
                          // depending on what's being edited.
   style,
   children,    // optional: render toolbar etc. using context
-}: Record<string, any>) {
+}: RichTextEditorProps) {
   const [doc, setDoc_]   = useState(() => value ?? emptyDoc());
   const [cursor, setCursor_] = useState({ para: 0, offset: 0 });
   const [sel, setSel_]   = useState({ anchor: { para: 0, offset: 0 }, focus: { para: 0, offset: 0 } });
@@ -795,8 +888,9 @@ export function RichTextEditor({
   // exactly what @glyx-dev's `files` example hits (its RichTextEditor style
   // prop sets `padding: 12` for cosmetic spacing, on top of this
   // component's own internal EDITOR_PADDING).
-  const outerPadLeft = (style && (style.paddingLeft ?? style.padding)) || 0;
-  const outerPadTop  = (style && (style.paddingTop  ?? style.padding)) || 0;
+  const padPx = (v: unknown): number => (typeof v === 'number' ? v : 0);
+  const outerPadLeft = padPx(style && (style.paddingLeft ?? style.padding));
+  const outerPadTop  = padPx(style && (style.paddingTop  ?? style.padding));
   const LINE_H = richTextLineHeight(fontSize);
 
   // Per-paragraph layout: marker width, wrapped visual lines (or a single
@@ -809,7 +903,7 @@ export function RichTextEditor({
     const contentWidth = Math.max(20, (typeof width === 'number' ? width : 600) - 2 * (EDITOR_PADDING + outerPadLeft));
     let y = 0;
     let maxContentWidth = contentWidth;
-    const items = paras.map((para: { listType: string; spans: any[]; }, pi: any) => {
+    const items = paras.map((para: Paragraph, pi: number) => {
       const number = para.listType === 'number' ? computeListNumber(paras, pi) : null;
       const mw = markerWidth(para, fontSize, number);
       const lines = wrap
@@ -1304,8 +1398,8 @@ function ParagraphRow({ para, paraIdx, mw, lines, cursor, sel, focused, blinkOn,
         // Selection intersected with this visual line's [start, end) range.
         let selX0 = null, selX1: any = null;
         if (selActive) {
-          const s = Math.max(selStart, line.start);
-          const e = Math.min(selEnd, line.end);
+          const s = Math.max(selStart as number, line.start);
+          const e = Math.min(selEnd as number, line.end);
           if (s < e) {
             selX0 = measureCursorX(lp, s - line.start, fontSize);
             selX1 = measureCursorX(lp, e - line.start, fontSize);
@@ -1354,7 +1448,7 @@ function ParagraphRow({ para, paraIdx, mw, lines, cursor, sel, focused, blinkOn,
 
 // ── RichTextToolbar ───────────────────────────────────────────────────────────
 
-export function RichTextToolbar({ style }: Record<string, any>) {
+export function RichTextToolbar({ style }: RichTextToolbarProps) {
   const ctx = useContext(EditorCtx);
   if (!ctx) return null;
   const { toggleFormat, selectionHasFormat, toggleList, indent, isListActive } = ctx;
@@ -1408,11 +1502,11 @@ function ToolBtn({ label, active, onPress, style: textStyle }: Record<string, an
 
 // ── Serialization ─────────────────────────────────────────────────────────────
 
-export function docToPlainText(doc: { paragraphs: any[]; }) {
+export function docToPlainText(doc: RichTextDocument): string {
   return doc.paragraphs.map((p): any => paraText(p)).join('\n');
 }
 
-export function docFromPlainText(text: string) {
+export function docFromPlainText(text: string): RichTextDocument {
   return {
     paragraphs: text
       // Normalize CRLF/CR line endings (Windows/old-Mac text files) to LF —
@@ -1431,6 +1525,6 @@ export function docFromPlainText(text: string) {
 
 // ── useRichText hook ──────────────────────────────────────────────────────────
 
-export function useEditorContext() {
+export function useEditorContext(): EditorContextValue | null {
   return useContext(EditorCtx);
 }

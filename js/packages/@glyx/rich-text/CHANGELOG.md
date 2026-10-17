@@ -4,6 +4,7 @@
 
 ### Added
 - **Written in TypeScript.** The source is now TypeScript (`src/index.ts`), strictly type-checked, and the package ships its declarations (`types/`), so TypeScript apps get types for the whole public API.
+- **A typed document model and props.** `RichTextDocument`, `Paragraph`, `Span`, `Cursor`, `Selection`, `RichTextEditorProps`, `RichTextToolbarProps` and `EditorContextValue` are exported, and the editing functions (`insertText`, `deleteSelection`, `applyFormat`, ...) use them. `useEditorContext()` returns `EditorContextValue | null`.
 
 ## [0.2.0] - 2026-10-05
 

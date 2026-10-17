@@ -7,6 +7,7 @@
 
 import React, { useState, useCallback } from 'react';
 import { View, Text, Pressable } from '@glyx-dev/react';
+import type { GlyxStyle } from '@glyx-dev/react';
 import { useTheme } from './theme.js';
 import { Heading } from './components.js';
 
@@ -27,6 +28,20 @@ import { Heading } from './components.js';
 //   hideCloseButton — hides the ✕ icon (default false)
 //   dismissOnBackdrop — click backdrop to close (default true)
 
+export interface ModalProps {
+  visible:             boolean;
+  /** Called when the backdrop or the ✕ is pressed. */
+  onClose?:            () => void;
+  title?:              string;
+  children?:           React.ReactNode;
+  /** Panel width in px (default 480, capped to the window). */
+  width?:              number;
+  hideCloseButton?:    boolean;
+  /** Pressing the backdrop closes it (default true). */
+  dismissOnBackdrop?:  boolean;
+  style?:              GlyxStyle;
+}
+
 export function Modal({
   visible,
   onClose,
@@ -36,7 +51,7 @@ export function Modal({
   hideCloseButton = false,
   dismissOnBackdrop = true,
   style,
-}: Record<string, any>) {
+}: ModalProps) {
   const { colors, space, radius, fontSize } = useTheme();
 
   if (!visible) return null;
@@ -127,7 +142,12 @@ export function Modal({
 //     <Button label="Save"   variant="primary" onPress={handleSave} />
 //   </ModalFooter>
 
-export function ModalFooter({ children, style }: Record<string, any>) {
+export interface ModalFooterProps {
+  children?: React.ReactNode;
+  style?:    GlyxStyle;
+}
+
+export function ModalFooter({ children, style }: ModalFooterProps) {
   const { space } = useTheme();
   return (
     <View
@@ -157,13 +177,25 @@ export function ModalFooter({ children, style }: Record<string, any>) {
 //                  default 36). Adjust if the tooltip overlaps your content.
 //   children     — the element to wrap
 
+export interface TooltipProps {
+  /** The tooltip text. */
+  content:      string;
+  placement?:   'top' | 'bottom' | 'left' | 'right';
+  /** Approximate height of `children` in px, used to place it (default 36). */
+  childHeight?: number;
+  /** Approximate width of `children` in px (default 36). */
+  childWidth?:  number;
+  /** The element the tooltip belongs to. */
+  children?:    React.ReactNode;
+}
+
 export function Tooltip({
   content,
   placement   = 'top',
   childHeight = 36,
   childWidth  = 36,
   children,
-}: Record<string, any>) {
+}: TooltipProps) {
   const { colors, space, radius, fontSize } = useTheme();
   const [visible, setVisible] = useState(false);
 
@@ -222,6 +254,17 @@ export function Tooltip({
 //   height       — sheet height in px (default 360)
 //   children     — sheet body content
 
+export interface SheetProps {
+  visible:   boolean;
+  /** Called when the backdrop is pressed. */
+  onClose?:  () => void;
+  title?:    string;
+  /** Sheet height in px (default 360). */
+  height?:   number;
+  children?: React.ReactNode;
+  style?:    GlyxStyle;
+}
+
 export function Sheet({
   visible,
   onClose,
@@ -229,7 +272,7 @@ export function Sheet({
   height  = 360,
   children,
   style,
-}: Record<string, any>) {
+}: SheetProps) {
   const { colors, space, radius, fontSize } = useTheme();
 
   if (!visible) return null;

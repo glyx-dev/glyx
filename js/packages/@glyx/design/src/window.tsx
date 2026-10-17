@@ -25,6 +25,7 @@
 
 import React from 'react';
 import { View, Text, Pressable, glyxWindow } from '@glyx-dev/react';
+import type { GlyxStyle } from '@glyx-dev/react';
 import { useTheme } from './theme.js';
 
 function _ControlButton({ glyph, onPress, hoverBg, glyphColor, hoverGlyphColor }: Record<string, any>) {
@@ -53,6 +54,18 @@ function _ControlButton({ glyph, onPress, hoverBg, glyphColor, hoverGlyphColor }
   );
 }
 
+export interface WindowControlsProps {
+  glyphColor?:      string;
+  hoverGlyphColor?: string;
+  hoverBg?:         string;
+  closeHoverBg?:    string;
+  minimizeIcon?:    string;
+  maximizeIcon?:    string;
+  restoreIcon?:     string;
+  closeIcon?:       string;
+  style?:           GlyxStyle;
+}
+
 /**
  * Minimize / maximize / close button row for custom (decorations: false)
  * title bars. Platform-aware order is automatic (macOS traffic-lights on the
@@ -68,7 +81,7 @@ export function WindowControls({
   restoreIcon,
   closeIcon = '✕',
   style,
-}: Record<string, any> = {}) {
+}: WindowControlsProps = {}) {
   const { colors } = useTheme();
   const isMac = glyxWindow.platform() === 'macos';
   const [maximized, setMaximized] = React.useState(() => glyxWindow.isMaximized());

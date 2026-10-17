@@ -83,12 +83,15 @@ fn ensure_icupkg_windows(tools: &Path) -> Result<PathBuf> {
         super::tools::paths::ICUPKG_WIN_X64
     };
     let url = super::tools::resolve_tool_url(default_url, mirror_path);
-    let dest = tools.join("icupkg.exe");
-
-    if dest.exists() && verify_sha256(&dest, sha).is_ok() {
-        return Ok(dest);
+    // icupkg.exe is dynamically linked to the ICU DLLs in the same folder of the zip, so it is run
+    // from the extracted folder, not copied out alone (a lone icupkg.exe cannot start).
+    let extract_dir = tools.join("icu-77-win");
+    if let Some(found) = find_icupkg_in(&extract_dir, "icupkg.exe") {
+        if verify_sha256(&found, sha).is_ok() {
+            return Ok(found);
+        }
     }
-    let _ = std::fs::remove_file(&dest);
+    let _ = std::fs::remove_dir_all(&extract_dir);
 
     println!("Downloading icupkg (ICU 77 data trimmer)...");
     let zip_tmp = tools.join("icu4c-77_1-win.zip");
@@ -102,20 +105,15 @@ fn ensure_icupkg_windows(tools: &Path) -> Result<PathBuf> {
     }
 
     println!("Extracting icupkg...");
-    let extract_dir = tools.join("icu_win_extract");
-    let _ = std::fs::remove_dir_all(&extract_dir);
     std::fs::create_dir_all(&extract_dir)?;
     extract_zip_full(&zip_tmp, &extract_dir).context("failed to extract icupkg zip")?;
     let _ = std::fs::remove_file(&zip_tmp);
 
     let found = find_icupkg_in(&extract_dir, "icupkg.exe")
         .context("icupkg.exe not found in extracted ICU zip")?;
-    std::fs::copy(&found, &dest).context("copy icupkg into tools dir")?;
-    let _ = std::fs::remove_dir_all(&extract_dir);
-
-    verify_sha256(&dest, sha).context("icupkg download integrity check failed")?;
-    println!("✓ icupkg cached: {}", dest.display());
-    Ok(dest)
+    verify_sha256(&found, sha).context("icupkg download integrity check failed")?;
+    println!("✓ icupkg cached: {}", found.display());
+    Ok(found)
 }
 
 /// Extract a zip fully (preserving its internal directory layout) into `dest`.
@@ -140,12 +138,15 @@ fn ensure_icupkg_linux(tools: &Path) -> Result<PathBuf> {
         "https://github.com/unicode-org/icu/releases/download/release-77-1/icu4c-77_1-Ubuntu22.04-x64.tgz";
     const SHA: &str = "3AD6448BBEAEF1D0AB9A9813EC030DF3BEEE0124243074C31BB2A344EE34E014";
     let url = super::tools::resolve_tool_url(DEFAULT_URL, super::tools::paths::ICUPKG_LINUX_X64);
-    let dest = tools.join("icupkg");
-
-    if dest.exists() && verify_sha256(&dest, SHA).is_ok() {
-        return Ok(dest);
+    // As on Windows: icupkg needs the libicu*.so files from the same tarball, so it is run from the
+    // extracted folder (see `icupkg_command`, which points the loader at the tarball's lib/).
+    let extract_dir = tools.join("icu-77-linux");
+    if let Some(found) = find_icupkg_in(&extract_dir, "icupkg") {
+        if verify_sha256(&found, SHA).is_ok() {
+            return Ok(found);
+        }
     }
-    let _ = std::fs::remove_file(&dest);
+    let _ = std::fs::remove_dir_all(&extract_dir);
 
     println!("Downloading icupkg (ICU 77 data trimmer)...");
     let tgz_tmp = tools.join("icu4c-77_1-linux.tgz");
@@ -159,8 +160,6 @@ fn ensure_icupkg_linux(tools: &Path) -> Result<PathBuf> {
     }
 
     println!("Extracting icupkg...");
-    let extract_dir = tools.join("icu_linux_extract");
-    let _ = std::fs::remove_dir_all(&extract_dir);
     std::fs::create_dir_all(&extract_dir)?;
     let ok = Command::new("tar")
         .args(["-xzf", tgz_tmp.to_str().unwrap()])
@@ -175,17 +174,35 @@ fn ensure_icupkg_linux(tools: &Path) -> Result<PathBuf> {
 
     let found = find_icupkg_in(&extract_dir, "icupkg")
         .context("icupkg not found in extracted ICU tarball")?;
-    std::fs::copy(&found, &dest).context("copy icupkg into tools dir")?;
-    let _ = std::fs::remove_dir_all(&extract_dir);
-
-    verify_sha256(&dest, SHA).context("icupkg download integrity check failed")?;
+    verify_sha256(&found, SHA).context("icupkg download integrity check failed")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::set_permissions(&found, std::fs::Permissions::from_mode(0o755));
     }
-    println!("✓ icupkg cached: {}", dest.display());
-    Ok(dest)
+    println!("✓ icupkg cached: {}", found.display());
+    Ok(found)
+}
+
+/// A `Command` for `icupkg`. On Linux the downloaded binary needs the `libicu*.so` files that sit in
+/// the `lib/` folder of its tarball, so the loader is pointed there; elsewhere this is a plain `Command`.
+pub(crate) fn icupkg_command(icupkg: &Path) -> Command {
+    let mut cmd = Command::new(icupkg);
+    if cfg!(target_os = "linux") {
+        if let Some(bin) = icupkg.parent() {
+            let mut dirs: Vec<String> = Vec::new();
+            for d in [bin.join("../lib"), bin.join("lib"), bin.to_path_buf()] {
+                if d.is_dir() {
+                    dirs.push(d.display().to_string());
+                }
+            }
+            if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
+                dirs.push(existing);
+            }
+            cmd.env("LD_LIBRARY_PATH", dirs.join(":"));
+        }
+    }
+    cmd
 }
 
 /// macOS: unicode.org ships no prebuilt `icupkg`, so use a system install

@@ -147,7 +147,8 @@ pub(super) fn cmd_dev(inspect: Option<u16>, devtools: Option<u16>, open: bool, p
         // Point the (shared) runner at this app's trimmed ICU data.
         let icu_dir = std::path::PathBuf::from("target/glyx/icu");
         match super::icu_trim::trim_icu_for_app(&project_name, &icu_dir, icupkg.clone()) {
-            Ok(dat) => { cmd.env("GLYX_ICU_DATA", &dat); }
+            Ok(Some(dat)) => { cmd.env("GLYX_ICU_DATA", &dat); }
+            Ok(None)      => {}
             Err(e)  => log::warn!("ICU trim skipped: {e}"),
         }
         // Suppress noisy symphonia probe warnings (emitted when probing MKV/other

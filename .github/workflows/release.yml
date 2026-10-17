@@ -228,6 +228,40 @@ jobs:
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sig
 
+  # ── ICU data ───────────────────────────────────────────────────────────────
+  # The V8 runners are built without embedded ICU data, so `Intl` and `toLocaleString()` need an
+  # `icudtl.dat`. `glyx dev` / `glyx build` / `glyx package` trim one to the app's locales; in the source
+  # checkout they start from crates/glyx-runtime/icudtl.dat, and everywhere else from this asset, which
+  # the CLI downloads and verifies (crates/glyx-cli/src/icu_trim.rs). It is loaded straight into V8, so
+  # like the snapshot and the capability modules it is signed with the capability key. The data is the
+  # same on every platform (all targets are little-endian), so one asset serves all.
+  icu:
+    name: ICU data
+    needs: versions
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stage and sign
+        env:
+          CAP_SIGNING_KEY: ${{ secrets.CAP_SIGNING_KEY }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ASSET="glyx-icudtl-${VERSION}.dat"
+          cp crates/glyx-runtime/icudtl.dat "$ASSET"
+          test -s "$ASSET" || { echo "empty ICU data"; exit 1; }
+          echo "$CAP_SIGNING_KEY" > cap-key.pem
+          openssl pkeyutl -sign -rawin -inkey cap-key.pem -in "$ASSET" -out "$ASSET.sig"
+          rm -f cap-key.pem
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
+          ls -l "$ASSET" "$ASSET.sig"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: icu-data
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sig
+
   # ── Capability DLLs ────────────────────────────────────────────────────────
   cap-windows:
     name: Cap DLLs (windows)
@@ -349,7 +383,7 @@ jobs:
   # ── Publish GitHub Release ─────────────────────────────────────────────────
   publish:
     name: Publish release
-    needs: [versions, runner, cli, snapshot, cap-windows, cap-macos, cap-linux]
+    needs: [versions, runner, cli, snapshot, icu, cap-windows, cap-macos, cap-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write

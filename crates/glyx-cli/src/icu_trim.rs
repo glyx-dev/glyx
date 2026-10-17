@@ -9,11 +9,11 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-use super::cmd_package::ensure_icupkg;
+use super::cmd_package::{ensure_icupkg, icupkg_command};
+use super::signed_asset;
 
 /// Locales we always retain: `root` is required for ICU fallback, and we add
 /// every requested locale together with all of its parent prefixes
@@ -59,7 +59,7 @@ pub(super) fn trim_icu_data(
     // list to stdout first, so we use the listing and only bail when it's
     // actually empty — the dependency warning is non-fatal for trimming
     // because the remove step runs with `--ignore-deps`.
-    let out = Command::new(&icupkg)
+    let out = icupkg_command(&icupkg)
         .args(["-l", "--auto_toc_prefix", in_dat.to_str().unwrap()])
         .output()
         .with_context(|| format!("failed to run icupkg -l on {}", in_dat.display()))?;
@@ -93,7 +93,7 @@ pub(super) fn trim_icu_data(
     std::fs::write(&list_path, remove.join("\n"))
         .with_context(|| format!("write remove list {}", list_path.display()))?;
 
-    let status = Command::new(&icupkg)
+    let status = icupkg_command(&icupkg)
         .args([
             "-r",
             list_path.to_str().unwrap(),
@@ -134,28 +134,74 @@ pub(super) fn read_app_locales() -> Vec<String> {
     }
 }
 
-/// Locate the full `icudtl.dat` shipped in the glyx-runtime crate.
+/// The full ICU data that is trimmed to the app's locales.
+///
+/// In the glyx source checkout it is the `icudtl.dat` in the glyx-runtime crate. Everywhere else (a
+/// JS developer who installed the CLI) it is the release's `glyx-icudtl-<version>.dat`, signed with
+/// the capability key: downloaded once into `~/.glyx/icu/`, verified before use. V8 reads this
+/// file straight into memory, so an unverified one is as dangerous as an unverified native module.
 fn full_icu_path() -> Result<PathBuf> {
-    let ws = super::find_workspace_root()?
-        .context("could not locate workspace root to find icudtl.dat")?;
-    let p = ws.join("crates").join("glyx-runtime").join("icudtl.dat");
-    if !p.exists() {
-        bail!("ICU source data not found at {}", p.display());
+    if let Some(ws) = super::find_workspace_root()? {
+        let p = ws.join("crates").join("glyx-runtime").join("icudtl.dat");
+        if p.exists() {
+            return Ok(p);
+        }
     }
-    Ok(p)
+    let version = env!("CARGO_PKG_VERSION");
+    let path = signed_asset::fetch_verified(
+        &ICU_KIND,
+        &super::glyx_dir(),
+        &icu_asset_name(version),
+        version,
+        super::tools::tools_base().as_deref(),
+        &glyx_verify::CAP_PUBKEY,
+        &|url, max| signed_asset::http_get(url, max),
+    )?;
+    Ok(path)
+}
+
+/// Far more than the 10 MB ICU 77 data; a limit so a bad mirror cannot fill the disk.
+const ICU_KIND: signed_asset::Kind = signed_asset::Kind {
+    what:       "ICU data",
+    cache_dir:  "icu",
+    mirror_dir: "icu",
+    max_bytes:  64 * 1024 * 1024,
+};
+
+/// `glyx-icudtl-0.2.0.dat` — the release asset (and, with `.sig`, its signature).
+fn icu_asset_name(version: &str) -> String {
+    format!("glyx-icudtl-{version}.dat")
 }
 
 /// Trim `icudtl.dat` to the app's locales and place the result at
 /// `bin_dir/icudtl.dat`. Returns the destination path. Safe to call repeatedly.
 /// `icupkg` is an optional override path (from `--icupkg` / `$GLYX_ICUPKG`).
-pub(super) fn trim_icu_for_app(project_name: &str, bin_dir: &Path, icupkg: Option<PathBuf>) -> Result<PathBuf> {
+///
+/// Returns `None` for the QuickJS engine, which has no ICU (`Intl` is a V8 feature here): nothing is
+/// downloaded, trimmed or shipped.
+pub(super) fn trim_icu_for_app(project_name: &str, bin_dir: &Path, icupkg: Option<PathBuf>) -> Result<Option<PathBuf>> {
+    if !engine_uses_icu(&super::read_engine_from_config()) {
+        return Ok(None);
+    }
     let locales = read_app_locales();
     let full = full_icu_path()?;
     std::fs::create_dir_all(bin_dir)?;
     let out = bin_dir.join("icudtl.dat");
 
     let orig = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
-    let removed = trim_icu_data(&locales, &full, &out, icupkg)?;
+    // Trimming is only a size optimisation. If it cannot be done (no `icupkg` for this platform, the
+    // download failed, the tool did not run), ship the full data rather than none: without ICU data
+    // the app has no `Intl` at all.
+    let removed = match trim_icu_data(&locales, &full, &out, icupkg) {
+        Ok(n) => n,
+        Err(e) => {
+            log::warn!("ICU trim skipped ({e:#}); shipping the full ICU data instead");
+            std::fs::copy(&full, &out)
+                .with_context(|| format!("copy {} → {}", full.display(), out.display()))?;
+            println!("✓ ICU data: full ({:.1} MB; could not trim to [{}])", orig as f64 / 1_048_576.0, locales.join(","));
+            return Ok(Some(out));
+        }
+    };
     let trimmed = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
     let pct = if orig > 0 {
         (100 * (orig - trimmed) / orig) as u32
@@ -171,5 +217,40 @@ pub(super) fn trim_icu_for_app(project_name: &str, bin_dir: &Path, icupkg: Optio
         trimmed as f64 / 1_048_576.0,
         pct,
     );
-    Ok(out)
+    Ok(Some(out))
+}
+
+/// Only the V8 engine loads ICU data; the QuickJS runtime does not use it.
+fn engine_uses_icu(engine: &str) -> bool {
+    engine != "quickjs"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_v8_engine_uses_icu_data() {
+        assert!(engine_uses_icu("v8"));
+        assert!(!engine_uses_icu("quickjs"));
+    }
+
+    #[test]
+    fn the_icu_asset_is_named_per_version_and_lives_under_icu() {
+        assert_eq!(icu_asset_name("0.2.0"), "glyx-icudtl-0.2.0.dat");
+        let a = icu_asset_name("0.2.0");
+        assert_eq!(
+            signed_asset::asset_url(&ICU_KIND, &a, "0.2.0", None),
+            "https://github.com/glyx-dev/glyx/releases/download/v0.2.0/glyx-icudtl-0.2.0.dat",
+        );
+        assert_eq!(
+            signed_asset::asset_url(&ICU_KIND, &a, "0.2.0", Some("https://mirror.example")),
+            "https://mirror.example/icu/glyx-icudtl-0.2.0.dat",
+        );
+        let root = std::path::Path::new("/home/u/.glyx");
+        assert_eq!(
+            signed_asset::cache_path(&ICU_KIND, root, &a),
+            root.join("icu").join("glyx-icudtl-0.2.0.dat"),
+        );
+    }
 }

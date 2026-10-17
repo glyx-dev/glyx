@@ -47,11 +47,6 @@ pub(crate) mod paths {
     pub const ICUPKG_WIN_ARM64: &str = "icu/icu4c-77_1-WinARM64-MSVC2022.zip";
     /// icupkg (ICU 77 data trimmer) — Linux x64 (Ubuntu 22.04).
     pub const ICUPKG_LINUX_X64: &str = "icu/icu4c-77_1-Ubuntu22.04-x64.tgz";
-    /// Full ICU data file (mirror of the one embedded in glyx-runtime).
-    /// Reserved for when `icudtl.dat` is fetched from the mirror instead of
-    /// being embedded; not yet consumed by any download path.
-    #[allow(dead_code)]
-    pub const ICU_DATA: &str = "icudtl.dat";
 }
 
 /// Mirror path for a prebuilt glyx-runner artifact (versioned).
@@ -66,10 +61,4 @@ pub(crate) fn runner_mirror_path(artifact: &str) -> String {
 /// (`caps/glyx_cap_audio-windows.dll`).
 pub(crate) fn cap_mirror_path(asset: &str) -> String {
     format!("caps/{asset}")
-}
-
-/// Mirror path for a prebuilt base V8 snapshot or its `.sig`
-/// (`snapshots/glyx-snapshot-0.2.0-aarch64-apple-darwin.snapshot`).
-pub(crate) fn snapshot_mirror_path(asset: &str) -> String {
-    format!("snapshots/{asset}")
 }

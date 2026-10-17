@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- **`Intl` and `toLocaleString()` work outside the Glyx source checkout.** The V8 runners are built without embedded ICU data, and the CLI
+  used to trim it from a file that exists only in the checkout, so for a JS developer the app ran with "ICU data not loaded". The release
+  now publishes the full ICU data (`glyx-icudtl-<version>.dat`) signed with the capability key; `glyx dev`, `glyx build` and
+  `glyx package` download it once into `~/.glyx/icu/`, verify the signature before using it, trim it to the app's `locales` and ship it
+  next to the binary. If trimming is not possible on the machine they ship the full data (about 10 MB) instead of none. `GLYX_TOOLS_BASE`
+  mirrors it (`$GLYX_TOOLS_BASE/icu/`). QuickJS projects skip all of this: ICU is a V8 feature in Glyx.
 - **`glyx create --typescript`** (alias `--ts`) writes the app as TypeScript: `src/app.tsx` (or `ui/app.tsx` for `--native`), a `tsconfig.json`, and `typescript` and `@types/react` in `devDependencies`, with a `check` script. All four templates are typed. `glyx check` type-checks with the project's own TypeScript, run by Node (it never downloads a compiler, and says how to add one when it's missing). Every `@glyx-dev/*` package now ships type declarations; see the TypeScript guide.
 - **Bun is no longer required.** Apps are bundled with esbuild, whichever package manager the project uses: the one in the project's `node_modules`, or a pinned release that is downloaded once, checked against a built-in SHA-512 and cached in `~/.glyx/tools/`. Bun is only a fallback when esbuild can't be fetched, or when `GLYX_BUNDLER=bun`. `glyx.config.ts` is bundled and run with Node (or Bun, if that's the backend). New variables: `GLYX_BUNDLER`, `GLYX_ESBUILD`, `GLYX_BUNDLER_NO_DOWNLOAD`; `GLYX_TOOLS_BASE` mirrors the esbuild download. The bundling lives in the new `glyx-bundler` crate, shared by the CLI and the runner.
 - **glyx-media is downloaded for you.** `glyx dev` and `glyx package` now fetch the glyx-media library and its FFmpeg libraries from the GitHub Release of your Glyx version into `~/.glyx/cache/media/` when an app declares `video`, `camera` or `microphone`, so updating Glyx brings the matching media library along, as it does for the runner. A cached file that no longer verifies is fetched again; a library you built yourself is never replaced. `GLYX_MEDIA_NO_DOWNLOAD=1` turns it off, and `GLYX_TOOLS_BASE` points it at a mirror (`$GLYX_TOOLS_BASE/media/`).
@@ -11,6 +17,8 @@
 - **`glyx-snapshot --base <out>`** builds the base snapshot (the same inputs the release uses).
 
 ### Fixed
+- **The downloaded `icupkg` (the ICU trimming tool) could not start on Windows and Linux.** It was copied out of its archive without the
+  ICU libraries it loads. It now runs from the extracted folder, with the libraries beside it.
 - **`glyx dev` no longer crashes with `jsx_dev_runtime.jsxDEV is not a function`.** A project whose `tsconfig.json` says `"jsx": "react-jsx"` made the bundler emit React's *development* JSX calls while the bundle was built against React's *production* package, which has none. The JSX transform is now forced to match the React build, whatever the tsconfig says (including `react-jsxdev` and the classic `react`), by extending the project's tsconfig with a generated one rather than editing it, so path aliases and the rest of it are kept. Components no longer need `import React`.
 - **The FFmpeg libraries next to glyx-media are now verified.** The signed manifest lists each library and its SHA-256, and the loader refuses a library that doesn't match, instead of loading whatever was beside the signed library. `glyx package` copies exactly the libraries the manifest lists.
 - **glyx-media's version follows Glyx's** (it was fixed at 1.0.0, which no release produced), so the library a release builds is the one the CLI and runner look for.

@@ -25,6 +25,7 @@ mod cmd_check;
 mod cmd_test;
 mod cmd_generate;
 mod cmd_runtime;
+mod signed_asset;
 mod snapshot_blob;
 mod tools;
 mod updates;

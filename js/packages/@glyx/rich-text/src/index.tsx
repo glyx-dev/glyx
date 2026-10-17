@@ -331,7 +331,7 @@ export function selectedText(doc: RichTextDocument, sel: Selection) {
 // in this file — that guess had no relationship to the renderer's actual
 // line spacing, causing overlapping rows whenever a font's real line height
 // was smaller than 1.5×. Mirrors the equivalent fix in @glyx-dev/react's
-// TextInput (controls.js's `realLineHeight`).
+// TextInput (controls.ts's `realLineHeight`).
 function richTextLineHeight(fontSize: number) {
   if (typeof __glyx_measure_text !== 'undefined') {
     return __glyx_measure_text('M', fontSize, 1e6).height;
@@ -549,7 +549,7 @@ function _charClass(ch: string) {
 
 // A "word" is a maximal run of the same character class, matching standard
 // desktop-editor double-click behavior. Mirrors @glyx-dev/react's
-// TextInput (controls.js's `wordRangeAt`).
+// TextInput (controls.ts's `wordRangeAt`).
 export function wordRangeAt(text: string | any[], offset: number) {
   if (!text.length) return { start: 0, end: 0 };
   const idx = Math.max(0, Math.min(offset, text.length - 1));
@@ -718,7 +718,7 @@ export function RichTextEditor({
   // character branch below. `onKeyPress` (same channel @glyx-dev/react's
   // TextInput uses) carries an additional `text` field with the real
   // character, which is what the printable-character branch actually needs.
-  // Dispatch is already scoped to whichever input is focused (events.js's
+  // Dispatch is already scoped to whichever input is focused (events.ts's
   // own `focusedNodeId`/`inputRegistry`), so no extra focus check is needed
   // here — this only gets called when this editor is genuinely focused.
   const onKey = useCallback(({ key, text, ctrl, shift }: Record<string, any>) => {
@@ -933,7 +933,7 @@ export function RichTextEditor({
   // scrollbar drag.
   const measuredH = (nodeIdRef.current != null && typeof __glyx_getLayout !== 'undefined')
     // Full (unclipped) height: click Y arrives relative to the editor's
-    // unclipped origin (events.js boxOriginY), so the bound must share it.
+    // unclipped origin (events.ts boxOriginY), so the bound must share it.
     ? (l => l && (l.boxHeight ?? l.height))(__glyx_getLayout(nodeIdRef.current))
     : null;
   const effectiveHeight = (typeof measuredH === 'number' && measuredH > 0)
@@ -1020,7 +1020,7 @@ export function RichTextEditor({
   }, [posFromXY, setCursor]);
 
   // Mouse-drag selection: registered as an "input" node (alongside the
-  // Pressable) so events.js routes per-frame cursorMoved deltas here while
+  // Pressable) so events.ts routes per-frame cursorMoved deltas here while
   // the button is held — Pressable only ever fires a single onPress on
   // release, with no drag/move callback of its own.
   const onDragAt = useCallback((x: any, y: any) => {
@@ -1031,7 +1031,7 @@ export function RichTextEditor({
   }, [posFromXY]);
 
   // Double-click: select the word under the click, same convention as
-  // @glyx-dev/react's TextInput (controls.js's onDoubleClickAt) — this is a
+  // @glyx-dev/react's TextInput (controls.ts's onDoubleClickAt) — this is a
   // separate component with its own click handling, so it needs its own
   // word-boundary logic rather than sharing that one.
   const onDoubleClickAt = useCallback((x: number, y: number) => {
@@ -1143,7 +1143,7 @@ export function RichTextEditor({
       if (!layout || trackW <= 0) return;
       const li = layoutInfoRef.current;
       const maxScroll = Math.max(0, li.maxContentWidth - li.contentWidth);
-      // Track origin/width from the unclipped box — see events.js boxOriginX.
+      // Track origin/width from the unclipped box — see events.ts boxOriginX.
       const frac = Math.max(0, Math.min(1, (x - (layout.boxX ?? layout.x)) / trackW));
       setScrollXBoth(clampScrollX(frac * maxScroll));
     };
@@ -1191,7 +1191,7 @@ export function RichTextEditor({
       setFocused(true);
       setBlinkOn(true);
       // Cursor at the end of the document, same convention as
-      // @glyx-dev/react's TextInput focusing (controls.js's onFocus).
+      // @glyx-dev/react's TextInput focusing (controls.ts's onFocus).
       const paras = docRef.current.paragraphs;
       const last = paras.length - 1;
       const end = { para: last, offset: paraText(paras[last]).length };

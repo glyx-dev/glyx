@@ -787,7 +787,7 @@ pub fn set_root_callback(
 
 /// `__glyx_flushSceneOps(ops)` — sync. Batches append/insertBefore/update/
 /// remove/setRoot into ONE JS→native call per React commit instead of one
-/// call per op (`hostConfig.js`'s `resetAfterCommit` flush point).
+/// call per op (`hostConfig.ts`'s `resetAfterCommit` flush point).
 ///
 /// `createNode` is deliberately NOT part of this batch — it must stay a
 /// synchronous, immediate call because React needs the new node's id back

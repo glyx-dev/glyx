@@ -57,7 +57,7 @@ const OP_SET_ROOT      = 4; // op, id
 // unmount.
 const devFibers = globalThis.__glyx_devtools ? new Map() : null;
 
-// Glyx's own components (View, Text, Pressable, …), registered by index.js,
+// Glyx's own components (View, Text, Pressable, …), registered by index.ts,
 // so names can point past them to the app component that used them.
 const libraryComponents = new WeakSet();
 export function markLibraryComponents(values: any[]) {
@@ -87,7 +87,7 @@ export function componentName(fiber: { return: any; }) {
   return nearest;
 }
 
-// ── Devtools: automatic element IDs (see devIds.js) ─────────────────────────
+// ── Devtools: automatic element IDs (see devIds.ts) ─────────────────────────
 //
 // Computed on request from React's current fiber tree, one O(n) pass. The
 // result is cached until the tree's structure changes (any append / insert /
@@ -131,7 +131,7 @@ function allDevIds(useCache: boolean) {
 }
 
 if (devFibers) {
-  // CPU profiler, Components view: per-commit render times (see devProfile.js).
+  // CPU profiler, Components view: per-commit render times (see devProfile.ts).
   globalThis.__glyx_devProfileStart = () => { startRecording(); return true; };
   globalThis.__glyx_devProfileStop = () => JSON.stringify(stopRecording());
   /** `{ nodeId: { id, pinned? } }` for `ids`, or for every node when `ids` is null. */

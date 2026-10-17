@@ -1539,7 +1539,7 @@ pub(crate) fn record_visual_bounds(
 /// Find the topmost solid (click-opaque) node covering window-relative
 /// point `(x, y)`, or `None`.
 ///
-/// Ports `events.js`'s `findTopmostSolid` to native code, computed once per
+/// Ports `events.ts`'s `findTopmostSolid` to native code, computed once per
 /// real input event (see the `MouseButton`/`CursorMoved` construction sites
 /// in `lib.rs`) instead of JS calling `__glyx_getLayout` once per candidate
 /// node on every click and every cursor move. JS owned none of the state
@@ -1591,7 +1591,7 @@ fn hit_test_solid_impl(
     }
 
     // Is `ancestor_id` an ancestor of `descendant_id`? Walks up the persistent
-    // `parent` chain, same direction as `events.js`'s `isAncestorOf`.
+    // `parent` chain, same direction as `events.ts`'s `isAncestorOf`.
     let is_ancestor_of = |ancestor_id: u32, descendant_id: u32| -> bool {
         let mut cur = js_nodes.get(&descendant_id).and_then(|n| n.parent);
         while let Some(id) = cur {
@@ -1610,7 +1610,7 @@ fn hit_test_solid_impl(
     }
 
     // Effective z-index: a node's own z-index, or its highest ancestor's if
-    // that's greater — matches `events.js`'s `effectiveZ`.
+    // that's greater — matches `events.ts`'s `effectiveZ`.
     let effective_z = |id: u32| -> i32 {
         let mut z = js_nodes.get(&id).and_then(|n| n.props.z_index).unwrap_or(0);
         let mut cur = js_nodes.get(&id).and_then(|n| n.parent);

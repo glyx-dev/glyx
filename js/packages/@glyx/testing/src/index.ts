@@ -151,7 +151,7 @@ export function installStubs() {
   };
   globalThis.__glyx_removeNode   = (id: any) => { _nodeTree.delete(id); };
   globalThis.__glyx_setRoot      = (id: any) => { globalThis.__glyx_rootId = id; };
-  // `hostConfig.js` batches append/insertBefore/update/remove/setRoot into
+  // `hostConfig.ts` batches append/insertBefore/update/remove/setRoot into
   // one `__glyx_flushSceneOps(flatOps)` call per commit (see its "Scene-op
   // batching" comment) instead of calling the individual bindings above
   // directly. `flatOps` is ONE FLAT array — `[opcode, ...args, opcode, ...]`

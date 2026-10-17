@@ -1,4 +1,4 @@
-//! The prebuilt base V8 snapshot: what lets `glyx build --mode snapshot` work without a Rust toolchain.
+//! The prebuilt base V8 snapshot: what lets `glyx build` (snapshot mode, the default) work without a Rust toolchain.
 //!
 //! A snapshot holds only the runtime's stub bindings (plus the project's own `js/polyfills.js`, which
 //! almost no project has): the app is always evaluated at runtime. So for a project without polyfills
@@ -74,9 +74,10 @@ fn sig_path(blob: &Path) -> PathBuf {
 
 /// GET `url`, refusing a body larger than `max` bytes. Any failure to fetch is `Unavailable`.
 pub(crate) fn http_get(url: &str, max: u64) -> Result<Vec<u8>, FetchError> {
+    // ureq's own message already names the URL ("<url>: status code 404").
     let resp = ureq::get(url)
         .call()
-        .map_err(|e| FetchError::Unavailable(format!("{url}: {e}")))?;
+        .map_err(|e| FetchError::Unavailable(e.to_string()))?;
     let mut body = Vec::new();
     resp.into_reader()
         .take(max + 1)

@@ -1044,7 +1044,7 @@ pub struct NodeProps {
 
     //  Interaction 
     /// When true, the node does not respond to pointer / keyboard events.
-    /// Children inherit this behaviour.  The JS event dispatcher in events.js
+    /// Children inherit this behaviour.  The JS event dispatcher in events.ts
     /// checks a parallel `disabledRegistry` before firing callbacks.
     pub disabled: Option<bool>,
     /// `"auto"` (default) or `"none"`.  When `"none"`, the element is invisible
@@ -1401,7 +1401,7 @@ pub enum SceneCommand {
     /// Capture the current frame to a PNG file. Resolves with the file path.
     #[cfg(feature = "camera")]
     CaptureCamera { handle_id: u32, tx: OneshotSender<Result<String, String>> },
-    /// Start recording the camera feed to an MP4 file via ffmpeg.
+    /// Start recording the camera feed to an MP4 file (video only): the glyx-media encoder, or an `ffmpeg` executable when that is unavailable.
     #[cfg(feature = "camera")]
     StartCameraRecord { handle_id: u32, output_path: String },
     /// Stop recording and flush the MP4. Resolves with the final file path.

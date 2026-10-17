@@ -79,7 +79,7 @@ All crates live under `crates/`.
 | `glyx-media` | lib | Thin loader for the glyx-media DLL. `OnceLock` singleton. Ed25519 manifest verification. Exposes ffmpeg decode/encode API through raw function pointers. |
 | `glyx-perf` | lib | Frame timing metrics. FPS, P99 latency, JS execution time, layout time. Values displayed in the dev overlay. |
 | `glyx-runner` | bin | Prebuilt binary for JS-only projects. Reads binary trailer (snapshot + app.js + config) from its own executable. Enables zero-Cargo deployment. |
-| `glyx-cli` | bin | `glyx create/dev/build/runtime` CLI. Project scaffolding, runner caching, snapshot build, Bun invocation. |
+| `glyx-cli` | bin | `glyx create/dev/build/runtime` CLI. Project scaffolding, runner caching, snapshot build (a prebuilt, signed base snapshot is downloaded), bundler invocation. |
 
 Each crate has a narrow, well-defined responsibility. `glyx-core` is the coordinator but contains no rendering or layout logic itself — it calls into `glyx-renderer` and `glyx-layout`.
 
@@ -108,7 +108,7 @@ glyx-core::run(config)
     -> drain_scene_commands()       initial React render
   |
   #[cfg(feature = "dev")]
-  init_dev_mode()                   start notify file watcher + bun rebuild thread
+  init_dev_mode()                   start notify file watcher + bundler rebuild thread
   |
   glyx_shell::run(app_state, handler)
     -> EventLoop::build()
@@ -271,7 +271,7 @@ GlyxRuntime::eval(js: &str) -> Result<(), String>
 
 **ReactDOM render model**:
 
-The app bundle calls `render(<App />)` which calls `react-reconciler`'s `createRoot().render()`. Glyx's HostConfig (in `js/packages/@glyx/react/src/hostConfig.js`) maps reconciler calls to native bindings:
+The app bundle calls `render(<App />)` which calls `react-reconciler`'s `createRoot().render()`. Glyx's HostConfig (in `js/packages/@glyx/react/src/hostConfig.ts`) maps reconciler calls to native bindings:
 
 ```
 createInstance(type, props)     -> __glyx_createNode(id, type, props_json)
@@ -766,7 +766,7 @@ File watcher thread:
   notify::recommended_watcher() watching js/ directory
   Debounce 180ms after last event
   Filter: skip events for the output file (app.js) to avoid loop
-  On change: bun build js/app.jsx -> js/app.js
+  On change: bundle the entry (glyx-bundler: esbuild, Bun as a fallback) -> js/app.js
   Send BuildOk(new_js) or BuildErr(message) to channel
 
 Main thread (handle_dev_build_events, called each frame):
@@ -910,15 +910,19 @@ The glyx-media DLL ships with a sidecar `glyx-media.manifest.json` (SHA-256 hash
 
 **File**: `crates/glyx-runner/src/main.rs`, `crates/glyx-cli/src/main.rs`
 
-Glyx supports three distribution models:
+Glyx has three build modes for JS-only projects (`glyx build`, `--bundle` or `--portable` to change the default), plus native projects:
 
-**1. JS-only portable** (`glyx build --target portable`)
+**1. Snapshot (default)** (`glyx build`)
 
-Copies the pre-built `glyx-runner` binary alongside `app.js` and `glyx.config.json`. Requires the runner binary to be present. The runner reads `app.js` from disk at startup.
+Produces a single executable: the cached production `glyx-runner` is copied and a binary trailer is appended to it (snapshot, minified app bundle, resolved config). No Cargo or Rust toolchain is involved. The V8 snapshot holds only the runtime's stub bindings (the app is always evaluated at runtime), so it is the same for every app that has no `js/polyfills.js` of its own: the release publishes one per platform, signed with the capability key, and the CLI downloads it into `~/.glyx/snapshots/`, verifies the signature, and appends it. Inside the glyx source checkout it is built locally with `glyx-snapshot --base` instead. If it cannot be had (offline, no snapshot published for the platform, a project with its own `js/polyfills.js`), the CLI says why and falls back to bundle mode; a snapshot whose signature does not verify stops the build.
 
-**2. JS-only bundle** (`glyx build --target bundle`)
+**2. Bundle** (`glyx build --bundle`)
 
-Produces a single executable by appending a binary trailer to the glyx-runner binary.
+Copies the runner and ships the minified app bundle (`js/app.js`) beside it, so the JavaScript can be replaced without rebuilding.
+
+**3. Portable** (`glyx build --portable`)
+
+Copies the runner and ships the readable, unminified JavaScript beside it; easiest to patch and debug.
 
 **Binary trailer format** (last 72 bytes of the executable):
 
@@ -939,15 +943,15 @@ Offset  Size  Field
 
 `read_trailer()` seeks to the last 72 bytes, validates magic and CRC32, then seeks to each payload section offset.
 
-The snapshot section is currently zero-length (no V8 snapshot in the CLI flow). The JS section contains the minified app bundle. The config section contains the `glyx.config.json` content.
+The snapshot section holds the V8 snapshot (see Snapshot above; it is empty only if a binary was trailered without one). The JS section contains the minified app bundle. The config section contains the resolved `glyx.config.json` content.
 
-**3. Native** (apps with custom Rust extensions)
+**Native** (apps with custom Rust extensions)
 
 Native projects have a `Cargo.toml` and implement a `GlyxExtension` trait. These are built with `cargo build --release` directly. No runner binary is involved.
 
 **Runner caching**:
 
-The glyx-cli caches pre-built runner binaries in `~/.glyx/runners/{dev|prod}/glyx-runner[.exe]`. On first use, the runner is compiled from the glyx source tree and cached. Subsequent `glyx build` and `glyx dev` invocations use the cached binary, requiring no Rust toolchain.
+The glyx-cli caches pre-built runner binaries in `~/.glyx/runners/{engine}/{dev|prod}/glyx-runner[.exe]` (`engine` is `v8` or `quickjs`, from `glyx.config`). The prebuilt runner for the CLI's version is downloaded from the GitHub Release on first use (or from `$GLYX_TOOLS_BASE/runners/`), and a version stamp makes the CLI fetch a new one after an upgrade. Only if no prebuilt runner is available (offline, or a platform with no release artifact) is the runner compiled from the glyx source tree, and inside the source checkout it is always built from source so native changes are never served stale. Subsequent `glyx build` and `glyx dev` invocations use the cached binary, requiring no Rust toolchain.
 
 **glyx dev** (JS-only project):
 
@@ -1024,23 +1028,23 @@ Before `ai.generate()`, `glyx_sysapi::battery_status()` is checked. If dischargi
 
 ## 21. JS Package Ecosystem
 
-All packages live under `js/packages/@glyx/`. All are pure ESM with `"type": "module"`. Bun resolves imports from workspace symlinks — no build step is needed for the packages themselves.
+All packages live under `js/packages/@glyx/`. All are pure ESM with `"type": "module"` and written in TypeScript. They ship their TypeScript source (`main` is `src/index.ts`; the Glyx bundler compiles it with the app) and, for TypeScript consumers, declaration files built into `types/` at publish time. Inside the repo, imports resolve through workspace symlinks.
 
 | Package | Entry | Description |
 |---------|-------|-------------|
-| `@glyx-dev/react` | `src/index.js` | React reconciler, HostConfig, all native bindings exposed as JS APIs. The runtime. |
-| `@glyx-dev/router` | `src/index.js` | Named-route history stack. `<Router>`, `<Route>`, `useNavigate`, `useRoute`. |
-| `@glyx-dev/drizzle` | `src/index.js` | Drizzle ORM sqlite-proxy adapter. Translates Drizzle's SQL+params into `db.run`/`db.query` calls. |
-| `@glyx-dev/keychain` | `src/index.js` | Typed, namespace-scoped OS keychain wrapper. `createKeychain`, `createTypedKeychain`. |
-| `@glyx-dev/store` | `src/index.js` | Persistent reactive Zustand-style store backed by SQLite. `initStore`, `createStore`. |
-| `@glyx-dev/three` | `src/index.js` | Declarative R3F-style 3D API over `Canvas3D`. `<Scene>`, `<Mesh>`, `<Model>`, math utilities. |
+| `@glyx-dev/react` | `src/index.ts` | React reconciler, HostConfig, all native bindings exposed as JS APIs. The runtime. |
+| `@glyx-dev/router` | `src/index.ts` | Named-route history stack. `<Router>`, `<Route>`, `useNavigate`, `useRoute`. |
+| `@glyx-dev/drizzle` | `src/index.ts` | Drizzle ORM sqlite-proxy adapter. Translates Drizzle's SQL+params into `db.run`/`db.query` calls. |
+| `@glyx-dev/keychain` | `src/index.ts` | Typed, namespace-scoped OS keychain wrapper. `createKeychain`, `createTypedKeychain`. |
+| `@glyx-dev/store` | `src/index.ts` | Persistent reactive Zustand-style store backed by SQLite. `initStore`, `createStore`. |
+| `@glyx-dev/three` | `src/index.ts` | Declarative R3F-style 3D API over `Canvas3D`. `<Scene>`, `<Mesh>`, `<Model>`, math utilities. |
 
 **Package conventions**:
 
-- No build step — Bun resolves ESM directly from `src/index.js`
+- Source is TypeScript, run as-is by the bundler: no build step for the package itself. `bun run typecheck` checks every package; `bun run types:build` emits the declarations that are published
 - Peer dependencies declared in `package.json` (never bundled)
 - Packages import from `@glyx-dev/react` for access to native bindings; they do not call `__glyx_*` bindings directly
-- New packages are added to root `package.json` workspaces array and `bun install` is run
+- New packages are added to root `package.json` workspaces array, given a `tsconfig.json` extending `js/tsconfig.base.json`, and `bun install` is run
 
 **React reconciler** (`@glyx-dev/react`):
 
@@ -1120,11 +1124,11 @@ client ──ws://127.0.0.1──▶ glyx-devtools server (tokio task)
 
 ## 24. Motion Engine
 
-**Files**: `crates/glyx-core/src/motion.rs`, `scene.rs` (`sync_*`, `tick_*`), `js/packages/@glyx/react/src/hostConfig.js`
+**Files**: `crates/glyx-core/src/motion.rs`, `scene.rs` (`sync_*`, `tick_*`), `js/packages/@glyx/react/src/hostConfig.ts`
 
 Animation is owned by Rust, so nothing in JavaScript runs per frame. JS only declares intent (a `transition`, `animation` or `smoothScroll` prop, a `<Canvas transition>`); the frame loop moves the values.
 
-- **Declaration**: `hostConfig.js` flattens `transition` and `animation` props onto the node (duration, easing, spring stiffness and damping, properties). `apply_scene_commands` compares a node's visual values before and after an update and starts or retargets a `Transition` from what is on screen now, mid-flight values included.
+- **Declaration**: `hostConfig.ts` flattens `transition` and `animation` props onto the node (duration, easing, spring stiffness and damping, properties). `apply_scene_commands` compares a node's visual values before and after an update and starts or retargets a `Transition` from what is on screen now, mid-flight values included.
 - **Property transitions**: a `Transition` is a tween (CSS easings, `cubic-bezier`) or a critically damped `Spring` solved in closed form (`at(t) -> (progress, velocity)`). A retargeted spring inherits the current velocity. Overshoot is clamped where it would be invalid (opacity stays in 0 to 1, radius stays at or above 0).
 - **Keyframe animations**: `Animation` samples stops by percentage, with iterations, direction and fill. Re-sent identical props leave a running or finished animation alone.
 - **Smooth scroll**: JS keeps the scroll target. `sync_scroll` turns each new `scrollOffsetY` into a `ScrollSpring` and rewrites the offset to the one to display this frame, so rendering, hit testing and the scrollbar read one field. Scrollbar drags and touchpad events (precise deltas, held for 3 frames) snap.

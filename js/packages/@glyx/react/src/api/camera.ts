@@ -24,7 +24,10 @@ export const camera = {
     return __glyx_camera_capture(String(handle));
   },
   /**
-   * Start recording to an MP4 file via ffmpeg (must be in PATH).
+   * Start recording to an MP4 file (H.264, video only; there is no audio track).
+   * Encoding uses the glyx-media library, which `glyx dev` / `glyx package` download for you when
+   * the app declares `camera`. If it can't be loaded, an `ffmpeg` executable (`FFMPEG_PATH`, or on
+   * PATH) is used instead.
    * @param {number} handle
    * @param {string} outputPath  Absolute path for the output MP4.
    */

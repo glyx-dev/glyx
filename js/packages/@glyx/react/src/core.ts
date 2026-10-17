@@ -120,7 +120,7 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
   const [hovered, setHovered] = useState(false);
   // Keyboard-focus visibility only — Tab/Shift+Tab (or AT-driven focus) land
   // here via the same 'accessibilityFocus' event TextInput already consumes
-  // (see events.js), but until now Pressable never registered for it, so
+  // (see events.ts), but until now Pressable never registered for it, so
   // keyboard focus was invisible: the native focus registry moved, nothing
   // on screen showed it. `registerInput` below is what wires that up.
   const [focused, setFocused] = useState(false);
@@ -130,7 +130,7 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
     onFocus: () => setFocused(true),
     onBlur:  () => setFocused(false),
     onPress: (e: any) => {
-      // Move the Rust-side focus registry here — events.js's mouseButton
+      // Move the Rust-side focus registry here — events.ts's mouseButton
       // dispatch calls `onPress` DIRECTLY for a plain click (onPressIn/Out
       // are never invoked for a simple click, only onPress — confirmed by
       // reading the dispatch code after this fix's first attempt, in
@@ -175,7 +175,7 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
     registerDisabledNode(id, !!disabled);
     // Keyboard-focus-visible only — NOT `registerInput` (that registry is
     // also driven by mouse clicks, which would show a focus ring on every
-    // click; see events.js's `focusVisualRegistry` comment).
+    // click; see events.ts's `focusVisualRegistry` comment).
     registerFocusable(id, {
       onFocus: () => handlersRef.current.onFocus(),
       onBlur:  () => handlersRef.current.onBlur(),
@@ -306,7 +306,7 @@ export function useWheel(handler: any) {
 //                         jumping; scrollbar drags and touchpads still apply
 //                         instantly. Opt out with `smoothScroll={false}`.
 //
-// Scroll deltas arrive via the `scroll` input event, routed by events.js to
+// Scroll deltas arrive via the `scroll` input event, routed by events.ts to
 // whichever ScrollView the cursor is currently over.  The component converts
 // deltas into a React state integer and re-renders, which triggers a
 // visual-only UpdateNode (no Taffy rebuild — incremental layout).
@@ -610,7 +610,7 @@ export function useMediaQuery(minWidth: number) {
 
 // ── Window imperative API ─────────────────────────────────────────────────────
 //
-// glyxWindow is defined and exported from api.js.
+// glyxWindow is defined and exported from api.ts.
 // It is imported here for use by WindowControls and SelectableText.
 
 // ── Secure env access ─────────────────────────────────────────────────────────

@@ -1783,7 +1783,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         }
                         return;
                     }
-                    // Matches JS clearing the ring on any click (events.js).
+                    // Matches JS clearing the ring on any click (events.ts).
                     if pressed { s.focus_visible = false; }
                     // Native fallback close control (see CLOSE_BTN_SIZE doc)
                     // — only live when JS has never rendered anything, so it
@@ -1916,7 +1916,7 @@ pub fn run(mut config: AppConfig) -> bool {
                                     s.focused_node = target;
                                     s.window.set_ime_allowed(target.is_some());
                                     // Reuses the same event JS already handles for
-                                    // AT-driven focus moves (see events.js's
+                                    // AT-driven focus moves (see events.ts's
                                     // 'accessibilityFocus' case, which calls the JS
                                     // focus tracker's `setFocus` so onFocus/styling
                                     // fire) — Tab navigation needs identical JS-side

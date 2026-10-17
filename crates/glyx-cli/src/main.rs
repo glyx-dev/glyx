@@ -1,9 +1,10 @@
 //! glyx — CLI for the Glyx desktop app framework.
 //!
 //! Commands:
-//!   glyx create <name> [--native]       Scaffold a new project
+//!   glyx create <name> [--native] [--typescript]   Scaffold a new project
 //!   glyx dev                            Start dev server with hot reload
-//!   glyx build [--target <os>]          Production build (bun → runner/cargo)
+//!   glyx check                          Check the project (type-checks TypeScript)
+//!   glyx build [<os>] [--bundle|--portable]   Production build (bundler → runner + trailer, or cargo)
 //!   glyx package [--target <os>]        Create distributable installer/archive
 //!   glyx runtime list|build|install     Manage cached glyx-runner binaries
 
@@ -85,8 +86,9 @@ struct Cli {
 enum Commands {
     /// Scaffold a new Glyx project
     ///
-    /// Creates a ready-to-run project: src/app.jsx entry, glyx.config.ts,
-    /// package.json wired to the Glyx packages, and .gitignore.
+    /// Creates a ready-to-run project: src/app.jsx entry (src/app.tsx and a
+    /// tsconfig.json with --typescript), glyx.config.ts, package.json wired to
+    /// the Glyx packages, and .gitignore.
     ///
     /// By default the project is JS-only — it runs on a prebuilt glyx-runner
     /// binary, so no Rust toolchain is required. Use --native to generate a

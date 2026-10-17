@@ -31,7 +31,7 @@ export const WebView = React.forwardRef(function WebView(
   const nodeIdRef = React.useRef<any>(null);
 
   // `_glyxOnMount` fires synchronously during the initial commit (see
-  // hostConfig.js createInstance), so nodeIdRef.current is already set by
+  // hostConfig.ts createInstance), so nodeIdRef.current is already set by
   // the time this effect runs on mount — it never changes again afterward.
   React.useEffect(() => {
     const id = nodeIdRef.current;

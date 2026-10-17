@@ -19,8 +19,7 @@ pub enum Pm {
     Bun,
     Npm,
     Pnpm,
-    /// yarn classic (v1) and berry (v3/v4) share the same binary; the version
-    /// affects which dlx command to use.
+    /// yarn classic (v1) and berry (v3/v4) share the same binary.
     Yarn,
 }
 
@@ -151,18 +150,6 @@ pub fn run_cmd(pm: Pm, script: &str) -> Command {
     cmd
 }
 
-/// Build a `Command` for running a one-off binary (npx / bunx / pnpm dlx / yarn dlx).
-///
-/// Returns a `Command` with the dlx binary set; caller adds the binary name and its args.
-pub fn dlx_cmd(pm: Pm, bin: &str) -> Command {
-    match pm {
-        Pm::Bun  => { let mut c = pm_cmd(pm, &["x"]);      c.arg(bin); c }
-        Pm::Npm  => { let mut c = raw_cmd("npx"); c.arg(bin); c }
-        Pm::Pnpm => { let mut c = pm_cmd(pm, &["dlx"]);    c.arg(bin); c }
-        Pm::Yarn => { let mut c = pm_cmd(pm, &["dlx"]);    c.arg(bin); c }
-    }
-}
-
 /// Build a `Command` for running tests (equivalent of `bun test <dir>`).
 pub fn test_cmd(pm: Pm, test_root: &str) -> Command {
     match pm {
@@ -178,10 +165,6 @@ pub fn test_cmd(pm: Pm, test_root: &str) -> Command {
 /// Construct a platform-appropriate Command for the given PM binary.
 fn pm_cmd(pm: Pm, args: &[&str]) -> Command {
     raw_cmd_with_args(pm.name(), args)
-}
-
-fn raw_cmd(bin: &str) -> Command {
-    raw_cmd_with_args(bin, &[])
 }
 
 fn raw_cmd_with_args(bin: &str, args: &[&str]) -> Command {

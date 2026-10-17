@@ -16,7 +16,7 @@
 //  - An explicit `testID` replaces the ID (`pinned`).
 //
 // One depth-first pass over React's current fiber tree computes every ID
-// (O(n)); hostConfig.js caches the result for large trees.
+// (O(n)); hostConfig.ts caches the result for large trees.
 
 const HOST_COMPONENT = 5; // React 18 fiber tag
 

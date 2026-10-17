@@ -2,7 +2,7 @@
 
 // ── WebView (native OS-embedded webview) ────────────────────────────────────
 //
-// Declarative — `<WebView>` (see webview.js) sets `webviewSrc`/`webviewHtml`/
+// Declarative — `<WebView>` (see webview.ts) sets `webviewSrc`/`webviewHtml`/
 // `webviewOpts` node props; glyx-core creates/positions/destroys the native
 // child webview automatically based on layout. This module is just the
 // postMessage bridge: page→JS (poll) and JS→page (post).

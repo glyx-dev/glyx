@@ -355,7 +355,7 @@
       "properties": {
         "entry": {
           "type": "string",
-          "description": "JS/JSX/TSX entry file for bun build.",
+          "description": "JS/JSX/TSX entry file the bundler (esbuild) builds.",
           "default": "src/app.jsx",
           "examples": ["src/app.jsx", "ui/app.jsx"]
         },

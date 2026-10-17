@@ -43,7 +43,7 @@ try {
 //
 // Fix: only one native wakeup is ever in flight. _glyxFramePending tracks
 // that; it's set the moment we ask Rust for a wakeup and cleared at the
-// top of the next real frame callback (see index.js). While a wakeup is
+// top of the next real frame callback (see index.ts). While a wakeup is
 // already pending, new timer registrations and the interval-drain re-arm
 // don't request another one — the pending frame will observe the new/
 // updated due time when it runs and re-request from there if still needed.
@@ -148,8 +148,8 @@ if (typeof MessageChannel === 'undefined') {
 
 // TextEncoder is a Web Platform API, not a V8 built-in — bare V8 isolates
 // don't have it unless the embedder provides it, and this one doesn't.
-// `canvas.js`'s `fillText` calls `encodeInto()` with no fallback (unlike
-// `api.js`'s `toBytes()`, which degrades to a manual byte loop when
+// `canvas.ts`'s `fillText` calls `encodeInto()` with no fallback (unlike
+// `api.ts`'s `toBytes()`, which degrades to a manual byte loop when
 // TextEncoder is missing) — silently writing zero bytes every time, so
 // every Canvas `fillText()` call across the whole framework renders no
 // glyphs at all, with no error. Real UTF-8 encode/encodeInto, not a
@@ -189,7 +189,7 @@ if (typeof TextEncoder === 'undefined') {
       return new Uint8Array(out);
     }
 
-    // Matches the spec shape canvas.js relies on: writes as many whole
+    // Matches the spec shape canvas.ts relies on: writes as many whole
     // code points as fit in `dest`, returns { read, written } in JS
     // string-unit / byte counts respectively — never writes a partial
     // multi-byte sequence.

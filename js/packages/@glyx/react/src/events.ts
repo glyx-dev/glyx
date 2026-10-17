@@ -2,7 +2,7 @@
 //
 // This module bridges Glyx's native input events to React component handlers.
 // It is driven by `__glyx_frameCallback`, registered on `globalThis` in
-// index.js and called by the Rust runtime once per frame (frame_tick).
+// index.ts and called by the Rust runtime once per frame (frame_tick).
 //
 // ## Architecture
 //
@@ -153,7 +153,7 @@ export function registerImageError(imageId: any, onError: (ev: any) => any) {
   imageErrorRegistry.set(imageId, onError);
 }
 
-/** Register/unregister a system.watch subscriber (see api.js). */
+/** Register/unregister a system.watch subscriber (see api.ts). */
 export function registerSystemWatch(id: any, cb: any) {
   systemWatchRegistry.set(id, cb);
 }
@@ -520,7 +520,7 @@ function hitTest(nodeId: unknown, px: number, py: number) {
 // and caret state as of the last render; when several keys arrive in one
 // frame (fast typing, a barcode scanner, automation), without this every key
 // edits the same stale value and only the last one survives. Set by
-// index.js to the reconciler's `flushSync`; a plain call elsewhere (tests).
+// index.ts to the reconciler's `flushSync`; a plain call elsewhere (tests).
 let flushKey = (fn: { (): any; (): any; (): any; }) => fn();
 export function setKeyFlush(fn: { (fn: any): unknown; (fn: any): any; }) { flushKey = fn; }
 

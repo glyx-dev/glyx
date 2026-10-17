@@ -673,7 +673,7 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     }
 
     // ── Event polling + layout (drives the JS-side event dispatcher and
-    //    hit-testing — see events.js's dispatchEvents/getLayout usage) ────
+    //    hit-testing — see events.ts's dispatchEvents/getLayout usage) ────
     {
         let events = reg.events.clone();
         let poll_events_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<rquickjs::Value<'js>> {
@@ -688,7 +688,7 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         // — mirrors V8's `get_layout_callback` (`bind_core.rs`). Found alongside
         // `__glyx_measure_text` below: both were missed by the earlier JSON-removal
         // pass (Work Items 1-3), which covered props/input events but not every
-        // JSON-returning binding. `getLayout` is called from `events.js`'s hit-test
+        // JSON-returning binding. `getLayout` is called from `events.ts`'s hit-test
         // path (`findTopmostSolid` → `hitTest`), likely once per solid node per
         // click/hit-test pass — a real hot path, not a rare one.
         let get_layout_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>, id: u32| -> rquickjs::Result<rquickjs::Value<'js>> {
@@ -1232,7 +1232,7 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_audio_play", f)?;
 
         // Audio handle IDs cross the JS boundary as strings (the SDK's
-        // `api.js` does `const id = String(JSON.parse(rawId))`, mirroring
+        // `api.ts` does `const id = String(JSON.parse(rawId))`, mirroring
         // V8's `uint32_value()` which auto-coerces numeric strings — rquickjs
         // does not, so every handle-taking binding here parses from `String`.
         let sinks = reg.audio_sinks.clone(); let trackers = reg.audio_trackers.clone();
@@ -1640,7 +1640,7 @@ fn text_geometry_from_opts(opts: Option<rquickjs::Value>) -> (glyx_text::TextSty
     (crate::text_props::text_style(&props), crate::text_props::text_box(&props, w, h))
 }
 
-/// Build the JS array of `{type, ...fields}` event objects that `events.js`'s
+/// Build the JS array of `{type, ...fields}` event objects that `events.ts`'s
 /// `dispatchEvents()` consumes — mirrors V8's `poll_events_callback`
 /// object-construction 1:1, but constructs `rquickjs::Object`s directly
 /// instead of round-tripping through a JSON string + `ctx.json_parse`.

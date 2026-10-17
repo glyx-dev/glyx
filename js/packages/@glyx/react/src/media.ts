@@ -48,7 +48,7 @@ export const Camera = React.forwardRef(function Camera({ mirror, style, ...rest 
       if (cameraHandle === null) throw new Error('Camera not open');
       return __glyx_camera_capture(String(cameraHandle));
     },
-    /** Start MP4 recording via ffmpeg. @param {string} outputPath */
+    /** Start MP4 recording (H.264, video only) with the glyx-media encoder, or an `ffmpeg` executable if that is unavailable. @param {string} outputPath */
     startRecord(outputPath: any) {
       if (cameraHandle === null) throw new Error('Camera not open');
       __glyx_camera_record_start(String(cameraHandle), outputPath);

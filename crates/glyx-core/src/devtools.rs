@@ -192,7 +192,7 @@ struct Profiling {
     sampling: Result<(), String>,
 }
 
-/// JS for the component-render recorder (see `@glyx/react`'s devProfile.js).
+/// JS for the component-render recorder (see `@glyx/react`'s devProfile.ts).
 const PROFILE_START_JS: &str = "(typeof __glyx_devProfileStart === 'function') ? __glyx_devProfileStart() : false";
 const PROFILE_STOP_JS: &str = "(typeof __glyx_devProfileStop === 'function') ? __glyx_devProfileStop() : null";
 

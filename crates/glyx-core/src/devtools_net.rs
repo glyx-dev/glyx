@@ -1,7 +1,7 @@
 //! GDP Network domain: the request list behind the DevTools Network panel.
 //!
 //! The JS networking layer reports each step (see `@glyx/react`'s
-//! `devNet.js`) through `glyx_runtime::net_bus`. Here those steps become one
+//! `devNet.ts`) through `glyx_runtime::net_bus`. Here those steps become one
 //! record per fetch, WebSocket, IPC channel or backend command, kept in a
 //! bounded list. Bodies are the costly part, so they share a byte budget:
 //! past it, the oldest records lose their bodies (their timing and headers

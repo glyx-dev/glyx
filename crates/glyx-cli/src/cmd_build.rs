@@ -411,7 +411,7 @@ pub(super) fn copy_prod_runner_as(target: Option<&str>, project_name: &str) -> R
     if target.is_some() {
         println!("⚠ Cross-compilation for JS-only projects uses glyx-runner from glyx workspace.");
         println!("  Run `glyx runtime build` first to build the runner for the host platform,");
-        println!("  then use `glyx build --mode snapshot` for embedded cross-target binaries.");
+        println!("  then use `glyx build` (snapshot mode) for embedded cross-target binaries.");
     }
 
     let runner = find_or_build_runner(false, &super::read_engine_from_config())

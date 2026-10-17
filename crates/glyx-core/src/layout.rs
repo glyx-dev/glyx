@@ -564,7 +564,7 @@ pub(crate) const UNCLIPPED_KEY: u32 = 0x4000_0000;
 /// by `js_nodes.len()` — same cycle-guard pattern as `scene.rs`'s
 /// `outermost_scrolled_ancestor` (a parent-pointer cycle would otherwise spin
 /// this forever); unlike that function, this wants the NEAREST scrollable
-/// ancestor regardless of its current offset (matches `events.js`'s
+/// ancestor regardless of its current offset (matches `events.ts`'s
 /// `findScrollTarget`, which this mirrors on the native side).
 fn nearest_scroll_container(
     nodes: &std::collections::HashMap<u32, JsNode>,

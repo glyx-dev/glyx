@@ -360,7 +360,7 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
             let safe = validate_plugin_entry(p, i, app_caps)?;
             let global_name = format!("__glyx_plugin_{safe}");
 
-            // Hard-fail if bun bundling fails — a missing plugin is a startup error.
+            // Hard-fail if bundling fails — a missing plugin is a startup error.
             let bundled_js = match bundle_plugin(&p.entry, &safe) {
                 Some(js) => js,
                 None => {

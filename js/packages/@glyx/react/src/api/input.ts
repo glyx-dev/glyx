@@ -50,7 +50,7 @@ function _normalizeKey(winitKey: string) {
   return winitKey.toLowerCase();                                          // Space → space, F1 → f1
 }
 
-// Listen to every key event from events.js and check local shortcuts.
+// Listen to every key event from events.ts and check local shortcuts.
 addKeyListener(function _dispatchLocalShortcuts({ key, ctrl, shift, pressed }) {
   if (!pressed || _localShortcuts.size === 0) return;
   const norm = _normalizeKey(key);

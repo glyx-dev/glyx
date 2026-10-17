@@ -755,7 +755,7 @@ pub fn camera_capture_callback(
     });
 }
 
-/// `__glyx_camera_record_start(handleId, outputPath)` â€” sync. Starts MP4 recording via ffmpeg.
+/// `__glyx_camera_record_start(handleId, outputPath)` â€” sync. Starts MP4 recording (video only): the glyx-media encoder, or an `ffmpeg` executable when that is unavailable.
 #[cfg(feature = "camera")]
 pub fn camera_record_start_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,

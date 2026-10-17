@@ -325,7 +325,7 @@ export function TextInput({
       const end = value.length;
       setAnchor(end);
       setFocus_(end);
-      // Native focus registry sync happens centrally in events.js's
+      // Native focus registry sync happens centrally in events.ts's
       // `setFocus()` (the caller of this handler), not here — see its
       // comment for why: this used to call `__glyx_setFocus` directly too,
       // which raced with Tab-driven focus moving to a DIFFERENT node
@@ -988,7 +988,7 @@ export function Slider({
     });
     registerPressable(id, {
       // Slider is a raw View + registerPressable, NOT the <Pressable>
-      // component — so it never went through core.js's focus-registry fix.
+      // component — so it never went through core.ts's focus-registry fix.
       // Same class of bug as Checkbox/Switch/etc before that fix: without
       // this, clicking/dragging the slider never moves `focused_node`.
       onPress({ x }: Record<string, any>) {

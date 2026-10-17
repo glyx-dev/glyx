@@ -416,7 +416,7 @@ impl V8Runtime {
             v8::tc_scope!(let try_catch, scope);
 
             // Set a script origin so V8 labels stack frames as "app.js" instead
-            // of "vm".  With --source-map=inline in bun and --enable_source_maps
+            // of "vm".  With the bundler's source map and --enable_source_maps
             // in V8 (dev builds), positions are automatically translated back to
             // the original .jsx/.tsx source file and line.
             // A trailing `//# sourceURL=` names the script instead (DevTools

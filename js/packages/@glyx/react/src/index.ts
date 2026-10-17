@@ -47,15 +47,15 @@ const rootContainer = GlyxReconciler.createContainer(
   (err) => __glyx_log('[React] Recoverable error: ' + err.message),
   null
 );
-// Devtools element IDs walk React's current tree from here (hostConfig.js).
+// Devtools element IDs walk React's current tree from here (hostConfig.ts).
 setDevRoot(rootContainer);
 
-// Devtools component names skip past Glyx's own components (hostConfig.js).
+// Devtools component names skip past Glyx's own components (hostConfig.ts).
 for (const m of [coreExports, controlsExports, canvasExports, mediaExports, popoverExports]) {
   markLibraryComponents(Object.values(m));
 }
 
-// Text-input keys commit one at a time (see setKeyFlush in events.js).
+// Text-input keys commit one at a time (see setKeyFlush in events.ts).
 setKeyFlush((fn) => GlyxReconciler.flushSync(fn));
 
 // ── Frame callback ────────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ setKeyFlush((fn) => GlyxReconciler.flushSync(fn));
 globalThis.__glyx_frameCallback = function glyxFrameCallback() {
   // A real frame arrived — any native wakeup that was pending is now
   // consumed. Clear before draining timers so a timer/interval that still
-  // has work due can request the next wakeup (see polyfills.js).
+  // has work due can request the next wakeup (see polyfills.ts).
   (globalThis as any)._glyxFramePending = false;
   (globalThis as any)._glyxFramePendingDeadline = Infinity;
   // flushSync forces React to commit all state updates triggered by events

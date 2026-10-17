@@ -235,10 +235,7 @@ pub(crate) fn fs_watch_poll(events: &FsWatchEvents) -> String {
     let mut q = events.lock();
     if q.is_empty() { return "[]".to_string(); }
     let items: Vec<String> = q.drain(..)
-        .map(|(id, path, kind)| {
-            let path_escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
-            format!(r#"{{"id":{id},"path":"{path_escaped}","type":"{kind}"}}"#)
-        })
+        .map(|(id, path, kind)| crate::fs_watch_event_json(id, &path, &kind))
         .collect();
     format!("[{}]", items.join(","))
 }

@@ -6,6 +6,17 @@
 - **Written in TypeScript.** The source is now TypeScript (`src/*.ts`), strictly type-checked, and the package ships its declarations (`types/`). They cover the whole public API: every component and its props, `StyleProp`/`GlyxStyle`, `fs`, `db`, `dialog`, `clipboard`, `notification`, `audio`, `system`, `glyxWindow`, `tray`, `menubar`, ... The old hand-written file covered 46 of 119 exports.
 - `Pressable`'s `onPointerMove` event is typed `{ x, y, locationX, locationY }` (it always carried `locationX`/`locationY`).
 
+### Changed
+- **JS plugin calls (`backend.ns.fn(args)`) no longer go through JSON.** The plugin gets exactly the value you pass and its result comes
+  back untouched, so objects, `Uint8Array`, `Date` and `undefined` survive, and the call is about 3 to 6 times cheaper (measured, see
+  step 7 of the roadmap). Behaviour change: a plugin that returns a string such as `"123"` or `"true"` used to get a number or a boolean
+  back; it now gets the string. A plugin that mutates its argument now mutates the caller's object. Rust commands are unchanged
+  (JSON in, JSON out). A call with no argument still passes `{}`. Needs a runner with `__glyx_backend_call2`; with an older runner it
+  falls back to the JSON path.
+
+### Fixed
+- The webview message poll parsed `"[]"` on every frame; it now skips an empty queue like the other pollers.
+
 ### Deprecated
 - Style keys the renderer ignores are still accepted, typed `@deprecated`, so TypeScript shows a strike-through: per-side border widths and colours (`borderTopWidth`, `borderTopColor`, ...), `fontFamily`, `cursor`.
 

@@ -41,6 +41,9 @@ function emit(e: { t?: string; id?: any; kind?: any; url?: string; method?: any;
   try { sink()?.(JSON.stringify(e)); } catch { /* never break the app for DevTools */ }
 }
 
+/** True while DevTools is recording: callers use it to skip building a body nobody will read. */
+export function netActive(): boolean { return sink() !== null; }
+
 /** Start a record; returns its id, or 0 when not recording. */
 export function netStart(kind: string, url: string, init: any = {}) {
   if (!sink()) return 0;

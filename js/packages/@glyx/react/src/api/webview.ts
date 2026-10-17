@@ -11,7 +11,10 @@
 export const _webviewCallbacks = new Map();
 export function _pollWebview() {
   if (typeof __glyx_webview_poll === 'undefined') return;
-  const events = JSON.parse(__glyx_webview_poll());
+  const raw = __glyx_webview_poll();
+  if (!raw || raw === '[]') return;
+  let events;
+  try { events = JSON.parse(raw); } catch { return; }
   for (const ev of events) {
     const cbs = _webviewCallbacks.get(ev.id);
     if (cbs && cbs.onMessage) cbs.onMessage(ev.message);

@@ -24,6 +24,7 @@ declare var __glyx_autostart_isEnabled: any;
 declare var __glyx_autostart_setEnabled: any;
 declare var __glyx_autostart_wasOpenedAtLogin: any;
 declare var __glyx_backend_call: any;
+declare var __glyx_backend_call2: any;
 declare var __glyx_battery_getStatus: any;
 declare var __glyx_camera_capture: any;
 declare var __glyx_camera_close: any;

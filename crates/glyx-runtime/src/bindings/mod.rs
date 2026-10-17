@@ -1903,6 +1903,7 @@ pub fn register_all(
     register!("__glyx_splash_hide", splash_hide_callback);
     //  Backend command dispatch €€
     register!("__glyx_backend_call", backend_call_callback);
+    register!("__glyx_backend_call2", backend_call_value_callback);
 
     state_usize
 }

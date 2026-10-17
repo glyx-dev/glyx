@@ -238,6 +238,14 @@ pub(crate) fn backend_call<'js>(
         return f.call((parsed_args,));
     }
 
+    call_rust_command(ctx, name, args_json, commands, queue, tokio, redraw)
+}
+
+/// The Rust-command half of `backend_call`: capability check, then the async handler.
+fn call_rust_command<'js>(
+    ctx: Ctx<'js>, name: String, args_json: String, commands: BackendRegistry,
+    queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>,
+) -> rquickjs::Result<rquickjs::Promise<'js>> {
     let Some(cmd) = commands.get(&name) else {
         return QuickJsRuntime::reject_now(&ctx, format!("backend.{name}: no such command registered"));
     };
@@ -246,4 +254,40 @@ pub(crate) fn backend_call<'js>(
     }
     let handler = cmd.handler.clone();
     QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, async move { handler(args_json).await })
+}
+
+/// `__glyx_backend_call2(name, args) -> Promise` — `backend_call` without the JSON round trip for
+/// JS plugins, which share the caller's heap.
+///
+///  * A JS plugin command is called with `args` exactly as given (no stringify here, no parse there),
+///    and whatever it returns comes back untouched: a promise, or a plain value for a plugin function
+///    that is not `async`. A string result stays a string.
+///  * A Rust command takes JSON, so `args` is stringified here (`undefined` becomes `{}`), and the
+///    promise it returns is marked `__glyxRaw = true`: it resolves with the command's JSON string,
+///    which the caller parses. That is how the caller tells the two apart.
+pub(crate) fn backend_call_value<'js>(
+    ctx: Ctx<'js>, name: String, args: Option<Value<'js>>, commands: BackendRegistry,
+    js_commands: crate::quickjs_ipc::JsBackendCommands,
+    queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>,
+) -> rquickjs::Result<Value<'js>> {
+    let found = js_commands.borrow().get(&name).cloned();
+    if let Some((global_name, key)) = found {
+        let f = resolve_js_command(&ctx, &global_name, &key)?;
+        let arg = args.unwrap_or_else(|| Value::new_undefined(ctx.clone()));
+        return f.call((arg,));
+    }
+
+    let args_json = match args {
+        Some(v) if !v.is_undefined() => match ctx.json_stringify(v)? {
+            Some(s) => s.to_string()?,
+            None => "{}".to_string(),
+        },
+        _ => "{}".to_string(),
+    };
+    let promise = call_rust_command(ctx.clone(), name, args_json, commands, queue, tokio, redraw)?;
+    let value = promise.into_value();
+    if let Some(obj) = value.as_object() {
+        obj.set("__glyxRaw", true)?;
+    }
+    Ok(value)
 }

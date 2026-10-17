@@ -1404,6 +1404,19 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
             )
         })?;
         globals.set("__glyx_backend_call", f)?;
+
+        // The JSON-free variant (see `quickjs_ipc::backend_call_value`); `@glyx-dev/react` uses it when present.
+        let commands = reg.backend_commands.clone();
+        let js_backend_commands = Rc::clone(&reg.js_backend_commands);
+        let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
+        let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, name: String, args: Opt<Value<'js>>| {
+            crate::quickjs_ipc::backend_call_value(
+                ctx, name, args.0, commands.clone(),
+                Rc::clone(&js_backend_commands),
+                Arc::clone(&queue), tokio.clone(), redraw.clone(),
+            )
+        })?;
+        globals.set("__glyx_backend_call2", f)?;
     }
 
     // ── AI (crate::quickjs_ai) — static glyx-ai path when feature "ai" is
@@ -1963,11 +1976,17 @@ mod tests {
     /// Same as `new_runtime`, but with one JS plugin loaded — for exercising
     /// `eval_js_plugins`/`backend_call`'s JS-command path end to end.
     fn new_runtime_with_plugin(prefix: Option<&str>, bundled_js: &str, global_name: &str) -> (tokio::runtime::Runtime, QuickJsRuntime) {
+        new_runtime_with_registry(prefix, bundled_js, global_name, Arc::new(std::collections::HashMap::new()))
+    }
+
+    /// A runtime with one JS plugin and a registry of Rust commands.
+    fn new_runtime_with_registry(
+        prefix: Option<&str>, bundled_js: &str, global_name: &str, backend_commands: crate::BackendRegistry,
+    ) -> (tokio::runtime::Runtime, QuickJsRuntime) {
         let tokio_rt = tokio::runtime::Runtime::new().expect("tokio runtime should build");
         let perf = Arc::new(parking_lot::Mutex::new(glyx_perf::PerfState::new()));
         let ipc_bus = crate::bindings::new_ipc_bus();
         let next_window_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
-        let backend_commands: crate::BackendRegistry = Arc::new(std::collections::HashMap::new());
         let js_plugins: crate::JsPlugins = Arc::new(vec![crate::JsPlugin {
             prefix: prefix.map(String::from),
             bundled_js: bundled_js.to_string(),
@@ -2029,6 +2048,108 @@ mod tests {
         rt.tick();
         let out = rt.eval("globalThis.__err").expect("eval should succeed");
         assert!(out.contains("no such command"), "got: {out}");
+    }
+
+    // ── __glyx_backend_call2: no JSON round trip for JS plugins ──────────────
+
+    const PLUGIN_JS: &str = "globalThis.__glyx_plugin_notes = {         touch:  async function(a) { a.touched = true; return a; },         digits: async function() { return '123'; },         truth:  async function() { return 'true'; },         plain:  function() { return 42; },         size:   async function(u8) { return u8.byteLength; },         kind:   async function(a) { return typeof a; },         boom:   function() { throw new Error('sync failure'); }     };";
+
+    fn call2_runtime() -> (tokio::runtime::Runtime, QuickJsRuntime) {
+        let mut b = crate::BackendRegistryBuilder::new();
+        b.add("echo", |args| async move { Ok(args) });
+        b.add("fails", |_| async move { Err("nope".to_string()) });
+        new_runtime_with_registry(Some("notes"), PLUGIN_JS, "__glyx_plugin_notes", b.build())
+    }
+
+    #[test]
+    fn call2_hands_a_js_plugin_the_very_object_it_was_given() {
+        let (_t, mut rt) = call2_runtime();
+        rt.eval(
+            "globalThis.__arg = { n: 1 }; globalThis.__same = null;              __glyx_backend_call2('notes.touch', globalThis.__arg).then(r => { globalThis.__same = (r === globalThis.__arg); });"
+        ).unwrap();
+        rt.tick();
+        assert_eq!(rt.eval("String(globalThis.__same)").unwrap(), "true", "the plugin must get and return the same object, not a copy");
+        assert_eq!(rt.eval("String(globalThis.__arg.touched)").unwrap(), "true", "its change is visible to the caller");
+    }
+
+    #[test]
+    fn call2_keeps_what_json_cannot_carry() {
+        let (_t, mut rt) = call2_runtime();
+        rt.eval(
+            "globalThis.__size = null; globalThis.__kind = null;              __glyx_backend_call2('notes.size', new Uint8Array(5)).then(r => { globalThis.__size = r; });              __glyx_backend_call2('notes.kind', undefined).then(r => { globalThis.__kind = r; });"
+        ).unwrap();
+        rt.tick();
+        assert_eq!(rt.eval("String(globalThis.__size)").unwrap(), "5", "a typed array arrives as a typed array");
+        assert_eq!(rt.eval("String(globalThis.__kind)").unwrap(), "undefined", "no argument stays undefined");
+    }
+
+    #[test]
+    fn call2_leaves_a_plugins_result_alone() {
+        let (_t, mut rt) = call2_runtime();
+        rt.eval(
+            "globalThis.__r = [];              __glyx_backend_call2('notes.digits').then(r => { __r.push(typeof r + ':' + r); });              __glyx_backend_call2('notes.truth').then(r => { __r.push(typeof r + ':' + r); });              globalThis.__plain = __glyx_backend_call2('notes.plain');"
+        ).unwrap();
+        rt.tick();
+        assert_eq!(rt.eval("__r.join(',')").unwrap(), "string:123,string:true", "string results stay strings");
+        assert_eq!(rt.eval("String(__plain)").unwrap(), "42", "a plugin function that is not async returns its value as-is");
+    }
+
+    #[test]
+    fn call2_a_plugin_that_throws_synchronously_throws_to_the_caller() {
+        let (_t, mut rt) = call2_runtime();
+        let out = rt.eval("try { __glyx_backend_call2('notes.boom'); 'no throw' } catch (e) { 'threw: ' + e.message }").unwrap();
+        assert_eq!(out, "threw: sync failure");
+    }
+
+    #[test]
+    fn call2_stringifies_arguments_for_a_rust_command_and_marks_the_promise() {
+        let (_t, mut rt) = call2_runtime();
+        rt.eval(
+            "globalThis.__out = [];              const p = __glyx_backend_call2('echo', { a: [1, 2], b: 'x' });              __out.push('marked:' + p.__glyxRaw);              p.then(r => { __out.push(typeof r + ':' + r); });              __glyx_backend_call2('echo').then(r => { __out.push('noarg:' + r); });"
+        ).unwrap();
+        for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
+        let out = rt.eval("__out.join('|')").unwrap();
+        assert!(out.contains("marked:true"), "got: {out}");
+        assert!(out.contains(r#"string:{"a":[1,2],"b":"x"}"#), "got: {out}");
+        assert!(out.contains("noarg:{}"), "got: {out}");
+    }
+
+    #[test]
+    fn call2_a_plugin_promise_is_not_marked_and_unknown_or_failing_commands_reject() {
+        let (_t, mut rt) = call2_runtime();
+        rt.eval(
+            "globalThis.__out = [];              __out.push('plugin-marked:' + __glyx_backend_call2('notes.digits').__glyxRaw);              __glyx_backend_call2('missing').catch(e => { __out.push('missing:' + e); });              __glyx_backend_call2('fails').catch(e => { __out.push('fails:' + e); });"
+        ).unwrap();
+        for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
+        let out = rt.eval("__out.join('|')").unwrap();
+        assert!(out.contains("plugin-marked:undefined"), "got: {out}");
+        assert!(out.contains("no such command"), "got: {out}");
+        assert!(out.contains("fails:nope"), "got: {out}");
+    }
+
+    /// Old path against new path, for a small and a large argument. Run by hand:
+    ///   cargo test -p glyx-runtime --no-default-features --features quickjs --release -- --ignored --nocapture bench_backend
+    #[test]
+    #[ignore]
+    fn bench_backend_call_paths() {
+        let (_t, mut rt) = new_runtime_with_plugin(Some("bench"), crate::BENCH_PLUGIN_JS, "__glyx_plugin_bench");
+        for (label, n, large) in [("small object", 100_000u32, false), ("1000-item array", 2_000u32, true)] {
+            for new_path in [false, true] {
+                let start = std::time::Instant::now();
+                rt.eval(&crate::bench_script(new_path, n, large)).unwrap();
+                let mut spins = 0;
+                while rt.eval("String(__done)").unwrap() != n.to_string() {
+                    rt.tick();
+                    spins += 1;
+                    assert!(spins < 100_000, "calls did not finish");
+                }
+                let secs = start.elapsed().as_secs_f64();
+                println!(
+                    "QuickJS {:<16} {:<4} path: {:>9.2} ms total, {:>8.2} us/call  ({n} calls)",
+                    label, if new_path { "new" } else { "old" }, secs * 1000.0, secs * 1e6 / n as f64
+                );
+            }
+        }
     }
 
     #[test]

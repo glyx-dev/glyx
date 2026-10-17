@@ -7,6 +7,19 @@ Changes to the native runtime and renderer (`glyx-core`, and the crates it drive
 ### Changed
 - Hot-reload rebuilds, plugin bundling and the `glyx.config.ts` fallback use the shared `glyx-bundler` (esbuild, or Bun) instead of calling Bun directly, so they work on machines without Bun, and force the JSX transform to match the React build.
 
+### Added
+- **`__glyx_backend_call2(name, args)`** (both engines). Like `__glyx_backend_call`, but a JS plugin command is called with the caller's
+  value as it is and its result comes back untouched, instead of going through `JSON.stringify` / `JSON.parse` in both directions. A Rust
+  command still takes JSON; its promise is marked `__glyxRaw` so the caller knows to parse the result. Measured with an ignored
+  benchmark (`bench_backend_call_paths`), per call, on the dev-profile test build: QuickJS 24 to 7 microseconds for a small object and
+  10.5 to 2.4 milliseconds for a 1000-item array (the array's construction is included in both); V8 about 8 to 1.3 or 2.4 microseconds (two runs) and 1.7 to 0.55 milliseconds. One machine, noisy: treat these as a ratio of about 3 to 6.
+
+### Fixed
+- **`fs.watch` events for a file name with a quote, backslash, newline or other control character were invalid JSON** (only `\` and `"` were
+  escaped), so the JavaScript side dropped the event. Both engines now build the event with a real JSON encoder.
+- The QuickJS unit-test target did not compile (a `NodeProps` test had not been updated for `smooth_scroll`, `transition_stiffness` and
+  `transition_damping`); it does now, and the test feeds those props through.
+
 ## [0.2.0] - 2026-10-05
 
 ### Added

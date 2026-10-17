@@ -334,7 +334,8 @@ mod tests {
             boxShadow: '2px 3px #000000', backgroundGradient: '#ff0000 #0000ff',
             position: 'absolute', top: 1, left: '2%', right: 3, bottom: '4',
             transform: 'translate(10,20) rotate(45)', boxSizing: 'border-box',
-            scrollbarWidth: 9, scrollbarColor: '#888888', showScrollbar: false
+            scrollbarWidth: 9, scrollbarColor: '#888888', showScrollbar: false,
+            transitionStiffness: 300, transitionDamping: 35, smoothScroll: false
         })");
 
         let expected = NodeProps {
@@ -429,6 +430,9 @@ mod tests {
             opacity: Some(0.5),
             transition_ms: Some(250),
             transition_property: Some("opacity,transform".to_string()),
+            transition_stiffness: Some(300.0),
+            transition_damping: Some(35.0),
+            smooth_scroll: Some(false),
             transition_easing: Some("ease-in-out".to_string()),
             animation_keyframes: Some(r#"[[0,{"opacity":0}],[1,{"opacity":1}]]"#.to_string()),
             animation_ms: Some(800),

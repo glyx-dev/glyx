@@ -118,10 +118,7 @@ pub fn fs_watch_poll_callback(
         return;
     }
     let items: Vec<String> = q.drain(..)
-        .map(|(id, path, kind)| {
-            let path_escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
-            format!(r#"{{"id":{id},"path":"{path_escaped}","type":"{kind}"}}"#)
-        })
+        .map(|(id, path, kind)| crate::fs_watch_event_json(id, &path, &kind))
         .collect();
     let json = format!("[{}]", items.join(","));
     rv.set(v8::String::new(scope, &json).unwrap().into());

@@ -226,6 +226,69 @@ pub use glyx_cap_abi::CapSet;
 #[cfg(feature = "v8")]
 pub(crate) type Scope<'s, 'i> = v8::PinScope<'s, 'i, v8::Context>;
 
+// ── Benchmark of the two backend-call paths (run by hand, see the tests that use it) ──────────────
+
+/// The plugin used by the backend-call benchmarks: it returns its argument.
+#[cfg(test)]
+pub(crate) const BENCH_PLUGIN_JS: &str =
+    "globalThis.__glyx_plugin_bench = { echo: async function(a) { return a; } };";
+
+/// Calls the plugin `n` times through the old path (stringify, call, parse the result, as the JS
+/// wrapper did before `__glyx_backend_call2`) or the new one (the value itself), with `mk(i)` as the
+/// argument. `globalThis.__done` counts the calls that have finished.
+#[cfg(test)]
+pub(crate) fn bench_script(new_path: bool, n: u32, large: bool) -> String {
+    let call = if new_path {
+        "(name, a) => __glyx_backend_call2(name, a)"
+    } else {
+        "(name, a) => __glyx_backend_call(name, JSON.stringify(a)).then(raw => { try { return JSON.parse(raw); } catch (e) { return raw; } })"
+    };
+    let mk = if large {
+        "(i) => Array.from({ length: 1000 }, (_, k) => ({ id: k + i, name: 'item ' + k, tags: ['a', 'b'], ok: true }))"
+    } else {
+        "(i) => ({ id: i, title: 'hello', done: false })"
+    };
+    format!(
+        "globalThis.__done = 0; (() => {{ const call = {call}; const mk = {mk}; \
+         for (let i = 0; i < {n}; i++) {{ call('bench.echo', mk(i)).then(() => {{ __done++; }}); }} }})();"
+    )
+}
+
+// ── fs.watch events ───────────────────────────────────────────────────────────
+
+/// One `fs.watch` event as JSON: `{"id":1,"path":"...","type":"modify"}`. The path goes through a real
+/// JSON encoder: a file name can hold quotes, backslashes, newlines and other control characters, and
+/// escaping only `\` and `"` produced invalid JSON for those (the JS side then dropped the event).
+pub(crate) fn fs_watch_event_json(id: u32, path: &str, kind: &str) -> String {
+    let path = serde_json::to_string(path).unwrap_or_else(|_| "\"\"".to_string());
+    let kind = serde_json::to_string(kind).unwrap_or_else(|_| "\"\"".to_string());
+    format!(r#"{{"id":{id},"path":{path},"type":{kind}}}"#)
+}
+
+#[cfg(test)]
+mod fs_watch_event_tests {
+    use super::fs_watch_event_json;
+
+    #[test]
+    fn an_event_is_valid_json_whatever_the_file_name_holds() {
+        for path in [
+            "C:\\Users\\me\\notes.txt",
+            "say \"hi\".txt",
+            "line one\nline two",
+            "tab\there",
+            "bell\u{7}and\u{1b}escape",
+            "ünïcode — 日本語.md",
+            "",
+        ] {
+            let json = fs_watch_event_json(7, path, "modify");
+            let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{path:?}: {e}: {json}"));
+            assert_eq!(v["id"], 7);
+            assert_eq!(v["path"], path);
+            assert_eq!(v["type"], "modify");
+        }
+    }
+}
+
 // ── JS plugin type ────────────────────────────────────────────────────────────
 
 /// A bundled JS plugin ready to be evaluated in the V8 context.

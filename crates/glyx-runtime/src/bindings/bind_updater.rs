@@ -503,6 +503,62 @@ pub fn backend_call_callback(
         return;
     }
 
+    dispatch_rust_backend_command(scope, state, &name, args_json, &mut rv, false);
+}
+
+/// `__glyx_backend_call2(name, args)` — `backend_call_callback` without the JSON round trip for JS
+/// plugins, which share the caller's heap.
+///
+///  * A JS plugin command is called with `args` exactly as given (no stringify on the JS side, no
+///    parse here), and whatever it returns comes back untouched: a promise, or a plain value for a
+///    plugin function that is not `async`. A string result stays a string.
+///  * A Rust command takes JSON, so `args` is stringified here (`undefined` becomes `{}`), and the
+///    promise returned is marked `__glyxRaw = true`: it resolves with the command's JSON string,
+///    which the caller parses. That is how the caller tells the two apart.
+pub fn backend_call_value_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:   v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let name = v8_arg_to_string(scope, &args, 0);
+    let arg  = args.get(1);
+
+    if let Some(global_fn) = state.js_backend_commands.get(&name) {
+        let fn_local = v8::Local::new(scope, global_fn);
+        let global = ctx.global(scope);
+        // If the plugin throws, the exception stays pending and reaches the caller.
+        if let Some(ret) = fn_local.call(scope, global.into(), &[arg]) { rv.set(ret); }
+        return;
+    }
+
+    let args_json = if arg.is_undefined() {
+        "{}".to_string()
+    } else {
+        v8::json::stringify(scope, arg)
+            .map(|s| s.to_rust_string_lossy(scope))
+            .unwrap_or_else(|| "{}".to_string())
+    };
+    dispatch_rust_backend_command(scope, state, &name, args_json, &mut rv, true);
+}
+
+/// The Rust-command half of the two backend-call callbacks: capability check, then the async
+/// handler on the Tokio runtime, answered through a promise. `mark_raw` tags that promise
+/// (`__glyxRaw = true`) for `__glyx_backend_call2`.
+fn dispatch_rust_backend_command(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    state: &AsyncState,
+    name: &str,
+    args_json: String,
+    rv: &mut v8::ReturnValue,
+    mark_raw: bool,
+) {
+    let name = name.to_string();
     // Checked here (not just once at plugin-load time) so a command
     // registered via `add_gated` enforces its required capabilities on
     // every call, the same way JS plugins are capability-gated.
@@ -515,6 +571,12 @@ pub fn backend_call_callback(
     };
 
     let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
+    if mark_raw {
+        let key   = v8::String::new(scope, "__glyxRaw").unwrap();
+        let value = v8::Boolean::new(scope, true);
+        let obj: v8::Local<v8::Object> = promise.into();
+        let _ = obj.set(scope, key.into(), value.into());
+    }
     rv.set(promise.into());
 
     match dispatch {

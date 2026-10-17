@@ -67,3 +67,9 @@ pub(crate) fn runner_mirror_path(artifact: &str) -> String {
 pub(crate) fn cap_mirror_path(asset: &str) -> String {
     format!("caps/{asset}")
 }
+
+/// Mirror path for a prebuilt base V8 snapshot or its `.sig`
+/// (`snapshots/glyx-snapshot-0.2.0-aarch64-apple-darwin.snapshot`).
+pub(crate) fn snapshot_mirror_path(asset: &str) -> String {
+    format!("snapshots/{asset}")
+}

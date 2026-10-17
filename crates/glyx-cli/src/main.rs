@@ -24,6 +24,7 @@ mod cmd_check;
 mod cmd_test;
 mod cmd_generate;
 mod cmd_runtime;
+mod snapshot_blob;
 mod tools;
 mod updates;
 pub mod pm;

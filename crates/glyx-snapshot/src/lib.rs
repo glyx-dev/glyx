@@ -69,6 +69,16 @@ pub fn create_snapshot(
     Ok(startup_data.to_vec())
 }
 
+/// The inputs of the base snapshot: no polyfills, and nothing else evaluated at build time.
+/// (`glyx build` passes exactly these when a project has no `js/polyfills.js`.)
+pub const BASE_POLYFILLS: &str = "// no polyfills\n";
+pub const BASE_NOT_SNAPSHOTTED: &str = "// not snapshotted — eval'd at runtime\n";
+
+/// The snapshot shared by every app that has no polyfills of its own: just the runtime's stubs.
+pub fn create_base_snapshot() -> Result<Vec<u8>, SnapshotError> {
+    create_snapshot(BASE_POLYFILLS, BASE_NOT_SNAPSHOTTED, BASE_NOT_SNAPSHOTTED)
+}
+
 #[derive(Debug)]
 pub enum SnapshotError {
     ExecutionFailed(String),

@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::snapshot_blob;
 use super::{
     read_project_name, read_dev_config, is_native_project,
     build_app_bundle, resolve_config_json, platform_to_rust_target,
@@ -108,19 +109,23 @@ pub(super) fn build_snapshot_mode(target: Option<&str>, project_name: &str, p: p
     println!("✓ App bundle: {} ({} KB)", bundle.display(), std::fs::metadata(&bundle)?.len() / 1024);
 
     // 2. Create V8 snapshot (stubs + polyfills ONLY — app is eval'd separately
-    // at runtime).  A published CLI has no snapshot toolchain available (it
-    // needs the glyx source workspace), so fall back to bundle mode instead
-    // of hard-failing the build.
+    // at runtime).  A published CLI has no snapshot toolchain, so it downloads the
+    // release's signed base snapshot (see snapshot_blob.rs). If that is not
+    // available (offline, no blob for this platform, a project with its own
+    // js/polyfills.js) fall back to bundle mode instead of hard-failing the build;
+    // a blob whose signature does not verify is NOT a fallback case and stops the build.
     let snap = match create_snapshot_for_build(project_name) {
         Ok(s) => s,
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("Not running from inside the glyx source workspace")
+            if msg.contains(snapshot_blob::UNAVAILABLE_MARKER)
+                || msg.contains("Not running from inside the glyx source workspace")
                 || msg.contains("Could not find glyx home directory")
                 || msg.contains("Failed to build glyx-snapshot")
                 || msg.contains("glyx-snapshot binary not found")
             {
-                println!("⚠  V8 snapshot unavailable for this CLI install; falling back to bundle mode");
+                println!("⚠  {msg}");
+                println!("   Falling back to bundle mode (the app's JavaScript ships next to the binary).");
                 return build_bundle_mode(target, project_name, p);
             }
             return Err(e).context("V8 snapshot creation failed");
@@ -584,6 +589,17 @@ pub(crate) fn cap_os(rust_target: Option<&str>) -> &'static str {
     }
 }
 
+/// CPU family of a Rust target triple (or of this machine for `None`): `"x64"` or `"arm64"`.
+/// Only macOS ships both, so it only changes a release asset name there.
+pub(crate) fn cap_arch(rust_target: Option<&str>) -> &'static str {
+    match rust_target {
+        Some(t) if t.starts_with("aarch64") || t.starts_with("arm64") => "arm64",
+        Some(_) => "x64",
+        None if cfg!(target_arch = "aarch64") => "arm64",
+        None => "x64",
+    }
+}
+
 fn cap_ext(os: &str) -> &'static str {
     match os { "windows" => "dll", "macos" => "dylib", _ => "so" }
 }
@@ -595,9 +611,12 @@ pub(crate) fn cap_file_name(cap: &str, os: &str) -> String {
     format!("glyx_cap_{}.{}", cap.replace('-', "_"), cap_ext(os))
 }
 
-/// The release asset name (`release.yml`): `glyx_cap_<name>-<os>.<ext>`.
-pub(crate) fn cap_release_asset(cap: &str, os: &str) -> String {
-    format!("glyx_cap_{}-{os}.{}", cap.replace('-', "_"), cap_ext(os))
+/// The release asset name (`release.yml`): `glyx_cap_<name>-<os>.<ext>`. Intel macOS has its own
+/// module, `glyx_cap_<name>-macos-x64.dylib`; the unsuffixed macOS name stays Apple silicon, so
+/// releases that predate Intel keep working.
+pub(crate) fn cap_release_asset(cap: &str, os: &str, arch: &str) -> String {
+    let platform = if os == "macos" && arch == "x64" { "macos-x64" } else { os };
+    format!("glyx_cap_{}-{platform}.{}", cap.replace('-', "_"), cap_ext(os))
 }
 
 /// Download URL for a release asset of this CLI version, honouring a
@@ -620,7 +639,7 @@ pub fn stage_cap_dlls(caps: &[String], target: Option<&str>, dest: &Path) -> Res
         return Ok(CapSource::BuiltLocally);
     }
     let rust_target = target.map(super::platform_to_rust_target).transpose()?;
-    download_cap_dlls(caps, cap_os(rust_target.as_deref()), dest, env!("CARGO_PKG_VERSION"))?;
+    download_cap_dlls(caps, cap_os(rust_target.as_deref()), cap_arch(rust_target.as_deref()), dest, env!("CARGO_PKG_VERSION"))?;
     Ok(CapSource::DownloadedSigned)
 }
 
@@ -633,7 +652,7 @@ pub(crate) fn cap_is_staged(dest: &Path, file: &str, version: &str) -> bool {
             .unwrap_or(false)
 }
 
-fn download_cap_dlls(caps: &[String], os: &str, dest: &Path, version: &str) -> Result<()> {
+fn download_cap_dlls(caps: &[String], os: &str, arch: &str, dest: &Path, version: &str) -> Result<()> {
     let mirror = super::tools::tools_base();
     std::fs::create_dir_all(dest)?;
     for cap in caps {
@@ -643,7 +662,7 @@ fn download_cap_dlls(caps: &[String], os: &str, dest: &Path, version: &str) -> R
         }
         let file = cap_file_name(cap, os);
         if cap_is_staged(dest, &file, version) { continue; }
-        let asset = cap_release_asset(cap, os);
+        let asset = cap_release_asset(cap, os, arch);
         println!("Downloading the `{cap}` capability module ({version})…");
         for (src, dst) in [(asset.clone(), file.clone()), (format!("{asset}.sig"), format!("{file}.sig"))] {
             let url = cap_asset_url(&src, version, mirror.as_deref());
@@ -680,9 +699,10 @@ mod cap_staging_tests {
         assert_eq!(cap_file_name("audio", "macos"), "glyx_cap_audio.dylib");
         assert_eq!(cap_file_name("audio", "linux"), "glyx_cap_audio.so");
         // release.yml's asset names.
-        assert_eq!(cap_release_asset("audio", "windows"), "glyx_cap_audio-windows.dll");
-        assert_eq!(cap_release_asset("camera", "macos"), "glyx_cap_camera-macos.dylib");
-        assert_eq!(cap_release_asset("hid", "linux"), "glyx_cap_hid-linux.so");
+        assert_eq!(cap_release_asset("audio", "windows", "x64"), "glyx_cap_audio-windows.dll");
+        assert_eq!(cap_release_asset("camera", "macos", "arm64"), "glyx_cap_camera-macos.dylib");
+        assert_eq!(cap_release_asset("camera", "macos", "x64"), "glyx_cap_camera-macos-x64.dylib");
+        assert_eq!(cap_release_asset("hid", "linux", "x64"), "glyx_cap_hid-linux.so");
     }
 
     #[test]
@@ -690,6 +710,10 @@ mod cap_staging_tests {
         assert_eq!(cap_os(Some("x86_64-pc-windows-msvc")), "windows");
         assert_eq!(cap_os(Some("aarch64-apple-darwin")), "macos");
         assert_eq!(cap_os(Some("x86_64-unknown-linux-gnu")), "linux");
+        assert_eq!(cap_os(Some("x86_64-apple-darwin")), "macos");
+        assert_eq!(cap_arch(Some("x86_64-apple-darwin")), "x64");
+        assert_eq!(cap_arch(Some("aarch64-apple-darwin")), "arm64");
+        assert_eq!(cap_arch(Some("x86_64-pc-windows-msvc")), "x64");
     }
 
     #[test]
@@ -728,7 +752,7 @@ mod cap_staging_tests {
     fn downloads_the_real_signed_module_from_a_published_release() {
         let dir = std::env::temp_dir().join(format!("glyx-caps-net-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        download_cap_dlls(&["audio".to_string()], "windows", &dir, "0.1.0").expect("download");
+        download_cap_dlls(&["audio".to_string()], "windows", "x64", &dir, "0.1.0").expect("download");
         let f = cap_file_name("audio", "windows");
         assert!(std::fs::metadata(dir.join(&f)).unwrap().len() > 100_000, "a real DLL");
         assert_eq!(std::fs::metadata(dir.join(format!("{f}.sig"))).unwrap().len(), 64, "Ed25519 signature");
@@ -739,7 +763,7 @@ mod cap_staging_tests {
     #[test]
     fn unpublished_capabilities_fail_with_a_clear_message_before_any_download() {
         let dir = std::env::temp_dir().join(format!("glyx-caps-test2-{}", std::process::id()));
-        let err = download_cap_dlls(&["webview".to_string()], "windows", &dir, "0.2.0").unwrap_err();
+        let err = download_cap_dlls(&["webview".to_string()], "windows", "x64", &dir, "0.2.0").unwrap_err();
         assert!(err.to_string().contains("isn't published"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -750,32 +774,57 @@ pub(super) fn create_snapshot_for_build(project_name: &str) -> Result<PathBuf> {
     std::fs::create_dir_all("target/glyx")?;
 
     let polyfills_path = PathBuf::from("js/polyfills.js");
-    let polyfills_arg = if polyfills_path.exists() {
-        polyfills_path
-    } else {
-        let empty = PathBuf::from("target/glyx/empty.js");
-        std::fs::write(&empty, "// no polyfills\n")?;
-        empty
-    };
-
-    let empty_js = PathBuf::from("target/glyx/empty.js");
-    std::fs::write(&empty_js, "// not snapshotted — eval'd at runtime\n")?;
+    let custom_polyfills = polyfills_path.is_file();
 
     let snapshot_out = std::env::current_dir()?
         .join(format!("target/glyx/{project_name}.snapshot"));
 
+    // Everywhere but the glyx source checkout there is no snapshot toolchain. A project without
+    // polyfills of its own needs only the base snapshot, which the release publishes (signed) for
+    // each platform: download that instead of building one.
+    if super::glyx_source_checkout().is_none() {
+        if custom_polyfills {
+            bail!("{}: this project has its own js/polyfills.js, which can only be snapshotted \
+                   from the glyx source workspace", snapshot_blob::UNAVAILABLE_MARKER);
+        }
+        let Some(target) = super::release_target() else {
+            bail!("{}: no prebuilt snapshot is published for this platform", snapshot_blob::UNAVAILABLE_MARKER);
+        };
+        let blob = snapshot_blob::fetch_base_snapshot(
+            &super::glyx_dir(),
+            env!("CARGO_PKG_VERSION"),
+            target,
+            super::tools::tools_base().as_deref(),
+            &glyx_verify::CAP_PUBKEY,
+            &|url, max| snapshot_blob::http_get(url, max),
+        )?;
+        std::fs::copy(&blob, &snapshot_out)
+            .with_context(|| format!("copy {} → {}", blob.display(), snapshot_out.display()))?;
+        if let Ok(meta) = std::fs::metadata(&snapshot_out) {
+            println!("✓ V8 snapshot (prebuilt): {} ({} KB)", snapshot_out.display(), meta.len() / 1024);
+        }
+        return Ok(snapshot_out);
+    }
+
     let snapshot_bin = find_or_build_snapshot_binary()?;
 
     println!("Creating V8 snapshot (stubs + polyfills)...");
-    let status = Command::new(&snapshot_bin)
-        .args([
-            polyfills_arg.as_os_str(),
-            empty_js.as_os_str(),
-            empty_js.as_os_str(),
-            snapshot_out.as_os_str(),
-        ])
-        .status()
-        .context("Failed to run glyx-snapshot")?;
+    let status = if custom_polyfills {
+        let empty_js = PathBuf::from("target/glyx/empty.js");
+        std::fs::write(&empty_js, "// not snapshotted — eval'd at runtime\n")?;
+        Command::new(&snapshot_bin)
+            .args([
+                polyfills_path.as_os_str(),
+                empty_js.as_os_str(),
+                empty_js.as_os_str(),
+                snapshot_out.as_os_str(),
+            ])
+            .status()
+    } else {
+        // The same inputs the released base snapshot is made from.
+        Command::new(&snapshot_bin).arg("--base").arg(&snapshot_out).status()
+    }
+    .context("Failed to run glyx-snapshot")?;
 
     if !status.success() { bail!("glyx-snapshot failed"); }
 

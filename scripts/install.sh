@@ -22,7 +22,7 @@ case "$(uname -m)" in
   *) echo "error: unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
-# Released targets today: aarch64-apple-darwin, x86_64-unknown-linux-gnu.
+# Released targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-unknown-linux-gnu.
 target="${arch}-${os}"
 
 if [ -n "${GLYX_VERSION:-}" ]; then

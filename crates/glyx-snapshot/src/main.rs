@@ -1,6 +1,13 @@
 //! glyx-snapshot CLI — V8 snapshot builder
 //!
 //! Usage: glyx-snapshot <polyfills.js> <framework.js> <app.js> <output.snapshot>
+//!        glyx-snapshot --base <output.snapshot>
+//!
+//! `--base` builds the snapshot every app without its own `js/polyfills.js` uses: the runtime's
+//! stub bindings and nothing else (the app is always evaluated at runtime). It is the same for
+//! every app, so the release publishes one per platform and `glyx build` downloads it instead of
+//! needing this tool (and a Rust toolchain). The CLI uses `--base` for its local build too, so the
+//! downloaded and the locally built blobs are made from the same inputs.
 
 use std::fs;
 
@@ -10,6 +17,18 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let args: Vec<String> = std::env::args().collect();
+
+    if args.get(1).map(String::as_str) == Some("--base") {
+        let Some(output) = args.get(2) else {
+            eprintln!("Usage: glyx-snapshot --base <output.snapshot>");
+            std::process::exit(1);
+        };
+        let blob = glyx_snapshot::create_base_snapshot()?;
+        fs::write(output, &blob)
+            .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", output, e))?;
+        eprintln!("✅ Base snapshot created: {} ({} KB)", output, blob.len() / 1024);
+        return Ok(());
+    }
 
     if args.len() < 5 {
         eprintln!("Usage: glyx-snapshot <polyfills.js> <framework.js> <app.js> <output.snapshot>");

@@ -51,8 +51,9 @@ git push origin v0.2.0 js-v0.2.0
 
 Check that `git log -1` shows the merge of the release PR before tagging.
 
-- `v0.2.0` builds and publishes the CLI, runners and signed capability
-  modules (`.github/workflows/release.yml`).
+- `v0.2.0` builds and publishes the CLI, runners, signed capability
+  modules and signed base V8 snapshots, for Windows, Linux, and macOS (Apple
+  silicon and Intel) (`.github/workflows/release.yml`).
 - `js-v0.2.0` publishes the npm packages (`.github/workflows/npm-publish.yml`).
 
 Both workflows start by checking that every version equals the tag, so a

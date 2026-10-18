@@ -615,6 +615,23 @@ impl TinySkiaFrame {
         }).collect())
     }
 
+    /// Whether this frame repaints only part of the window.
+    pub fn is_partial(&self) -> bool { self.damage.is_some() }
+
+    /// Whether nothing is transforming what is drawn now (no `push_transform` open), so a bitmap can be placed at whole pixels.
+    pub fn is_untransformed(&self) -> bool { self.xf.is_identity() }
+
+    /// Blits premultiplied RGBA8 pixels (`w` x `h`, the layout of this frame's own pixmap) with their top-left at `(x, y)`,
+    /// source-over and clipped like any draw (the damage, open layers). Used to put back a canvas drawn earlier.
+    pub fn draw_premul_pixels(&mut self, px: &[u8], w: u32, h: u32, x: i32, y: i32) {
+        if self.culled(x as f64, y as f64, w as f64, h as f64) { return; }
+        let Some(src) = tiny_skia::PixmapRef::from_bytes(px, w, h) else { return };
+        let paint = tiny_skia::PixmapPaint { opacity: 1.0, blend_mode: self.blend, quality: tiny_skia::FilterQuality::Nearest };
+        self.ensure_mask();
+        let mask = self.current_mask.as_ref();
+        self.pixmap.draw_pixmap(x, y, src, &paint, self.xf, mask);
+    }
+
     /// Whether a box (in the current coordinates) lies wholly outside this
     /// frame's damage, so drawing it would change nothing. Lets a caller skip
     /// the work of *preparing* a drawing, not just rasterizing it. Always

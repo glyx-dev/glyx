@@ -100,6 +100,7 @@ mod config;
 mod label_cache;
 mod canvas_paint;
 mod canvas_export;
+mod canvas_cache;
 mod state;
 mod dev_mode;
 #[cfg(feature = "dev")]
@@ -1099,6 +1100,8 @@ pub fn run(mut config: AppConfig) -> bool {
 
     // Pins the shaped-label cache when the config says so; otherwise it sizes itself (see `label_cache.rs`).
     let label_cache_entries: Option<u32> = window.label_cache_entries;
+    // The pixel cache for canvases repainted unchanged (see `canvas_cache.rs`): a byte budget, 0 = off.
+    let canvas_cache_budget = canvas_cache::CanvasPixelCache::budget_from(std::env::var("GLYX_CANVAS_CACHE_MB").ok().as_deref(), window.canvas_cache_mb);
 
     // Pre-init splash window sizing: mirror the main window's own configured
     // dimensions so the handoff feels seamless (same size, no visible
@@ -1593,6 +1596,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     images_by_path: ByteBudgetImageCache::new(256 * 1024 * 1024),
                     image_cache_hits: 0,
                     image_cache_misses: 0,
+                    canvas_pixels: canvas_cache::CanvasPixelCache::new(canvas_cache_budget),
                     label_cache:  label_cache::LabelCache::new(label_cache::pinned_entries(std::env::var("GLYX_LABEL_CACHE").ok().as_deref(), label_cache_entries)),
                     cursor_x:     0.0,
                     cursor_y:     0.0,
@@ -2403,9 +2407,13 @@ pub fn run(mut config: AppConfig) -> bool {
                 // Dev: compute whether a full render is actually required.
                 #[cfg(feature = "dev")]
                 let needs_full_render = {
+                    // The overlay's text only exists while the overlay is up (`draw_dev_overlay` returns
+                    // first otherwise), so a hidden overlay has no text to refresh: without this check its
+                    // empty line list read as "first draw" and every timer wake-up repainted the whole window.
                     let overlay_refresh_due = s.dev_mode.as_ref().map(|d| {
-                        d.overlay_lines.is_empty()                   // first overlay draw
-                        || Instant::now() >= d.overlay_next_refresh  // 250ms text refresh
+                        (d.overlay_visible
+                            && (d.overlay_lines.is_empty()               // first overlay draw
+                                || Instant::now() >= d.overlay_next_refresh)) // 250ms text refresh
                         || d.last_js_error.is_some()                 // error banner active
                     }).unwrap_or(false);
                     scene_needs_gpu || overlay_refresh_due
@@ -2669,6 +2677,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         clips:             Vec::new(),
                         canvas_cmds:       &s.canvas_cmds,
                         canvas_anim:       &canvas_anim,
+                        canvas_pixels:     &mut s.canvas_pixels,
                         #[cfg(feature = "canvas3d")]
                         canvas3d_overlays: &mut canvas3d_overlays,
                         #[cfg(feature = "webview")]
@@ -3377,6 +3386,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     // from disk on restore (fast; atlas re-upload is the slow part,
                     // and that cost is paid anyway after trim_resources clears GPU buffers).
                     s.images_by_path.clear();
+                    s.canvas_pixels.clear();
                     log::debug!("Window {window_handle} occluded — GPU buffer pool + image CPU cache released.");
                 }
             }
@@ -3393,6 +3403,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 for s in windows.values_mut() {
                     s.runtime.gc_hint();
                     s.renderer.trim_resources();
+                    s.canvas_pixels.clear();
                     shrink_oversized_collections(s);
                 }
                 extern "C" { fn mi_collect(force: bool); }

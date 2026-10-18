@@ -662,6 +662,19 @@ impl AnyFrame {
         matches!(self, AnyFrame::Vello(_))
     }
 
+    /// Whether this frame repaints only part of the window (only the CPU renderer does).
+    pub fn is_partial(&self) -> bool {
+        matches!(self, AnyFrame::TinySkia(f) if f.is_partial() && f.is_untransformed())
+    }
+
+    /// Blits premultiplied RGBA8 pixels at whole-pixel `(x, y)`. `false` when this backend cannot (only the CPU renderer can).
+    pub fn draw_premul_pixels(&mut self, px: &[u8], w: u32, h: u32, x: i32, y: i32) -> bool {
+        match self {
+            AnyFrame::TinySkia(f) => { f.draw_premul_pixels(px, w, h, x, y); true }
+            _ => false,
+        }
+    }
+
     /// Whether a box lies wholly outside the area this frame repaints (only
     /// the CPU renderer redraws part of the window), so a drawing there can
     /// be skipped before any of its geometry is built.

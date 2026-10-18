@@ -461,3 +461,12 @@ test('exportRef receives the chart canvas and is cleared on unmount', () => {
   const pie = renderToStaticMarkup(React.createElement(PieChart, { data, shade: 'radial', exportRef: () => {} }));
   expect(pie).toContain('<canvas');
 });
+
+test('the hover column exists only while a point is hovered, and sits on a whole pixel', () => {
+  const { _HoverColumn } = _internals;
+  const draw = () => {};
+  expect(_HoverColumn({ x: null, top: 0, width: 30, height: 100, draw, deps: [] })).toBeNull();
+  const el = _HoverColumn({ x: 100.4, top: 10, width: 30, height: 100, draw, deps: [] });
+  expect(el.props.style.transform).toBe('translate(85px, 0px)'); // round(100.4 - 15)
+  expect(el.props.pointerEvents).toBe('none');
+});

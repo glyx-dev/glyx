@@ -66,6 +66,20 @@ pub(crate) fn render_rgba(
     labels: &mut crate::label_cache::LabelCache,
     w: u32, h: u32, base: Affine, background: Option<[u8; 4]>,
 ) -> Vec<u8> {
+    let mut rgba = render_premul(cmds, images, text_sys, labels, w, h, base, background);
+    unpremultiply(&mut rgba);
+    rgba
+}
+
+/// `render_rgba` before the last step: the pixels as the rasterizer holds them (premultiplied), which is what a cached canvas
+/// is blitted from.
+pub(crate) fn render_premul(
+    cmds: &[glyx_runtime::bindings::CanvasCmd],
+    images: &std::collections::HashMap<u32, peniko::ImageData>,
+    text_sys: &mut glyx_text::TextSystem,
+    labels: &mut crate::label_cache::LabelCache,
+    w: u32, h: u32, base: Affine, background: Option<[u8; 4]>,
+) -> Vec<u8> {
     let mut renderer = TinySkiaRenderer::new_cpu_only(w, h);
     renderer.background_color = peniko::Color::from_rgba8(0, 0, 0, 0);
     let mut frame = AnyFrame::TinySkia(renderer.begin_frame());
@@ -79,7 +93,6 @@ pub(crate) fn render_rgba(
     let AnyFrame::TinySkia(f) = frame else { unreachable!("built as tiny-skia above") };
     let mut rgba = Vec::new();
     renderer.finish_frame_soft(f, |px, _, _, _| rgba = px.to_vec());
-    unpremultiply(&mut rgba);
     rgba
 }
 

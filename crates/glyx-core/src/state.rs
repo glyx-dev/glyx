@@ -290,6 +290,8 @@ pub(super) struct PerWindowState {
     /// `labelCacheEntries` / `GLYX_LABEL_CACHE` (see `label_cache.rs`): a view with more distinct strings than it
     /// holds would re-shape them all every frame.
     pub(super) label_cache: crate::label_cache::LabelCache,
+    /// Bitmaps of canvases that are repainted unchanged (see `canvas_cache.rs`).
+    pub(super) canvas_pixels: crate::canvas_cache::CanvasPixelCache,
     pub(super) cursor_x:     f32,
     pub(super) cursor_y:     f32,
     pub(super) drag_active:  bool,

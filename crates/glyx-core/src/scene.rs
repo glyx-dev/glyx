@@ -681,6 +681,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 }
                 // Also clean up canvas data and any running motion for this node.
                 state.canvas_cmds.remove(&id);
+                state.canvas_pixels.invalidate(id);
                 state.transitions.remove(&id);
                 state.animations.remove(&id);
                 state.scroll_springs.remove(&(id, false));
@@ -822,6 +823,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 crate::canvas_export::handle(state, id, req_id, width, height, scale, region, raw);
             }
             SceneCommand::CanvasUpdate { id, cmds, append } => {
+                state.canvas_pixels.invalidate(id);
                 if append {
                     // Overflow continuation: extend the existing command list.
                     // The frame is still being assembled, so nothing eases.
@@ -1416,8 +1418,9 @@ pub(crate) fn update_dirty_from_layout(state: &mut PerWindowState) -> bool {
 /// rect), so a moving/rotating node erases its old pixels.
 ///
 /// Full-frame bailout conditions (correctness over cleverness):
-/// - a dirty node is missing from the tree or has no resolved layout
-///   (just removed / not yet laid out),
+/// - a dirty node exists but has no resolved layout (not yet laid out). A
+///   dirty id that is no longer in the tree (removed) is not a bailout: its
+///   last drawn bounds (`prev_visual`) are repainted, if it was ever drawn,
 /// - `dirty_nodes` is empty (callers treat that as "render everything").
 ///
 /// Scroll handling: a node inside a scrolled ancestor renders at
@@ -1455,7 +1458,13 @@ pub(crate) fn compute_frame_damage(
     };
 
     for &id in &state.dirty_nodes {
-        if !state.js_nodes.contains_key(&id) { return None; }
+        // A node removed this frame that was marked dirty after (or before) it went: repaint where it was last drawn, if it
+        // ever was. Its parent is dirty too, but an overflowing child (a shadow, a tooltip) can reach past the parent. One
+        // removed long ago has nothing on screen any more. Either way this is no reason to repaint the whole window.
+        if !state.js_nodes.contains_key(&id) {
+            if let Some(&(l, t, r, b)) = state.prev_visual.get(&id) { add(&mut rects, l, t, r - l, b - t); }
+            continue;
+        }
 
         // A canvas that changed only in part damages just that part (see
         // `canvas_damage`) — but only while it is where it was, unscrolled and

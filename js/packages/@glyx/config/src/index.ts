@@ -54,6 +54,13 @@ export interface WindowConfig {
    */
   labelCacheEntries?: number;
   /**
+   * Memory budget, in MB (0–256, default 16), of the pixel cache for canvases. A canvas that is repainted unchanged
+   * (because something next to it moved, or a tooltip glided over it) is drawn once into a bitmap and blitted after
+   * that, instead of running its whole drawing again. 0 turns it off. The `GLYX_CANVAS_CACHE_MB` environment variable
+   * overrides it. CPU renderer only (the GPU renderers repaint differently).
+   */
+  canvasCacheMb?: number;
+  /**
    * Frame-rate ceiling (15–500) for continuous redraws: animations, video,
    * drags. Default: the monitor's refresh rate. `60` halves animation CPU on
    * a 120 Hz display. Applies to the CPU renderer; GPU and Direct2D follow

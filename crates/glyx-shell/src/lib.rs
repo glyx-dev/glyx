@@ -248,6 +248,8 @@ pub struct ShellConfig {
     /// small, grows while it thrashes (up to a memory budget) and shrinks when quiet.
     /// Controlled by `labelCacheEntries` in `glyx.config.json` (the `GLYX_LABEL_CACHE` variable overrides it).
     pub label_cache_entries: Option<u32>,
+    /// `canvasCacheMb`: the byte budget (in MB) of the pixel cache for canvases repainted unchanged; 0 turns it off.
+    pub canvas_cache_mb: Option<u32>,
     /// Upper bound on frames per second for continuous redraws (animation,
     /// video, drags). `None` = the monitor's refresh rate. Controlled by
     /// `window.maxFps` in `glyx.config.json`; e.g. 60 halves animation cost
@@ -297,6 +299,7 @@ impl Default for ShellConfig {
             render_mode:  RenderMode::Auto,
             max_js_heap_mb: None,
             label_cache_entries: None,
+            canvas_cache_mb: None,
             max_fps: None,
             canvas_protocol: "binary".into(),
             canvas_buffer_kb: None,

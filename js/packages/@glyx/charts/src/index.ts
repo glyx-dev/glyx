@@ -174,12 +174,15 @@ function _normSeries({ data, series, color, name, palette = DEFAULT_PALETTE }: R
 // New data eases in: each update draws the final chart once, and the native
 // engine moves the previous drawing toward it (a canvas `transition`), so no
 // JavaScript runs per frame. Critically damped: quick, never overshooting the
-// data. It also glides the hover crosshair between points; the speed matches
-// the tooltip card's glide so the two stay together. A resized chart redraws
+// data. (The line and area charts' hover crosshair is not part of this canvas: it
+// has its own narrow layer that glides with the tooltip card, see `_HoverColumn`;
+// the other charts still draw their hover state here.) A resized chart redraws
 // instantly. When a draw gains or loses parts (an axis tick, a label), what
 // lines up still eases and the new or removed parts appear or vanish at once;
 // a data line that gained a point replaces the old one.
 const _DATA_TRANSITION = { spring: { stiffness: 300, damping: 35 } };
+// The hover column's sideways glide: the tooltip card's spring, so the two stay together.
+const _TOOLTIP_GLIDE_X = { spring: { stiffness: 420, damping: 34 }, properties: ['transform'] };
 
 // Segments per pie/donut arc. 48 keeps the rim within 0.1px of a true circle
 // at any size a chart is likely to be, even for a half-circle slice.
@@ -201,6 +204,31 @@ function _ChartCanvas({ width, height, draw, deps, animate = true, exportRef }: 
     ctx.flush();
   }, deps); // eslint-disable-line react-hooks/exhaustive-deps
   return React.createElement(Canvas, { ref, width, height, ...(animate ? { transition: _DATA_TRANSITION } : null) });
+}
+
+/**
+ * A narrow canvas that follows the hovered point and holds only what the hover adds (the crosshair, the point dots). The chart's own
+ * canvas does not redraw when the pointer moves: a hover step used to redraw the whole chart and then ease through about nine more
+ * full-chart frames. Now the column glides sideways on a native `transform` transition (as the tooltip card does) and its few shapes ease
+ * in place, so each frame repaints a strip a few dozen pixels wide.
+ * `draw(ctx, cx)` paints with the point's x at `cx`, in the column's own coordinates; y is the chart's.
+ */
+function _HoverColumn({ x, top, width, height, draw, deps }: Record<string, any>) {
+  if (x == null) return null;
+  const cx = width / 2; // `width` is even, so the crosshair's centre is a whole pixel
+  return React.createElement(
+    View,
+    {
+      style: { position: 'absolute', left: 0, top, width, height, transform: `translate(${Math.round(x - cx)}px, 0px)` },
+      pointerEvents: 'none',
+      transition: _TOOLTIP_GLIDE_X,
+    },
+    React.createElement(_ChartCanvas, {
+      width, height,
+      draw: (ctx: any) => { ctx.save(); ctx.translate(0, -top); draw(ctx, cx); ctx.restore(); },
+      deps: [top, width, height, ...deps],
+    }),
+  );
 }
 
 // ── Public types ───────────────────────────────────
@@ -912,12 +940,13 @@ function _lineChart(kind: string, props: any) {
   } = props;
   const T = _theme(theme);
   const area = kind === 'area';
-  const allSeries = _normSeries({ ...props, palette });
+  // Stable between renders unless the data changes, so a hover (a state change) does not look like new data to the canvas.
+  const allSeries = useMemo(() => _normSeries({ ...props, palette }), [props.data, props.series, props.color, props.name, palette]); // eslint-disable-line react-hooks/exhaustive-deps
   const full = allSeries[0].data;
   const zp = _useZoomPan(full.length, { trackWidth: width - 60 });
   const lo = zoomPan ? zp.start : 0;
   const hi = zoomPan ? zp.start + zp.count : full.length;
-  const series = allSeries.map((s) => ({ ...s, data: s.data.slice(lo, hi) }));
+  const series = useMemo(() => allSeries.map((s) => ({ ...s, data: s.data.slice(lo, hi) })), [allSeries, lo, hi]);
   const n = series[0].data.length;
   const [active, setActive] = useState<any>(null);
   const activeIdx = active != null && active < n ? active : null;
@@ -996,24 +1025,29 @@ function _lineChart(kind: string, props: any) {
       ctx.strokeLine(PAD.left, y, PAD.left + W, y);
     }
 
-    if (activeIdx != null) {
-      const x = toX(activeIdx);
-      ctx.strokeStyle = T.crosshair; ctx.lineWidth = 1;
-      _dashedVLine(ctx, Math.round(x) + 0.5, PAD.top, PAD.top + H);
-      series.forEach((s) => {
-        const d = s.data[activeIdx];
-        if (!d) return;
-        const y = toY(stack ? upper[series.indexOf(s)][activeIdx] : d.y);
-        ctx.fillStyle = _rgba(s.color, 0.22); ctx.fillCircle(x, y, lineWidth + 7);
-        ctx.fillStyle = T.surface;            ctx.fillCircle(x, y, lineWidth + 3.5);
-        ctx.fillStyle = s.color;              ctx.fillCircle(x, y, lineWidth + 1.5);
-      });
-    }
-
     if (showLabels) {
       _drawXLabels(ctx, series[0].data.map((d: any) => formatLabel(d.x)), series[0].data.map((_: any, i: any) => toX(i)), L, T);
     }
   };
+
+  // The crosshair and the dots on the hovered point, in their own narrow canvas (see `_HoverColumn`).
+  const drawHover = (ctx: any, x: number) => {
+    if (activeIdx == null) return;
+    const { PAD, H, toY } = layout;
+    ctx.strokeStyle = T.crosshair; ctx.lineWidth = 1;
+    _dashedVLine(ctx, Math.round(x) + 0.5, PAD.top, PAD.top + H);
+    series.forEach((s, k) => {
+      const d = s.data[activeIdx];
+      if (!d) return;
+      const y = toY(stack ? upper[k][activeIdx] : d.y);
+      ctx.fillStyle = _rgba(s.color, 0.22); ctx.fillCircle(x, y, lineWidth + 7);
+      ctx.fillStyle = T.surface;            ctx.fillCircle(x, y, lineWidth + 3.5);
+      ctx.fillStyle = s.color;              ctx.fillCircle(x, y, lineWidth + 1.5);
+    });
+  };
+  const hoverW = 2 * Math.ceil(lineWidth + 9);
+  const hoverTop = Math.max(0, layout.PAD.top - lineWidth - 8);
+  const hoverH = Math.min(chartH, layout.PAD.top + layout.H + lineWidth + 8) - hoverTop;
 
   const pick = (lx: number) => {
     if (n === 0) return null;
@@ -1051,7 +1085,11 @@ function _lineChart(kind: string, props: any) {
     { style: { width, height: chartH, position: 'relative' }, _glyxOnMount: zoomPan ? zp.onMount : undefined },
     React.createElement(_ChartCanvas, {
       width, height: chartH, draw, animate, exportRef: props.exportRef,
-      deps: [series, width, chartH, lineWidth, showGrid, showLabels, dots, smooth, activeIdx, stack, T, props.gridDash, props.labelRotation, props.glow],
+      deps: [series, width, chartH, lineWidth, showGrid, showLabels, dots, smooth, stack, T, props.gridDash, props.labelRotation, props.glow],
+    }),
+    React.createElement(_HoverColumn, {
+      x: activeIdx != null && n > 0 ? layout.toX(activeIdx) : null, top: hoverTop, width: hoverW, height: hoverH,
+      draw: drawHover, deps: [series, activeIdx, lineWidth, stack, T],
     }),
     React.createElement(_Interaction, {
       width, height: chartH, T, count: n, pick, active: activeIdx, setActive,
@@ -1895,4 +1933,4 @@ function _CandlestickChartInner(props: any) {
  */
 export function CandlestickChart(props: CandlestickChartProps): React.ReactElement { return _fit(_CandlestickChartInner, props); }
 
-export const _internals = { _sparkPoints, _scatterPoints, _bubbleRadius, _nearestPoint, _candle, _barScale, _barSegments, _barSlots, _niceScale, _niceStep, _fmt, _fmtTick, _normSeries, _theme, _cartesianSummary, _ChartStream, _smoothPath, _curveSegments, _zoomWindow, _cumulative, _cartesianLayout, _drawYAxis, _drawXLabels, _gridDash };
+export const _internals = { _sparkPoints, _scatterPoints, _bubbleRadius, _nearestPoint, _candle, _barScale, _barSegments, _barSlots, _niceScale, _niceStep, _fmt, _fmtTick, _normSeries, _theme, _cartesianSummary, _ChartStream, _smoothPath, _curveSegments, _zoomWindow, _cumulative, _cartesianLayout, _drawYAxis, _drawXLabels, _gridDash, _HoverColumn };

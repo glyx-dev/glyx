@@ -21,6 +21,8 @@ pub(crate) struct RenderCtx<'a> {
     /// Interpolated command lists for canvases easing toward new data: drawn
     /// in place of `canvas_cmds` (their target) while they move.
     pub canvas_anim: &'a std::collections::HashMap<u32, Vec<CanvasCmd>>,
+    /// Bitmaps of canvases that were repainted unchanged (see `canvas_cache.rs`).
+    pub canvas_pixels: &'a mut crate::canvas_cache::CanvasPixelCache,
     /// Accumulated (canvas3d_id, x, y, w, h) for post-Vello 3D overlay rendering.
     #[cfg(feature = "canvas3d")]
     pub canvas3d_overlays: &'a mut Vec<(u32, f32, f32, f32, f32)>,
@@ -617,12 +619,41 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
             // A partial repaint that misses the canvas skips its commands: turning a busy drawing into geometry
             // (strokes, shadows, glyph outlines) costs far more than the few pixels the repaint touches.
             let off_screen = ctx.frame.is_outside_damage(rx, ry, rw, rh);
+            let easing = ctx.canvas_anim.contains_key(&id);
             if let Some(cmds) = ctx.canvas_anim.get(&id).or_else(|| ctx.canvas_cmds.get(&id)).filter(|_| !off_screen) {
+                // A canvas repainted unchanged next to something that moves is blitted from a bitmap (see `canvas_cache`).
+                // Only when the bitmap is exactly what drawing it would give: a partial repaint, a whole-pixel position, a
+                // fully opaque node, and no easing in progress.
+                let at = [rx.round() as i32, ry.round() as i32, rw.round() as i32, rh.round() as i32];
+                let whole = (rx - at[0] as f64).abs() < 0.01 && (ry - at[1] as f64).abs() < 0.01
+                    && (rw - at[2] as f64).abs() < 0.01 && (rh - at[3] as f64).abs() < 0.01;
+                let mut keep = false;
+                if whole && !easing && child_opacity >= 0.999 && ctx.frame.is_partial() {
+                    match ctx.canvas_pixels.plan(id, at, cmds) {
+                        crate::canvas_cache::Plan::Blit(px) => {
+                            ctx.frame.draw_premul_pixels(px, at[2] as u32, at[3] as u32, at[0], at[1]);
+                            ctx.frame.pop_layer();
+                            return;
+                        }
+                        crate::canvas_cache::Plan::PaintAndCache => keep = true,
+                        crate::canvas_cache::Plan::Paint => {}
+                    }
+                }
+                if keep {
+                    // Drawn once on its own, then blitted: the same pixels, kept for the next repaint.
+                    let px = crate::canvas_export::render_premul(
+                        cmds, ctx.images, &mut *ctx.text_sys, &mut *ctx.label_cache,
+                        at[2] as u32, at[3] as u32, peniko::kurbo::Affine::IDENTITY, None,
+                    );
+                    ctx.frame.draw_premul_pixels(&px, at[2] as u32, at[3] as u32, at[0], at[1]);
+                    ctx.canvas_pixels.store(id, px);
+                } else {
                 // The painter keeps the canvas's drawing state (transform, alpha, line style, ...) and closes
                 // any clip or blend the list leaves open, so an unbalanced list cannot leak into the frame.
                 crate::canvas_paint::Painter::new(
                     &mut *ctx.frame, &mut *ctx.text_sys, &mut *ctx.label_cache, ctx.images, (rx, ry), child_opacity,
                 ).erasing_to(eff_bg).paint_all(cmds);
+                }
             }
             ctx.frame.pop_layer();
         }

@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, Text, ScrollView, render } from '@glyx-dev/react';
 import {
-  LineChart, AreaChart, BarChart, ScatterChart, CandlestickChart, Sparkline,
+  LineChart, AreaChart, BarChart, PieChart, ScatterChart, CandlestickChart, Sparkline,
 } from '@glyx-dev/charts';
 
 // One of every chart. Charts sized '100%' measure the panel they sit in and
@@ -36,6 +36,11 @@ const CANDLES = (() => {
     return { x: `D${i + 1}`, open, high, low, close };
   });
 })();
+
+const LONG_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const SHARE = [
+  { x: 'Direct', y: 38 }, { x: 'Search', y: 27 }, { x: 'Social', y: 19 }, { x: 'Email', y: 11 }, { x: 'Other', y: 5 },
+];
 
 const POINTS = [
   { name: 'Small', color: '#4C8DF6', data: walk(18, 11, 2).map((p, i) => ({ x: 10 + i * 4 + (p.y % 5), y: p.y })) },
@@ -77,6 +82,18 @@ function App() {
           <Stat label="Visits" value="12.4k" data={trend} color="#4C8DF6" />
           <Stat label="Signups" value="831" data={walk(24, 5).map((p) => p.y)} color="#22C29B" />
           <Stat label="Errors" value="17" data={walk(24, 9).map((p) => p.y)} color="#EC5D78" />
+        </Row>
+
+        <Row>
+          <Panel title="Dashed grid, glow, labels turned 35°">
+            <LineChart
+              data={LONG_MONTHS.map((x, i) => ({ x, y: Math.round(40 + 18 * Math.sin(i * 0.7)) }))}
+              width="100%" height={250} gridDash glow labelRotation={35}
+            />
+          </Panel>
+          <Panel title="Radial shading">
+            <PieChart data={SHARE} innerRadius={0.6} shade="radial" width="100%" height={250} showLegend />
+          </Panel>
         </Row>
 
         <Row>

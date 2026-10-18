@@ -615,6 +615,12 @@ impl TinySkiaFrame {
         }).collect())
     }
 
+    /// Whether a box (in the current coordinates) lies wholly outside this
+    /// frame's damage, so drawing it would change nothing. Lets a caller skip
+    /// the work of *preparing* a drawing, not just rasterizing it. Always
+    /// false on a full-window frame.
+    pub fn is_outside_damage(&self, x: f64, y: f64, w: f64, h: f64) -> bool { self.culled(x, y, w, h) }
+
     /// True when a draw with the given bbox lies entirely outside the damage
     /// region and can be skipped (the base mask would zero it anyway; this
     /// avoids the rasterization work).
@@ -1949,6 +1955,22 @@ mod transform_tests {
         frame.pop_transform();
         assert!(is_red(px(&frame, 45, 5)), "inside the moved clip");
         assert!(!is_red(px(&frame, 55, 5)), "clipped by the moved clip rect");
+    }
+
+    #[test]
+    fn a_box_outside_the_damage_can_be_skipped_before_it_is_built() {
+        let mut r = TinySkiaRenderer::new_cpu_only(64, 16);
+        let seed = r.begin_frame();
+        r.finish_frame_soft(seed, |_, _, _, _| {});
+        let frame = r.begin_frame_damaged(Some(&[(20.0, 0.0, 20.0, 16.0)]));
+        assert!(frame.is_outside_damage(0.0, 0.0, 10.0, 16.0));
+        assert!(frame.is_outside_damage(45.0, 0.0, 15.0, 16.0));
+        assert!(!frame.is_outside_damage(10.0, 0.0, 15.0, 16.0), "straddling the edge still draws");
+        assert!(!frame.is_outside_damage(25.0, 2.0, 4.0, 4.0));
+        drop(frame);
+        let mut r = TinySkiaRenderer::new_cpu_only(64, 16);
+        let full = r.begin_frame();
+        assert!(!full.is_outside_damage(0.0, 0.0, 10.0, 16.0), "a full frame draws everything");
     }
 
     #[test]

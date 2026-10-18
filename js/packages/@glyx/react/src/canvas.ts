@@ -725,11 +725,12 @@ export class GlyxCanvasContext {
     }
   }
 
-  quadraticCurveTo(cpx: number, cpy: number, x: number, y: number) {
+  /** Quadratic curve to (x, y), split into line segments: 16 by default; pass `segments` for fewer on short curves (a freehand stroke has many). */
+  quadraticCurveTo(cpx: number, cpy: number, x: number, y: number, segments?: number) {
     const n = this._path.length;
     const x0 = n >= 2 ? this._path[n - 2] : cpx;
     const y0 = n >= 2 ? this._path[n - 1] : cpy;
-    const segs = 16;
+    const segs = segments && segments > 0 ? Math.ceil(segments) : 16;
     for (let i = 1; i <= segs; i++) {
       const t = i / segs, mt = 1 - t;
       this._path.push(mt * mt * x0 + 2 * mt * t * cpx + t * t * x,

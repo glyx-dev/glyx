@@ -662,6 +662,16 @@ impl AnyFrame {
         matches!(self, AnyFrame::Vello(_))
     }
 
+    /// Whether a box lies wholly outside the area this frame repaints (only
+    /// the CPU renderer redraws part of the window), so a drawing there can
+    /// be skipped before any of its geometry is built.
+    pub fn is_outside_damage(&self, x: f64, y: f64, w: f64, h: f64) -> bool {
+        match self {
+            AnyFrame::TinySkia(f) => f.is_outside_damage(x, y, w, h),
+            _ => false,
+        }
+    }
+
 
     pub fn fill_rounded_rect(&mut self, x: f64, y: f64, w: f64, h: f64,
                               radius: f64, color: Color) {

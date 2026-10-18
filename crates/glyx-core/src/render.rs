@@ -614,7 +614,10 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
             }
             // Clip all canvas draw commands to the node's layout rect.
             ctx.frame.push_layer(rx, ry, rw, rh);
-            if let Some(cmds) = ctx.canvas_anim.get(&id).or_else(|| ctx.canvas_cmds.get(&id)) {
+            // A partial repaint that misses the canvas skips its commands: turning a busy drawing into geometry
+            // (strokes, shadows, glyph outlines) costs far more than the few pixels the repaint touches.
+            let off_screen = ctx.frame.is_outside_damage(rx, ry, rw, rh);
+            if let Some(cmds) = ctx.canvas_anim.get(&id).or_else(|| ctx.canvas_cmds.get(&id)).filter(|_| !off_screen) {
                 // The painter keeps the canvas's drawing state (transform, alpha, line style, ...) and closes
                 // any clip or blend the list leaves open, so an unbalanced list cannot leak into the frame.
                 crate::canvas_paint::Painter::new(

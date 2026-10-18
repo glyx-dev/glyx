@@ -43,4 +43,13 @@ Charts are drawn with the Canvas path API (fill/stroke/arc + fillText) and only 
 `width`/`height` accept a percentage string (`'100%'`) to follow the container. `AreaChart` takes `stacked`; `zoomPan` charts also zoom with Ctrl + wheel.
 - `Legend({ items, onToggle, disabled, style })` — standalone legend, with optional series toggling (`onToggle`) and a `disabled` list to grey out hidden series.
 
+Finishing touches (all off by default): `gridDash` dashes the gridlines, `labelRotation` (degrees, or `'auto'`) turns crowded x labels, `glow` lights a line, `shade="radial"` shades pie slices. To save a chart as an image, pass `exportRef` and read it once the chart is up:
+
+```jsx
+const chart = useRef(null);
+<LineChart data={data} exportRef={chart} />
+// later, in a handler:
+const png = await chart.current.toPNG();          // Uint8Array; also toDataURL() and toBlob()
+```
+
 All chart components take `data`, `width`, and `height` at minimum; consult each component's props type (`LineChartProps`, `BarChartProps`, ...) for series-specific options (colors, axis formatting, hover/tooltip behavior).

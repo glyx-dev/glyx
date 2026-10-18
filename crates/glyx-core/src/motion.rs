@@ -883,8 +883,10 @@ fn cmd_nums(c: &CanvasCmd, out: &mut Vec<f32>) {
             out.extend(stops.iter().map(|(o, _)| *o));
         }
         PushClip { x, y, w, h } => out.extend([*x, *y, *w, *h]),
-        // The drawing-state commands, images and brush fills do not animate: they take the new value at once.
-        Save | Restore | Transform { .. } | GlobalAlpha { .. } | Blend { .. } | LineStyle { .. } | Shadow { .. }
+        Transform { m } => out.extend(*m),
+        GlobalAlpha { alpha } => out.push(*alpha),
+        // The other drawing-state commands, images and brush fills do not animate: they take the new value at once.
+        Save | Restore | Blend { .. } | LineStyle { .. } | Shadow { .. }
         | DrawImage { .. } | FillPathBrush { .. } | StrokePathBrush { .. } | FillPaths { .. } | ClipPath { .. } => {}
     }
 }
@@ -899,14 +901,14 @@ fn same_shape(a: &CanvasCmd, b: &CanvasCmd) -> bool {
         (FillRect { .. }, FillRect { .. }) | (StrokeRect { .. }, StrokeRect { .. })
         | (FillCircle { .. }, FillCircle { .. }) | (StrokeCircle { .. }, StrokeCircle { .. })
         | (StrokeLine { .. }, StrokeLine { .. }) | (FillText { .. }, FillText { .. })
-        | (PushClip { .. }, PushClip { .. }) => true,
+        | (PushClip { .. }, PushClip { .. }) | (Transform { .. }, Transform { .. }) | (GlobalAlpha { .. }, GlobalAlpha { .. }) => true,
         (FillPath { points: p, .. }, FillPath { points: q, .. }) => p.len() == q.len(),
         (StrokePath { points: p, .. }, StrokePath { points: q, .. }) => p.len() == q.len(),
         (FillPathGradient { points: p, stops: s, .. }, FillPathGradient { points: q, stops: t, .. }) => p.len() == q.len() && s.len() == t.len(),
-        // Drawing state and the commands that do not animate line up only with an identical command, so the
+        // The other drawing state and the commands that do not animate line up only with an identical command, so the
         // commands around them still pair and ease, and a change in one of them applies at once.
         (Save, Save) | (Restore, Restore) => true,
-        (Transform { .. }, Transform { .. }) | (GlobalAlpha { .. }, GlobalAlpha { .. }) | (Blend { .. }, Blend { .. })
+        (Blend { .. }, Blend { .. })
         | (LineStyle { .. }, LineStyle { .. }) | (Shadow { .. }, Shadow { .. }) | (DrawImage { .. }, DrawImage { .. })
         | (FillPathBrush { .. }, FillPathBrush { .. }) | (StrokePathBrush { .. }, StrokePathBrush { .. })
         | (FillPaths { .. }, FillPaths { .. }) | (ClipPath { .. }, ClipPath { .. }) => a == b,
@@ -947,6 +949,10 @@ fn lerp_cmd(a: &CanvasCmd, b: &CanvasCmd, t: f32) -> CanvasCmd {
             },
         (PushClip { x: ax, y: ay, w: aw, h: ah }, PushClip { x, y, w, h }) =>
             PushClip { x: l(*ax, *x), y: l(*ay, *y), w: pos(*aw, *w), h: pos(*ah, *h) },
+        // A transform eases entry by entry (rotated chart labels keep their angle and glide to their new place), and
+        // the global alpha fades.
+        (Transform { m: p }, Transform { m: q }) => Transform { m: std::array::from_fn(|i| l(p[i], q[i])) },
+        (GlobalAlpha { alpha: p }, GlobalAlpha { alpha: q }) => GlobalAlpha { alpha: l(*p, *q).clamp(0.0, 1.0) },
         // Not same-shape: take the new command whole.
         (_, b) => b.clone(),
     }
@@ -1791,6 +1797,22 @@ mod tests {
         assert!(align(&a, &b).is_none(), "600 x 700 commands is past the search cap");
         // The same-length fast path needs no search at any size.
         assert!(align(&many(2000), &many(2000)).is_some());
+    }
+
+    #[test]
+    fn transforms_and_global_alpha_ease() {
+        use CanvasCmd::*;
+        let a = Transform { m: [1.0, 0.0, 0.0, 1.0, 10.0, 20.0] };
+        let b = Transform { m: [1.0, 0.0, 0.0, 1.0, 30.0, 60.0] };
+        assert!(same_shape(&a, &b));
+        assert_eq!(lerp_cmd(&a, &b, 0.5), Transform { m: [1.0, 0.0, 0.0, 1.0, 20.0, 40.0] });
+        assert_eq!(lerp_cmd(&GlobalAlpha { alpha: 0.0 }, &GlobalAlpha { alpha: 1.0 }, 0.25), GlobalAlpha { alpha: 0.25 });
+        // A spring overshoot never takes the alpha out of range.
+        assert_eq!(lerp_cmd(&GlobalAlpha { alpha: 0.5 }, &GlobalAlpha { alpha: 1.0 }, 1.4), GlobalAlpha { alpha: 1.0 });
+        let mut v = Vec::new();
+        cmd_nums(&a, &mut v);
+        cmd_nums(&GlobalAlpha { alpha: 1.0 }, &mut v);
+        assert_eq!(v.len(), 7);
     }
 
     #[test]

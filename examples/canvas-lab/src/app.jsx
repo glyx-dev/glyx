@@ -211,9 +211,17 @@ function App() {
     ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#ffd866';
     for (const s of strokes.current) {
       ctx.lineWidth = 3;
+      if (s.length === 1) { ctx.fillCircle(s[0].x, s[0].y, 1.5); continue; }
+      // The mouse reports a few positions a frame, so joining them with straight lines looks angular. Smooth it: a
+      // curve through the midpoints of the samples, each sample a control point (the usual freehand trick).
       ctx.beginPath();
-      s.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-      if (s.length === 1) ctx.fillCircle(s[0].x, s[0].y, 1.5); else ctx.stroke();
+      ctx.moveTo(s[0].x, s[0].y);
+      for (let i = 1; i < s.length - 1; i++) {
+        const mx = (s[i].x + s[i + 1].x) / 2, my = (s[i].y + s[i + 1].y) / 2;
+        ctx.quadraticCurveTo(s[i].x, s[i].y, mx, my, 6);
+      }
+      ctx.lineTo(s[s.length - 1].x, s[s.length - 1].y);
+      ctx.stroke();
     }
     ctx.flush();
   }, []);

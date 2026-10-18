@@ -185,8 +185,14 @@ const _DATA_TRANSITION = { spring: { stiffness: 300, damping: 35 } };
 // at any size a chart is likely to be, even for a half-circle slice.
 const _ARC_SEGMENTS = 48;
 
-function _ChartCanvas({ width, height, draw, deps, animate = true }: Record<string, any>) {
+function _ChartCanvas({ width, height, draw, deps, animate = true, exportRef }: Record<string, any>) {
   const ref = useRef<any>(null);
+  // Hand the canvas's export methods (toDataURL / toPNG / toBlob) to the caller's `exportRef`.
+  useEffect(() => {
+    const api = ref.current;
+    if (typeof exportRef === 'function') { exportRef(api); return () => exportRef(null); }
+    if (exportRef) { exportRef.current = api; return () => { exportRef.current = null; }; }
+  }, [exportRef]);
   useEffect(() => {
     const ctx = ref.current;
     if (!ctx) return;
@@ -234,7 +240,20 @@ export interface ChartBaseProps {
   showTooltip?:   boolean;
   /** Glide the tooltip between points (default true). */
   tooltipMotion?: boolean;
+  /**
+   * Receives the chart's canvas once it is up, so the chart can be saved:
+   * `await ref.current.toPNG()` (PNG bytes), `toDataURL()` or `toBlob()`. A ref object or a callback.
+   */
+  exportRef?:     ChartExportRef;
 }
+
+/** The export methods of a chart's canvas (see `exportRef`). All are asynchronous: the picture is rendered on the CPU. */
+export interface ChartExport {
+  toPNG(options?: { scale?: number }): Promise<Uint8Array>;
+  toDataURL(type?: string, options?: { scale?: number }): Promise<string>;
+  toBlob(): Promise<{ type: string; size: number; bytes: Uint8Array }>;
+}
+export type ChartExportRef = { current: ChartExport | null } | ((api: ChartExport | null) => void);
 
 /** Props shared by the charts that draw one or more series against axes. */
 export interface CartesianChartProps<P = ChartPoint> extends ChartBaseProps {
@@ -255,6 +274,13 @@ export interface CartesianChartProps<P = ChartPoint> extends ChartBaseProps {
   formatValue?:  (value: number) => string;
   /** Formats an x-axis label. */
   formatLabel?:  (x: string | number) => string;
+  /** Draw the gridlines dashed: `true` for 4 on / 4 off, or your own `[on, off, ...]` lengths (default solid). */
+  gridDash?:     boolean | number[];
+  /**
+   * Turn the x-axis labels, in degrees (45 reads up to the right). `'auto'` turns them 45 degrees only when they would
+   * otherwise overlap. The chart makes room below the plot. Default 0 (they are thinned instead).
+   */
+  labelRotation?: number | 'auto';
   /** Called when a point is pressed (or activated from the keyboard). */
   onPointPress?: (point: P, index: number) => void;
 }
@@ -265,6 +291,8 @@ export interface LineChartProps extends CartesianChartProps {
   showDots?:  boolean;
   /** Round the corners of the line (default true). */
   smooth?:    boolean;
+  /** A soft glow of the line's colour around each line (default off). */
+  glow?:      boolean;
   /** Zoom with Ctrl + wheel and pan by dragging, with zoom buttons. */
   zoomPan?:   boolean;
 }
@@ -293,6 +321,8 @@ export interface PieChartProps extends ChartBaseProps {
   palette?:      string[];
   /** Above 0 draws a donut: the hole's radius as a fraction of the pie's (0 to 1). */
   innerRadius?:  number;
+  /** `'radial'` shades each slice lighter towards the middle (default `'flat'`). */
+  shade?:        'flat' | 'radial';
   showLegend?:   boolean;
   /** The caption in a donut's hole (default `'Total'`). */
   centerLabel?:  string;
@@ -530,18 +560,35 @@ function _roundRectPath(ctx: any, x: number, y: number, w: number, h: number, rT
 }
 
 function _dashedVLine(ctx: any, x: number, y0: number, y1: number, dash = 4, gap = 4) {
-  for (let y = y0; y < y1; y += dash + gap) ctx.strokeLine(x, y, x, Math.min(y + dash, y1));
+  ctx.setLineDash([dash, gap]);
+  ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+/** The `gridDash` prop as dash lengths, or null for solid lines. */
+function _gridDash(v: any): number[] | null {
+  if (Array.isArray(v)) return v.length ? v : null;
+  return v ? [4, 4] : null;
 }
 
 /** Horizontal gridlines + Y tick labels (right-aligned, left of the plot). */
-function _drawYAxis(ctx: any, L: any, T: any, { showGrid, showLabels }: { showGrid: any; showLabels: any; }) {
+function _drawYAxis(ctx: any, L: any, T: any, { showGrid, showLabels, gridDash }: { showGrid: any; showLabels: any; gridDash?: any; }) {
   const { PAD, W, scale, toY } = L;
+  const dash = _gridDash(gridDash);
   ctx.lineWidth = 1;
   for (const v of scale.ticks) {
     const y = Math.round(toY(v)) + 0.5;
     if (showGrid) {
-      ctx.strokeStyle = v === 0 && scale.lo < 0 ? T.baseline : T.grid;
-      ctx.strokeLine(PAD.left, y, PAD.left + W, y);
+      const zero = v === 0 && scale.lo < 0;
+      ctx.strokeStyle = zero ? T.baseline : T.grid;
+      // The zero line stays solid so it reads as the axis.
+      if (dash && !zero) {
+        ctx.setLineDash(dash);
+        ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + W, y); ctx.stroke();
+        ctx.setLineDash([]);
+      } else {
+        ctx.strokeLine(PAD.left, y, PAD.left + W, y);
+      }
     }
     if (showLabels) {
       ctx.fillStyle = T.label;
@@ -554,10 +601,26 @@ function _drawYAxis(ctx: any, L: any, T: any, { showGrid, showLabels }: { showGr
 
 /**
  * X labels centred under their positions, thinned so they never overlap and
- * nudged inside the chart at both ends (no clipped first/last label).
+ * nudged inside the chart at both ends (no clipped first/last label). When the
+ * layout turned them (`L.labelAngle`, radians) each ends at its tick instead.
  */
 function _drawXLabels(ctx: any, labels: any[], xs: any, L: any, T: any) {
   const { PAD, H, width } = L;
+  if (L.labelAngle) {
+    const spacing = xs.length > 1 ? Math.abs(xs[1] - xs[0]) : Infinity;
+    const step = Math.max(1, Math.ceil(14 / (spacing * Math.sin(Math.abs(L.labelAngle)))));
+    ctx.fillStyle = T.label;
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    for (let i = 0; i < labels.length; i += step) {
+      ctx.save();
+      ctx.translate(xs[i] + 3, PAD.top + H + 9);
+      ctx.rotate(-L.labelAngle);
+      ctx.fillText(labels[i], 0, 0, 11);
+      ctx.restore();
+    }
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    return;
+  }
   const widths = labels.map((s: any) => _textW(s, 11));
   const maxW = Math.max(1, ...widths);
   const spacing = xs.length > 1 ? Math.abs(xs[1] - xs[0]) : Infinity;
@@ -813,7 +876,7 @@ function _ZoomControls({ T, onZoomIn, onZoomOut, onReset }: Record<string, any>)
 
 // ── Line & Area ─────────────────────────────────────────────────────────────
 
-function _cartesianLayout({ width, height, scale, showLabels, xCount, topPad = 14, band = false }: Record<string, any>) {
+function _cartesianLayout({ width, height, scale, showLabels, xCount, topPad = 14, band = false, xLabels, labelRotation }: Record<string, any>) {
   const yLabelW = showLabels ? Math.max(...scale.ticks.map((v: any) => _textW(_fmtTick(v, scale.step), 11))) : 0;
   const PAD = {
     top: topPad,
@@ -822,13 +885,23 @@ function _cartesianLayout({ width, height, scale, showLabels, xCount, topPad = 1
     left: showLabels ? Math.ceil(yLabelW) + 18 : 8,
   };
   const W = Math.max(1, width - PAD.left - PAD.right);
+  // Turned x labels: 'auto' turns them 45 degrees only when horizontal ones would collide; the room they take
+  // under the plot is their widest label's height once turned.
+  let labelAngle = 0;
+  if (showLabels && labelRotation && xLabels && xLabels.length) {
+    const maxW = Math.max(...xLabels.map((s: any) => _textW(s, 11)));
+    const slot = band ? W / xCount : W / Math.max(1, xCount - 1);
+    const deg = labelRotation === 'auto' ? (maxW + 14 > slot ? 45 : 0) : Number(labelRotation) || 0;
+    labelAngle = Math.max(-90, Math.min(90, deg)) * Math.PI / 180;
+    if (labelAngle) PAD.bottom += Math.ceil(maxW * Math.sin(Math.abs(labelAngle)) + 11 * Math.cos(Math.abs(labelAngle)) - 11);
+  }
   const H = Math.max(1, height - PAD.top - PAD.bottom);
   const toY = (v: number) => PAD.top + H - ((v - scale.lo) / (scale.hi - scale.lo || 1)) * H;
   const slot = xCount > 0 ? W / xCount : W;
   const toX = band
     ? (i: number) => PAD.left + slot * i + slot / 2
     : (i: number) => PAD.left + (xCount <= 1 ? W / 2 : (i / (xCount - 1)) * W);
-  return { PAD, W, H, width, height, scale, toX, toY, slot };
+  return { PAD, W, H, width, height, scale, toX, toY, slot, labelAngle };
 }
 
 function _lineChart(kind: string, props: any) {
@@ -860,8 +933,11 @@ function _lineChart(kind: string, props: any) {
   const layout = useMemo(() => {
     const ys = (stack ? upper.flat() : series.flatMap((s) => s.data.map((d: any) => d.y))).filter(Number.isFinite);
     const scale = _niceScale(Math.min(...ys), Math.max(...ys), { zero: area });
-    return _cartesianLayout({ width, height: chartH, scale, showLabels, xCount: n, topPad: zoomPan ? 30 : 14 });
-  }, [series, width, chartH, showLabels, n, area, zoomPan, stack]); // eslint-disable-line react-hooks/exhaustive-deps
+    return _cartesianLayout({
+      width, height: chartH, scale, showLabels, xCount: n, topPad: zoomPan ? 30 : 14,
+      xLabels: props.labelRotation ? series[0].data.map((d: any) => formatLabel(d.x)) : null, labelRotation: props.labelRotation,
+    });
+  }, [series, width, chartH, showLabels, n, area, zoomPan, stack, props.labelRotation]); // eslint-disable-line react-hooks/exhaustive-deps
 
   zp.plot.current = { left: layout.PAD.left, width: layout.W };
   const dots = showDots ?? n <= 14;
@@ -869,7 +945,7 @@ function _lineChart(kind: string, props: any) {
     if (n === 0) return;
     const L = layout;
     const { PAD, W, H, toX, toY } = L;
-    _drawYAxis(ctx, L, T, { showGrid, showLabels });
+    _drawYAxis(ctx, L, T, { showGrid, showLabels, gridDash: props.gridDash });
 
     ctx.pushClip(PAD.left - lineWidth * 2, PAD.top - lineWidth * 3, W + lineWidth * 4, H + lineWidth * 3 + 1);
     const baseY = toY(Math.max(layout.scale.lo, Math.min(0, layout.scale.hi)));
@@ -902,7 +978,9 @@ function _lineChart(kind: string, props: any) {
       if (smooth) _smoothPath(ctx, pts); else _polyline(ctx, pts);
       ctx.strokeStyle = s.color;
       ctx.lineWidth = lineWidth;
+      if (props.glow) { ctx.shadowColor = _rgba(s.color, 0.55); ctx.shadowBlur = 10; }
       ctx.stroke();
+      ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
       if (dots) {
         pts.forEach(([x, y]: any) => {
           ctx.fillStyle = T.surface; ctx.fillCircle(x, y, lineWidth + 2);
@@ -972,8 +1050,8 @@ function _lineChart(kind: string, props: any) {
     View,
     { style: { width, height: chartH, position: 'relative' }, _glyxOnMount: zoomPan ? zp.onMount : undefined },
     React.createElement(_ChartCanvas, {
-      width, height: chartH, draw, animate,
-      deps: [series, width, chartH, lineWidth, showGrid, showLabels, dots, smooth, activeIdx, stack, T],
+      width, height: chartH, draw, animate, exportRef: props.exportRef,
+      deps: [series, width, chartH, lineWidth, showGrid, showLabels, dots, smooth, activeIdx, stack, T, props.gridDash, props.labelRotation, props.glow],
     }),
     React.createElement(_Interaction, {
       width, height: chartH, T, count: n, pick, active: activeIdx, setActive,
@@ -1103,15 +1181,18 @@ function _BarChartInner(props: any) {
 
   const layout = useMemo(() => {
     const scale = _barScale(series, stack);
-    return _cartesianLayout({ width, height: chartH, scale, showLabels, xCount: n, band: true });
-  }, [series, width, chartH, showLabels, n, stack]); // eslint-disable-line react-hooks/exhaustive-deps
+    return _cartesianLayout({
+      width, height: chartH, scale, showLabels, xCount: n, band: true,
+      xLabels: props.labelRotation ? rows.map((d: any) => formatLabel(d.x)) : null, labelRotation: props.labelRotation,
+    });
+  }, [series, width, chartH, showLabels, n, stack, props.labelRotation]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const slots = _barSlots(layout.slot, series.length, stack);
   const draw = (ctx: any) => {
     if (n === 0) return;
     const L = layout;
     const { toX, toY } = L;
-    _drawYAxis(ctx, L, T, { showGrid, showLabels });
+    _drawYAxis(ctx, L, T, { showGrid, showLabels, gridDash: props.gridDash });
     const zeroY = toY(0);
     rows.forEach((_: any, i: any | null) => {
       const dim = activeIdx != null && i !== activeIdx;
@@ -1186,7 +1267,8 @@ function _BarChartInner(props: any) {
       View,
       { style: { width, height: chartH, position: 'relative' } },
       React.createElement(_ChartCanvas, {
-        width, height: chartH, draw, animate, deps: [series, width, chartH, showGrid, showLabels, activeIdx, stack, T],
+        width, height: chartH, draw, animate, exportRef: props.exportRef,
+        deps: [series, width, chartH, showGrid, showLabels, activeIdx, stack, T, props.gridDash, props.labelRotation],
       }),
       React.createElement(_Interaction, {
         width, height: chartH, T, count: n, pick, active: activeIdx, setActive,
@@ -1272,8 +1354,18 @@ function _PieChartInner(props: any) {
       const hot = activeIdx === i;
       const mid = (a0 + a1) / 2, pop = hot ? 5 : 0;
       const c = colorOf(d, i);
-      ctx.fillStyle = hot ? _lighten(c, 0.1) : _rgba(c, activeIdx != null ? 0.55 : 1);
-      wedge(ctx, a0 + trim, a1 - trim, r + (hot ? 2 : 0), rInner, Math.cos(mid) * pop, Math.sin(mid) * pop);
+      const base = hot ? _lighten(c, 0.1) : _rgba(c, activeIdx != null ? 0.55 : 1);
+      const ox = Math.cos(mid) * pop, oy = Math.sin(mid) * pop, rOut = r + (hot ? 2 : 0);
+      if (props.shade === 'radial') {
+        // Lighter towards the middle, the true colour at the rim (a donut's ring starts at its inner edge).
+        const g = ctx.createRadialGradient(cx + ox, cy + oy, 0, cx + ox, cy + oy, rOut);
+        g.addColorStop(rInner / rOut, _lighten(base, 0.28));
+        g.addColorStop(1, base);
+        ctx.fillStyle = g;
+      } else {
+        ctx.fillStyle = base;
+      }
+      wedge(ctx, a0 + trim, a1 - trim, rOut, rInner, ox, oy);
       ctx.fill();
     });
     if (donut) {
@@ -1332,7 +1424,8 @@ function _PieChartInner(props: any) {
     View,
     { style: { width, height: chartH, position: 'relative' } },
     React.createElement(_ChartCanvas, {
-      width, height: chartH, draw, animate, deps: [rows, width, chartH, innerRadius, palette, activeIdx, T, centerLabel],
+      width, height: chartH, draw, animate, exportRef: props.exportRef,
+      deps: [rows, width, chartH, innerRadius, palette, activeIdx, T, centerLabel, props.shade],
     }),
     React.createElement(_Interaction, {
       width, height: chartH, T, count: n, pick, active: activeIdx, setActive,
@@ -1525,7 +1618,7 @@ function _SparklineInner(props: any) {
   return React.createElement(
     View,
     { style: { width, height, position: 'relative' }, role: 'img', ariaLabel: label },
-    React.createElement(_ChartCanvas, { width, height, draw, animate, deps: [ys.join(','), width, height, c, lineWidth, fill, smooth, showLast, T] }),
+    React.createElement(_ChartCanvas, { width, height, draw, animate, exportRef: props.exportRef, deps: [ys.join(','), width, height, c, lineWidth, fill, smooth, showLast, T] }),
   );
 }
 
@@ -1594,7 +1687,7 @@ function _ScatterChartInner(props: any) {
     if (n === 0) return;
     const L = layout;
     const { PAD, W, H, xScale } = L;
-    _drawYAxis(ctx, L, T, { showGrid, showLabels });
+    _drawYAxis(ctx, L, T, { showGrid, showLabels, gridDash: props.gridDash });
     // X axis: ticks, optional vertical grid, labels.
     ctx.lineWidth = 1;
     for (const v of xScale.ticks) {
@@ -1660,7 +1753,8 @@ function _ScatterChartInner(props: any) {
       View,
       { style: { width, height: chartH, position: 'relative' } },
       React.createElement(_ChartCanvas, {
-        width, height: chartH, draw, animate, deps: [pts, width, chartH, radius, showGrid, showLabels, activeIdx, T],
+        width, height: chartH, draw, animate, exportRef: props.exportRef,
+        deps: [pts, width, chartH, radius, showGrid, showLabels, activeIdx, T, props.gridDash],
       }),
       React.createElement(_Interaction, {
         width, height: chartH, T, count: n, pick, active: activeIdx, setActive,
@@ -1709,15 +1803,18 @@ function _CandlestickChartInner(props: any) {
   const layout = useMemo(() => {
     const lows = candles.filter(Boolean).map((c: any) => c.low), highs = candles.filter(Boolean).map((c: any) => c.high);
     const scale = _niceScale(Math.min(...lows), Math.max(...highs));
-    return _cartesianLayout({ width, height, scale, showLabels, xCount: n, band: true });
-  }, [rows, width, height, showLabels, n]); // eslint-disable-line react-hooks/exhaustive-deps
+    return _cartesianLayout({
+      width, height, scale, showLabels, xCount: n, band: true,
+      xLabels: props.labelRotation ? rows.map((d: any) => formatLabel(d.x)) : null, labelRotation: props.labelRotation,
+    });
+  }, [rows, width, height, showLabels, n, props.labelRotation]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const bodyW = Math.max(2, Math.min(18, layout.slot * 0.6));
   const draw = (ctx: any) => {
     if (n === 0) return;
     const L = layout;
     const { toX, toY } = L;
-    _drawYAxis(ctx, L, T, { showGrid, showLabels });
+    _drawYAxis(ctx, L, T, { showGrid, showLabels, gridDash: props.gridDash });
     candles.forEach((c: any, i: null) => {
       if (!c) return;
       const col = c.up ? upColor : downColor;
@@ -1779,7 +1876,8 @@ function _CandlestickChartInner(props: any) {
     View,
     { style: { width, height, position: 'relative' }, animation: _ENTRANCE },
     React.createElement(_ChartCanvas, {
-      width, height, draw, animate, deps: [rows, width, height, showGrid, showLabels, activeIdx, upColor, downColor, T],
+      width, height, draw, animate, exportRef: props.exportRef,
+      deps: [rows, width, height, showGrid, showLabels, activeIdx, upColor, downColor, T, props.gridDash, props.labelRotation],
     }),
     React.createElement(_Interaction, {
       width, height, T, count: n, pick, active: activeIdx, setActive,
@@ -1797,4 +1895,4 @@ function _CandlestickChartInner(props: any) {
  */
 export function CandlestickChart(props: CandlestickChartProps): React.ReactElement { return _fit(_CandlestickChartInner, props); }
 
-export const _internals = { _sparkPoints, _scatterPoints, _bubbleRadius, _nearestPoint, _candle, _barScale, _barSegments, _barSlots, _niceScale, _niceStep, _fmt, _fmtTick, _normSeries, _theme, _cartesianSummary, _ChartStream, _smoothPath, _curveSegments, _zoomWindow, _cumulative };
+export const _internals = { _sparkPoints, _scatterPoints, _bubbleRadius, _nearestPoint, _candle, _barScale, _barSegments, _barSlots, _niceScale, _niceStep, _fmt, _fmtTick, _normSeries, _theme, _cartesianSummary, _ChartStream, _smoothPath, _curveSegments, _zoomWindow, _cumulative, _cartesianLayout, _drawYAxis, _drawXLabels, _gridDash };

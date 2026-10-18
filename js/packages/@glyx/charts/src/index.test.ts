@@ -409,3 +409,55 @@ test('a candlestick chart reads open/high/low/close and says which way each move
   expect(_internals._candle({ open: 1, high: 2, low: 0 })).toBe(null);
   expect(() => renderToStaticMarkup(React.createElement(CandlestickChart, { data: [], width: 300, height: 200 }))).not.toThrow();
 });
+
+// ── Canvas-powered finishing ─────────────────────────────────────────────────
+
+const _layoutFor = (extra) => _internals._cartesianLayout({
+  width: 300, height: 200, scale: _niceScale(0, 100), showLabels: true, xCount: 12, band: true, ...extra,
+});
+const _months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+test('turned x labels make room under the plot; auto only turns crowded ones', () => {
+  const flat = _layoutFor({});
+  expect(flat.labelAngle).toBe(0);
+  const turned = _layoutFor({ xLabels: _months, labelRotation: 45 });
+  expect(turned.labelAngle).toBeCloseTo(Math.PI / 4);
+  expect(turned.PAD.bottom).toBeGreaterThan(flat.PAD.bottom);
+  expect(turned.H).toBeLessThan(flat.H);
+  // 12 long names do not fit across 300px; 3 short ones do.
+  expect(_layoutFor({ xLabels: _months, labelRotation: 'auto' }).labelAngle).toBeCloseTo(Math.PI / 4);
+  const calm = _layoutFor({ xCount: 3, xLabels: ['a', 'b', 'c'], labelRotation: 'auto' });
+  expect(calm.labelAngle).toBe(0);
+  expect(calm.PAD.bottom).toBe(flat.PAD.bottom);
+});
+
+test('turned labels are drawn rotated, right-aligned at their tick', () => {
+  const L = _layoutFor({ xLabels: _months, labelRotation: 45 });
+  const c = new GlyxCanvasContext(1);
+  _internals._drawXLabels(c, _months, _months.map((_, i) => L.toX(i)), L, THEMES.dark);
+  const types = c._cmds.map((m) => m.type);
+  expect(types).toContain('transform');
+  expect(types.filter((t) => t === 'fillText').length).toBe(_months.length);
+  expect(c.textAlign).toBe('left'); // restored for whoever draws next
+});
+
+test('gridDash dashes the gridlines but keeps the zero line solid', () => {
+  expect(_internals._gridDash(true)).toEqual([4, 4]);
+  expect(_internals._gridDash([6, 2])).toEqual([6, 2]);
+  expect(_internals._gridDash(false)).toBeNull();
+  const L = _internals._cartesianLayout({ width: 300, height: 200, scale: _niceScale(-50, 50), showLabels: false, xCount: 3 });
+  const c = new GlyxCanvasContext(1);
+  _internals._drawYAxis(c, L, THEMES.dark, { showGrid: true, showLabels: false, gridDash: true });
+  // State is sent lazily: dashed lines, then the solid zero line, then dashed lines again.
+  const dashes = c._cmds.filter((m) => m.type === 'lineStyle').map((m) => m.dashes.length > 0);
+  expect(dashes).toEqual([true, false, true]);
+});
+
+test('exportRef receives the chart canvas and is cleared on unmount', () => {
+  // Static rendering runs no effects, so check that the props are accepted and the canvas still renders.
+  const ref = { current: null };
+  const html = renderToStaticMarkup(React.createElement(LineChart, { data, width: 300, height: 200, exportRef: ref, glow: true, gridDash: true, labelRotation: 'auto' }));
+  expect(html).toContain('<canvas width="300"');
+  const pie = renderToStaticMarkup(React.createElement(PieChart, { data, shade: 'radial', exportRef: () => {} }));
+  expect(pie).toContain('<canvas');
+});

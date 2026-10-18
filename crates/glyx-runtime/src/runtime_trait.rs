@@ -155,13 +155,17 @@ pub trait JsRuntime {
 /// function so this logic is unit-testable directly, without a full
 /// `JsRuntime` mock.
 pub fn coalesce_cursor_moved(q: &mut VecDeque<InputEvent>, x: f32, y: f32, target: Option<u32>) {
-    if let Some(InputEvent::CursorMoved { x: lx, y: ly, target: lt }) = q.back_mut() {
+    if let Some(InputEvent::CursorMoved { x: lx, y: ly, target: lt, trail }) = q.back_mut() {
+        // The position being replaced joins the trail (the newest CURSOR_TRAIL_MAX points are kept).
+        if trail.len() >= crate::bindings::CURSOR_TRAIL_MAX * 2 { trail.drain(..2); }
+        trail.push(*lx);
+        trail.push(*ly);
         *lx = x;
         *ly = y;
         *lt = target;
         return;
     }
-    q.push_back(InputEvent::CursorMoved { x, y, target });
+    q.push_back(InputEvent::CursorMoved { x, y, target, trail: Vec::new() });
 }
 
 #[cfg(test)]
@@ -172,7 +176,7 @@ mod tests {
     // the fields out via `if let` and compare with `assert_eq!` instead.
     fn as_cursor_moved(ev: &InputEvent) -> (f32, f32, Option<u32>) {
         match ev {
-            InputEvent::CursorMoved { x, y, target } => (*x, *y, *target),
+            InputEvent::CursorMoved { x, y, target, .. } => (*x, *y, *target),
             other => panic!("expected CursorMoved, got {other:?}"),
         }
     }
@@ -195,6 +199,37 @@ mod tests {
         // queued event holding only the LATEST position/target.
         assert_eq!(q.len(), 1);
         assert_eq!(as_cursor_moved(&q[0]), (3.0, 3.0, Some(9)));
+    }
+
+    #[test]
+    fn the_positions_a_merged_move_passed_through_are_kept_as_a_trail() {
+        let mut q: VecDeque<InputEvent> = VecDeque::new();
+        coalesce_cursor_moved(&mut q, 1.0, 1.0, None);
+        assert!(matches!(&q[0], InputEvent::CursorMoved { trail, .. } if trail.is_empty()), "one move has no trail");
+        coalesce_cursor_moved(&mut q, 2.0, 3.0, None);
+        coalesce_cursor_moved(&mut q, 4.0, 5.0, None);
+        match &q[0] {
+            InputEvent::CursorMoved { x, y, trail, .. } => {
+                assert_eq!((*x, *y), (4.0, 5.0));
+                assert_eq!(trail, &vec![1.0, 1.0, 2.0, 3.0], "the earlier positions, oldest first");
+            }
+            other => panic!("expected CursorMoved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_very_long_trail_keeps_only_the_newest_points() {
+        let mut q: VecDeque<InputEvent> = VecDeque::new();
+        for i in 0..1000 { coalesce_cursor_moved(&mut q, i as f32, 0.0, None); }
+        match &q[0] {
+            InputEvent::CursorMoved { x, trail, .. } => {
+                assert_eq!(*x, 999.0);
+                assert_eq!(trail.len(), crate::bindings::CURSOR_TRAIL_MAX * 2);
+                assert_eq!(trail[trail.len() - 2], 998.0, "the position just before the latest is the last point");
+                assert_eq!(trail[0], 999.0 - crate::bindings::CURSOR_TRAIL_MAX as f32, "older ones were dropped");
+            }
+            other => panic!("expected CursorMoved, got {other:?}"),
+        }
     }
 
     #[test]

@@ -510,12 +510,54 @@ impl Direct2DFrame {
     /// `fill_path` with any brush. Linear gradients are native D2D brushes;
     /// other gradient kinds fall back to their first stop's colour.
     pub fn fill_path_with_brush(&mut self, pts: &[f32], brush: &peniko::Brush) {
+        let Some(geometry) = self.build_path_geometry(pts, true) else { return };
+        self.fill_geometry_with_brush(&geometry, brush);
+    }
+
+    /// Fill several closed polygons together (shapes with holes), with any brush.
+    pub fn fill_contours(&mut self, contours: &[Vec<f32>], brush: &peniko::Brush, even_odd: bool) {
+        unsafe {
+            let Ok(factory) = self.rt.GetFactory() else { return };
+            let factory: ID2D1Factory = factory;
+            let Ok(geometry) = factory.CreatePathGeometry() else { return };
+            let Ok(sink) = geometry.Open() else { return };
+            sink.SetFillMode(if even_odd { D2D1_FILL_MODE_ALTERNATE } else { D2D1_FILL_MODE_WINDING });
+            let mut any = false;
+            for c in contours.iter().filter(|c| c.len() >= 6) {
+                sink.BeginFigure(windows_numerics::Vector2 { X: c[0], Y: c[1] }, D2D1_FIGURE_BEGIN_FILLED);
+                for p in c[2..].chunks_exact(2) { sink.AddLine(windows_numerics::Vector2 { X: p[0], Y: p[1] }); }
+                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                any = true;
+            }
+            if sink.Close().is_err() || !any { return; }
+            self.fill_geometry_with_brush(&geometry, brush);
+        }
+    }
+
+    /// `draw_image_with_transform` at `alpha` opacity: drawn through a layer that carries the opacity.
+    pub fn draw_image_alpha(&mut self, image: &peniko::ImageData, transform: kurbo::Affine, alpha: f32) {
+        if alpha >= 1.0 { return self.draw_image_with_transform(image, transform); }
+        if image.width == 0 || image.height == 0 { return; }
+        let Some(bitmap) = self.image_cache.get_or_create(&self.rt, image) else { return };
+        let matrix = d2d_matrix(self.xf * transform);
+        let dest = D2D_RECT_F { left: 0.0, top: 0.0, right: image.width as f32, bottom: image.height as f32 };
+        unsafe {
+            self.rt.SetTransform(&matrix as *const _);
+            self.rt.DrawBitmap(&bitmap, Some(&dest as *const _), alpha.clamp(0.0, 1.0), D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+            self.rt.SetTransform(&d2d_matrix(self.xf) as *const _);
+        }
+    }
+
+    fn fill_geometry_with_brush(&mut self, geometry: &ID2D1PathGeometry, brush: &peniko::Brush) {
         let grad = match brush {
-            peniko::Brush::Solid(c) => return self.fill_path(pts, *c),
+            peniko::Brush::Solid(c) => {
+                let Some(b) = self.solid_brush(*c) else { return };
+                unsafe { self.rt.FillGeometry(geometry, &b, None); }
+                return;
+            }
             peniko::Brush::Gradient(g) => g,
             _ => return,
         };
-        let Some(geometry) = self.build_path_geometry(pts, true) else { return };
         match &grad.kind {
             peniko::GradientKind::Linear(pos) => {
                 let Some(stops) = self.gradient_stops(grad) else { return };
@@ -524,12 +566,28 @@ impl Direct2DFrame {
                     endPoint:   windows_numerics::Vector2 { X: pos.end.x   as f32, Y: pos.end.y   as f32 },
                 };
                 let Ok(gb) = (unsafe { self.rt.CreateLinearGradientBrush(&props as *const _, None, &stops) }) else { return };
-                unsafe { self.rt.FillGeometry(&geometry, &gb, None); }
+                unsafe { self.rt.FillGeometry(geometry, &gb, None); }
+            }
+            // Two circles, as the canvas's `createRadialGradient`: Direct2D's radial brush has one radius (the outer
+            // circle's) and an origin offset for the inner centre, so an inner radius above zero is ignored.
+            peniko::GradientKind::Radial(pos) => {
+                let Some(stops) = self.gradient_stops(grad) else { return };
+                let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
+                    center: windows_numerics::Vector2 { X: pos.end_center.x as f32, Y: pos.end_center.y as f32 },
+                    gradientOriginOffset: windows_numerics::Vector2 {
+                        X: (pos.start_center.x - pos.end_center.x) as f32,
+                        Y: (pos.start_center.y - pos.end_center.y) as f32,
+                    },
+                    radiusX: pos.end_radius,
+                    radiusY: pos.end_radius,
+                };
+                let Ok(gb) = (unsafe { self.rt.CreateRadialGradientBrush(&props as *const _, None, &stops) }) else { return };
+                unsafe { self.rt.FillGeometry(geometry, &gb, None); }
             }
             _ => {
                 if let Some(first) = grad.stops.first() {
                     let Some(b) = self.solid_brush(first.color.to_alpha_color()) else { return };
-                    unsafe { self.rt.FillGeometry(&geometry, &b, None); }
+                    unsafe { self.rt.FillGeometry(geometry, &b, None); }
                 }
             }
         }
@@ -746,6 +804,44 @@ impl Direct2DFrame {
 
     pub fn push_layer(&mut self, x: f64, y: f64, w: f64, h: f64) {
         self.push_layer_impl(x, y, w, h, 0.0, 1.0);
+    }
+
+    /// Clip to closed polygons (see `AnyFrame::push_clip_contours`): a layer with a geometric mask.
+    pub fn push_clip_contours(&mut self, contours: &[Vec<f32>], even_odd: bool) {
+        let geometry: Option<ID2D1Geometry> = unsafe {
+            (|| {
+                let factory: ID2D1Factory = self.rt.GetFactory().ok()?;
+                let geometry = factory.CreatePathGeometry().ok()?;
+                let sink = geometry.Open().ok()?;
+                sink.SetFillMode(if even_odd { D2D1_FILL_MODE_ALTERNATE } else { D2D1_FILL_MODE_WINDING });
+                let mut any = false;
+                for c in contours.iter().filter(|c| c.len() >= 6) {
+                    sink.BeginFigure(windows_numerics::Vector2 { X: c[0], Y: c[1] }, D2D1_FIGURE_BEGIN_FILLED);
+                    for p in c[2..].chunks_exact(2) { sink.AddLine(windows_numerics::Vector2 { X: p[0], Y: p[1] }); }
+                    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                    any = true;
+                }
+                sink.Close().ok()?;
+                if !any { return None; }
+                geometry.cast::<ID2D1Geometry>().ok()
+            })()
+        };
+        let Some(geometry) = geometry else {
+            // Nothing to show through: clip everything away (and keep the layers balanced).
+            return self.push_layer_impl(0.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+        };
+        let big = D2D_RECT_F { left: -1.0e6, top: -1.0e6, right: 1.0e6, bottom: 1.0e6 };
+        let identity = windows_numerics::Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: 0.0, M32: 0.0 };
+        let params = D2D1_LAYER_PARAMETERS1 {
+            contentBounds: big,
+            geometricMask: std::mem::ManuallyDrop::new(Some(geometry)),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: identity,
+            opacity: 1.0,
+            opacityBrush: std::mem::ManuallyDrop::new(None),
+            layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+        };
+        unsafe { self.ctx.PushLayer(&params as *const _, None); }
     }
 
     pub fn push_rounded_layer(&mut self, x: f64, y: f64, w: f64, h: f64, radius: f64) {

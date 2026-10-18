@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 150 130">
+  <!-- Glyx Render Trail — symbol, for dark grounds -->
+  <g transform="skewX(-12)" transform-origin="75 65">
+    <rect x="30" y="26" width="50" height="78" rx="6" fill="#F59E0B"/>
+    <rect x="94" y="26" width="18" height="78" rx="5" fill="#FBBF24"/>
+    <rect x="124" y="26" width="7" height="78" rx="3.5" fill="#8B5CF6"/>
+  </g>
+</svg>

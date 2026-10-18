@@ -12,6 +12,7 @@
 //! Zero extra allocation — Scene's internal Vec buffers survive the move.
 
 mod blit;
+mod text_outline;
 pub(crate) use blit::CachedBlit;
 mod skia;
 pub use skia::{TinySkiaFrame, TinySkiaRenderer};
@@ -232,7 +233,7 @@ impl GlyxRenderer {
         self.scene.reset();
         // Move scene out; render_frame puts it back.
         let scene = std::mem::replace(&mut self.scene, Scene::new());
-        FrameBuilder { scene }
+        FrameBuilder { scene, blend_open: false }
     }
 
     /// Submit the frame to the GPU.
@@ -318,6 +319,36 @@ impl GlyxRenderer {
 /// renderer without a double-borrow error.
 pub struct FrameBuilder {
     pub(crate) scene: Scene,
+    /// A blend layer opened by `set_blend` and not yet closed.
+    blend_open: bool,
+}
+
+/// How a canvas draw combines with what is already there (the canvas's `globalCompositeOperation`). Only the
+/// Vello and tiny-skia backends apply it; Direct2D draws source-over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BlendKind {
+    #[default]
+    SourceOver,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    Difference,
+    Exclusion,
+    /// Erases what it covers.
+    DestinationOut,
+}
+
+impl BlendKind {
+    /// From the canvas command's `mode` byte (anything unknown is source-over).
+    pub fn from_u8(mode: u8) -> Self {
+        match mode {
+            1 => Self::Multiply, 2 => Self::Screen, 3 => Self::Overlay, 4 => Self::Darken,
+            5 => Self::Lighten, 6 => Self::Difference, 7 => Self::Exclusion, 8 => Self::DestinationOut,
+            _ => Self::SourceOver,
+        }
+    }
 }
 
 impl FrameBuilder {
@@ -356,6 +387,12 @@ impl FrameBuilder {
     /// cap-height from the layout top to the baseline.
     pub fn draw_text(&mut self, layout: &glyx_text::TextLayout,
                      x: f64, y: f64, color: Color) {
+        self.draw_text_transformed(layout, Affine::translate(vello::kurbo::Vec2::new(x, y)), color);
+    }
+
+    /// `draw_text` under any transform (rotation, scale, skew): `transform` maps the layout's own space (origin at its
+    /// top-left) to the window.
+    pub fn draw_text_transformed(&mut self, layout: &glyx_text::TextLayout, base: Affine, color: Color) {
         for line in layout.inner.lines() {
             for item in line.items() {
                 let parley::layout::PositionedLayoutItem::GlyphRun(gr) = item else {
@@ -369,8 +406,8 @@ impl FrameBuilder {
                 let baseline = gr.baseline() as f64;
                 let run_off  = gr.offset()   as f64;
 
-                let transform = Affine::translate(
-                    vello::kurbo::Vec2::new(x + run_off, y + baseline)
+                let transform = base * Affine::translate(
+                    vello::kurbo::Vec2::new(run_off, baseline)
                 );
 
                 // parley 0.8+ uses Y-down convention (same as vello) — no negation needed.
@@ -447,6 +484,23 @@ impl FrameBuilder {
         );
     }
 
+    /// Clip everything until the matching `pop_layer` to the shape of closed polygons (even-odd or non-zero).
+    pub fn push_clip_contours(&mut self, contours: &[Vec<f32>], even_odd: bool) {
+        let mut path = vello::kurbo::BezPath::new();
+        for c in contours.iter().filter(|c| c.len() >= 6) {
+            path.move_to((c[0] as f64, c[1] as f64));
+            for p in c[2..].chunks_exact(2) { path.line_to((p[0] as f64, p[1] as f64)); }
+            path.close_path();
+        }
+        let rule = if even_odd { Fill::EvenOdd } else { Fill::NonZero };
+        if path.elements().is_empty() {
+            // Nothing to show through: clip everything away (and keep the layers balanced).
+            self.push_layer(0.0, 0.0, 0.0, 0.0);
+            return;
+        }
+        self.scene.push_layer(rule, vello::peniko::Mix::Normal, 1.0, Affine::IDENTITY, &path);
+    }
+
     pub fn push_rounded_layer(&mut self, x: f64, y: f64, w: f64, h: f64, radius: f64) {
         let rect = RoundedRect::new(x, y, x + w, y + h, radius);
         self.scene.push_layer(
@@ -501,6 +555,48 @@ impl FrameBuilder {
     pub fn fill_path(&mut self, pts: &[f32], color: Color) {
         let Some(path) = bez_path(pts, true) else { return };
         self.scene.fill(vello::peniko::Fill::NonZero, Affine::IDENTITY, &Brush::Solid(color), None, &path);
+    }
+
+    /// Fill several closed polygons together (shapes with holes), with any brush.
+    pub fn fill_contours(&mut self, contours: &[Vec<f32>], brush: &Brush, even_odd: bool) {
+        let mut path = vello::kurbo::BezPath::new();
+        for c in contours.iter().filter(|c| c.len() >= 6) {
+            path.move_to((c[0] as f64, c[1] as f64));
+            for p in c[2..].chunks_exact(2) { path.line_to((p[0] as f64, p[1] as f64)); }
+            path.close_path();
+        }
+        if path.elements().is_empty() { return; }
+        let rule = if even_odd { vello::peniko::Fill::EvenOdd } else { vello::peniko::Fill::NonZero };
+        self.scene.fill(rule, Affine::IDENTITY, brush, None, &path);
+    }
+
+    /// Composite what is drawn next with `kind` instead of source-over: a layer with that blend mode is opened
+    /// over everything and closed by the next call (so callers close it before popping any layer opened later,
+    /// and before the frame ends). `SourceOver` just closes it.
+    pub fn set_blend(&mut self, kind: BlendKind) {
+        use vello::peniko::{BlendMode, Compose, Mix};
+        if self.blend_open { self.scene.pop_layer(); self.blend_open = false; }
+        let mode = match kind {
+            BlendKind::SourceOver => return,
+            BlendKind::Multiply => BlendMode::new(Mix::Multiply, Compose::SrcOver),
+            BlendKind::Screen => BlendMode::new(Mix::Screen, Compose::SrcOver),
+            BlendKind::Overlay => BlendMode::new(Mix::Overlay, Compose::SrcOver),
+            BlendKind::Darken => BlendMode::new(Mix::Darken, Compose::SrcOver),
+            BlendKind::Lighten => BlendMode::new(Mix::Lighten, Compose::SrcOver),
+            BlendKind::Difference => BlendMode::new(Mix::Difference, Compose::SrcOver),
+            BlendKind::Exclusion => BlendMode::new(Mix::Exclusion, Compose::SrcOver),
+            BlendKind::DestinationOut => BlendMode::new(Mix::Normal, Compose::DestOut),
+        };
+        let everything = vello::kurbo::Rect::new(-1.0e5, -1.0e5, 1.0e5, 1.0e5);
+        self.scene.push_layer(vello::peniko::Fill::NonZero, mode, 1.0, Affine::IDENTITY, &everything);
+        self.blend_open = true;
+    }
+
+    /// `draw_image_with_transform` at `alpha` opacity (0 to 1).
+    pub fn draw_image_alpha(&mut self, image: &ImageData, transform: Affine, alpha: f32) {
+        let mut brush = ImageBrushRef::from(image).with_quality(ImageQuality::High);
+        brush.sampler.alpha = alpha.clamp(0.0, 1.0);
+        self.scene.draw_image(brush, transform);
     }
 
     /// `fill_path` with any brush (a linear gradient for chart area fills).
@@ -612,6 +708,29 @@ impl AnyFrame {
             AnyFrame::TinySkia(f) => f.draw_text(layout, x, y, color),
             #[cfg(target_os = "windows")]
             AnyFrame::Direct2D(f) => f.draw_text(layout, x, y, color),
+        }
+    }
+
+    /// Text under any transform (see `FrameBuilder::draw_text_transformed`). Vello turns the glyphs natively; the
+    /// other backends draw the glyph outlines as filled polygons, since their text paths cannot rotate.
+    pub fn draw_text_transformed(&mut self, layout: &glyx_text::TextLayout, transform: Affine, color: Color) {
+        match self {
+            AnyFrame::Vello(f) => f.draw_text_transformed(layout, transform, color),
+            _ => {
+                let contours = text_outline::contours(layout, transform);
+                if !contours.is_empty() { self.fill_contours(&contours, &Brush::Solid(color), false); }
+            }
+        }
+    }
+
+    /// Clip what is drawn until the matching `pop_layer` to a shape: closed polygons, filled by the even-odd or
+    /// non-zero rule. The CPU renderer builds a window-sized mask for it while it is open.
+    pub fn push_clip_contours(&mut self, contours: &[Vec<f32>], even_odd: bool) {
+        match self {
+            AnyFrame::Vello(f)    => f.push_clip_contours(contours, even_odd),
+            AnyFrame::TinySkia(f) => f.push_clip_contours(contours, even_odd),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.push_clip_contours(contours, even_odd),
         }
     }
 
@@ -755,6 +874,39 @@ impl AnyFrame {
             AnyFrame::TinySkia(f) => f.stroke_line(x0, y0, x1, y1, width, color),
             #[cfg(target_os = "windows")]
             AnyFrame::Direct2D(f) => f.stroke_line(x0, y0, x1, y1, width, color),
+        }
+    }
+
+    /// Fill several closed polygons together (shapes with holes), with any brush. Direct2D fills the first stop's
+    /// colour for gradients other than linear.
+    pub fn fill_contours(&mut self, contours: &[Vec<f32>], brush: &Brush, even_odd: bool) {
+        match self {
+            AnyFrame::Vello(f)    => f.fill_contours(contours, brush, even_odd),
+            AnyFrame::TinySkia(f) => f.fill_contours(contours, brush, even_odd),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.fill_contours(contours, brush, even_odd),
+        }
+    }
+
+    /// Composite the drawing that follows with `kind` (see [`FrameBuilder::set_blend`]). Pass
+    /// `BlendKind::SourceOver` to go back, and do so before popping a layer opened after the blend was set.
+    /// Direct2D ignores it.
+    pub fn set_blend(&mut self, kind: BlendKind) {
+        match self {
+            AnyFrame::Vello(f)    => f.set_blend(kind),
+            AnyFrame::TinySkia(f) => f.set_blend(kind),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(_) => { let _ = kind; }
+        }
+    }
+
+    /// An image under `transform` at `alpha` opacity (0 to 1).
+    pub fn draw_image_alpha(&mut self, image: &ImageData, transform: Affine, alpha: f32) {
+        match self {
+            AnyFrame::Vello(f)    => f.draw_image_alpha(image, transform, alpha),
+            AnyFrame::TinySkia(f) => f.draw_image_alpha(image, transform, alpha),
+            #[cfg(target_os = "windows")]
+            AnyFrame::Direct2D(f) => f.draw_image_alpha(image, transform, alpha),
         }
     }
 

@@ -154,10 +154,19 @@ pub fn poll_events_callback(
                 };
                 obj.set(scope, k.into(), v);
             }
-            InputEvent::CursorMoved { x, y, target } => {
+            InputEvent::CursorMoved { x, y, target, trail } => {
                 set_str!("type", "cursorMoved");
                 set_num!("x", x);
                 set_num!("y", y);
+                if !trail.is_empty() {
+                    let arr = v8::Array::new(scope, trail.len() as i32);
+                    for (k, v) in trail.iter().enumerate() {
+                        let n = v8::Number::new(scope, *v as f64);
+                        arr.set_index(scope, k as u32, n.into());
+                    }
+                    let k = v8::String::new(scope, "trail").unwrap();
+                    obj.set(scope, k.into(), arr.into());
+                }
                 let k = v8::String::new(scope, "target").unwrap();
                 let v: v8::Local<v8::Value> = match target {
                     Some(id) => v8::Number::new(scope, id as f64).into(),
@@ -182,6 +191,12 @@ pub fn poll_events_callback(
                 set_str!("type", "scrollbarDrag");
                 set_num!("nodeId", node_id);
                 set_num!("scrollY", scroll_y);
+            }
+            InputEvent::CanvasExport { req_id, data, error } => {
+                set_str!("type", "canvasExport");
+                set_num!("reqId", req_id);
+                if !data.is_empty() { set_str!("data", &data); }
+                if !error.is_empty() { set_str!("error", &error); }
             }
             InputEvent::ScrollbarDragX { node_id, scroll_x } => {
                 set_str!("type", "scrollbarDragX");

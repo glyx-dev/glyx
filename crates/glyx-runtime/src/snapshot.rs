@@ -173,6 +173,7 @@ globalThis.__glyx_audio_seek      = function() { return stubPromise('null'); };
 // Canvas 2D / 3D bindings
 globalThis.__glyx_canvas_update      = function() {};
 globalThis.__glyx_canvas_flush       = function() {};
+globalThis.__glyx_canvas_export      = function() { return 0; };
 globalThis.__glyx_canvas_protocol    = 'json';
 globalThis.__glyx_canvas3d_update    = function() {};
 globalThis.__glyx_canvas3d_load_gltf   = function() {};

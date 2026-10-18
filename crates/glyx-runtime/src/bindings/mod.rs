@@ -282,6 +282,12 @@ pub fn new_raycast_request_queue() -> RaycastRequestQueue { Arc::new(Mutex::new(
 pub type RaycastResults = Arc<Mutex<VecDeque<String>>>;
 pub fn new_raycast_results() -> RaycastResults { Arc::new(Mutex::new(VecDeque::new())) }
 
+/// Ids for `CanvasExport` requests, shared by both engines' `__glyx_canvas_export`.
+pub(crate) static NEXT_CANVAS_EXPORT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// Most intermediate cursor positions kept for one merged `CursorMoved`.
+pub const CURSOR_TRAIL_MAX: usize = 128;
+
 /// An input event pushed by the Rust side and consumed by JS via __glyx_pollEvents.
 #[derive(Debug, Clone)]
 pub enum InputEvent {
@@ -294,7 +300,11 @@ pub enum InputEvent {
     /// and handed over pre-resolved.
     MouseButton { x: f32, y: f32, button: u8, pressed: bool, target: Option<u32> },
     /// Cursor moved to pixel position. `target` — see `MouseButton`.
-    CursorMoved { x: f32, y: f32, target: Option<u32> },
+    /// The cursor moved. Moves within one frame are merged into one event holding the latest position;
+    /// `trail` keeps the positions it passed through before that, as a flat `[x0, y0, x1, y1, ...]` list
+    /// (oldest first, at most [`CURSOR_TRAIL_MAX`] points: the newest if there were more), so a drawing
+    /// app can follow the whole stroke, not one point a frame.
+    CursorMoved { x: f32, y: f32, target: Option<u32>, trail: Vec<f32> },
     /// Pointer drag started (left button down + first move).
     DragStart { x: f32, y: f32 },
     /// Pointer dragged  continuous move while left button held.
@@ -320,6 +330,9 @@ pub enum InputEvent {
     /// through the same JS-side handler as `ScrollbarDrag` (`onAbsoluteScroll`),
     /// so no new scroll-clamping logic exists on the JS side either.
     ScrollIntoView { node_id: u32, scroll_y: f32 },
+    /// A finished `CanvasExport`: the PNG (or, for a raw request, the RGBA pixels) as base64 in `data`, or the
+    /// reason it failed in `error` (the other empty).
+    CanvasExport { req_id: u32, data: String, error: String },
     /// The horizontal twin of `ScrollIntoView`, for the nearest ancestor that scrolls sideways.
     ScrollIntoViewX { node_id: u32, scroll_x: f32 },
     /// Window resized to new physical pixel dimensions.
@@ -1201,6 +1214,87 @@ pub enum CanvasCmd {
     /// Clip every following command to this rect until the matching `PopClip`.
     PushClip   { x: f32, y: f32, w: f32, h: f32 },
     PopClip,
+
+    // ── Drawing state and richer drawing (the rest of the 2D canvas) ─────────────────────────────────────
+    /// Save the drawing state (transform, alpha, blend mode, line style, shadow, clips) for the matching `Restore`.
+    Save,
+    Restore,
+    /// Set the current transform, as the canvas's `setTransform(a, b, c, d, e, f)`: it applies to every drawing
+    /// command that follows (until changed or restored).
+    Transform { m: [f32; 6] },
+    /// Multiplies the opacity of everything drawn after it (0 to 1).
+    GlobalAlpha { alpha: f32 },
+    /// How the following drawing combines with what is already there: see [`BlendMode`].
+    Blend { mode: u8 },
+    /// Line caps / joins / dashes for the strokes that follow. `cap`: 0 butt, 1 round, 2 square. `join`: 0 miter,
+    /// 1 round, 2 bevel. `dashes` is the on/off pattern (empty = solid) starting `dash_offset` into it.
+    LineStyle {
+        cap: u8, join: u8,
+        #[serde(rename = "miterLimit")] miter_limit: f32,
+        #[serde(rename = "dashOffset")] dash_offset: f32,
+        dashes: Vec<f32>,
+    },
+    /// A soft shadow under what follows (`color` alpha 0 turns it off): `blur` is the blur radius in pixels.
+    Shadow { color: [u8; 4], blur: f32, dx: f32, dy: f32 },
+    /// Draw (part of) a decoded image: `src` = `[x, y, w, h]` in image pixels (w or h 0 = the whole image),
+    /// `dst` = `[x, y, w, h]` on the canvas.
+    DrawImage { image: u32, src: [f32; 4], dst: [f32; 4] },
+    /// A closed polygon filled with any brush.
+    FillPathBrush { points: Vec<f32>, brush: CanvasBrush },
+    /// A polyline stroked with any brush.
+    StrokePathBrush {
+        points: Vec<f32>,
+        #[serde(rename = "lineWidth")] line_width: f32,
+        #[serde(default)] closed: bool,
+        brush: CanvasBrush,
+    },
+    /// Clip everything after this to a shape (closed polygons, filled by the even-odd or non-zero rule), until
+    /// the matching `PopClip` or the `Restore` of the enclosing `Save`: the canvas's `clip()`.
+    ClipPath {
+        contours: Vec<Vec<f32>>,
+        #[serde(default, rename = "evenOdd")] even_odd: bool,
+    },
+    /// Several closed polygons filled together, so shapes can have holes (`even_odd`: the even-odd rule instead of
+    /// non-zero winding).
+    FillPaths {
+        contours: Vec<Vec<f32>>,
+        brush: CanvasBrush,
+        #[serde(default, rename = "evenOdd")] even_odd: bool,
+    },
+}
+
+/// A paint: a colour or a gradient (colours are RGBA bytes, offsets 0 to 1).
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct CanvasBrush {
+    /// 0 solid (`color`), 1 linear, 2 radial, 3 conic.
+    pub kind: u8,
+    #[serde(default)]
+    pub color: [u8; 4],
+    /// Linear: `[x0, y0, x1, y1]`. Radial (two circles, as the canvas's `createRadialGradient`):
+    /// `[x0, y0, r0, x1, y1, r1]`. Conic: `[cx, cy, startAngle]`.
+    #[serde(default)]
+    pub p: [f32; 6],
+    #[serde(default)]
+    pub stops: Vec<(f32, [u8; 4])>,
+}
+
+impl CanvasBrush {
+    pub fn solid(color: [u8; 4]) -> Self { Self { kind: 0, color, p: [0.0; 6], stops: Vec::new() } }
+}
+
+/// The values of `CanvasCmd::Blend::mode` (the canvas's `globalCompositeOperation`).
+pub mod blend_mode {
+    pub const SOURCE_OVER: u8 = 0;
+    pub const MULTIPLY: u8 = 1;
+    pub const SCREEN: u8 = 2;
+    pub const OVERLAY: u8 = 3;
+    pub const DARKEN: u8 = 4;
+    pub const LIGHTEN: u8 = 5;
+    pub const DIFFERENCE: u8 = 6;
+    pub const EXCLUSION: u8 = 7;
+    /// Erases what it covers (an eraser): `destination-out`.
+    pub const DESTINATION_OUT: u8 = 8;
+    pub const COUNT: u8 = 9;
 }
 
 //  Canvas 2D binary protocol 
@@ -1223,7 +1317,26 @@ mod canvas_op {
     pub const PUSH_CLIP:     u32 = 10; // [op, x, y, w, h]
     pub const POP_CLIP:      u32 = 11; // [op]
     pub const FILL_TEXT_BOLD: u32 = 12; // as FILL_TEXT, bold weight
+    pub const SAVE:          u32 = 13; // [op]
+    pub const RESTORE:       u32 = 14; // [op]
+    pub const TRANSFORM:     u32 = 15; // [op, a, b, c, d, e, f]
+    pub const GLOBAL_ALPHA:  u32 = 16; // [op, alpha]
+    pub const BLEND:         u32 = 17; // [op, mode]
+    pub const LINE_STYLE:    u32 = 18; // [op, cap, join, miterLimit, dashOffset, nDashes, d0,…]
+    pub const SHADOW:        u32 = 19; // [op, color, blur, dx, dy]
+    pub const DRAW_IMAGE:    u32 = 20; // [op, imageId, sx,sy,sw,sh, dx,dy,dw,dh]
+    // A brush is `[kind, color, p0..p5, nStops, (offset, color)×n]` (see `CanvasBrush`).
+    pub const FILL_PATH_BRUSH:   u32 = 21; // [op, count, <brush>, x0,y0,…]
+    pub const STROKE_PATH_BRUSH: u32 = 22; // [op, count, lineW, closed, <brush>, x0,y0,…]
+    pub const FILL_PATHS:        u32 = 23; // [op, evenOdd, nContours, <brush>, (count, x0,y0,…)×n]
+    pub const CLIP_PATH:         u32 = 24; // [op, evenOdd, nContours, (count, x0,y0,…)×n]
 }
+
+/// Limits on what one command may carry (the buffer is JS-controlled): dashes in a line pattern, colour stops in a
+/// gradient, and sub-paths in one fill.
+const MAX_DASHES: usize = 32;
+const MAX_STOPS: usize = 64;
+const MAX_CONTOURS: usize = 4096;
 
 /// Decode the binary command stream into `Vec<CanvasCmd>`.
 ///
@@ -1249,6 +1362,22 @@ pub(crate) fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_byt
     // Read `n` point floats starting at slot `start`, guarding the bound.
     let read_points = |start: usize, n: usize| -> Vec<f32> {
         (0..n).map(|k| f32_at(start + k)).collect()
+    };
+
+    // `[kind, color, p0..p5, nStops, (offset, color)×n]` at slot `at`: the brush and the slot after it. `None` if
+    // it runs past the buffer or is malformed.
+    let read_brush = |at: usize| -> Option<(CanvasBrush, usize)> {
+        if at.checked_add(9)? > slots { return None; }
+        let kind = f32_at(at) as u8;
+        if kind > 3 { return None; }
+        let n = f32_at(at + 8) as usize;
+        if n > MAX_STOPS { return None; }
+        let stops_at = at + 9;
+        let end = stops_at.checked_add(n.checked_mul(2)?)?;
+        if end > slots { return None; }
+        let stops = (0..n).map(|k| (f32_at(stops_at + k * 2), color_at(stops_at + k * 2 + 1))).collect();
+        let p = [f32_at(at + 2), f32_at(at + 3), f32_at(at + 4), f32_at(at + 5), f32_at(at + 6), f32_at(at + 7)];
+        Some((CanvasBrush { kind, color: color_at(at + 1), p, stops }, end))
     };
 
     let mut cmds = Vec::new();
@@ -1365,6 +1494,111 @@ pub(crate) fn decode_canvas_binary(cmd_bytes: &[u8], float_count: usize, str_byt
                 i += 4;
             }
             canvas_op::POP_CLIP => cmds.push(CanvasCmd::PopClip),
+            canvas_op::SAVE => cmds.push(CanvasCmd::Save),
+            canvas_op::RESTORE => cmds.push(CanvasCmd::Restore),
+            canvas_op::TRANSFORM => {
+                if i + 6 > slots { break; }
+                cmds.push(CanvasCmd::Transform { m: [f32_at(i), f32_at(i + 1), f32_at(i + 2), f32_at(i + 3), f32_at(i + 4), f32_at(i + 5)] });
+                i += 6;
+            }
+            canvas_op::GLOBAL_ALPHA => {
+                if i + 1 > slots { break; }
+                cmds.push(CanvasCmd::GlobalAlpha { alpha: f32_at(i) });
+                i += 1;
+            }
+            canvas_op::BLEND => {
+                if i + 1 > slots { break; }
+                cmds.push(CanvasCmd::Blend { mode: f32_at(i) as u8 });
+                i += 1;
+            }
+            canvas_op::LINE_STYLE => {
+                // [cap, join, miterLimit, dashOffset, nDashes, d0,…]
+                if i + 5 > slots { break; }
+                let n = f32_at(i + 4) as usize;
+                let start = i + 5;
+                if n > MAX_DASHES || start.checked_add(n).map_or(true, |end| end > slots) { break; }
+                cmds.push(CanvasCmd::LineStyle {
+                    cap: f32_at(i) as u8, join: f32_at(i + 1) as u8,
+                    miter_limit: f32_at(i + 2), dash_offset: f32_at(i + 3),
+                    dashes: read_points(start, n),
+                });
+                i = start + n;
+            }
+            canvas_op::SHADOW => {
+                if i + 4 > slots { break; }
+                cmds.push(CanvasCmd::Shadow { color: color_at(i), blur: f32_at(i + 1), dx: f32_at(i + 2), dy: f32_at(i + 3) });
+                i += 4;
+            }
+            canvas_op::DRAW_IMAGE => {
+                if i + 9 > slots { break; }
+                cmds.push(CanvasCmd::DrawImage {
+                    image: f32_at(i) as u32,
+                    src: [f32_at(i + 1), f32_at(i + 2), f32_at(i + 3), f32_at(i + 4)],
+                    dst: [f32_at(i + 5), f32_at(i + 6), f32_at(i + 7), f32_at(i + 8)],
+                });
+                i += 9;
+            }
+            canvas_op::FILL_PATH_BRUSH => {
+                if i + 1 > slots { break; }
+                let count = f32_at(i) as usize;
+                let Some((brush, start)) = read_brush(i + 1) else { break };
+                let npts = match count.checked_mul(2) { Some(n) => n, None => break };
+                if start.checked_add(npts).map_or(true, |end| end > slots) { break; }
+                cmds.push(CanvasCmd::FillPathBrush { points: read_points(start, npts), brush });
+                i = start + npts;
+            }
+            canvas_op::STROKE_PATH_BRUSH => {
+                if i + 3 > slots { break; }
+                let count = f32_at(i) as usize;
+                let (lw, closed) = (f32_at(i + 1), f32_at(i + 2) != 0.0);
+                let Some((brush, start)) = read_brush(i + 3) else { break };
+                let npts = match count.checked_mul(2) { Some(n) => n, None => break };
+                if start.checked_add(npts).map_or(true, |end| end > slots) { break; }
+                cmds.push(CanvasCmd::StrokePathBrush { points: read_points(start, npts), line_width: lw, closed, brush });
+                i = start + npts;
+            }
+            canvas_op::CLIP_PATH => {
+                if i + 2 > slots { break; }
+                let even_odd = f32_at(i) != 0.0;
+                let n = f32_at(i + 1) as usize;
+                if n > MAX_CONTOURS { break; }
+                let mut at = i + 2;
+                let mut contours = Vec::with_capacity(n.min(64));
+                let mut ok = true;
+                for _ in 0..n {
+                    if at + 1 > slots { ok = false; break; }
+                    let count = f32_at(at) as usize;
+                    let npts = match count.checked_mul(2) { Some(n) => n, None => { ok = false; break; } };
+                    let start = at + 1;
+                    if start.checked_add(npts).map_or(true, |end| end > slots) { ok = false; break; }
+                    contours.push(read_points(start, npts));
+                    at = start + npts;
+                }
+                if !ok { break; }
+                cmds.push(CanvasCmd::ClipPath { contours, even_odd });
+                i = at;
+            }
+            canvas_op::FILL_PATHS => {
+                if i + 2 > slots { break; }
+                let even_odd = f32_at(i) != 0.0;
+                let n = f32_at(i + 1) as usize;
+                if n > MAX_CONTOURS { break; }
+                let Some((brush, mut at)) = read_brush(i + 2) else { break };
+                let mut contours = Vec::with_capacity(n.min(64));
+                let mut ok = true;
+                for _ in 0..n {
+                    if at + 1 > slots { ok = false; break; }
+                    let count = f32_at(at) as usize;
+                    let npts = match count.checked_mul(2) { Some(n) => n, None => { ok = false; break; } };
+                    let start = at + 1;
+                    if start.checked_add(npts).map_or(true, |end| end > slots) { ok = false; break; }
+                    contours.push(read_points(start, npts));
+                    at = start + npts;
+                }
+                if !ok { break; }
+                cmds.push(CanvasCmd::FillPaths { contours, brush, even_odd });
+                i = at;
+            }
             _ => break, // unknown opcode †’ corrupt/truncated stream
         }
     }
@@ -1397,6 +1631,12 @@ pub enum SceneCommand {
     /// `append=false` replaces the canvas's command list (normal flush);
     /// `append=true` extends it (overflow continuation chunk in binary mode).
     CanvasUpdate  { id: u32, cmds: Vec<CanvasCmd>, append: bool },
+    /// Render the canvas `id` (what its command list draws) to a PNG, `scale` times its size (or exactly
+    /// `width` x `height` when both are non-zero); the answer comes back as `InputEvent::CanvasExport` with the same
+    /// `req_id`.
+    /// With a non-empty `region` (`[x, y, w, h]` in output pixels) only that part is rendered, and with `raw` the
+    /// answer is its straight RGBA bytes instead of a PNG (`getImageData`).
+    CanvasExport { id: u32, req_id: u32, width: u32, height: u32, scale: f32, region: [u32; 4], raw: bool },
     #[cfg(feature = "canvas3d")]
     Canvas3DUpdate { id: u32, scene: glyx_3d::Scene3D },
     #[cfg(feature = "canvas3d")]
@@ -1837,6 +2077,7 @@ pub fn register_all(
     //  Canvas 2D / 3D 
     register!("__glyx_canvas_update",   canvas_update_callback);
     register!("__glyx_canvas_flush",    canvas_flush_callback);
+    register!("__glyx_canvas_export", canvas_export_callback);
     #[cfg(feature = "canvas3d")]
     register!("__glyx_canvas3d_update", canvas3d_update_callback);
     #[cfg(feature = "canvas3d")]
@@ -2741,6 +2982,95 @@ mod tests {
             { "type": "fillPath", "points": [0,0,7,7], "color": [255,0,0,255] }
         ]"#).unwrap();
         assert_eq!(from_binary, from_json);
+    }
+
+    #[test]
+    fn the_drawing_state_commands_decode_and_match_their_json_form() {
+        let from_binary = Stream::new()
+            .f(canvas_op::SAVE as f32)
+            .f(canvas_op::TRANSFORM as f32).f(1.0).f(0.0).f(0.0).f(1.0).f(10.0).f(20.0)
+            .f(canvas_op::GLOBAL_ALPHA as f32).f(0.5)
+            .f(canvas_op::BLEND as f32).f(blend_mode::MULTIPLY as f32)
+            .f(canvas_op::LINE_STYLE as f32).f(1.0).f(2.0).f(4.0).f(3.0).f(2.0).f(5.0).f(2.0)
+            .f(canvas_op::SHADOW as f32).color(RED).f(6.0).f(2.0).f(3.0)
+            .f(canvas_op::DRAW_IMAGE as f32).f(7.0).f(0.0).f(0.0).f(0.0).f(0.0).f(1.0).f(2.0).f(30.0).f(40.0)
+            .f(canvas_op::RESTORE as f32)
+            .decode(&[]);
+        let from_json: Vec<CanvasCmd> = serde_json::from_str(r#"[
+            { "type": "save" },
+            { "type": "transform", "m": [1,0,0,1,10,20] },
+            { "type": "globalAlpha", "alpha": 0.5 },
+            { "type": "blend", "mode": 1 },
+            { "type": "lineStyle", "cap": 1, "join": 2, "miterLimit": 4, "dashOffset": 3, "dashes": [5, 2] },
+            { "type": "shadow", "color": [255,0,0,255], "blur": 6, "dx": 2, "dy": 3 },
+            { "type": "drawImage", "image": 7, "src": [0,0,0,0], "dst": [1,2,30,40] },
+            { "type": "restore" }
+        ]"#).unwrap();
+        assert_eq!(from_binary, from_json);
+    }
+
+    #[test]
+    fn brush_fills_and_multi_contour_fills_decode() {
+        // A radial brush (kind 2) with two stops, filling a triangle; then two contours with the even-odd rule.
+        let from_binary = Stream::new()
+            .f(canvas_op::FILL_PATH_BRUSH as f32).f(3.0)
+                .f(2.0).color(RED).f(5.0).f(5.0).f(0.0).f(5.0).f(5.0).f(9.0).f(2.0).f(0.0).color(RED).f(1.0).color(RED)
+                .f(0.0).f(0.0).f(10.0).f(0.0).f(5.0).f(8.0)
+            .f(canvas_op::FILL_PATHS as f32).f(1.0).f(2.0)
+                .f(0.0).color(RED).f(0.0).f(0.0).f(0.0).f(0.0).f(0.0).f(0.0).f(0.0)
+                .f(3.0).f(0.0).f(0.0).f(10.0).f(0.0).f(5.0).f(8.0)
+                .f(3.0).f(2.0).f(1.0).f(8.0).f(1.0).f(5.0).f(6.0)
+            .decode(&[]);
+        assert_eq!(from_binary.len(), 2);
+        match &from_binary[0] {
+            CanvasCmd::FillPathBrush { points, brush } => {
+                assert_eq!(points.len(), 6);
+                assert_eq!((brush.kind, brush.p, brush.stops.len()), (2, [5.0, 5.0, 0.0, 5.0, 5.0, 9.0], 2));
+            }
+            other => panic!("expected FillPathBrush, got {other:?}"),
+        }
+        match &from_binary[1] {
+            CanvasCmd::FillPaths { contours, brush, even_odd } => {
+                assert!(*even_odd);
+                assert_eq!((brush.kind, brush.color), (0, RED));
+                assert_eq!(contours.len(), 2);
+                assert_eq!(contours[1], vec![2.0, 1.0, 8.0, 1.0, 5.0, 6.0]);
+            }
+            other => panic!("expected FillPaths, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_clip_path_decodes_and_matches_its_json_form_and_a_truncated_one_stops_cleanly() {
+        let from_binary = Stream::new()
+            .f(canvas_op::CLIP_PATH as f32).f(1.0).f(2.0)
+                .f(3.0).f(0.0).f(0.0).f(10.0).f(0.0).f(5.0).f(8.0)
+                .f(3.0).f(2.0).f(1.0).f(8.0).f(1.0).f(5.0).f(6.0)
+            .decode(&[]);
+        let from_json: Vec<CanvasCmd> = serde_json::from_str(r#"[
+            { "type": "clipPath", "evenOdd": true, "contours": [[0,0,10,0,5,8], [2,1,8,1,5,6]] }
+        ]"#).unwrap();
+        assert_eq!(from_binary, from_json);
+        // No contours at all is valid (it clips everything away); a contour count past the buffer is not.
+        assert_eq!(Stream::new().f(canvas_op::CLIP_PATH as f32).f(0.0).f(0.0).decode(&[]),
+            vec![CanvasCmd::ClipPath { contours: vec![], even_odd: false }]);
+        let cut = Stream::new().f(canvas_op::CLEAR as f32).f(canvas_op::CLIP_PATH as f32).f(0.0).f(2.0).f(3.0).f(0.0).f(0.0).decode(&[]);
+        assert_eq!(cut, vec![CanvasCmd::Clear]);
+    }
+
+    #[test]
+    fn malformed_new_commands_stop_decoding_without_panicking() {
+        // Too many dashes, a bad brush kind, a contour count past the buffer, a truncated brush: each stops cleanly.
+        for stream in [
+            Stream::new().f(canvas_op::CLEAR as f32).f(canvas_op::LINE_STYLE as f32).f(0.0).f(0.0).f(4.0).f(0.0).f(1000.0),
+            Stream::new().f(canvas_op::CLEAR as f32).f(canvas_op::FILL_PATH_BRUSH as f32).f(0.0).f(9.0).color(RED),
+            Stream::new().f(canvas_op::CLEAR as f32).f(canvas_op::FILL_PATHS as f32).f(0.0).f(3.0).f(0.0).color(RED)
+                .f(0.0).f(0.0).f(0.0).f(0.0).f(0.0).f(0.0).f(0.0).f(1000000.0),
+            Stream::new().f(canvas_op::CLEAR as f32).f(canvas_op::SHADOW as f32).color(RED),
+            Stream::new().f(canvas_op::CLEAR as f32).f(canvas_op::DRAW_IMAGE as f32).f(1.0).f(2.0),
+        ] {
+            assert_eq!(stream.decode(&[]), vec![CanvasCmd::Clear]);
+        }
     }
 
     #[test]

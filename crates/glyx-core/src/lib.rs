@@ -97,6 +97,9 @@ pub use glyx_shell::ShellConfig as WindowConfig;
 pub use glyx_shell::StartupMode;
 pub use glyx_shell::RenderMode;
 mod config;
+mod label_cache;
+mod canvas_paint;
+mod canvas_export;
 mod state;
 mod dev_mode;
 #[cfg(feature = "dev")]
@@ -402,39 +405,7 @@ impl DevModeConfig {
 }
 
 // ── Cached label ──────────────────────────────────────────────────────────────
-
-/// How many shaped labels the cache keeps when `GLYX_LABEL_CACHE` is not set.
-const DEFAULT_LABEL_CACHE_ENTRIES: usize = 256;
-
-/// The capacity of the shaped-label cache: `value` (the `GLYX_LABEL_CACHE` environment variable) if it
-/// is a number of entries between 16 and 1,000,000, else the default.
-///
-/// Every `Text` node and every canvas `fillText` string shares this cache. Shaping a short string costs
-/// about 7 microseconds, so a view that shows more distinct strings than the cache holds (a big table, a
-/// canvas grid) misses on every frame and re-shapes all of them.
-fn label_cache_capacity(value: Option<&str>) -> std::num::NonZeroUsize {
-    let entries = value
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| (16..=1_000_000).contains(n))
-        .unwrap_or(DEFAULT_LABEL_CACHE_ENTRIES);
-    std::num::NonZeroUsize::new(entries).unwrap()
-}
-
-#[cfg(test)]
-mod label_cache_capacity_tests {
-    use super::*;
-
-    #[test]
-    fn the_default_applies_unless_the_variable_holds_a_sensible_number() {
-        let default = DEFAULT_LABEL_CACHE_ENTRIES;
-        assert_eq!(label_cache_capacity(None).get(), default);
-        assert_eq!(label_cache_capacity(Some("4096")).get(), 4096);
-        assert_eq!(label_cache_capacity(Some(" 2000 ")).get(), 2000);
-        for bad in ["", "lots", "-5", "0", "15", "1000001", "4096.5"] {
-            assert_eq!(label_cache_capacity(Some(bad)).get(), default, "{bad:?}");
-        }
-    }
-}
+// The cache that holds these, and sizes itself, is in `label_cache.rs`.
 
 /// A shaped text label — holds the Parley layout plus pre-computed metrics
 /// for centering inside a box without re-querying the layout object.
@@ -1126,6 +1097,9 @@ pub fn run(mut config: AppConfig) -> bool {
         }
     };
 
+    // Pins the shaped-label cache when the config says so; otherwise it sizes itself (see `label_cache.rs`).
+    let label_cache_entries: Option<u32> = window.label_cache_entries;
+
     // Pre-init splash window sizing: mirror the main window's own configured
     // dimensions so the handoff feels seamless (same size, no visible
     // resize/jump) — see `ShellConfig::splash_window`'s doc comment.
@@ -1619,7 +1593,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     images_by_path: ByteBudgetImageCache::new(256 * 1024 * 1024),
                     image_cache_hits: 0,
                     image_cache_misses: 0,
-                    label_cache:  lru::LruCache::new(label_cache_capacity(std::env::var("GLYX_LABEL_CACHE").ok().as_deref())),
+                    label_cache:  label_cache::LabelCache::new(label_cache::pinned_entries(std::env::var("GLYX_LABEL_CACHE").ok().as_deref(), label_cache_entries)),
                     cursor_x:     0.0,
                     cursor_y:     0.0,
                     drag_active:  false,
@@ -3268,6 +3242,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 // Update prev_resolved/prev_visual snapshots and clear per-frame dirty sets.
                 scene::record_visual_bounds(s, &motion_overrides);
                 snapshot_resolved(s);
+                s.label_cache.end_frame();
                 s.dirty_nodes.clear();
                 s.dirty_subtrees.clear();
 

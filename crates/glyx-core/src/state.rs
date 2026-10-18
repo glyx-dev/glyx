@@ -11,7 +11,7 @@ use glyx_runtime::{CanvasCmd, NodeProps, NodeType, JsRuntime};
 use glyx_gpu::GpuContext;
 use glyx_text::TextSystem;
 
-use crate::{LabelKey, CachedLabel};
+
 use crate::soft_present::SoftPresent;
 #[cfg(target_os = "windows")]
 use crate::d2d_present::D2DPresent;
@@ -286,9 +286,10 @@ pub(super) struct PerWindowState {
     pub(super) images_by_path: ByteBudgetImageCache,
     pub(super) image_cache_hits: u64,
     pub(super) image_cache_misses: u64,
-    /// Shaped text labels, shared by `Text` nodes and canvas `fillText`; its size is `label_cache_capacity`
-    /// (`GLYX_LABEL_CACHE`). A view with more distinct strings than this re-shapes them all every frame.
-    pub(super) label_cache: lru::LruCache<LabelKey, CachedLabel>,
+    /// Shaped text labels, shared by `Text` nodes and canvas `fillText`. It sizes itself unless pinned by
+    /// `labelCacheEntries` / `GLYX_LABEL_CACHE` (see `label_cache.rs`): a view with more distinct strings than it
+    /// holds would re-shape them all every frame.
+    pub(super) label_cache: crate::label_cache::LabelCache,
     pub(super) cursor_x:     f32,
     pub(super) cursor_y:     f32,
     pub(super) drag_active:  bool,

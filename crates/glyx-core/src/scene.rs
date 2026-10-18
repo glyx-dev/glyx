@@ -817,6 +817,10 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 // nowhere for composed text to go.
                 state.window.set_ime_allowed(id.is_some());
             }
+            SceneCommand::CanvasExport { id, req_id, width, height, scale, region, raw } => {
+                // Rendered right here, after the canvas's own draws (they are in this same command list).
+                crate::canvas_export::handle(state, id, req_id, width, height, scale, region, raw);
+            }
             SceneCommand::CanvasUpdate { id, cmds, append } => {
                 if append {
                     // Overflow continuation: extend the existing command list.

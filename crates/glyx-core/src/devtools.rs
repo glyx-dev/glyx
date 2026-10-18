@@ -908,6 +908,24 @@ impl Devtools {
                 let s = window(req, windows)?;
                 Ok(perf::snapshot_json(&s.perf.lock()))
             })().into(),
+            // The shaped-text cache: its size, fill and hit rate; and pin it or let it size itself, live.
+            ("Performance", "getLabelCache") => (|| {
+                let win = target_window(req.window_id, windows)?;
+                let s = windows.get_mut(&win).expect("target_window checked it");
+                Ok(s.label_cache.stats_json())
+            })().into(),
+            ("Performance", "setLabelCache") => (|| {
+                let win = target_window(req.window_id, windows)?;
+                let s = windows.get_mut(&win).expect("target_window checked it");
+                if p.get("auto").and_then(Value::as_bool) == Some(true) {
+                    s.label_cache.set_auto();
+                } else if let Some(n) = p.get("entries").and_then(Value::as_u64) {
+                    s.label_cache.set_fixed(n as usize);
+                } else {
+                    return Err(ErrorBody::invalid_params("entries (a number, 16 to 1,000,000) or auto: true is required"));
+                }
+                Ok(s.label_cache.stats_json())
+            })().into(),
             ("Performance", "getBudget") => (|| {
                 let s = window(req, windows)?;
                 Ok(json!({ "budgetMs": s.perf.lock().budget_ms }))

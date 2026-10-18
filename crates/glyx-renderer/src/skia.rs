@@ -322,7 +322,38 @@ struct TinySkiaShared {
     /// showing stale frames interleaved with live ones (and frames from before
     /// a camera stop reappearing after restart). `Blob::id` comes from a global
     /// counter and is never reused.
-    image_cache: lru::LruCache<u64, Vec<u8>>,
+    image_cache: ByteBudgetCache,
+}
+
+/// Memory the converted-image cache may hold, in bytes. Each entry is a full sRGB RGBA copy of an image, so a count
+/// limit said nothing about memory (256 large images is gigabytes); the budget does.
+const CONVERTED_IMAGE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
+/// A least-recently-used cache of converted image bytes that evicts by total size, not by entry count.
+struct ByteBudgetCache {
+    lru: lru::LruCache<u64, Vec<u8>>,
+    bytes: usize,
+    budget: usize,
+}
+
+impl ByteBudgetCache {
+    fn new(budget: usize) -> Self { Self { lru: lru::LruCache::unbounded(), bytes: 0, budget } }
+    fn get(&mut self, key: &u64) -> Option<&Vec<u8>> { self.lru.get(key) }
+    #[allow(dead_code)]
+    fn len(&self) -> usize { self.lru.len() }
+    #[allow(dead_code)]
+    fn bytes(&self) -> usize { self.bytes }
+    fn clear(&mut self) { self.lru.clear(); self.bytes = 0; }
+    /// Keeps `value` unless it alone is over the budget, evicting the least recently used until it fits.
+    fn put(&mut self, key: u64, value: Vec<u8>) {
+        if value.len() > self.budget { return; }
+        if let Some(old) = self.lru.pop(&key) { self.bytes -= old.len(); }
+        while self.bytes + value.len() > self.budget {
+            match self.lru.pop_lru() { Some((_, v)) => self.bytes -= v.len(), None => break }
+        }
+        self.bytes += value.len();
+        self.lru.put(key, value);
+    }
 }
 
 /// `peniko::ImageData` bytes are linear-premultiplied (`glyx-core/src/scene.rs`'s
@@ -470,6 +501,8 @@ pub struct TinySkiaFrame {
     xf:           tiny_skia::Transform,
     /// Saved transforms, see `push_transform` / `pop_transform`.
     xf_stack:     Vec<tiny_skia::Transform>,
+    /// How draws combine with the pixels under them (see `set_blend`); source-over unless a canvas changed it.
+    blend:        tiny_skia::BlendMode,
     /// Persistent state moved from TinySkiaRenderer for the frame duration.
     shared:       TinySkiaShared,
 }
@@ -569,6 +602,7 @@ impl TinySkiaFrame {
             damage:       damage_set,
             xf:           tiny_skia::Transform::identity(),
             xf_stack:     Vec::new(),
+            blend:        tiny_skia::BlendMode::SourceOver,
             shared,
         })
     }
@@ -726,7 +760,7 @@ impl TinySkiaFrame {
                               radius: f64, color: peniko::Color) {
         if self.culled(x, y, w, h) { return; }
         if let Some(set) = self.damage_clipped_fill(x, y, w, h, radius) {
-            let paint = solid_paint(color);
+            let paint = self.solid(color);
             for rect in set.iter() {
                 // The rect IS inside the damage, so only a pushed clip layer matters.
                 let needs = !self.clip_stack.is_empty()
@@ -739,7 +773,7 @@ impl TinySkiaFrame {
         }
         let Some(path) = rrect_path(x as f32, y as f32, w as f32, h as f32, radius as f32)
             else { return };
-        let paint = solid_paint(color);
+        let paint = self.solid(color);
         // A big rounded rect is mostly flat interior, and what makes filling it
         // slow is the clip mask, not the shape: through the damage mask a panel
         // takes ~19x longer than without one. So fill an integer-aligned inner
@@ -796,7 +830,8 @@ impl TinySkiaFrame {
         let Some(path) = rrect_path(x as f32, y as f32, w as f32, h as f32, radius as f32)
             else { return };
         let strip = self.gradient_strip(brush);
-        let Some(paint) = brush_paint(brush, &strip) else { return };
+        let Some(mut paint) = brush_paint(brush, &strip) else { return };
+        paint.blend_mode = self.blend;
         let mask = if self.mask_needed(x, y, w, h) { self.current_mask.as_ref() } else { None };
         self.pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding,
                               self.xf, mask);
@@ -804,7 +839,7 @@ impl TinySkiaFrame {
 
     pub fn fill_rect(&mut self, x: f64, y: f64, w: f64, h: f64, color: peniko::Color) {
         if self.culled(x, y, w, h) { return; }
-        let paint = solid_paint(color);
+        let paint = self.solid(color);
         // A damage-clipped rect is inside the damage by construction, so only
         // a pushed clip layer can still matter.
         if let Some(set) = self.damage_clipped_fill(x, y, w, h, 0.0) {
@@ -830,7 +865,7 @@ impl TinySkiaFrame {
         if self.culled(x - sw, y - sw, w + sw * 2.0, h + sw * 2.0) { return; }
         let Some(path) = rrect_path(x as f32, y as f32, w as f32, h as f32, radius as f32)
             else { return };
-        let paint  = solid_paint(color);
+        let paint  = self.solid(color);
         let stroke = tiny_skia::Stroke { width: sw as f32, ..Default::default() };
         let mask   = if self.mask_needed(x - sw, y - sw, w + sw * 2.0, h + sw * 2.0) { self.current_mask.as_ref() } else { None };
         self.pixmap.stroke_path(&path, &paint, &stroke,
@@ -841,7 +876,7 @@ impl TinySkiaFrame {
         if self.culled(cx - r, cy - r, r * 2.0, r * 2.0) { return; }
         let Some(path) = tiny_skia::PathBuilder::from_circle(cx as f32, cy as f32, r as f32)
             else { return };
-        let paint = solid_paint(color);
+        let paint = self.solid(color);
         let mask  = if self.mask_needed(cx - r, cy - r, r * 2.0, r * 2.0) { self.current_mask.as_ref() } else { None };
         self.pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding,
                               self.xf, mask);
@@ -852,7 +887,7 @@ impl TinySkiaFrame {
         if self.culled(cx - rr, cy - rr, rr * 2.0, rr * 2.0) { return; }
         let Some(path) = tiny_skia::PathBuilder::from_circle(cx as f32, cy as f32, r as f32)
             else { return };
-        let paint  = solid_paint(color);
+        let paint  = self.solid(color);
         let stroke = tiny_skia::Stroke { width: width as f32, ..Default::default() };
         let mask   = if self.mask_needed(cx - rr, cy - rr, rr * 2.0, rr * 2.0) { self.current_mask.as_ref() } else { None };
         self.pixmap.stroke_path(&path, &paint, &stroke,
@@ -871,7 +906,7 @@ impl TinySkiaFrame {
         pb.move_to(x0 as f32, y0 as f32);
         pb.line_to(x1 as f32, y1 as f32);
         let Some(path) = pb.finish() else { return };
-        let paint  = solid_paint(color);
+        let paint  = self.solid(color);
         let stroke = tiny_skia::Stroke {
             width:    width as f32,
             line_cap: tiny_skia::LineCap::Round,
@@ -926,7 +961,7 @@ impl TinySkiaFrame {
         let clipped = self.clip_fill_to_damage(pts);
         let pts = match &clipped { Some(c) if c.len() < 6 => return, Some(c) => c.as_slice(), None => pts };
         let Some(path) = poly_path(pts, true) else { return };
-        let paint = solid_paint(color);
+        let paint = self.solid(color);
         let needs = Self::points_box(pts, 0.0).map_or(true, |(x, y, w, h)| self.mask_needed(x, y, w, h));
         let mask  = if needs { self.current_mask.as_ref() } else { None };
         self.pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding,
@@ -950,10 +985,60 @@ impl TinySkiaFrame {
         let pts = match &clipped { Some(c) if c.len() < 6 => return, Some(c) => c.as_slice(), None => pts };
         let Some(path) = poly_path(pts, true) else { return };
         let strip = self.gradient_strip(brush);
-        let Some(paint) = brush_paint(brush, &strip) else { return };
+        let Some(mut paint) = brush_paint(brush, &strip) else { return };
+        paint.blend_mode = self.blend;
         let needs = Self::points_box(pts, 0.0).map_or(true, |(x, y, w, h)| self.mask_needed(x, y, w, h));
         let mask = if needs { self.current_mask.as_ref() } else { None };
         self.pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, self.xf, mask);
+    }
+
+    /// A solid paint that composites with the current blend mode.
+    fn solid(&self, color: peniko::Color) -> tiny_skia::Paint<'static> {
+        let mut p = solid_paint(color);
+        p.blend_mode = self.blend;
+        p
+    }
+
+    /// Composite what is drawn next with `kind` (see `AnyFrame::set_blend`).
+    pub fn set_blend(&mut self, kind: crate::BlendKind) {
+        use crate::BlendKind::*;
+        self.blend = match kind {
+            SourceOver => tiny_skia::BlendMode::SourceOver,
+            Multiply => tiny_skia::BlendMode::Multiply,
+            Screen => tiny_skia::BlendMode::Screen,
+            Overlay => tiny_skia::BlendMode::Overlay,
+            Darken => tiny_skia::BlendMode::Darken,
+            Lighten => tiny_skia::BlendMode::Lighten,
+            Difference => tiny_skia::BlendMode::Difference,
+            Exclusion => tiny_skia::BlendMode::Exclusion,
+            DestinationOut => tiny_skia::BlendMode::DestinationOut,
+        };
+    }
+
+    /// Fill several closed polygons together (shapes with holes), with any brush.
+    pub fn fill_contours(&mut self, contours: &[Vec<f32>], brush: &peniko::Brush, even_odd: bool) {
+        let mut pb = tiny_skia::PathBuilder::new();
+        for c in contours.iter().filter(|c| c.len() >= 6) {
+            pb.move_to(c[0], c[1]);
+            for p in c[2..].chunks_exact(2) { pb.line_to(p[0], p[1]); }
+            pb.close();
+        }
+        let Some(path) = pb.finish() else { return };
+        let b = path.bounds();
+        let (x, y, w, h) = (b.x() as f64, b.y() as f64, b.width() as f64, b.height() as f64);
+        if self.culled(x, y, w, h) { return; }
+        let strip = self.gradient_strip(brush);
+        let Some(mut paint) = brush_paint(brush, &strip) else { return };
+        paint.blend_mode = self.blend;
+        let needs = self.mask_needed(x, y, w, h);
+        let mask = if needs { self.current_mask.as_ref() } else { None };
+        let rule = if even_odd { tiny_skia::FillRule::EvenOdd } else { tiny_skia::FillRule::Winding };
+        self.pixmap.fill_path(&path, &paint, rule, self.xf, mask);
+    }
+
+    /// `draw_image_with_transform` at `alpha` opacity (0 to 1).
+    pub fn draw_image_alpha(&mut self, image: &peniko::ImageData, transform: Affine, alpha: f32) {
+        self.draw_image_transformed_alpha(image, transform, true, alpha);
     }
 
     pub fn stroke_path(&mut self, pts: &[f32], width: f64, closed: bool, color: peniko::Color) {
@@ -976,7 +1061,7 @@ impl TinySkiaFrame {
     /// Strokes the polyline exactly as given (`stroke_path` decides which parts).
     fn stroke_polyline(&mut self, pts: &[f32], width: f64, closed: bool, color: peniko::Color) {
         let Some(path) = poly_path(pts, closed) else { return };
-        let paint  = solid_paint(color);
+        let paint  = self.solid(color);
         let stroke = tiny_skia::Stroke {
             width: width as f32,
             line_cap:  tiny_skia::LineCap::Round,
@@ -1162,6 +1247,10 @@ impl TinySkiaFrame {
     }
 
     fn draw_image_transformed(&mut self, image: &peniko::ImageData, transform: Affine, cache: bool) {
+        self.draw_image_transformed_alpha(image, transform, cache, 1.0);
+    }
+
+    fn draw_image_transformed_alpha(&mut self, image: &peniko::ImageData, transform: Affine, cache: bool, alpha: f32) {
         let (iw, ih) = (image.width, image.height);
         if iw == 0 || ih == 0 { return; }
         let bytes = self.srgb_bytes(image, cache);
@@ -1173,6 +1262,7 @@ impl TinySkiaFrame {
             a as f32, b as f32, c as f32, d as f32, e as f32, f as f32,
         ));
 
+        let blend = self.blend;
         let apply = |src: &[u8], pixmap: &mut tiny_skia::Pixmap,
                      mask: Option<&tiny_skia::Mask>| {
             if let Some(pm) = tiny_skia::PixmapRef::from_bytes(src, iw, ih) {
@@ -1180,10 +1270,10 @@ impl TinySkiaFrame {
                     pm,
                     tiny_skia::SpreadMode::Pad,
                     tiny_skia::FilterQuality::Bilinear,
-                    1.0,
+                    alpha.clamp(0.0, 1.0),
                     ts,
                 );
-                let paint = tiny_skia::Paint { shader, anti_alias: true, ..Default::default() };
+                let paint = tiny_skia::Paint { shader, anti_alias: true, blend_mode: blend, ..Default::default() };
                 let pw = pixmap.width() as f32;
                 let ph = pixmap.height() as f32;
                 if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, pw, ph) {
@@ -1265,6 +1355,24 @@ impl TinySkiaFrame {
     // ── Layers / clipping ─────────────────────────────────────────────────────
 
     fn push_clip_path(&mut self, path: &tiny_skia::Path) {
+        self.push_clip_path_rule(path, tiny_skia::FillRule::Winding);
+    }
+
+    /// Clip to closed polygons (see `AnyFrame::push_clip_contours`); a shape with no area clips everything away.
+    pub fn push_clip_contours(&mut self, contours: &[Vec<f32>], even_odd: bool) {
+        let mut pb = tiny_skia::PathBuilder::new();
+        for c in contours.iter().filter(|c| c.len() >= 6) {
+            pb.move_to(c[0], c[1]);
+            for p in c[2..].chunks_exact(2) { pb.line_to(p[0], p[1]); }
+            pb.close();
+        }
+        match pb.finish() {
+            Some(path) => self.push_clip_path_rule(&path, if even_odd { tiny_skia::FillRule::EvenOdd } else { tiny_skia::FillRule::Winding }),
+            None => self.push_layer(0.0, 0.0, 0.0, 0.0),
+        }
+    }
+
+    fn push_clip_path_rule(&mut self, path: &tiny_skia::Path, rule: tiny_skia::FillRule) {
         self.ensure_mask();
         // The new mask folds in whatever rect clip is pending, so from here the
         // clip is the mask alone; the rect set and mask are saved to restore.
@@ -1274,7 +1382,7 @@ impl TinySkiaFrame {
         let new_mask = match saved.as_ref() {
             Some(parent) => {
                 let mut m = parent.clone();
-                m.intersect_path(path, tiny_skia::FillRule::Winding, true, self.xf);
+                m.intersect_path(path, rule, true, self.xf);
                 Some(m)
             }
             None => {
@@ -1282,7 +1390,7 @@ impl TinySkiaFrame {
                 let h = self.pixmap.height();
                 let xf = self.xf;
                 tiny_skia::Mask::new(w, h).map(|mut m| {
-                    m.fill_path(path, tiny_skia::FillRule::Winding, true, xf);
+                    m.fill_path(path, rule, true, xf);
                     m
                 })
             }
@@ -1435,7 +1543,7 @@ impl TinySkiaRenderer {
             // several font sizes' worth of Latin glyphs without thrashing.
             glyph_cache: lru::LruCache::new(std::num::NonZeroUsize::new(2048).unwrap()),
             pixmap:      None,
-            image_cache: lru::LruCache::new(std::num::NonZeroUsize::new(256).unwrap()),
+            image_cache: ByteBudgetCache::new(CONVERTED_IMAGE_BUDGET_BYTES),
         })
     }
 
@@ -1678,6 +1786,29 @@ impl TinySkiaRenderer {
     }
 
     pub fn try_save_pipeline_cache(&self) {}
+}
+
+#[cfg(test)]
+mod byte_budget_cache_tests {
+    use super::*;
+
+    #[test]
+    fn it_evicts_the_least_recently_used_by_size_and_refuses_what_alone_is_too_big() {
+        let mut c = ByteBudgetCache::new(100);
+        c.put(1, vec![0; 40]);
+        c.put(2, vec![0; 40]);
+        assert_eq!((c.len(), c.bytes()), (2, 80));
+        assert!(c.get(&1).is_some()); // 1 is now more recent than 2
+        c.put(3, vec![0; 40]);         // 120 > 100: the least recent (2) goes
+        assert!(c.get(&2).is_none() && c.get(&1).is_some() && c.get(&3).is_some());
+        assert_eq!(c.bytes(), 80);
+        c.put(4, vec![0; 101]);        // bigger than the whole budget: not stored, nothing evicted
+        assert_eq!((c.len(), c.bytes()), (2, 80));
+        c.put(1, vec![0; 10]);         // replacing an entry swaps its size
+        assert_eq!(c.bytes(), 50);
+        c.clear();
+        assert_eq!((c.len(), c.bytes()), (0, 0));
+    }
 }
 
 #[cfg(test)]

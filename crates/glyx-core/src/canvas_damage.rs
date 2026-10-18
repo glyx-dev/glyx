@@ -73,7 +73,23 @@ fn cmd_bounds(cmd: &CanvasCmd) -> Option<Region> {
             let b = points_box(points, *line_width);
             if b[0] > b[2] { EMPTY } else { [b[0] - PAD, b[1] - PAD, b[2] + PAD, b[3] + PAD] }
         }
-        PushClip { .. } | PopClip => return None,
+        FillPathBrush { points, .. } => {
+            let b = points_box(points, 0.0);
+            if b[0] > b[2] { EMPTY } else { [b[0] - PAD, b[1] - PAD, b[2] + PAD, b[3] + PAD] }
+        }
+        StrokePathBrush { points, line_width, .. } => {
+            let b = points_box(points, *line_width);
+            if b[0] > b[2] { EMPTY } else { [b[0] - PAD, b[1] - PAD, b[2] + PAD, b[3] + PAD] }
+        }
+        FillPaths { contours, .. } => {
+            let b = contours.iter().fold(EMPTY, |acc, c| union(acc, points_box(c, 0.0)));
+            if b[0] > b[2] { EMPTY } else { [b[0] - PAD, b[1] - PAD, b[2] + PAD, b[3] + PAD] }
+        }
+        DrawImage { dst, .. } => rect(dst[0], dst[1], dst[0] + dst[2], dst[1] + dst[3], 0.0),
+        // These change how the commands after them are drawn (a transform moves them, a line style or shadow
+        // widens them, a blend mode changes pixels outside their own box), so they have no region of their own.
+        PushClip { .. } | PopClip | ClipPath { .. } | Save | Restore | Transform { .. } | GlobalAlpha { .. } | Blend { .. }
+        | LineStyle { .. } | Shadow { .. } => return None,
     })
 }
 
@@ -83,6 +99,11 @@ fn cmd_bounds(cmd: &CanvasCmd) -> Option<Region> {
 /// give an empty region.
 pub(crate) fn changed_region(old: &[CanvasCmd], new: &[CanvasCmd]) -> Option<Region> {
     if old == new { return Some(EMPTY); }
+    // With drawing state in play (a transform, a shadow, a blend mode, ...) a changed command can reach well
+    // outside its own bounds, and so can the ones that look unchanged: repaint the whole canvas.
+    if old.iter().chain(new).any(|c| cmd_bounds(c).is_none() && !matches!(c, CanvasCmd::PushClip { .. } | CanvasCmd::PopClip)) {
+        return None;
+    }
     let mut acc = EMPTY;
     let mut add = |c: &CanvasCmd| -> bool {
         match cmd_bounds(c) { Some(b) => { acc = union(acc, b); true } None => false }
@@ -242,6 +263,27 @@ mod tests {
     }
 
     #[test]
+    fn drawing_state_makes_a_changed_command_unboundable_but_brush_fills_and_images_are_bounded() {
+        let rect = |x: f32| CanvasCmd::FillRect { x, y: 0.0, w: 10.0, h: 10.0, color: [255, 0, 0, 255] };
+        // A transform (or shadow, blend, line style, save/restore, alpha) anywhere in either list: repaint it all.
+        for state in [
+            CanvasCmd::Transform { m: [1.0, 0.0, 0.0, 1.0, 5.0, 5.0] }, CanvasCmd::Save, CanvasCmd::Restore,
+            CanvasCmd::GlobalAlpha { alpha: 0.5 }, CanvasCmd::Blend { mode: 1 },
+            CanvasCmd::LineStyle { cap: 0, join: 0, miter_limit: 10.0, dash_offset: 0.0, dashes: vec![4.0, 2.0] },
+            CanvasCmd::Shadow { color: [0, 0, 0, 255], blur: 4.0, dx: 1.0, dy: 1.0 },
+        ] {
+            assert_eq!(changed_region(&[state.clone(), rect(0.0)], &[state.clone(), rect(50.0)]), None, "{state:?}");
+        }
+        // Brush fills and images carry their own geometry, so a change to one is bounded like any other draw.
+        let brush = glyx_runtime::bindings::CanvasBrush::solid([0, 255, 0, 255]);
+        let tri = |dx: f32| CanvasCmd::FillPathBrush { points: vec![dx, 0.0, dx + 10.0, 0.0, dx + 5.0, 8.0], brush: brush.clone() };
+        let region = changed_region(&[tri(0.0)], &[tri(100.0)]).expect("bounded");
+        assert!(region[0] <= 0.0 && region[2] >= 110.0, "{region:?}");
+        let img = |x: f32| CanvasCmd::DrawImage { image: 1, src: [0.0; 4], dst: [x, 0.0, 20.0, 20.0] };
+        assert!(changed_region(&[img(0.0)], &[img(40.0)]).is_some());
+    }
+
+    #[test]
     fn a_changed_clip_cannot_be_bounded() {
         let a = vec![CanvasCmd::PushClip { x: 0.0, y: 0.0, w: 50.0, h: 50.0 }, line(0.0, 0.0, 40.0, 40.0), CanvasCmd::PopClip];
         let mut b = a.clone();
@@ -301,19 +343,9 @@ mod tests {
         let mut frame = AnyFrame::TinySkia(r.begin_frame());
         frame.fill_rect(0.0, 0.0, WIN_W as f64, WIN_H as f64, crate::rgba_to_vello([13, 14, 22, 255]));
         frame.push_layer(OX, OY, CW as f64, CH as f64);
-        let mut depth = 0;
-        for cmd in cmds {
-            match cmd {
-                CanvasCmd::FillText { text, x, y, font_size, color, bold } => {
-                    let layout = if *bold { ts.styled_label(text, *font_size, f32::MAX, true, false, None) } else { ts.label(text, *font_size) };
-                    frame.draw_text(&layout, OX + *x as f64, OY + *y as f64, crate::rgba_to_vello(*color));
-                }
-                CanvasCmd::PushClip { x, y, w, h } => { frame.push_layer(OX + *x as f64, OY + *y as f64, *w as f64, *h as f64); depth += 1; }
-                CanvasCmd::PopClip => { if depth > 0 { frame.pop_layer(); depth -= 1; } }
-                _ => crate::render::draw_canvas_cmd(&mut frame, cmd, OX, OY, 1.0),
-            }
-        }
-        for _ in 0..depth { frame.pop_layer(); }
+        let mut labels = crate::label_cache::LabelCache::new(Some(4096));
+        let images = std::collections::HashMap::new();
+        crate::canvas_paint::Painter::new(&mut frame, ts, &mut labels, &images, (OX, OY), 1.0).paint_all(cmds);
         frame.pop_layer();
         let AnyFrame::TinySkia(f) = frame else { unreachable!() };
         let mut out = Vec::new();

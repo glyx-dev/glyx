@@ -125,6 +125,27 @@ let shiftHeld = false;
 let altHeld   = false;
 let superHeld = false;
 
+// Mouse buttons held, as the web's `PointerEvent.buttons`: 1 left, 2 right, 4 middle.
+let buttonsHeld = 0;
+// The Pressable that has captured the pointer: from a press on it until the button is released, it gets the
+// pointer's moves wherever the pointer goes (a drawing that runs past the canvas's edge keeps going), and a
+// final `onPointerUp`. `null` when nothing has it.
+let pointerCaptureId: any = null;
+// Where the pointer was this frame, oldest first: every position a merged cursor move passed through, then the
+// latest. Reset each dispatch.
+let moveTrail: number[] = [];
+
+// Who answers `canvasExport` events (a finished `ctx.toDataURL()` / `toPNG()`): canvas.ts sets it.
+let canvasExportHandler: ((ev: any) => void) | null = null;
+export function setCanvasExportHandler(fn: (ev: any) => void) { canvasExportHandler = fn; }
+
+/** Send the pointer's moves to this Pressable until the button is released (a press on it does this by default). */
+export function setPointerCapture(nodeId: any) { pointerCaptureId = nodeId; }
+/** Stop capturing (only if `nodeId` is the capturing node, when given). */
+export function releasePointerCapture(nodeId?: any) {
+  if (nodeId === undefined || pointerCaptureId === nodeId) pointerCaptureId = null;
+}
+
 // Last cursor position seen this frame (updated by cursorMoved events).
 let cursorX = 0;
 let cursorY = 0;
@@ -133,6 +154,22 @@ let cursorY = 0;
 // calling `findTopmostSolid` itself. See `findTopmostSolid`'s doc comment.
 let cursorTarget: any = null;
 
+/**
+ * A pointer event for a Pressable at (x, y), in window coordinates, with the position inside its box. Like the web's:
+ * `buttons` (1 left, 2 right, 4 middle; 0 when none is held), `button` (the one that changed, -1 for a move),
+ * `pressure` (0.5 while a button is held, 0 otherwise: a mouse), `pointerType` and `pointerId`. Pen and touch
+ * pressure are not reported yet.
+ */
+function pointerEvent(layout: any, x: number, y: number, button: number) {
+  return {
+    x, y,
+    locationX: x - boxOriginX(layout), locationY: y - boxOriginY(layout),
+    button, buttons: buttonsHeld,
+    pressure: buttonsHeld ? 0.5 : 0,
+    pointerType: 'mouse', pointerId: 1,
+  };
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
@@ -140,7 +177,7 @@ let cursorTarget: any = null;
  * @param {number} nodeId
  * @param {{ onPress?: () => void, onPressIn?: () => void, onPressOut?: () => void }} handlers
  */
-export function registerPressable(nodeId: any, handlers: { onPress: ((e: any) => any) | (({ x, y }: { x: any; y: any; }) => void) | (({ x }: { x: any; }) => void); onRightPress?: (e: any) => any; onPressIn: (() => any) | (() => void) | (() => void); onPressOut: (() => any) | (() => void) | (() => void); onHoverIn: (() => any) | (() => void) | (() => void); onHoverOut: (() => any) | (() => void) | (() => void); onPointerMove?: (e: any) => any; keepFocus?: any; }) {
+export function registerPressable(nodeId: any, handlers: { onPress: ((e: any) => any) | (({ x, y }: { x: any; y: any; }) => void) | (({ x }: { x: any; }) => void); onRightPress?: (e: any) => any; onPressIn: (() => any) | (() => void) | (() => void); onPressOut: (() => any) | (() => void) | (() => void); onHoverIn: (() => any) | (() => void) | (() => void); onHoverOut: (() => any) | (() => void) | (() => void); onPointerMove?: (e: any) => any; onPointerDown?: (e: any) => any; onPointerUp?: (e: any) => any; capturesPointer?: boolean; keepFocus?: any; }) {
   pressableRegistry.set(nodeId, handlers);
 }
 
@@ -602,6 +639,7 @@ export function dispatchEvents() {
   if (!events || events.length === 0) return;
 
   let cursorMovedThisFrame = false;
+  moveTrail = [];
 
   for (const ev of events) {
     switch (ev.type) {
@@ -609,8 +647,17 @@ export function dispatchEvents() {
       case 'mouseButton': {
         if (!ev.pressed) {
           inputDragNodeId = null;   // end text drag-selection on release
+          buttonsHeld &= ~(1 << ev.button);
+          if (pointerCaptureId !== null) {
+            const id = pointerCaptureId;
+            pointerCaptureId = null;
+            const ph = pressableRegistry.get(id);
+            const l = ph?.onPointerUp && typeof __glyx_getLayout !== 'undefined' ? __glyx_getLayout(id) : null;
+            if (l) ph.onPointerUp(pointerEvent(l, ev.x, ev.y, ev.button));
+          }
           break;
         }
+        buttonsHeld |= 1 << ev.button;
 
         const isRight = ev.button === 1; // 0 = left, 1 = right, 2 = middle
 
@@ -667,6 +714,10 @@ export function dispatchEvents() {
               // Right-click → onRightPress (if present); otherwise left → onPress.
               if (isRight) ph.onRightPress?.(pev);
               else         ph.onPress?.(pev);
+              // Pointer events (a press of any button), and capture: the pointer's moves keep coming to this
+              // Pressable until the button goes up, even outside it.
+              if (layout && ph.onPointerDown) ph.onPointerDown(pointerEvent(layout, ev.x, ev.y, ev.button));
+              if (ph.capturesPointer) pointerCaptureId = pressableTarget;
             }
           }
 
@@ -884,6 +935,10 @@ export function dispatchEvents() {
         cursorY = ev.y;
         cursorTarget = ev.target;
         cursorMovedThisFrame = true;
+        // Every position this move passed through (the runtime merges a frame's moves and keeps them), then the
+        // latest, so a drawing app can follow the whole stroke.
+        if (ev.trail) for (let k = 0; k < ev.trail.length; k++) moveTrail.push(ev.trail[k]);
+        moveTrail.push(ev.x, ev.y);
         // Text drag-selection: while the left button is held on an input,
         // every cursor move extends the selection toward the pointer.
         if (inputDragNodeId !== null) {
@@ -951,6 +1006,11 @@ export function dispatchEvents() {
         // node ID directly (no hit-test needed; the thumb is inside the clip).
         const handlers = scrollRegistry.get(ev.nodeId);
         handlers?.onAbsoluteScroll?.(ev.scrollY);
+        break;
+      }
+
+      case 'canvasExport': {
+        canvasExportHandler?.(ev);
         break;
       }
 
@@ -1075,18 +1135,24 @@ export function dispatchEvents() {
       hoveredPressableId = newHoveredId;
     }
 
-    // Continuous pointer tracking for the hovered pressable (charts'
-    // crosshair, sliders' hover preview…). Once per frame: cursor moves are
-    // already coalesced natively, so this never runs more than once a frame.
-    if (newHoveredId !== null) {
-      const h = pressableRegistry.get(newHoveredId);
+    // Continuous pointer tracking: the Pressable that captured the pointer (a press on it, button still held),
+    // else the hovered one (charts' crosshair, sliders' hover preview…). Once per frame: cursor moves are
+    // merged natively, and the positions they passed through arrive as `points`.
+    const trackedId = pointerCaptureId !== null && pressableRegistry.has(pointerCaptureId) ? pointerCaptureId : newHoveredId;
+    if (trackedId !== null) {
+      const h = pressableRegistry.get(trackedId);
       if (h?.onPointerMove && typeof __glyx_getLayout !== 'undefined') {
-        const l = __glyx_getLayout(newHoveredId);
+        const l = __glyx_getLayout(trackedId);
         if (l) {
-          h.onPointerMove({
-            x: cursorX, y: cursorY,
-            locationX: cursorX - boxOriginX(l), locationY: cursorY - boxOriginY(l),
-          });
+          const e: any = pointerEvent(l, cursorX, cursorY, -1);
+          // More than one position this frame: all of them, oldest first (the last is x, y).
+          if (moveTrail.length > 2) {
+            e.points = [];
+            for (let k = 0; k + 1 < moveTrail.length; k += 2) {
+              e.points.push({ x: moveTrail[k], y: moveTrail[k + 1], locationX: moveTrail[k] - boxOriginX(l), locationY: moveTrail[k + 1] - boxOriginY(l) });
+            }
+          }
+          h.onPointerMove(e);
         }
       }
     }

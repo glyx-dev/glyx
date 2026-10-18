@@ -201,6 +201,38 @@ pub fn canvas3d_load_gltf_callback(
     state.frame_scene.borrow_mut().push(SceneCommand::Canvas3DUpdate { id, scene });
 }
 
+/// `__glyx_canvas_export(id, width, height, scale, [x, y, w, h], raw) -> reqId` — ask glyx-core to render canvas
+/// `id` to a PNG (the size is `width` x `height` when both are given, else the canvas's size times `scale`); with a
+/// region (width and height above 0) only that part of it, and with `raw` its RGBA pixels instead of a PNG. Returns at
+/// once with a request id; the result arrives later as a `canvasExport` input event carrying the same id.
+pub fn canvas_export_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args:  v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let data  = args.data();
+    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
+    let state = unsafe { &*(ext.value() as *const AsyncState) };
+
+    let num = |scope: &mut v8::PinScope<'_, '_, v8::Context>, i: i32| args.get(i).number_value(scope).unwrap_or_default();
+    let id = num(scope, 0) as u32;
+    let (w, h) = (num(scope, 1).max(0.0) as u32, num(scope, 2).max(0.0) as u32);
+    let scale = num(scope, 3) as f32;
+    // The region is one array argument, `[x, y, w, h]` (or nothing).
+    let mut region = [0u32; 4];
+    if let Ok(arr) = v8::Local::<v8::Array>::try_from(args.get(4)) {
+        for (i, slot) in region.iter_mut().enumerate() {
+            *slot = arr.get_index(scope, i as u32).and_then(|v| v.number_value(scope)).unwrap_or(0.0).max(0.0) as u32;
+        }
+    }
+    let raw = args.get(5).boolean_value(scope);
+    let req_id = crate::bindings::NEXT_CANVAS_EXPORT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state.frame_scene.borrow_mut().push(SceneCommand::CanvasExport { id, req_id, width: w, height: h, scale, region, raw });
+    rv.set_uint32(req_id);
+}
+
 /// `__glyx_canvas3d_unload_gltf(path)` â€” drop a GLTF model from the LRU cache.
 /// Useful before loading a large new model to reclaim GPU memory immediately.
 #[cfg(feature = "canvas3d")]

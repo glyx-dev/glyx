@@ -113,7 +113,7 @@ export function Image({ src, width = 120, height = 120, resizeMode = 'stretch', 
 // per Pressable with `transition={false}`, or pass your own `transition`.
 const PRESSABLE_TRANSITION: TransitionConfig = { spring: { stiffness: 600, damping: 48 }, properties: 'all' as const };
 
-export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, onPointerMove, onKeyDown, disabled, keepFocus, feedback = true, transition = PRESSABLE_TRANSITION, style, _glyxOnMount: externalOnMount, ...props }: PressableProps) {
+export function Pressable({ children, onPress, onRightPress, onPressIn, onPressOut, onHoverIn, onHoverOut, onPointerMove, onPointerDown, onPointerUp, capturePointer, onKeyDown, disabled, keepFocus, feedback = true, transition = PRESSABLE_TRANSITION, style, _glyxOnMount: externalOnMount, ...props }: PressableProps) {
   const nodeIdRef    = useRef<any>(null);
   const handlersRef  = useRef<any>(null);
   const [pressed, setPressed] = useState(false);
@@ -153,6 +153,12 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
     onHoverIn:  () => { setHovered(true);  onHoverIn?.(); },
     onHoverOut: () => { setHovered(false); onHoverOut?.(); },
     onPointerMove: (e: any) => onPointerMove?.(e),
+    onPointerDown: (e: any) => onPointerDown?.(e),
+    onPointerUp: (e: any) => onPointerUp?.(e),
+    hasPointerDown: !!onPointerDown,
+    hasPointerUp: !!onPointerUp,
+    // Read at press time, as `keepFocus` is.
+    capturesPointer: capturePointer !== false && (!!onPointerMove || !!onPointerUp),
     onKeyDown: (e: any) => onKeyDown?.(e),
     keepFocus: !!keepFocus,
   };
@@ -169,6 +175,10 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
       onHoverIn:  () => handlersRef.current.onHoverIn(),
       onHoverOut: () => handlersRef.current.onHoverOut(),
       onPointerMove: (e: any) => handlersRef.current.onPointerMove(e),
+      // Only registered when the prop is set, so a press on a plain Pressable does not start a capture.
+      get onPointerDown() { return handlersRef.current.hasPointerDown ? (e: any) => handlersRef.current.onPointerDown(e) : undefined; },
+      get onPointerUp() { return handlersRef.current.hasPointerUp ? (e: any) => handlersRef.current.onPointerUp(e) : undefined; },
+      get capturesPointer() { return handlersRef.current.capturesPointer; },
       // Read at press time: a press on a `keepFocus` Pressable does not blur the focused text field.
       get keepFocus() { return handlersRef.current.keepFocus; },
     });

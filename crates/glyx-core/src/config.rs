@@ -84,6 +84,8 @@ pub(super) struct WindowCfgJson {
     pub(super) render_mode:  Option<String>,
     #[serde(rename = "maxJsHeapMb")]
     pub(super) max_js_heap_mb: Option<u32>,
+    #[serde(rename = "labelCacheEntries")]
+    pub(super) label_cache_entries: Option<u32>,
     #[serde(rename = "maxFps")]
     pub(super) max_fps: Option<u32>,
     /// When true, `glyxWindow.create` with a title matching an open window
@@ -316,6 +318,10 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
 
         if let Some(mb) = w.max_js_heap_mb {
             cfg.max_js_heap_mb = Some(mb.clamp(16, 512));
+        }
+
+        if let Some(n) = w.label_cache_entries {
+            cfg.label_cache_entries = Some(n.clamp(crate::label_cache::MIN_ENTRIES as u32, crate::label_cache::MAX_ENTRIES as u32));
         }
 
         if let Some(fps) = w.max_fps {

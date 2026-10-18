@@ -883,6 +883,9 @@ fn cmd_nums(c: &CanvasCmd, out: &mut Vec<f32>) {
             out.extend(stops.iter().map(|(o, _)| *o));
         }
         PushClip { x, y, w, h } => out.extend([*x, *y, *w, *h]),
+        // The drawing-state commands, images and brush fills do not animate: they take the new value at once.
+        Save | Restore | Transform { .. } | GlobalAlpha { .. } | Blend { .. } | LineStyle { .. } | Shadow { .. }
+        | DrawImage { .. } | FillPathBrush { .. } | StrokePathBrush { .. } | FillPaths { .. } | ClipPath { .. } => {}
     }
 }
 
@@ -900,6 +903,13 @@ fn same_shape(a: &CanvasCmd, b: &CanvasCmd) -> bool {
         (FillPath { points: p, .. }, FillPath { points: q, .. }) => p.len() == q.len(),
         (StrokePath { points: p, .. }, StrokePath { points: q, .. }) => p.len() == q.len(),
         (FillPathGradient { points: p, stops: s, .. }, FillPathGradient { points: q, stops: t, .. }) => p.len() == q.len() && s.len() == t.len(),
+        // Drawing state and the commands that do not animate line up only with an identical command, so the
+        // commands around them still pair and ease, and a change in one of them applies at once.
+        (Save, Save) | (Restore, Restore) => true,
+        (Transform { .. }, Transform { .. }) | (GlobalAlpha { .. }, GlobalAlpha { .. }) | (Blend { .. }, Blend { .. })
+        | (LineStyle { .. }, LineStyle { .. }) | (Shadow { .. }, Shadow { .. }) | (DrawImage { .. }, DrawImage { .. })
+        | (FillPathBrush { .. }, FillPathBrush { .. }) | (StrokePathBrush { .. }, StrokePathBrush { .. })
+        | (FillPaths { .. }, FillPaths { .. }) | (ClipPath { .. }, ClipPath { .. }) => a == b,
         _ => false,
     }
 }

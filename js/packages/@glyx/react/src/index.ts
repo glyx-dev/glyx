@@ -10,7 +10,7 @@ import * as controlsExports from './controls.js';
 import * as canvasExports from './canvas.js';
 import * as mediaExports from './media.js';
 import * as popoverExports from './popover.js';
-import { dispatchEvents, setKeyFlush, addGlobalClickListener, removeGlobalClickListener, addKeyListener, removeKeyListener, registerInput, unregisterInput, registerScrollView, unregisterScrollView, registerDraggable, unregisterDraggable } from './events.js';
+import { dispatchEvents, setKeyFlush, addGlobalClickListener, removeGlobalClickListener, addKeyListener, removeKeyListener, registerInput, unregisterInput, registerScrollView, unregisterScrollView, registerDraggable, unregisterDraggable, setPointerCapture, releasePointerCapture } from './events.js';
 import {
   _pollWebSockets, _pollIpc, _pollDeeplinks, _pollGamepads,
   _pollGlobalShortcuts, _pollPerfViolations, _pollLeakWarnings,
@@ -34,7 +34,7 @@ export * from './webview.js';
 export type * from './types.js';
 
 // Event-registry helpers used by companion packages (@glyx-dev/context-menu, @glyx-dev/rich-text, …).
-export { addGlobalClickListener, removeGlobalClickListener, addKeyListener, removeKeyListener, registerInput, unregisterInput, registerScrollView, unregisterScrollView, registerDraggable, unregisterDraggable };
+export { addGlobalClickListener, removeGlobalClickListener, addKeyListener, removeKeyListener, registerInput, unregisterInput, registerScrollView, unregisterScrollView, registerDraggable, unregisterDraggable, setPointerCapture, releasePointerCapture };
 
 // ── Reconciler ────────────────────────────────────────────────────────────────
 

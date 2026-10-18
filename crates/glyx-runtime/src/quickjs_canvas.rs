@@ -19,6 +19,15 @@ use crate::bindings::{RaycastRequest, RaycastRequestQueue, RaycastResults};
 #[cfg(feature = "canvas3d")]
 static NEXT_RAYCAST_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
+/// `__glyx_canvas_export(id, width, height, scale, [x, y, w, h], raw) -> reqId`: asks glyx-core to render canvas
+/// `id` to a PNG (or, with `raw`, the RGBA pixels of a region); the answer arrives later as a `canvasExport` input
+/// event with the returned id.
+pub(crate) fn canvas_export(id: u32, width: u32, height: u32, scale: f32, region: [u32; 4], raw: bool, frame: &FrameBuffer) -> u32 {
+    let req_id = crate::bindings::NEXT_CANVAS_EXPORT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    frame.borrow_mut().push(SceneCommand::CanvasExport { id, req_id, width, height, scale, region, raw });
+    req_id
+}
+
 pub(crate) fn canvas_update(id: u32, json: String, frame: &FrameBuffer) {
     let cmds: Vec<CanvasCmd> = match serde_json::from_str(&json) {
         Ok(c) => c,

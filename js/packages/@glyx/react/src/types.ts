@@ -176,6 +176,26 @@ export interface ImageProps {
   [key: string]: any;
 }
 
+/** What a Pressable's pointer handlers receive. Pen and touch pressure and tilt are not reported yet. */
+export interface PointerEventInfo {
+  /** Position in the window. */
+  x: number;
+  y: number;
+  /** Position inside the Pressable. */
+  locationX: number;
+  locationY: number;
+  /** The button that changed (0 left, 1 right, 2 middle), or -1 for a move. */
+  button: number;
+  /** Buttons held now, as the web's: 1 left, 2 right, 4 middle (0 = none). */
+  buttons: number;
+  /** 0.5 while a button is held, 0 otherwise (a mouse). */
+  pressure: number;
+  pointerType: 'mouse';
+  pointerId: number;
+  /** Every position the pointer passed through this frame, oldest first; only present when more than one. */
+  points?: Array<{ x: number; y: number; locationX: number; locationY: number }>;
+}
+
 export interface PressableProps {
   onPress?:      (event?: any) => void;
   /** The right mouse button. */
@@ -184,7 +204,18 @@ export interface PressableProps {
   onPressOut?:   () => void;
   onHoverIn?:    () => void;
   onHoverOut?:   () => void;
-  onPointerMove?: (event: { x: number; y: number; locationX: number; locationY: number }) => void;
+  /**
+   * The pointer moved over this Pressable, or (while a button pressed on it is held) anywhere. At most once a frame;
+   * when it moved through several positions that frame, `points` lists them all, oldest first (the last is `x`, `y`),
+   * so a drawing follows the whole stroke instead of one point a frame.
+   */
+  onPointerMove?: (event: PointerEventInfo) => void;
+  /** A mouse button went down on this Pressable (any button; `onPress` is the left one). */
+  onPointerDown?: (event: PointerEventInfo) => void;
+  /** The button pressed on this Pressable went up, wherever the pointer is by then. */
+  onPointerUp?:  (event: PointerEventInfo) => void;
+  /** While a button pressed on it is held, keep sending this Pressable the pointer's moves even outside it (default `true`; only when it has a pointer handler). */
+  capturePointer?: boolean;
   onKeyDown?:    (event: any) => void;
   disabled?:     boolean;
   /** Keep keyboard focus where it is when this is pressed. */

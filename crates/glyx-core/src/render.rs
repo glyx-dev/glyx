@@ -16,7 +16,7 @@ pub(crate) struct RenderCtx<'a> {
     pub z_order: &'a std::collections::HashMap<u32, SmallVec<[u32; 4]>>,
     pub frame: &'a mut AnyFrame,
     pub text_sys: &'a mut TextSystem,
-    pub label_cache: &'a mut lru::LruCache<LabelKey, CachedLabel>,
+    pub label_cache: &'a mut crate::label_cache::LabelCache,
     pub canvas_cmds: &'a std::collections::HashMap<u32, Vec<CanvasCmd>>,
     /// Interpolated command lists for canvases easing toward new data: drawn
     /// in place of `canvas_cmds` (their target) while they move.
@@ -615,45 +615,11 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
             // Clip all canvas draw commands to the node's layout rect.
             ctx.frame.push_layer(rx, ry, rw, rh);
             if let Some(cmds) = ctx.canvas_anim.get(&id).or_else(|| ctx.canvas_cmds.get(&id)) {
-                // Clip pushes still open, so a canvas with unbalanced
-                // pushClip/popClip can't leak clips into the rest of the frame.
-                let mut clip_depth = 0usize;
-                for cmd in cmds {
-                    match cmd {
-                        // `fillText` needs the TextSystem to shape real glyphs, so
-                        // it's handled here (where ctx is available) rather than in
-                        // the frame-only `draw_canvas_cmd`.
-                        CanvasCmd::FillText { text, x, y, font_size, color, bold } => {
-                            // Shaping is most of a label's cost, and a canvas draws
-                            // the same few strings (a chart's axis labels) every
-                            // frame — so share the Text-node label cache. Same
-                            // inputs as `TextSystem::label`/`bold_label` (single
-                            // line, no wrapping), so the layout is identical.
-                            let key = LabelKey::new(text, *font_size, f32::MAX, *bold, false, None);
-                            if ctx.label_cache.peek(&key).is_none() {
-                                let lbl = CachedLabel::new(ctx.text_sys, text, *font_size, f32::MAX, *color, *bold, false, None);
-                                ctx.label_cache.put(LabelKey::new(text, *font_size, f32::MAX, *bold, false, None), lbl);
-                            }
-                            let label = ctx.label_cache.get(&key).unwrap();
-                            ctx.frame.draw_text(
-                                &label.layout, rx + *x as f64, ry + *y as f64,
-                                apply_opacity(rgba_to_vello(*color), child_opacity),
-                            );
-                        }
-                        CanvasCmd::PushClip { x, y, w, h } => {
-                            ctx.frame.push_layer(rx + *x as f64, ry + *y as f64, *w as f64, *h as f64);
-                            clip_depth += 1;
-                        }
-                        CanvasCmd::PopClip => {
-                            if clip_depth > 0 {
-                                ctx.frame.pop_layer();
-                                clip_depth -= 1;
-                            }
-                        }
-                        _ => draw_canvas_cmd(ctx.frame, cmd, rx, ry, child_opacity),
-                    }
-                }
-                for _ in 0..clip_depth { ctx.frame.pop_layer(); }
+                // The painter keeps the canvas's drawing state (transform, alpha, line style, ...) and closes
+                // any clip or blend the list leaves open, so an unbalanced list cannot leak into the frame.
+                crate::canvas_paint::Painter::new(
+                    &mut *ctx.frame, &mut *ctx.text_sys, &mut *ctx.label_cache, ctx.images, (rx, ry), child_opacity,
+                ).erasing_to(eff_bg).paint_all(cmds);
             }
             ctx.frame.pop_layer();
         }
@@ -778,66 +744,6 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
         ctx.frame.append_scene(&captured, None);
         ctx.scene_cache_new.insert(id, captured);
     }
-}
-
-pub(crate) fn draw_canvas_cmd(frame: &mut AnyFrame, cmd: &CanvasCmd, ox: f64, oy: f64, opacity: f32) {
-    use CanvasCmd::*;
-    match cmd {
-        Clear => {
-            // Clear is a no-op here — background is drawn by the Canvas node itself.
-        }
-        FillRect { x, y, w, h, color } => {
-            frame.fill_rect(ox + *x as f64, oy + *y as f64, *w as f64, *h as f64, rgba_to_vello(*color));
-        }
-        StrokeRect { x, y, w, h, color, line_width } => {
-            frame.stroke_rounded_rect(ox + *x as f64, oy + *y as f64, *w as f64, *h as f64, 0.0, *line_width as f64, rgba_to_vello(*color));
-        }
-        FillCircle { cx, cy, r, color } => {
-            frame.fill_circle(ox + *cx as f64, oy + *cy as f64, *r as f64, rgba_to_vello(*color));
-        }
-        StrokeCircle { cx, cy, r, color, line_width } => {
-            frame.stroke_circle(ox + *cx as f64, oy + *cy as f64, *r as f64, *line_width as f64, rgba_to_vello(*color));
-        }
-        StrokeLine { x0, y0, x1, y1, color, line_width } => {
-            frame.stroke_line(ox + *x0 as f64, oy + *y0 as f64, ox + *x1 as f64, oy + *y1 as f64, *line_width as f64, rgba_to_vello(*color));
-        }
-        FillText { text, x, y, font_size, color, .. } => {
-            // Canvas text: draw a filled placeholder rect sized to the text.
-            // Full Parley shaping requires a mutable TextSystem not available here.
-            frame.fill_rect(ox + *x as f64, oy + *y as f64, *font_size as f64 * text.len() as f64 * 0.6, *font_size as f64 * 1.2, rgba_to_vello(*color));
-        }
-        FillPath { points, color } => {
-            let pts = offset_points(points, ox, oy);
-            frame.fill_path(&pts, rgba_to_vello(*color));
-        }
-        StrokePath { points, color, line_width, closed } => {
-            let pts = offset_points(points, ox, oy);
-            frame.stroke_path(&pts, *line_width as f64, *closed, rgba_to_vello(*color));
-        }
-        FillPathGradient { points, x0, y0, x1, y1, stops } => {
-            let pts = offset_points(points, ox, oy);
-            let gradient = peniko::Gradient::new_linear(
-                peniko::kurbo::Point::new(ox + *x0 as f64, oy + *y0 as f64),
-                peniko::kurbo::Point::new(ox + *x1 as f64, oy + *y1 as f64),
-            ).with_stops(
-                stops.iter()
-                    .map(|(o, c)| (o.clamp(0.0, 1.0), apply_opacity(rgba_to_vello(*c), opacity)))
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            );
-            frame.fill_path_with_brush(&pts, &peniko::Brush::Gradient(gradient));
-        }
-        // Handled by the Canvas node's loop (they need clip bookkeeping).
-        PushClip { .. } | PopClip => {}
-    }
-}
-
-/// Translate a flat `[x0,y0,…]` point list by the canvas node's screen origin.
-fn offset_points(points: &[f32], ox: f64, oy: f64) -> Vec<f32> {
-    let (ox, oy) = (ox as f32, oy as f32);
-    points.iter().enumerate()
-        .map(|(i, &v)| if i % 2 == 0 { v + ox } else { v + oy })
-        .collect()
 }
 
 /// Compute the scrollbar thumb rectangle for a node.

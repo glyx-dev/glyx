@@ -40,6 +40,7 @@ declare var __glyx_canvas3d_update: any;
 declare var __glyx_canvas_cmdbuf_f32: any;
 declare var __glyx_canvas_cmdbuf_u32: any;
 declare var __glyx_canvas_flush: any;
+declare var __glyx_canvas_export: any;
 declare var __glyx_canvas_protocol: any;
 declare var __glyx_canvas_strbuf: any;
 declare var __glyx_canvas_update: any;

@@ -47,6 +47,13 @@ export interface WindowConfig {
   /** V8 heap cap in MB (16–512). Default: auto from bundle size. */
   maxJsHeapMb?: number;
   /**
+   * Pin the shaped-text cache to this many entries (16–1,000,000; about 2 KB each). Default: the cache sizes itself,
+   * starting at 256 entries, growing while a view shows more distinct strings than it holds (a big table, a canvas grid)
+   * up to an 8 MB budget, and shrinking back when quiet. Set it to fix the size; the `GLYX_LABEL_CACHE` environment
+   * variable overrides it.
+   */
+  labelCacheEntries?: number;
+  /**
    * Frame-rate ceiling (15–500) for continuous redraws: animations, video,
    * drags. Default: the monitor's refresh rate. `60` halves animation CPU on
    * a 120 Hz display. Applies to the CPU renderer; GPU and Direct2D follow

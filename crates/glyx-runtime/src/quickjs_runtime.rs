@@ -527,6 +527,9 @@ struct RegisterState {
 /// Registers every `__glyx_*` binding for this backend. A plain fn item
 /// with a named `'js` generic (not a closure — see `register_core_bindings`'s
 /// doc comment for why that distinction matters here).
+/// Ids for images made by `__glyx_createImage`, unique across windows (an id only needs to be unique within one).
+static NEXT_IMAGE_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
 /// `{ width, height }` as a real object (no JSON text in between).
 fn size_object<'js>(ctx: &Ctx<'js>, width: u32, height: u32) -> rquickjs::Result<rquickjs::Value<'js>> {
     let obj = rquickjs::Object::new(ctx.clone())?;
@@ -703,12 +706,26 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_setFocus", set_focus_fn)?;
     }
     {
-        let create_image_fn = Function::new(ctx.clone(), move |_path: String, _w: Opt<Option<f64>>, _h: Opt<Option<f64>>| -> u32 {
-            // Image loading isn't ported yet (needs glyx_security path
-            // resolution + SceneCommand::CreateImage wiring) — returns an
-            // id so callers don't crash, but nothing will actually render.
-            log::warn!("QuickJsRuntime: __glyx_createImage is not yet implemented");
-            0
+        // `__glyx_createImage(path, width?, height?) -> id`, as on V8 (`create_image_callback`): a local path must be
+        // readable under the app's fs capability (a `data:` or http(s) URL is not a local read); the optional size is
+        // a hint for rasterizing an SVG at the size it is shown. The decode happens in glyx-core when it applies the
+        // command, so the id is usable at once (it draws nothing until the image has loaded).
+        let frame = Rc::clone(&reg.frame_scene);
+        let create_image_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>, path: String, w: Opt<Option<f64>>, h: Opt<Option<f64>>| -> rquickjs::Result<u32> {
+            let is_local = !path.starts_with("data:") && !path.starts_with("http://") && !path.starts_with("https://");
+            let path = if is_local {
+                match glyx_security::resolve_and_check_read(std::path::Path::new(&path)) {
+                    Ok(c) => c.to_string_lossy().into_owned(),
+                    Err(e) => return Err(rquickjs::Exception::throw_message(&ctx, &format!("createImage denied: {e}"))),
+                }
+            } else {
+                path
+            };
+            let width  = w.0.flatten().filter(|v| *v > 0.0).map(|v| v as f32);
+            let height = h.0.flatten().filter(|v| *v > 0.0).map(|v| v as f32);
+            let id = NEXT_IMAGE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            frame.borrow_mut().push(SceneCommand::CreateImage { id, path, width, height });
+            Ok(id)
         })?;
         globals.set("__glyx_createImage", create_image_fn)?;
     }
@@ -1632,6 +1649,14 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
             crate::quickjs_canvas::canvas_flush(id, f32buf, float_count, u8buf, str_len, append, &frame)
         })?;
         globals.set("__glyx_canvas_flush", f)?;
+
+        let frame = Rc::clone(&reg.frame_scene);
+        let f = Function::new(ctx.clone(), move |id: u32, width: u32, height: u32, scale: f64, region: Opt<Vec<f64>>, raw: Opt<bool>| -> u32 {
+            let r = region.0.unwrap_or_default();
+            let at = |i: usize| r.get(i).copied().unwrap_or(0.0).max(0.0) as u32;
+            crate::quickjs_canvas::canvas_export(id, width, height, scale as f32, [at(0), at(1), at(2), at(3)], raw.0.unwrap_or(false), &frame)
+        })?;
+        globals.set("__glyx_canvas_export", f)?;
     }
     #[cfg(feature = "canvas3d")]
     {
@@ -1724,11 +1749,16 @@ fn input_events_to_array<'js>(
                 obj.set("pressed", *pressed)?;
                 obj.set("target", *target)?;
             }
-            InputEvent::CursorMoved { x, y, target } => {
+            InputEvent::CursorMoved { x, y, target, trail } => {
                 obj.set("type", "cursorMoved")?;
                 obj.set("x", *x as f64)?;
                 obj.set("y", *y as f64)?;
                 obj.set("target", *target)?;
+                if !trail.is_empty() {
+                    let arr = rquickjs::Array::new(ctx.clone())?;
+                    for (k, v) in trail.iter().enumerate() { arr.set(k, *v as f64)?; }
+                    obj.set("trail", arr)?;
+                }
             }
             InputEvent::DragStart { x, y } => {
                 obj.set("type", "dragStart")?;
@@ -1764,6 +1794,12 @@ fn input_events_to_array<'js>(
                 obj.set("type", "scrollbarDrag")?;
                 obj.set("nodeId", *node_id as f64)?;
                 obj.set("scrollY", *scroll_y as f64)?;
+            }
+            InputEvent::CanvasExport { req_id, data, error } => {
+                obj.set("type", "canvasExport")?;
+                obj.set("reqId", *req_id as f64)?;
+                if !data.is_empty() { obj.set("data", data.as_str())?; }
+                if !error.is_empty() { obj.set("error", error.as_str())?; }
             }
             InputEvent::ScrollbarDragX { node_id, scroll_x } => {
                 obj.set("type", "scrollbarDragX")?;
@@ -2650,6 +2686,21 @@ mod tests {
             other => panic!("expected UpdateNode, got {other:?}"),
         }
         assert!(matches!(commands[4], SceneCommand::RemoveNode { .. }));
+    }
+
+    #[test]
+    fn create_image_queues_a_load_for_a_data_url_and_refuses_a_local_path_the_app_may_not_read() {
+        let (_t, mut rt) = new_runtime();
+        let id = rt.eval("String(__glyx_createImage('data:image/png;base64,AAAA', 32, 0))").unwrap();
+        let id: u32 = id.trim_matches('"').parse().expect("an image id");
+        assert!(id > 0, "a real id, not the old stub's 0");
+        let commands = rt.drain_scene_commands();
+        assert!(commands.iter().any(|c| matches!(c,
+            SceneCommand::CreateImage { id: i, path, width: Some(w), height: None }
+                if *i == id && path.starts_with("data:") && *w == 32.0)), "got {commands:?}");
+        // With no fs capability a local path is denied, as on V8.
+        let out = rt.eval("try { __glyx_createImage('secret.png'); 'no throw' } catch (e) { String(e.message) }").unwrap();
+        assert!(out.contains("createImage denied"), "got {out}");
     }
 
     #[test]

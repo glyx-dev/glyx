@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- `window.labelCacheEntries`: pin the shaped-text cache to a number of entries (16 to 1,000,000, about 2 KB each). Without it the cache sizes itself: it starts at 256, grows while a view shows more distinct strings than it holds (up to an 8 MB budget) and shrinks back when quiet. The `GLYX_LABEL_CACHE` environment variable overrides it.
+
 ## [0.2.0] - 2026-10-05
 
 ### Added

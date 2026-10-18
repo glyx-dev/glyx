@@ -324,6 +324,8 @@ Input goes through the app's event loop into the same handlers as real input.
 | `snapshot` | | Over the last ~5 s of frames: `fps`, `budgetMs`, `overBudget`, `p99FrameTime`, `p99WorkTime`, `average` (`frameTime`, `workTime`, `jsTime`, `layoutTime`, `renderTime`, `presentTime`, `damagePx`), `partialFrames`, `memory` (`heapUsed`, `heapTotal`, `processRss`, `gpuBuffers`, `gpuTextures`), `last` (the newest frame). |
 | `getBudget` | | `{ budgetMs }` |
 | `setBudget` | `ms` | Frame budget used for violations (default 16.667). |
+| `getLabelCache` | | The shaped-text cache: `capacity`, `held`, `mode` (`auto` or `pinned`), `approxBytes`, `lookups`, `misses`, `evictions`, `hitRate`. |
+| `setLabelCache` | `entries` (16 to 1,000,000) or `auto: true` | Pins the cache to that many entries, or lets it size itself again (it starts at 256, grows while thrashing up to 4096 entries, shrinks when quiet). Same fields as `getLabelCache`. |
 | `getViolations` | `since?` | Frames whose own cost went over budget: `entries: [{ seq, data: { budget, actual, interval, jsTime, layoutTime, renderTime, presentTime } }]` (`actual` = the frame's cost, `interval` = time since the previous frame), `lastSeq`. Pass the last `lastSeq` as `since` to get only new ones. Reading doesn't consume them: the app's own `perf.onBudgetExceeded` still sees every one. |
 | `getLeakWarnings` | `since?` | Same shape, for the dev-mode leak heuristics (for example node count growing for 600 frames in a row). |
 | `enableFrames` / `disableFrames` | `detail?` | Starts / stops `Performance.frame` events. With `detail: true` the app also keeps, for the last 300 frames, which elements changed. |

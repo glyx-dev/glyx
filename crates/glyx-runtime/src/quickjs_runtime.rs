@@ -1765,6 +1765,16 @@ fn input_events_to_array<'js>(
                 obj.set("nodeId", *node_id as f64)?;
                 obj.set("scrollY", *scroll_y as f64)?;
             }
+            InputEvent::ScrollbarDragX { node_id, scroll_x } => {
+                obj.set("type", "scrollbarDragX")?;
+                obj.set("nodeId", *node_id as f64)?;
+                obj.set("scrollX", *scroll_x as f64)?;
+            }
+            InputEvent::ScrollIntoViewX { node_id, scroll_x } => {
+                obj.set("type", "scrollIntoViewX")?;
+                obj.set("nodeId", *node_id as f64)?;
+                obj.set("scrollX", *scroll_x as f64)?;
+            }
             InputEvent::ScrollIntoView { node_id, scroll_y } => {
                 obj.set("type", "scrollIntoView")?;
                 obj.set("nodeId", *node_id as f64)?;

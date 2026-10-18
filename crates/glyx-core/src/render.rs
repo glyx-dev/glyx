@@ -28,6 +28,10 @@ pub(crate) struct RenderCtx<'a> {
     /// positioning — a webview is a real OS child window, not Vello content.
     #[cfg(feature = "webview")]
     pub webview_overlays: &'a mut Vec<(u32, f32, f32, f32, f32)>,
+    /// The visible rects `[x, y, w, h]` of the clipping nodes being drawn, innermost last (each already cut
+    /// down to its parent's). A scrollbar is drawn inside the innermost one, so a scroller wider than its
+    /// clipping ancestor (a table's rows inside a horizontal pane) still shows its bar at the edge you can see.
+    pub clips: Vec<[f64; 4]>,
     /// Window dimensions in physical pixels — used for viewport culling.
     pub win_w: f64,
     pub win_h: f64,
@@ -323,12 +327,17 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
                 }
             };
 
+            // The clipping ancestor's visible rect, before this node's own joins the stack.
+            let outer_clip = ctx.clips.last().copied();
             if is_clip {
                 if radius > 0.0 {
                     ctx.frame.push_rounded_layer(rx, ry, rw, rh, radius);
                 } else {
                     ctx.frame.push_layer(rx, ry, rw, rh);
                 }
+                let (x0, y0) = outer_clip.map_or((rx, ry), |c| (rx.max(c[0]), ry.max(c[1])));
+                let (x1, y1) = outer_clip.map_or((rx + rw, ry + rh), |c| ((rx + rw).min(c[0] + c[2]), (ry + rh).min(c[1] + c[3])));
+                ctx.clips.push([x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)]);
             }
 
             // Children in z_order (pre-sorted on change — see `reconcile_z_order`).
@@ -346,7 +355,10 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
                 // Both rl.y and max_child_bottom are window-absolute. Content height is
                 // the distance from this node's top to the furthest child bottom.
                 let content_height = max_child_bottom - rl.y as f64;
-                draw_scrollbar(rx, ry, rw, rh, child_scroll_y, content_height, bar_w, bar_color, ctx.frame);
+                // The bar sits on the right edge you can see: a list as wide as its table is cut off by the
+                // pane around it, and its own right edge may be far off to the side.
+                let visible_w = outer_clip.map_or(rw, |c| ((rx + rw).min(c[0] + c[2]) - rx).max(0.0));
+                draw_scrollbar(rx, ry, visible_w, rh, child_scroll_y, content_height, bar_w, bar_color, ctx.frame);
             }
             if is_clip && own_x.is_some() && node.props.show_scrollbar.unwrap_or(true) && max_child_right.is_finite() {
                 let bar_w = node.props.scrollbar_width.unwrap_or(8.0) as f64;
@@ -354,10 +366,12 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
                     .map(parse_scrollbar_color)
                     .unwrap_or_else(|| peniko::Color::from_rgba8(140, 140, 170, 153));
                 let content_width = max_child_right - rl.x as f64;
-                draw_hscrollbar(rx, ry, rw, rh, child_scroll_x, content_width, bar_w, bar_color, ctx.frame);
+                let visible_h = outer_clip.map_or(rh, |c| ((ry + rh).min(c[1] + c[3]) - ry).max(0.0));
+                draw_hscrollbar(rx, ry, rw, visible_h, child_scroll_x, content_width, bar_w, bar_color, ctx.frame);
             }
 
             if is_clip {
+                ctx.clips.pop();
                 ctx.frame.pop_layer();
             }
         }

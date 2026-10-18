@@ -669,6 +669,71 @@ fn scroll_reveal_target_impl(
     Some((scroll_id, new_offset))
 }
 
+/// The nearest ancestor of `id` that scrolls sideways (a clipping node carrying `scroll_offset_x`). It is
+/// not necessarily the nearest scroll container: a vertical list can sit inside a horizontal pane.
+fn nearest_x_scroll_container(
+    nodes: &std::collections::HashMap<u32, JsNode>,
+    id: u32,
+) -> Option<u32> {
+    let mut cur = id;
+    for _ in 0..nodes.len() {
+        let parent_id = nodes.get(&cur)?.parent?;
+        let parent = nodes.get(&parent_id)?;
+        let overflows = matches!(parent.props.overflow.as_deref(), Some("hidden" | "scroll"));
+        if (parent.props.clip.unwrap_or(false) || overflows) && parent.props.scroll_offset_x.is_some() {
+            return Some(parent_id);
+        }
+        cur = parent_id;
+    }
+    None
+}
+
+/// The horizontal twin of [`scroll_reveal_target_impl`]: the offset that brings `focus_id` into view in
+/// its nearest sideways-scrolling ancestor, from raw rects and the content width the walk published.
+fn scroll_reveal_target_x_impl(
+    nodes: &std::collections::HashMap<u32, JsNode>,
+    resolved: &std::collections::HashMap<NodeId, ResolvedLayout>,
+    cache: &std::collections::HashMap<u32, [f32; 4]>,
+    focus_id: u32,
+) -> Option<(u32, f32)> {
+    let scroll_id = nearest_x_scroll_container(nodes, focus_id)?;
+    let container = nodes.get(&scroll_id)?;
+    let current = container.props.scroll_offset_x.unwrap_or(0.0);
+
+    let focus_rl = resolved.get(&nodes.get(&focus_id)?.layout_id?)?;
+    let container_rl = resolved.get(&container.layout_id?)?;
+
+    let content_left  = focus_rl.x as f64 - container_rl.x as f64;
+    let content_right = content_left + focus_rl.width as f64;
+    let viewport_left  = current as f64;
+    let viewport_right = viewport_left + container_rl.width as f64;
+    let margin = SCROLL_REVEAL_MARGIN as f64;
+
+    let max_scroll = cache
+        .get(&(scroll_id | CONTENT_HEIGHT_KEY))
+        .map(|c| (c[2] as f64 - container_rl.width as f64).max(0.0))
+        .unwrap_or(f64::MAX);
+
+    let target = if content_left < viewport_left {
+        content_left - margin
+    } else if content_right > viewport_right {
+        content_right + margin - container_rl.width as f64
+    } else {
+        return None; // already fully visible
+    };
+    let new_offset = target.clamp(0.0, max_scroll) as f32;
+    if (new_offset - current).abs() < 0.5 {
+        return None;
+    }
+    Some((scroll_id, new_offset))
+}
+
+pub(crate) fn scroll_reveal_target_x(state: &PerWindowState, focus_id: u32) -> Option<(u32, f32)> {
+    let layout_cache = state.runtime.layout_cache();
+    let cache = layout_cache.lock();
+    scroll_reveal_target_x_impl(&state.js_nodes, &state.resolved_by_id, &cache, focus_id)
+}
+
 pub(crate) fn scroll_reveal_target(state: &PerWindowState, focus_id: u32) -> Option<(u32, f32)> {
     let layout_cache = state.runtime.layout_cache();
     let cache = layout_cache.lock();
@@ -1118,6 +1183,51 @@ mod scroll_reveal_tests {
         scroll_walk(1, &nodes, &resolved, 0.0, 0.0, None, &mut cache);
         assert_eq!(cache[&(1 | CONTENT_HEIGHT_KEY)][2], 0.0);
         assert_eq!(cache[&3], [-9999.0, -9999.0, 0.0, 0.0], "child 3 starts beyond the viewport edge");
+    }
+
+    /// A sideways scroller (id 1, 100 wide, offset `offset`) holding a vertical list (id 2, clip, no x offset)
+    /// whose rows (ids 3..) are 100 wide each, side by side; row 4 sits at x 150..250.
+    fn x_sample(offset: f32) -> (HashMap<u32, JsNode>, HashMap<NodeId, ResolvedLayout>, HashMap<u32, [f32; 4]>) {
+        let mut nodes = HashMap::new();
+        let mut pane = node_with_layout(None, &[2], 1);
+        pane.props.clip = Some(true);
+        pane.props.scroll_offset_x = Some(offset);
+        nodes.insert(1, pane);
+        let mut list = node_with_layout(Some(1), &[3, 4], 2);
+        list.props.clip = Some(true);
+        nodes.insert(2, list);
+        nodes.insert(3, node_with_layout(Some(2), &[], 3));
+        nodes.insert(4, node_with_layout(Some(2), &[], 4));
+        let mut resolved = HashMap::new();
+        resolved.insert(NodeId::from(1u64), ResolvedLayout { x: 0.0, y: 0.0, width: 100.0, height: 100.0 });
+        resolved.insert(NodeId::from(2u64), ResolvedLayout { x: 0.0, y: 0.0, width: 400.0, height: 100.0 });
+        resolved.insert(NodeId::from(3u64), ResolvedLayout { x: 0.0, y: 0.0, width: 100.0, height: 20.0 });
+        resolved.insert(NodeId::from(4u64), ResolvedLayout { x: 150.0, y: 0.0, width: 100.0, height: 20.0 });
+        let mut cache = HashMap::new();
+        cache.insert(1 | CONTENT_HEIGHT_KEY, [0.0, 0.0, 400.0, 100.0]);
+        (nodes, resolved, cache)
+    }
+
+    #[test]
+    fn a_node_beyond_the_right_edge_reveals_on_the_sideways_scroller_not_the_list() {
+        let (nodes, resolved, cache) = x_sample(0.0);
+        // The list (id 2) is the nearest clip container, but only the pane (id 1) scrolls sideways.
+        assert_eq!(nearest_scroll_container(&nodes, 4), Some(2));
+        assert_eq!(nearest_x_scroll_container(&nodes, 4), Some(1));
+        // Row 4 spans x 150..250 in a 100 wide viewport: scroll so its right edge lands 8px inside.
+        assert_eq!(scroll_reveal_target_x_impl(&nodes, &resolved, &cache, 4), Some((1, 158.0)));
+    }
+
+    #[test]
+    fn a_node_left_of_the_viewport_and_one_already_visible() {
+        let (nodes, resolved, cache) = x_sample(200.0);
+        // Scrolled to 200: row 3 (x 0..100) is off to the left; its left edge goes 8px inside.
+        assert_eq!(scroll_reveal_target_x_impl(&nodes, &resolved, &cache, 3), Some((1, 0.0)));
+        let (nodes, resolved, cache) = x_sample(150.0);
+        // Scrolled to 150: row 4 (x 150..250) fills the viewport exactly, so nothing moves.
+        assert_eq!(scroll_reveal_target_x_impl(&nodes, &resolved, &cache, 4), None);
+        // Nothing scrolls sideways above the root.
+        assert_eq!(scroll_reveal_target_x_impl(&nodes, &resolved, &cache, 1), None);
     }
 
     #[test]

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **`glyx build` skips the V8 snapshot for a QuickJS project** (`engine: 'quickjs'`): QuickJS cannot use one, so it no longer downloads the release's base snapshot or builds one, and the binary's snapshot section is empty.
+
 ### Added
 - **`Intl` and `toLocaleString()` work outside the Glyx source checkout.** The V8 runners are built without embedded ICU data, and the CLI
   used to trim it from a file that exists only in the checkout, so for a JS developer the app ran with "ICU data not loaded". The release

@@ -600,15 +600,21 @@ fn has_pressable_descendant_at(
 
 /// After focus moves to `id` (Tab/Shift+Tab, AT-driven focus, or focus
 /// survival on node removal), scroll it into view if it's outside its
-/// nearest scrollable ancestor's viewport. Shared by all three call sites
+/// nearest scrollable ancestor's viewport, on each axis. Shared by all three call sites
 /// so the behavior — and any future fix to it — stays in exactly one place.
 fn reveal_focus_if_needed(s: &PerWindowState, id: u32) {
     if let Some((scroll_id, new_scroll_y)) = scroll_reveal_target(s, id) {
         s.runtime.push_event(InputEvent::ScrollIntoView { node_id: scroll_id, scroll_y: new_scroll_y });
     }
+    // The nearest ancestor that scrolls sideways is not always the one that scrolls up and down (a list
+    // inside a horizontal pane), so the two axes are revealed separately.
+    if let Some((scroll_id, new_scroll_x)) = layout::scroll_reveal_target_x(s, id) {
+        s.runtime.push_event(InputEvent::ScrollIntoViewX { node_id: scroll_id, scroll_x: new_scroll_x });
+    }
 }
 
-/// Try to start a scrollbar interaction at the current cursor position.
+/// Try to start a scrollbar interaction at the current cursor position, on the vertical bar along a
+/// scroller's right edge or the horizontal one along the bottom of a node that scrolls sideways.
 /// Thumb hit → drag from the current scroll position.  Track hit → JUMP the
 /// scroll so the thumb centers on the click, then drag from there (standard
 /// scrollbar behavior).  Pushes the jump event itself; returns the drag state.
@@ -665,21 +671,68 @@ fn try_start_scrollbar_drag(s: &mut PerWindowState) -> Option<ScrollbarDragState
             if smaller {
                 result = Some((ScrollbarDragState {
                     node_id: id,
-                    track_h: rh,
-                    thumb_h: th,
+                    horizontal: false,
+                    track_len: rh,
+                    thumb_len: th,
                     scroll_range,
-                    start_scroll_y: jump.unwrap_or(scroll_y),
-                    start_mouse_y: cy,
+                    start_scroll: jump.unwrap_or(scroll_y),
+                    start_mouse: cy,
+                }, jump, area));
+            }
+        }
+        // The horizontal bars, along the bottom edge of nodes that scroll sideways.
+        for (&id, node) in &s.js_nodes {
+            let Some(scroll_x) = node.props.scroll_offset_x.map(|x| x as f64) else { continue };
+            let overflows = matches!(node.props.overflow.as_deref(), Some("hidden" | "scroll"));
+            if !(node.props.clip.unwrap_or(false) || overflows) { continue; }
+            if !node.props.show_scrollbar.unwrap_or(true) { continue; }
+            let Some(&[nx, ny, nw, nh]) = cache.get(&id) else { continue };
+            let (rx, ry, rw, rh) = (nx as f64, ny as f64, nw as f64, nh as f64);
+            let bar_w = node.props.scrollbar_width.unwrap_or(8.0) as f64;
+            if cy < ry + rh - bar_w || cy > ry + rh { continue; }
+            if cx < rx || cx > rx + rw { continue; }
+            let Some(lid) = node.layout_id else { continue };
+            let Some(rl) = s.resolved_rect(lid) else { continue };
+            let max_child_right: f64 = node.children.iter()
+                .filter_map(|&cid| {
+                    let cn   = s.js_nodes.get(&cid)?;
+                    let clid = cn.layout_id?;
+                    s.resolved_rect(clid).map(|crl| (crl.x + crl.width) as f64)
+                })
+                .fold(f64::NEG_INFINITY, f64::max);
+            if !max_child_right.is_finite() { continue; }
+            let content_w = max_child_right - rl.x as f64;
+            let Some((tx, _ty, tw, _th)) = render::compute_hscrollbar_thumb(
+                rx, ry, rw, rh, scroll_x, content_w, bar_w,
+            ) else { continue };
+            let scroll_range = (content_w - rw).max(0.0);
+            let on_thumb = cx >= tx && cx <= tx + tw;
+            let jump = if on_thumb { None } else {
+                let drag_range = (rw - tw).max(1.0);
+                Some(((cx - rx - tw / 2.0) / drag_range).clamp(0.0, 1.0) * scroll_range)
+            };
+            let area = rw * rh;
+            let smaller = result.as_ref().map_or(true, |(_, _, prev_area)| area < *prev_area);
+            if smaller {
+                result = Some((ScrollbarDragState {
+                    node_id: id,
+                    horizontal: true,
+                    track_len: rw,
+                    thumb_len: tw,
+                    scroll_range,
+                    start_scroll: jump.unwrap_or(scroll_x),
+                    start_mouse: cx,
                 }, jump, area));
             }
         }
     }
     let (drag, jump, _) = result?;
     if let Some(target) = jump {
-        s.runtime.push_event(InputEvent::ScrollbarDrag {
-            node_id: drag.node_id,
-            scroll_y: target as f32,
-        });
+        if drag.horizontal {
+            s.runtime.push_event(InputEvent::ScrollbarDragX { node_id: drag.node_id, scroll_x: target as f32 });
+        } else {
+            s.runtime.push_event(InputEvent::ScrollbarDrag { node_id: drag.node_id, scroll_y: target as f32 });
+        }
         (s.request_redraw)();
     }
     Some(drag)
@@ -1775,16 +1828,17 @@ pub fn run(mut config: AppConfig) -> bool {
 
                     // Scrollbar thumb drag
                     if let Some(ref drag) = s.scrollbar_drag {
-                        let cursor_y = y as f64;
-                        let mouse_delta = cursor_y - drag.start_mouse_y;
-                        let drag_range = drag.track_h - drag.thumb_h;
+                        let along = if drag.horizontal { x as f64 } else { y as f64 };
+                        let mouse_delta = along - drag.start_mouse;
+                        let drag_range = drag.track_len - drag.thumb_len;
                         if drag_range > 0.0 && drag.scroll_range > 0.0 {
                             let ratio = drag.scroll_range / drag_range;
-                            let new_scroll_y =
-                                (drag.start_scroll_y + mouse_delta * ratio).clamp(0.0, drag.scroll_range);
-                            s.runtime.push_event(InputEvent::ScrollbarDrag {
-                                node_id: drag.node_id,
-                                scroll_y: new_scroll_y as f32,
+                            let new_scroll =
+                                (drag.start_scroll + mouse_delta * ratio).clamp(0.0, drag.scroll_range) as f32;
+                            s.runtime.push_event(if drag.horizontal {
+                                InputEvent::ScrollbarDragX { node_id: drag.node_id, scroll_x: new_scroll }
+                            } else {
+                                InputEvent::ScrollbarDrag { node_id: drag.node_id, scroll_y: new_scroll }
                             });
                         }
                     }
@@ -2638,6 +2692,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         frame:             &mut frame,
                         text_sys:          &mut s.text_sys,
                         label_cache:       &mut s.label_cache,
+                        clips:             Vec::new(),
                         canvas_cmds:       &s.canvas_cmds,
                         canvas_anim:       &canvas_anim,
                         #[cfg(feature = "canvas3d")]
@@ -3395,6 +3450,33 @@ mod tests {
     use glyx_gpu::GpuTier;
     use glyx_security::Capabilities;
 
+    /// What one cached label costs in memory, measured as the growth of the process's private working set
+    /// while holding many shaped labels (the allocator keeps freed pages, so only growth is meaningful).
+    /// Sets the byte budget of the automatic label-cache size. Run by hand:
+    ///   cargo test -p glyx-core --release -- --ignored --nocapture bench_label_memory
+    #[test]
+    #[ignore]
+    #[cfg(feature = "dev")]
+    fn bench_label_memory() {
+        let mut ts = TextSystem::new();
+        // Warm the font system and the allocator so the first label's one-off costs are not counted.
+        let mut warm = Vec::new();
+        for i in 0..2000 { warm.push(CachedLabel::new(&mut ts, &format!("warm {i}"), 13.0, f32::MAX, [0; 4], false, false, None)); }
+        drop(warm);
+        for (name, make) in [
+            ("short (about 13 chars)", (|i: usize| format!("user{i}@x.com")) as fn(usize) -> String),
+            ("medium (about 45 chars)", |i: usize| format!("The quick brown fox {i} jumps over the lazy dog")),
+        ] {
+            let n = 20_000;
+            let before = crate::devtools::private_working_set().unwrap_or(0);
+            let mut held = Vec::with_capacity(n);
+            for i in 0..n { held.push(CachedLabel::new(&mut ts, &make(i), 13.0, f32::MAX, [0; 4], false, false, None)); }
+            let after = crate::devtools::private_working_set().unwrap_or(0);
+            println!("label memory, {name}: {:.0} bytes per label ({n} labels held, {} KB growth)", (after.saturating_sub(before)) as f64 / n as f64, after.saturating_sub(before) / 1024);
+            drop(held);
+        }
+    }
+
     // ── Backend selection (renderMode + GPU tier → concrete backend) ──────────
 
     #[test]
@@ -3524,6 +3606,21 @@ mod tests {
         assert_eq!(cfg.max_fps, Some(15));
         let (cfg, _) = apply(r#"{ "window": {} }"#);
         assert_eq!(cfg.max_fps, None);
+    }
+
+    #[test]
+    #[cfg(feature = "v8")]
+    fn dev_heap_cap_leaves_room_for_a_hot_reload_to_double_the_live_heap() {
+        use crate::config::calc_heap_mb;
+        const MB: usize = 1024 * 1024;
+        // A small bundle: the production cap stays tight, dev gets the 128 MB floor.
+        assert_eq!(calc_heap_mb(MB, false), 24);
+        assert_eq!(calc_heap_mb(MB, true), 128);
+        // The 3.24 MB big-table bundle that overflowed at 38 MB on reload.
+        assert_eq!(calc_heap_mb(3 * MB + MB / 4, false), 39);
+        assert_eq!(calc_heap_mb(3 * MB + MB / 4, true), 128);
+        // Large bundles scale, and nothing passes the 512 MB ceiling.
+        assert_eq!(calc_heap_mb(20 * MB, true), 512);
     }
 
     #[test]

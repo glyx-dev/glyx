@@ -210,15 +210,17 @@ export interface ScrollViewProps {
   contentHeight?:  number;
   /** Scroll left and right instead of up and down (default `false`). The content keeps its natural width, the wheel's horizontal delta or Shift+wheel moves it, and a horizontal scrollbar shows when it is wider than the view. */
   horizontal?:     boolean;
-  /** Scroll on both axes at once, for content wider and taller than the view (a big image, a spreadsheet). The content keeps its natural size, the wheel's two deltas move the two offsets together, and both scrollbars show; `smoothScroll` is off so the axes stay in step. Takes the place of `horizontal`. */
+  /** Scroll on both axes at once, for content wider and taller than the view (a big image, a spreadsheet). The content keeps its natural size, the wheel's two deltas move the two offsets together, and both scrollbars show. Takes the place of `horizontal`. */
   both?:           boolean;
+  /** Called with the new `{ x, y }` offset (the one JavaScript asked for) whenever it changes, so a parent can render only what is in view. */
+  onScrollChange?: (offset: { x: number; y: number }) => void;
   /** Show the scrollbar (default `true`). */
   showScrollbar?:  boolean;
   /** React Native's name for `showScrollbar`; `showScrollbar` wins if both are given. */
   showsScrollIndicator?: boolean;
   scrollbarWidth?: number;
   scrollbarColor?: string;
-  /** Ease wheel and keyboard scrolling on a spring (default `true`). Scrollbar drags and touchpads are never eased. */
+  /** Ease wheel and keyboard scrolling on a spring, on each axis (default `true`). Scrollbar drags and touchpads are never eased. */
   smoothScroll?:   boolean;
   children?:       React.ReactNode;
   [key: string]: any;

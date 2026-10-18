@@ -1,5 +1,6 @@
 // @glyx-dev/table — data table with sortable + resizable columns, selection, and
-// virtualized rows (built on @glyx-dev/react VirtualizedList + measureText).
+// virtualized rows and, when it scrolls sideways, virtualized columns (built on @glyx-dev/react
+// VirtualizedList, ScrollView and measureText).
 //
 //   import { DataTable } from '@glyx-dev/table';
 //   <DataTable columns={cols} rows={rows} width={W} height={H}
@@ -7,10 +8,38 @@
 //
 // Column: { key, label, width?, minWidth?, sortable?, align?, render?(value,row) }
 
-import React, { useState, useMemo, useCallback, useEffect } from 'react';
+import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { View, Text, Pressable, ScrollView, VirtualizedList, measureText, useDraggable } from '@glyx-dev/react';
 
 export type SortDirection = 'asc' | 'desc';
+
+/** Extra pixels of columns kept rendered beyond each edge of the view, so a scroll step never shows blanks. */
+const COLUMN_OVERSCAN_PX = 200;
+
+/** Height (px) kept free under the rows for the horizontal scrollbar. */
+const SCROLLBAR_GUTTER = 8;
+
+/**
+ * The columns to render for a table scrolled `scrollX` px, in a `viewW` px view: the first and last index
+ * (inclusive) of the columns that intersect it plus `overscan` px each side, and the width of everything
+ * before the first (the spacer that keeps the rest in place). `lead` is the width of the leading selection
+ * column. An empty list gives `last < first`.
+ */
+export function visibleColumns(
+  widths: number[], lead: number, scrollX: number, viewW: number, overscan: number = COLUMN_OVERSCAN_PX,
+): { first: number; last: number; before: number } {
+  const from = scrollX - overscan, to = scrollX + viewW + overscan;
+  let left = lead, first = -1, last = -1, before = 0;
+  for (let i = 0; i < widths.length; i++) {
+    const right = left + widths[i];
+    if (right > from && left < to) {
+      if (first < 0) { first = i; before = left - lead; }
+      last = i;
+    }
+    left = right;
+  }
+  return first < 0 ? { first: 0, last: -1, before: 0 } : { first, last, before };
+}
 
 /** One column of a {@link DataTable}. */
 export interface DataTableColumn<Row = any> {
@@ -159,18 +188,36 @@ export function DataTable<Row = any>({
   const scrollsX = width != null && totalW > width;
   const contentW = scrollsX ? totalW : width;
 
+  // Only the columns in (or near) view are rendered; the offset arrives from the scroller. What is drawn is
+  // always computed from the latest offset, widths and width; the counter only forces a re-render when the
+  // window differs from the one last drawn (so scrolling within a column re-renders nothing).
+  const scrollXRef = useRef(0);
+  const windowFor = (x: number) => (scrollsX ? visibleColumns(widths, selW, x, width as number) : { first: 0, last: columns.length - 1, before: 0 });
+  const cur = windowFor(scrollXRef.current);
+  const drawn = useRef(cur);
+  drawn.current = cur;
+  const [, rerender] = useState(0);
+  const onScrollChange = useCallback(({ x }: { x: number }) => {
+    scrollXRef.current = x;
+    const n = windowFor(x), d = drawn.current;
+    if (n.first !== d.first || n.last !== d.last || n.before !== d.before) rerender((c: number) => c + 1);
+  }, [widths, width, scrollsX, selW, columns.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  const shown = columns.slice(cur.first, cur.last + 1);
+  const spacer = (h: number) => cur.before > 0 ? React.createElement(View, { key: '__before', width: cur.before, height: h, style: { flexShrink: 0 } }) : null;
+
   const header = React.createElement(View, {
     style: { flexDirection: 'row', backgroundColor: '#14141A', borderBottomWidth: 1, borderColor: '#2A2A3A' },
     width: contentW, height: HEADER_H,
   },
     selectable && React.createElement(View, { width: selW, height: HEADER_H }),
-    ...columns.map((col, i) => React.createElement(ResizableHeaderCell, {
+    spacer(HEADER_H),
+    ...shown.map((col, k) => { const i = cur.first + k; return React.createElement(ResizableHeaderCell, {
       key: String(col.key),
       col, width: widths[i],
       sorted: sortKey === col.key, dir: sortDir,
       onSort: () => doSort(col.key),
       onResize: (dx: number) => resize(i, dx),
-    })),
+    }); }),
   );
 
   const renderRow = useCallback((row: Row, index: number) => {
@@ -195,20 +242,22 @@ export function DataTable<Row = any>({
           backgroundColor: selected.has(rid) ? '#00A878' : 'transparent',
         },
       })),
-      ...columns.map((col, i) => React.createElement(View, {
-        key: String(col.key), width: widths[i], height: rowHeight,
+      spacer(rowHeight),
+      ...shown.map((col, k) => React.createElement(View, {
+        key: String(col.key), width: widths[cur.first + k], height: rowHeight,
         style: { paddingHorizontal: 12, justifyContent: 'center', alignItems: col.align === 'right' ? 'flex-end' : 'flex-start', flexShrink: 0 },
       },
         col.render ? col.render((row as any)[col.key], row)
                    : React.createElement(Text, { fontSize: CELL_FS, style: { color: '#A0A0B2' } }, String((row as any)[col.key] ?? '')),
       )),
     );
-  }, [columns, widths, selected, selectable, rowHeight, contentW, onRowPress]); // eslint-disable-line
+  }, [columns, widths, selected, selectable, rowHeight, contentW, onRowPress, cur.first, cur.last, cur.before]); // eslint-disable-line
 
   const body = [
     header,
     React.createElement(VirtualizedList, {
-      data: sortedRows, itemHeight: rowHeight, width: contentW, height: height - HEADER_H,
+      // Leaves the strip along the bottom to the horizontal scrollbar, so it does not cover the last row.
+      data: sortedRows, itemHeight: rowHeight, width: contentW, height: height - HEADER_H - (scrollsX ? SCROLLBAR_GUTTER : 0),
       keyExtractor: (r: Row, i: number) => String(idOf(r, i)),
       renderItem: ({ item, index }: { item: Row; index: number }) => renderRow(item, index),
     }),
@@ -218,7 +267,8 @@ export function DataTable<Row = any>({
     width, style: { borderRadius: 8, borderWidth: 1, borderColor: '#2A2A3A', overflow: 'hidden' },
   },
     ...(scrollsX
-      ? [React.createElement(ScrollView, { horizontal: true, width, height },
+      // No easing: the columns rendered follow the offset JavaScript asked for, so the picture must not lag it.
+      ? [React.createElement(ScrollView, { horizontal: true, width, height, smoothScroll: false, onScrollChange },
           React.createElement(View, { width: contentW }, ...body))]
       : body),
   );

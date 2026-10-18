@@ -278,55 +278,71 @@ pub(crate) fn tick_transitions(state: &mut PerWindowState) -> bool {
 /// React to commit the new offset, and one of slack.
 pub(crate) const PRECISE_SCROLL_FRAMES: u8 = 3;
 
-/// A ScrollView's new `scrollOffsetY` becomes a spring target instead of a
-/// jump. `props.scroll_offset_y` is rewritten to the offset to *display* now,
+/// A ScrollView's new `scrollOffsetY` / `scrollOffsetX` becomes a spring target instead of a
+/// jump. `props.scroll_offset_y` / `_x` is rewritten to the offset to *display* now,
 /// so everything downstream (render, hit-testing, damage, the scrollbar thumb)
 /// keeps reading one field and needs no idea a spring exists. Snaps when the
 /// scrollbar thumb is being dragged (it must track the pointer 1:1), when the
 /// input is from a touchpad, or while devtools has the motion clock paused.
+/// Each axis has its own spring, so a diagonal wheel move eases both together.
 fn sync_scroll(state: &mut PerWindowState, id: u32, props: &mut NodeProps) {
-    if props.smooth_scroll != Some(true) || motion::reduced() {
-        state.scroll_springs.remove(&id);
+    sync_scroll_axis(state, id, props, false);
+    sync_scroll_axis(state, id, props, true);
+}
+
+fn sync_scroll_axis(state: &mut PerWindowState, id: u32, props: &mut NodeProps, horizontal: bool) {
+    let key = (id, horizontal);
+    // The offset field this axis lives in, for the incoming props and for the node as it is now.
+    let (new_offset, old_offset) = match (horizontal, state.js_nodes.get(&id)) {
+        (false, node) => (&mut props.scroll_offset_y, node.and_then(|n| n.props.scroll_offset_y)),
+        (true, node)  => (&mut props.scroll_offset_x, node.and_then(|n| n.props.scroll_offset_x)),
+    };
+    if props.smooth_scroll != Some(true) || motion::reduced() || (horizontal && new_offset.is_none()) {
+        state.scroll_springs.remove(&key);
         return;
     }
-    let Some(node) = state.js_nodes.get(&id) else { return };
-    let target = props.scroll_offset_y.unwrap_or(0.0) as f64;
+    if state.js_nodes.get(&id).is_none() { return; }
+    let target = new_offset.unwrap_or(0.0) as f64;
 
-    if let Some(sp) = state.scroll_springs.get_mut(&id) {
+    if let Some(sp) = state.scroll_springs.get_mut(&key) {
         if sp.target == target {
             // Same target re-sent by an unrelated re-render: keep easing.
-            props.scroll_offset_y = Some(sp.pos as f32);
+            *new_offset = Some(sp.pos as f32);
             return;
         }
     }
 
-    let shown = state.scroll_springs.get(&id).map_or(node.props.scroll_offset_y.unwrap_or(0.0) as f64, |s| s.pos);
+    let shown = state.scroll_springs.get(&key).map_or(old_offset.unwrap_or(0.0) as f64, |s| s.pos);
     let dragging = state.scrollbar_drag.as_ref().map_or(false, |d| d.node_id == id);
     let precise  = state.precise_scroll_frames > 0;
     if dragging || precise || state.motion_clock.paused() || (shown - target).abs() < 0.5 {
-        state.scroll_springs.remove(&id);
+        state.scroll_springs.remove(&key);
         return;
     }
 
     let now = state.motion_clock.now();
-    let sp = state.scroll_springs.entry(id).or_insert_with(|| motion::ScrollSpring::new(shown, target, now));
+    let sp = state.scroll_springs.entry(key).or_insert_with(|| motion::ScrollSpring::new(shown, target, now));
     sp.retarget(target);
-    props.scroll_offset_y = Some(sp.pos as f32);
+    *new_offset = Some(sp.pos as f32);
     (state.request_redraw)();
 }
 
 /// Advance every smooth-scroll spring one frame, writing the displayed offset
 /// into the node and marking it (and, since leaf scenes bake in absolute
-/// y-positions, its descendants) dirty. `true` while any spring still moves.
+/// positions, its descendants) dirty. `true` while any spring still moves.
 pub(crate) fn tick_scroll(state: &mut PerWindowState) -> bool {
     if state.scroll_springs.is_empty() || state.motion_clock.paused() { return false; }
     let now = state.motion_clock.now();
     let (nodes, dirty, cascade) = (&mut state.js_nodes, &mut state.dirty_nodes, &mut state.descendant_cascade_nodes);
     let mut running = false;
-    state.scroll_springs.retain(|&id, sp| {
+    state.scroll_springs.retain(|&(id, horizontal), sp| {
         let Some(node) = nodes.get_mut(&id) else { return false };
         let moving = sp.step(now);
-        node.props.scroll_offset_y = Some(sp.pos as f32);
+        if horizontal {
+            node.props.scroll_offset_x = Some(sp.pos as f32);
+        } else {
+            node.props.scroll_offset_y = Some(sp.pos as f32);
+        }
         dirty.insert(id);
         cascade.insert(id);
         running |= moving;
@@ -667,7 +683,8 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 state.canvas_cmds.remove(&id);
                 state.transitions.remove(&id);
                 state.animations.remove(&id);
-                state.scroll_springs.remove(&id);
+                state.scroll_springs.remove(&(id, false));
+                state.scroll_springs.remove(&(id, true));
                 state.canvas_tweens.remove(&id);
                 state.canvas_size.remove(&id);
                 state.canvas_cadence.remove(&id);

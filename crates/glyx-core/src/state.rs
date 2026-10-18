@@ -256,11 +256,11 @@ pub(super) struct PerWindowState {
     /// Running keyframe animations (`animation` prop), keyed by node id —
     /// see `crate::motion::Animation` and `scene::tick_transitions`.
     pub(super) animations:  std::collections::HashMap<u32, crate::motion::Animation>,
-    /// Smooth-scrolling springs, keyed by ScrollView node id — see
+    /// Smooth-scrolling springs, keyed by ScrollView node id and axis (`true` = horizontal) — see
     /// `scene::sync_scroll` / `scene::tick_scroll`. While one runs, the node's
-    /// `props.scroll_offset_y` holds the *displayed* offset (so render, hit
+    /// `props.scroll_offset_y` / `_x` holds the *displayed* offset (so render, hit
     /// testing and damage all agree); the spring's `target` is JS's value.
-    pub(super) scroll_springs: std::collections::HashMap<u32, crate::motion::ScrollSpring>,
+    pub(super) scroll_springs: std::collections::HashMap<(u32, bool), crate::motion::ScrollSpring>,
     /// Canvases easing toward a new command list, keyed by canvas node id —
     /// see `scene::tick_canvas`. `canvas_cmds[id]` is always the target; the
     /// tween holds where it started, and the frame loop samples what to draw.
@@ -551,14 +551,16 @@ impl JsNode {
     }
 }
 
-/// State for an active scrollbar thumb drag.
+/// State for an active scrollbar thumb drag, on either axis: lengths and positions are along the
+/// dragged bar (`horizontal` says which).
 pub(super) struct ScrollbarDragState {
     pub(super) node_id: u32,
-    pub(super) track_h: f64,
-    pub(super) thumb_h: f64,
+    pub(super) horizontal: bool,
+    pub(super) track_len: f64,
+    pub(super) thumb_len: f64,
     pub(super) scroll_range: f64,
-    pub(super) start_scroll_y: f64,
-    pub(super) start_mouse_y: f64,
+    pub(super) start_scroll: f64,
+    pub(super) start_mouse: f64,
 }
 
 #[cfg(feature = "dev")]

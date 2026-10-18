@@ -183,6 +183,16 @@ pub fn poll_events_callback(
                 set_num!("nodeId", node_id);
                 set_num!("scrollY", scroll_y);
             }
+            InputEvent::ScrollbarDragX { node_id, scroll_x } => {
+                set_str!("type", "scrollbarDragX");
+                set_num!("nodeId", node_id);
+                set_num!("scrollX", scroll_x);
+            }
+            InputEvent::ScrollIntoViewX { node_id, scroll_x } => {
+                set_str!("type", "scrollIntoViewX");
+                set_num!("nodeId", node_id);
+                set_num!("scrollX", scroll_x);
+            }
             InputEvent::ScrollIntoView { node_id, scroll_y } => {
                 set_str!("type", "scrollIntoView");
                 set_num!("nodeId", node_id);

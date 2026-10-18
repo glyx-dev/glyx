@@ -1028,7 +1028,7 @@ impl Devtools {
                 for s in windows.values_mut() {
                     s.motion_clock.seek_by(by);
                     // Paused animations don't request frames: draw the new moment.
-                    for id in s.transitions.keys().chain(s.animations.keys()).chain(s.canvas_tweens.keys()).chain(s.scroll_springs.keys()).copied().collect::<Vec<_>>() { s.dirty_nodes.insert(id); }
+                    for id in s.transitions.keys().chain(s.animations.keys()).chain(s.canvas_tweens.keys()).chain(s.scroll_springs.keys().map(|(id, _)| id)).copied().collect::<Vec<_>>() { s.dirty_nodes.insert(id); }
                     s.window.request_redraw();
                 }
                 Ok(json!({ "byMs": by }))
@@ -1238,7 +1238,7 @@ fn memory_sample(s: &mut PerWindowState) -> Value {
 /// private working set, without shared DLL / font / mapped-file pages that
 /// `rss` (the full working set) includes. None where the OS can't say.
 #[cfg(windows)]
-fn private_working_set() -> Option<u64> {
+pub(crate) fn private_working_set() -> Option<u64> {
     use windows_sys::Win32::System::{ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS}, Threading::GetCurrentProcess};
     // PROCESS_MEMORY_COUNTERS_EX2 (Windows 10 1809+); not in windows-sys 0.59.
     #[repr(C)]
@@ -1257,7 +1257,7 @@ fn private_working_set() -> Option<u64> {
 }
 
 #[cfg(not(windows))]
-fn private_working_set() -> Option<u64> { None }
+pub(crate) fn private_working_set() -> Option<u64> { None }
 
 /// Select mode on or off in every window. Off also clears the hover
 /// outline, so the app looks normal again.

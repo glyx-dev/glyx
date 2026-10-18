@@ -88,7 +88,8 @@ pub(super) fn run_perf_check(bin: &Path, budget_ms: f64, duration_secs: u64) -> 
     Ok(())
 }
 
-/// snapshot mode — self-contained exe with embedded V8 snapshot + embedded app JS.
+/// snapshot mode — self-contained exe with embedded V8 snapshot + embedded app JS (a QuickJS project
+/// embeds no snapshot, only the JS).
 ///
 /// For native projects: `cargo build --release -p <project_name>`
 /// For JS-only projects: `cargo build --release --no-default-features -p glyx-runner`
@@ -110,13 +111,19 @@ pub(super) fn build_snapshot_mode(target: Option<&str>, project_name: &str, p: p
     println!("✓ App bundle: {} ({} KB)", bundle.display(), std::fs::metadata(&bundle)?.len() / 1024);
 
     // 2. Create V8 snapshot (stubs + polyfills ONLY — app is eval'd separately
-    // at runtime).  A published CLI has no snapshot toolchain, so it downloads the
+    // at runtime). A QuickJS project has no use for one (its runner never reads the snapshot
+    // section), so it skips the snapshot, and with it the download of the release's.
+    // A published CLI has no snapshot toolchain, so it downloads the
     // release's signed base snapshot (see snapshot_blob.rs). If that is not
     // available (offline, no blob for this platform, a project with its own
     // js/polyfills.js) fall back to bundle mode instead of hard-failing the build;
     // a blob whose signature does not verify is NOT a fallback case and stops the build.
-    let snap = match create_snapshot_for_build(project_name) {
-        Ok(s) => s,
+    let engine = super::read_engine_from_config();
+    let snap = if !needs_v8_snapshot(&engine) {
+        println!("✓ {engine} engine: no V8 snapshot needed");
+        None
+    } else { match create_snapshot_for_build(project_name) {
+        Ok(s) => Some(s),
         Err(e) => {
             let msg = e.to_string();
             if msg.contains(snapshot_blob::UNAVAILABLE_MARKER)
@@ -131,7 +138,7 @@ pub(super) fn build_snapshot_mode(target: Option<&str>, project_name: &str, p: p
             }
             return Err(e).context("V8 snapshot creation failed");
         }
-    };
+    } };
 
     // 3. Resolve config to JSON and embed it
     let abs_bundle = std::env::current_dir()?.join(&bundle);
@@ -143,9 +150,19 @@ pub(super) fn build_snapshot_mode(target: Option<&str>, project_name: &str, p: p
 
     let bin_path = if is_native_project() {
         // Native: build the app's own binary (compile-time embedding via build.rs)
-        cargo_build_release(target, project_name, Some(&snap), Some(&abs_bundle), Some(&abs_config))?
+        cargo_build_release(target, project_name, snap.as_deref(), Some(&abs_bundle), Some(&abs_config))?
     } else {
-        // JS-only: copy cached prod runner and append payload as binary trailer — no cargo needed
+        // JS-only: copy cached prod runner and append payload as binary trailer — no cargo needed.
+        // Without a snapshot the trailer's snapshot section is empty.
+        let snap = match snap {
+            Some(s) => s,
+            None => {
+                let empty = std::env::current_dir()?.join(format!("target/glyx/{project_name}.snapshot"));
+                std::fs::create_dir_all("target/glyx")?;
+                std::fs::write(&empty, b"")?;
+                empty
+            }
+        };
         append_trailer_snapshot(target, project_name, &snap, &abs_bundle, &abs_config)?
     };
 
@@ -693,6 +710,12 @@ mod cap_staging_tests {
     use super::*;
 
     #[test]
+    fn only_the_v8_engine_embeds_a_snapshot() {
+        assert!(needs_v8_snapshot("v8"));
+        assert!(!needs_v8_snapshot("quickjs"));
+    }
+
+    #[test]
     fn file_names_match_what_the_loader_and_the_release_use() {
         // Loader: no `lib` prefix on any OS (the old copy step used one on
         // macOS/Linux, so locally built modules never loaded there).
@@ -768,6 +791,12 @@ mod cap_staging_tests {
         assert!(err.to_string().contains("isn't published"));
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// Whether a build for this engine (glyx.config's `engine`) embeds a V8 snapshot. Only V8 restores
+/// from one; QuickJS evaluates its polyfills at startup.
+pub(super) fn needs_v8_snapshot(engine: &str) -> bool {
+    engine != "quickjs"
 }
 
 /// Create a V8 snapshot containing ONLY stubs + polyfills.

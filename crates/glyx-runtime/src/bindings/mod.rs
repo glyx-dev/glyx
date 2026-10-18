@@ -307,6 +307,8 @@ pub enum InputEvent {
     Scroll { delta_x: f32, delta_y: f32 },
     /// Absolute scroll position set by a scrollbar thumb drag.
     ScrollbarDrag { node_id: u32, scroll_y: f32 },
+    /// The same for the horizontal scrollbar of a node that scrolls sideways (`scroll_offset_x`).
+    ScrollbarDragX { node_id: u32, scroll_x: f32 },
     /// Absolute scroll position needed to bring a newly-focused node (Tab/
     /// Shift+Tab, AT-driven focus, or focus survival after node removal)
     /// into view within its nearest scrollable ancestor. Computed natively
@@ -318,6 +320,8 @@ pub enum InputEvent {
     /// through the same JS-side handler as `ScrollbarDrag` (`onAbsoluteScroll`),
     /// so no new scroll-clamping logic exists on the JS side either.
     ScrollIntoView { node_id: u32, scroll_y: f32 },
+    /// The horizontal twin of `ScrollIntoView`, for the nearest ancestor that scrolls sideways.
+    ScrollIntoViewX { node_id: u32, scroll_x: f32 },
     /// Window resized to new physical pixel dimensions.
     Resize { width: u32, height: u32 },
     /// An image failed to load (missing file, unreadable format).

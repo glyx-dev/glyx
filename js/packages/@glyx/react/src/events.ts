@@ -230,6 +230,8 @@ export interface ScrollHandlers {
    */
   onScroll: (deltaY: number, deltaX?: number) => void;
   onAbsoluteScroll: (y: number) => void;
+  /** The horizontal scrollbar was dragged, or a focused node needs revealing sideways: scroll to this x. */
+  onAbsoluteScrollX?: (x: number) => void;
   getScrollY?: () => number;
   /** Scrolls sideways: it is offered horizontal wheel input (and Shift+wheel). Default false. */
   horizontal?: boolean;
@@ -949,6 +951,14 @@ export function dispatchEvents() {
         // node ID directly (no hit-test needed; the thumb is inside the clip).
         const handlers = scrollRegistry.get(ev.nodeId);
         handlers?.onAbsoluteScroll?.(ev.scrollY);
+        break;
+      }
+
+      case 'scrollbarDragX':
+      case 'scrollIntoViewX': {
+        // The horizontal twins of the two events around this case: an absolute x from the native side
+        // (the horizontal scrollbar's thumb, or the reveal of a focused node), applied without more math here.
+        scrollRegistry.get(ev.nodeId)?.onAbsoluteScrollX?.(ev.scrollX);
         break;
       }
 

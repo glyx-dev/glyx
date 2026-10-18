@@ -315,11 +315,11 @@ export function useWheel(handler: any) {
 // visual-only UpdateNode (no Taffy rebuild — incremental layout).
 //
 // `horizontal` scrolls left and right only (like React Native's): the children sit in a row inside a
-// wrapper that is as wide as they are (it does not shrink to the viewport), wheel deltaX and
-// Shift+wheel move it, and it is not eased (`smoothScroll` applies to vertical scrolling).
+// wrapper that is as wide as they are (it does not shrink to the viewport), and wheel deltaX, Shift+wheel,
+// the horizontal scrollbar and keyboard focus (scroll-into-view) move it.
 // `both` scrolls on both axes at once: the content keeps its natural width and height, and the wheel's
-// two deltas move the two offsets together (so a touchpad pans diagonally). Vertical easing is off there,
-// so the axes stay in step.
+// two deltas move the two offsets together (so a touchpad pans diagonally). `smoothScroll` eases each axis
+// with its own spring.
 
 export function ScrollView({
   children,
@@ -328,6 +328,7 @@ export function ScrollView({
   contentHeight,        // explicit content height override (more reliable than auto-detect)
   horizontal      = false,
   both            = false,
+  onScrollChange,        // ({ x, y }) after the offset changes: lets a parent window what it renders
   showsScrollIndicator,  // React Native's name for showScrollbar
   showScrollbar   = showsScrollIndicator ?? true,
   scrollbarWidth  = 8,
@@ -351,6 +352,10 @@ export function ScrollView({
   const [scrollX, setScrollX] = useState(0);
   const scrollXRef    = useRef(0);
   const maxScrollXRef = useRef(0);
+  const onScrollChangeRef = useRef(onScrollChange);
+  onScrollChangeRef.current = onScrollChange;
+  const reportScroll = () => onScrollChangeRef.current?.({ x: scrollXRef.current, y: scrollYRef.current });
+
   // Which axes this view scrolls. Read by the stable callbacks below, so a changed prop takes effect without
   // re-creating them.
   const scrollsX = horizontal || both;
@@ -402,6 +407,7 @@ export function ScrollView({
       const nextX = Math.min(maxScrollXRef.current, Math.max(0, scrollXRef.current + deltaX));
       scrollXRef.current = nextX;
       setScrollX(nextX);
+      if (!axesRef.current.y) { reportScroll(); return; }
     }
     if (!axesRef.current.y) return;
     // `scrollYRef.current` (not `scrollY`/the functional-updater `prev`) is
@@ -414,24 +420,35 @@ export function ScrollView({
     const next = Math.min(maxScrollRef.current, Math.max(0, scrollYRef.current + deltaY));
     scrollYRef.current = next;
     setScrollY(next);
+    reportScroll();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onAbsoluteScroll = useCallback((y: number) => {
-    // Scrollbar drags and scroll-into-view are vertical; a horizontal view has neither yet.
+    // The vertical scrollbar and scroll-into-view; a horizontal-only view gets its own through onAbsoluteScrollX.
     if (!axesRef.current.y) return;
     refreshMaxScroll();
     const next = Math.min(maxScrollRef.current, Math.max(0, y));
     scrollYRef.current = next;
     setScrollY(next);
+    reportScroll();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const onAbsoluteScrollX = useCallback((x: number) => {
+    if (!axesRef.current.x) return;
+    refreshMaxScroll();
+    const next = Math.min(maxScrollXRef.current, Math.max(0, x));
+    scrollXRef.current = next;
+    setScrollX(next);
+    reportScroll();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onMount = useCallback((id: any) => {
     nodeIdRef.current = id;
     registerScrollView(id, {
-      onScroll, onAbsoluteScroll, getScrollY: () => scrollYRef.current,
+      onScroll, onAbsoluteScroll, onAbsoluteScrollX, getScrollY: () => scrollYRef.current,
       ...(scrollsX ? { horizontal: true, vertical: scrollsY } : null),
     });
-  }, [onScroll, onAbsoluteScroll, scrollsX, scrollsY]);
+  }, [onScroll, onAbsoluteScroll, onAbsoluteScrollX, scrollsX, scrollsY]);
 
   useEffect(() => {
     return () => {
@@ -449,8 +466,8 @@ export function ScrollView({
     alignItems:     both ? 'flex-start' : 'stretch',
     // Rust: push Vello clip layer + shift children by scrollOffsetY (plus scrollOffsetX when `horizontal` / `both`).
     clip:           true,
-    ...(both ? { scrollOffsetX: scrollX, scrollOffsetY: scrollY }
-      : horizontal ? { flexDirection: 'row', scrollOffsetX: scrollX }
+    ...(both ? { scrollOffsetX: scrollX, scrollOffsetY: scrollY, smoothScroll }
+      : horizontal ? { flexDirection: 'row', scrollOffsetX: scrollX, smoothScroll }
       : { scrollOffsetY: scrollY, smoothScroll }),
     // Scrollbar visual props
     showScrollbar,
@@ -486,6 +503,9 @@ export function ScrollView({
 //     Variable-height support (measured items) is planned for a future release.
 //   • `height`     — visible container height in px (required)
 //   • `width`      — container width in px (required)
+//   • `renderItem` should keep its identity between renders (wrap it in `useCallback`): rows already
+//     built are then reused as they scroll, and only the rows entering the window are built. An inline
+//     arrow works too, but every parent render rebuilds all the visible rows.
 //
 // Usage:
 //   <VirtualizedList
@@ -518,6 +538,9 @@ export function VirtualizedList({
   // onScroll/onAbsoluteScroll below, not mirrored from `scrollY` at render
   // time (that version compounded into a scroll runaway).
   const scrollYRef = useRef(0);
+  // The rows built last render, to reuse (see "Build the visible slice").
+  const rowCache = useRef<{ renderItem: any; itemHeight: number; width: any; rows: Map<string, { item: any; index: number; el: any }> }>(
+    { renderItem: null, itemHeight: 0, width: undefined, rows: new Map() });
 
   const totalItems    = data ? data.length : 0;
   const totalContentH = totalItems * itemHeight;
@@ -560,8 +583,14 @@ export function VirtualizedList({
     };
   }, []);
 
-  // Build the visible slice.
+  // Build the visible slice. A row built for an earlier scroll position is reused, element and all, while
+  // its item, its index and `renderItem` are unchanged, so React skips it: a scroll step then builds only the
+  // rows that enter the window instead of re-creating (and re-diffing) every row on screen. A `renderItem`
+  // that is a new function each render (an inline arrow) starts the cache over, as before.
   const visibleChildren: any[] = [];
+  const prevRows = rowCache.current;
+  const reuseRows = prevRows.renderItem === renderItem && prevRows.itemHeight === itemHeight && prevRows.width === width;
+  const rows = new Map<string, { item: any; index: number; el: any }>();
 
   if (topSpacerH > 0) {
     visibleChildren.push(
@@ -572,14 +601,14 @@ export function VirtualizedList({
   for (let i = firstVisible; i < lastVisible; i++) {
     const item = data[i];
     const key  = keyExtractor ? keyExtractor(item, i) : String(i);
-    visibleChildren.push(
-      React.createElement(
-        View,
-        { key, height: itemHeight, width },
-        renderItem({ item, index: i })
-      )
-    );
+    const prev = reuseRows ? prevRows.rows.get(key) : undefined;
+    const el = prev && prev.item === item && prev.index === i
+      ? prev.el
+      : React.createElement(View, { key, height: itemHeight, width }, renderItem({ item, index: i }));
+    rows.set(key, { item, index: i, el });
+    visibleChildren.push(el);
   }
+  rowCache.current = { renderItem, itemHeight, width, rows };
 
   if (bottomSpacerH > 0) {
     visibleChildren.push(

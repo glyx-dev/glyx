@@ -531,13 +531,14 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 // Check layout-prop changes before mutating — need old props for comparison.
                 // Also detect prop changes that must cascade dirty state to all descendants:
                 //   • opacity  — child_opacity is a running product; parent change affects leaves
-                //   • scroll_offset_y — absolute y-positions are baked into cached leaf scenes
+                //   • scroll_offset_x / _y — absolute positions are baked into cached leaf scenes
                 // Other visual changes (background, border, shadow, transform) do NOT cascade
                 // because they are rendered at the container level and leave leaf scenes intact.
                 let (changed, opt_lid, opt_nt, needs_cascade) =
                     if let Some(node) = state.js_nodes.get(&id) {
                         let cascade = node.props.opacity         != props.opacity
-                                   || node.props.scroll_offset_y != props.scroll_offset_y;
+                                   || node.props.scroll_offset_y != props.scroll_offset_y
+                                   || node.props.scroll_offset_x != props.scroll_offset_x;
                         if layout_props_changed(&props, &node.props) {
                             (true, node.layout_id, Some(node.node_type.clone()), cascade)
                         } else {
@@ -1399,8 +1400,8 @@ pub(crate) fn update_dirty_from_layout(state: &mut PerWindowState) -> bool {
 /// - `dirty_nodes` is empty (callers treat that as "render everything").
 ///
 /// Scroll handling: a node inside a scrolled ancestor renders at
-/// `resolved.y - Σ ancestor offsets`, which this function does not replay.
-/// Instead, the OUTERMOST ancestor with a non-zero `scroll_offset_y` is used
+/// `resolved.{x,y} - Σ ancestor offsets`, which this function does not replay.
+/// Instead, the OUTERMOST ancestor with a non-zero `scroll_offset_x` / `_y` is used
 /// as the damage contribution — its own rect is absolute-correct and clips
 /// its content, so it bounds the node's old and new visual positions.
 pub(crate) fn compute_frame_damage(
@@ -1696,7 +1697,7 @@ pub(crate) fn shrink_oversized_collections(state: &mut PerWindowState) {
 }
 
 /// Walk `id`'s persistent `parent` chain and return the **outermost**
-/// ancestor with a non-zero `scroll_offset_y` (if any). The chain is kept up
+/// ancestor with a non-zero `scroll_offset_x` / `_y` (if any). The chain is kept up
 /// to date by `apply_scene_commands`, so this is O(tree depth) with no
 /// per-frame child→parent map. Terminates on a stale link (parent id no
 /// longer present) because `js_nodes.get` then yields `None`.
@@ -1717,7 +1718,7 @@ fn outermost_scrolled_ancestor(
     for _ in 0..js_nodes.len() {
         let Some(pid) = js_nodes.get(&cur).and_then(|n| n.parent) else { break };
         if let Some(pn) = js_nodes.get(&pid) {
-            if pn.props.scroll_offset_y.unwrap_or(0.0) != 0.0 {
+            if pn.props.scroll_offset_y.unwrap_or(0.0) != 0.0 || pn.props.scroll_offset_x.unwrap_or(0.0) != 0.0 {
                 outer = Some(pid);
             }
         }
@@ -1805,10 +1806,10 @@ pub(crate) fn build_dirty_subtrees(state: &mut PerWindowState) {
     //
     // Most visual prop changes (background, border, shadow, transform) are
     // rendered at the container level and do NOT affect cached leaf scenes.
-    // Only opacity and scroll_offset_y changes require descendant cascade:
+    // Only opacity and scroll_offset_x / _y changes require descendant cascade:
     //   • opacity:         child_opacity is a product through the tree; cached
     //                      leaf draw-calls used the old multiplied opacity.
-    //   • scroll_offset_y: absolute y-positions are baked into cached leaf scenes.
+    //   • scroll_offset_x / _y: absolute positions are baked into cached leaf scenes.
     //
     // This avoids invalidating 100 cached leaf nodes when only a hover color
     // changes on a container, saving the majority of O4b cache hits in practice.

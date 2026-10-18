@@ -537,6 +537,13 @@ pub fn backend_call_value_callback(
         return;
     }
 
+    if let Some(cmd) = state.backend_commands.get(&name) {
+        if let Some(bin) = cmd.binary.clone() {
+            dispatch_binary_command(scope, state, &name, cmd, bin, arg, &mut rv);
+            return;
+        }
+    }
+
     let args_json = if arg.is_undefined() {
         "{}".to_string()
     } else {
@@ -545,6 +552,52 @@ pub fn backend_call_value_callback(
             .unwrap_or_else(|| "{}".to_string())
     };
     dispatch_rust_backend_command(scope, state, &name, args_json, &mut rv, true);
+}
+
+/// The bytes an `ArrayBuffer` or any typed array / `DataView` holds (a view only the part it covers).
+fn v8_bytes_of(arg: v8::Local<v8::Value>) -> Option<Vec<u8>> {
+    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(arg) {
+        let mut out = vec![0u8; view.byte_length()];
+        view.copy_contents(&mut out);
+        return Some(out);
+    }
+    if let Ok(buffer) = v8::Local::<v8::ArrayBuffer>::try_from(arg) {
+        let store = buffer.get_backing_store();
+        return Some(store.iter().map(|b| b.get()).collect());
+    }
+    None
+}
+
+/// A binary command (`add_bytes`) called through `__glyx_backend_call2`: the argument must be bytes,
+/// the answer is an `ArrayBuffer` (see `take_binary_result` in the tick that settles it).
+fn dispatch_binary_command(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    state: &AsyncState,
+    name: &str,
+    cmd: &crate::RegisteredCommand,
+    bin: crate::BinaryCommandFn,
+    arg: v8::Local<v8::Value>,
+    rv: &mut v8::ReturnValue,
+) {
+    let (resolver, promise, queue_clone, redraw) = make_promise(scope, state);
+    rv.set(promise.into());
+
+    let reject = |msg: String| {
+        queue_clone.lock().push_back(Completion { resolver_ptr: resolver, result: Err(msg) });
+        if let Some(r) = &redraw { r(); }
+    };
+    if let Err(e) = crate::command_capabilities_ok(cmd, glyx_security::get()) {
+        return reject(format!("backend.{name}: {e}"));
+    }
+    let Some(bytes) = v8_bytes_of(arg) else {
+        return reject(format!("backend.{name}: expects an ArrayBuffer or a typed array"));
+    };
+    let queue = queue_clone.clone();
+    state.tokio.spawn(async move {
+        let result = crate::run_binary_command(bin, bytes).await;
+        queue.lock().push_back(Completion { resolver_ptr: resolver, result });
+        if let Some(r) = redraw { r(); }
+    });
 }
 
 /// The Rust-command half of the two backend-call callbacks: capability check, then the async

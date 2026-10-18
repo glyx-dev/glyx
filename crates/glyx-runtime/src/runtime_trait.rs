@@ -216,7 +216,7 @@ mod tests {
         // A scroll event queued first, then a burst of cursor moves — the
         // scroll must stay put; only the moves after it coalesce together.
         let mut q: VecDeque<InputEvent> = VecDeque::new();
-        q.push_back(InputEvent::Scroll { delta_y: 10.0 });
+        q.push_back(InputEvent::Scroll { delta_x: 0.0, delta_y: 10.0 });
         coalesce_cursor_moved(&mut q, 1.0, 1.0, None);
         coalesce_cursor_moved(&mut q, 2.0, 2.0, None);
         assert_eq!(q.len(), 2);

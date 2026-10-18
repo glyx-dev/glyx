@@ -1115,8 +1115,12 @@ impl Devtools {
             ("Automation", "scroll") => (|| {
                 let win = target_window(req.window_id, windows)?;
                 let s = &windows[&win];
-                let dy = p.get("deltaY").and_then(Value::as_f64)
-                    .ok_or_else(|| ErrorBody::invalid_params("deltaY (number, negative scrolls down) is required"))?;
+                // Like the web's WheelEvent: positive deltaY scrolls down, positive deltaX scrolls right.
+                let dx = p.get("deltaX").and_then(Value::as_f64);
+                let dy = p.get("deltaY").and_then(Value::as_f64);
+                if dx.is_none() && dy.is_none() {
+                    return Err(ErrorBody::invalid_params("deltaY and / or deltaX (numbers; positive scrolls down / right) is required"));
+                }
                 let mut events = Vec::new();
                 // Scroll goes to what's under the pointer: move there first.
                 if p.get("x").is_some() || p.get("nodeId").is_some() || p.get("testID").is_some() {
@@ -1130,7 +1134,7 @@ impl Devtools {
                 // unless the caller passes `smooth: true` to exercise the same
                 // eased path a real mouse wheel takes.
                 let smooth = p.get("smooth").and_then(Value::as_bool).unwrap_or(false);
-                events.push(ShellEvent::Scroll { window_handle: win, delta_y: dy as f32, precise: !smooth });
+                events.push(ShellEvent::Scroll { window_handle: win, delta_x: dx.unwrap_or(0.0) as f32, delta_y: dy.unwrap_or(0.0) as f32, precise: !smooth });
                 self.inject(events);
                 Ok(json!({}))
             })().into(),
@@ -1342,7 +1346,7 @@ fn button_code(b: &str) -> Result<u8, ErrorBody> {
 
 /// `Automation.dispatchInput`: one low-level event.
 /// `{ type: "pointerMove", x, y }`, `{ type: "pointerDown" | "pointerUp", button? }`,
-/// `{ type: "scroll", deltaY }`, `{ type: "keyDown" | "keyUp", key, text? }`.
+/// `{ type: "scroll", deltaY?, deltaX? }`, `{ type: "keyDown" | "keyUp", key, text? }`.
 pub(crate) fn raw_input(win: u32, p: &Value) -> Result<ShellEvent, ErrorBody> {
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     let button = || s("button").map_or(Ok(0), button_code);
@@ -1351,8 +1355,12 @@ pub(crate) fn raw_input(win: u32, p: &Value) -> Result<ShellEvent, ErrorBody> {
         Some("pointerDown") => Ok(ShellEvent::MouseInput { window_handle: win, button: button()?, pressed: true }),
         Some("pointerUp") => Ok(ShellEvent::MouseInput { window_handle: win, button: button()?, pressed: false }),
         Some("scroll") => {
-            let dy = p.get("deltaY").and_then(Value::as_f64).ok_or_else(|| ErrorBody::invalid_params("deltaY is required"))?;
-            Ok(ShellEvent::Scroll { window_handle: win, delta_y: dy as f32, precise: true })
+            let dx = p.get("deltaX").and_then(Value::as_f64);
+            let dy = p.get("deltaY").and_then(Value::as_f64);
+            if dx.is_none() && dy.is_none() {
+                return Err(ErrorBody::invalid_params("deltaY and / or deltaX is required"));
+            }
+            Ok(ShellEvent::Scroll { window_handle: win, delta_x: dx.unwrap_or(0.0) as f32, delta_y: dy.unwrap_or(0.0) as f32, precise: true })
         }
         Some(t @ ("keyDown" | "keyUp")) => {
             let key = s("key").ok_or_else(|| ErrorBody::invalid_params("key is required"))?;

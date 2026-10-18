@@ -19,15 +19,15 @@
 //! `apply_scene_commands` tracks whether any *layout-affecting* prop changed
 //! in an UpdateNode command.  Layout props are: width, height, flex,
 //! flex_direction, justify_content, align_items, padding, gap, text, font_size.
-//! Visual-only props (color, background, border, clip, scroll_offset_y) skip
+//! Visual-only props (color, background, border, clip, scroll_offset_x/y) skip
 //! the Taffy rebuild entirely, saving ~1 ms per hover/scroll frame.
 //!
 //! ## Recursive renderer (Week 14)
 //!
 //! The flat `build_render_order` loop has been replaced by `render_subtree`,
-//! a depth-first recursive function that carries a cumulative `scroll_y`
-//! offset.  ScrollView nodes push a Vello clip layer, apply their
-//! `scroll_offset_y` to all descendants, then pop the layer.
+//! a depth-first recursive function that carries cumulative `scroll_x` /
+//! `scroll_y` offsets.  ScrollView nodes push a Vello clip layer, apply their
+//! `scroll_offset_x` / `scroll_offset_y` to all descendants, then pop the layer.
 //!
 //! ## Multi-line text / measure function (Week 15A)
 //!
@@ -402,6 +402,39 @@ impl DevModeConfig {
 }
 
 // ── Cached label ──────────────────────────────────────────────────────────────
+
+/// How many shaped labels the cache keeps when `GLYX_LABEL_CACHE` is not set.
+const DEFAULT_LABEL_CACHE_ENTRIES: usize = 256;
+
+/// The capacity of the shaped-label cache: `value` (the `GLYX_LABEL_CACHE` environment variable) if it
+/// is a number of entries between 16 and 1,000,000, else the default.
+///
+/// Every `Text` node and every canvas `fillText` string shares this cache. Shaping a short string costs
+/// about 7 microseconds, so a view that shows more distinct strings than the cache holds (a big table, a
+/// canvas grid) misses on every frame and re-shapes all of them.
+fn label_cache_capacity(value: Option<&str>) -> std::num::NonZeroUsize {
+    let entries = value
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| (16..=1_000_000).contains(n))
+        .unwrap_or(DEFAULT_LABEL_CACHE_ENTRIES);
+    std::num::NonZeroUsize::new(entries).unwrap()
+}
+
+#[cfg(test)]
+mod label_cache_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_applies_unless_the_variable_holds_a_sensible_number() {
+        let default = DEFAULT_LABEL_CACHE_ENTRIES;
+        assert_eq!(label_cache_capacity(None).get(), default);
+        assert_eq!(label_cache_capacity(Some("4096")).get(), 4096);
+        assert_eq!(label_cache_capacity(Some(" 2000 ")).get(), 2000);
+        for bad in ["", "lots", "-5", "0", "15", "1000001", "4096.5"] {
+            assert_eq!(label_cache_capacity(Some(bad)).get(), default, "{bad:?}");
+        }
+    }
+}
 
 /// A shaped text label — holds the Parley layout plus pre-computed metrics
 /// for centering inside a box without re-querying the layout object.
@@ -1533,7 +1566,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     images_by_path: ByteBudgetImageCache::new(256 * 1024 * 1024),
                     image_cache_hits: 0,
                     image_cache_misses: 0,
-                    label_cache:  lru::LruCache::new(std::num::NonZeroUsize::new(256).unwrap()),
+                    label_cache:  lru::LruCache::new(label_cache_capacity(std::env::var("GLYX_LABEL_CACHE").ok().as_deref())),
                     cursor_x:     0.0,
                     cursor_y:     0.0,
                     drag_active:  false,
@@ -2062,12 +2095,12 @@ pub fn run(mut config: AppConfig) -> bool {
             }
 
             // ── Scroll ────────────────────────────────────────────────────
-            ShellEvent::Scroll { window_handle, delta_y, precise } => {
+            ShellEvent::Scroll { window_handle, delta_x, delta_y, precise } => {
                 if let Some(s) = windows.get_mut(&window_handle) {
                     // The JS handler runs on the next frame, and React may commit
                     // the new offset a frame after that: hold across a few frames.
                     s.precise_scroll_frames = if precise { scene::PRECISE_SCROLL_FRAMES } else { 0 };
-                    s.runtime.push_event(InputEvent::Scroll { delta_y });
+                    s.runtime.push_event(InputEvent::Scroll { delta_x, delta_y });
                 }
             }
 
@@ -2625,7 +2658,7 @@ pub fn run(mut config: AppConfig) -> bool {
                         win_w: s.gpu.width()  as f64,
                         win_h: s.gpu.height() as f64,
                     };
-                    render_subtree(root_id, 0.0, 1.0, &mut render_ctx);
+                    render_subtree(root_id, 0.0, 0.0, 1.0, &mut render_ctx);
                 } else if !s.decorations {
                     // JS never produced a scene (crashed / failed to eval)
                     // and there's no OS titlebar to fall back on — the

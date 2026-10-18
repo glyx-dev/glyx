@@ -82,6 +82,8 @@ export interface GlyxStyle {
   overflow?:         'visible' | 'hidden' | 'scroll';
   clip?:             boolean;
   scrollOffsetY?:    number;
+  /** Scroll the children sideways by this many px; setting it (even to 0) makes a clipping node scroll horizontally. `ScrollView horizontal` sets it for you. */
+  scrollOffsetX?:    number;
   scrollbarWidth?:   number;
   scrollbarColor?:   string;
 
@@ -206,8 +208,14 @@ export interface ScrollViewProps {
   height?:         GlyxLength;
   /** Content height override (more reliable than auto-detection). */
   contentHeight?:  number;
+  /** Scroll left and right instead of up and down (default `false`). The content keeps its natural width, the wheel's horizontal delta or Shift+wheel moves it, and a horizontal scrollbar shows when it is wider than the view. */
+  horizontal?:     boolean;
+  /** Scroll on both axes at once, for content wider and taller than the view (a big image, a spreadsheet). The content keeps its natural size, the wheel's two deltas move the two offsets together, and both scrollbars show; `smoothScroll` is off so the axes stay in step. Takes the place of `horizontal`. */
+  both?:           boolean;
   /** Show the scrollbar (default `true`). */
   showScrollbar?:  boolean;
+  /** React Native's name for `showScrollbar`; `showScrollbar` wins if both are given. */
+  showsScrollIndicator?: boolean;
   scrollbarWidth?: number;
   scrollbarColor?: string;
   /** Ease wheel and keyboard scrolling on a spring (default `true`). Scrollbar drags and touchpads are never eased. */
@@ -384,8 +392,11 @@ export interface WebViewProps {
   [key: string]: unknown;
 }
 
-/** A wheel or trackpad event offered to a `useWheel` handler. `deltaY` is positive when scrolling down; `x` and `y` are relative to the view. */
-export interface WheelEvent { deltaY: number; ctrl: boolean; shift: boolean; x: number; y: number }
+/**
+ * A wheel or trackpad event offered to a `useWheel` handler, in the web's convention: `deltaY` is positive when
+ * scrolling down and `deltaX` positive when scrolling right (0 for a plain mouse wheel); `x` and `y` are relative to the view.
+ */
+export interface WheelEvent { deltaX: number; deltaY: number; ctrl: boolean; shift: boolean; x: number; y: number }
 
 export type SystemWatchKind = 'battery' | 'memory' | 'darkMode' | 'batterySaver';
 

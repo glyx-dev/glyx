@@ -4,15 +4,26 @@ Changes to the native runtime and renderer (`glyx-core`, and the crates it drive
 
 ## [Unreleased]
 
+### Fixed
+- **The mouse wheel and touchpad scrolled the wrong way.** winit reports the direction the *content* should move; the scroll handlers (and the charts' Ctrl+wheel zoom) expect the web's convention, where a positive delta scrolls down / right. The shell now converts, so turning the wheel toward you scrolls down like every other app.
+
+### Added
+- **Faster JSON on the QuickJS engine.** Backend-command arguments and results no longer go through QuickJS's slow `JSON.parse` / `JSON.stringify`: arguments are written to text straight from the JS values (about 2.4x faster) and an object or array result is parsed straight into JS values (about 1.9x), with the built-in as the fallback for anything unusual (`Date`, `toJSON`, `BigInt`, cycles, odd numbers), so results and errors are the same. `__glyx_backend_call` still resolves with the string; `__glyx_backend_call2` resolves with the parsed value for a Rust command's object or array result. The websocket poll and window-size bindings build their JS values directly instead of through JSON text. V8 is unchanged. `bench_native_json_vs_quickjs` and `bench_backend_call_paths` measure it.
+- **Horizontal scrolling: the `scrollOffsetX` prop.** A clipping node that carries it (even 0) shifts its children left by that many pixels, clamped to its content width, and draws a horizontal scrollbar along the bottom when the content is wider; rendering, hit testing, damage tracking and the scene cache follow the offset like they do `scrollOffsetY`. Without the prop nothing changes, however wide the content. `__glyx_getLayout` and DevTools `getLayout` report `contentWidth` for such a node, and the Inspector shows `scrollOffsetX`. Not yet: easing (`smoothScroll` is vertical only), dragging the horizontal scrollbar, and scroll-into-view on x.
+
 ### Changed
+- Scroll input carries a horizontal delta too: `InputEvent::Scroll { delta_x, delta_y }` reaches JS as `deltaX` / `deltaY`, and DevTools `Automation.scroll` / `dispatchInput` accept `deltaX`.
+- **A failing async binding on QuickJS now rejects with an `Error` object**, as V8 always did, instead of the bare message string, so
+  `e.message` works on both engines (and `String(e)` is `"Error: ..."` on both).
 - Hot-reload rebuilds, plugin bundling and the `glyx.config.ts` fallback use the shared `glyx-bundler` (esbuild, or Bun) instead of calling Bun directly, so they work on machines without Bun, and force the JSX transform to match the React build.
 
 ### Added
+- **Binary commands: `BackendRegistryBuilder::add_bytes` / `add_bytes_gated`.** A Rust command that takes the bytes of an `ArrayBuffer`,
+  typed array or `DataView` and returns bytes, which reach JS as an `ArrayBuffer`: no JSON on either side. Called through
+  `__glyx_backend_call2` (both engines). 4000 numbers (32 KB), release build, per call: V8 664 to 56 microseconds, QuickJS 2996 to 38.
 - **`__glyx_backend_call2(name, args)`** (both engines). Like `__glyx_backend_call`, but a JS plugin command is called with the caller's
   value as it is and its result comes back untouched, instead of going through `JSON.stringify` / `JSON.parse` in both directions. A Rust
-  command still takes JSON; its promise is marked `__glyxRaw` so the caller knows to parse the result. Measured with an ignored
-  benchmark (`bench_backend_call_paths`), per call, on the dev-profile test build: QuickJS 24 to 7 microseconds for a small object and
-  10.5 to 2.4 milliseconds for a 1000-item array (the array's construction is included in both); V8 about 8 to 1.3 or 2.4 microseconds (two runs) and 1.7 to 0.55 milliseconds. One machine, noisy: treat these as a ratio of about 3 to 6.
+  command still takes JSON; its promise is marked `__glyxRaw` so the caller knows to parse the result. Measured with an ignored benchmark (`bench_backend_call_paths`), release build, per call, small object: JS plugin on V8 12.8 to 2.2 microseconds, on QuickJS 22.0 to 6.6 (QuickJS's floor with no native call at all is 5.6, V8's 1.1). One machine, noisy.
 
 ### Fixed
 - **`fs.watch` events for a file name with a quote, backslash, newline or other control character were invalid JSON** (only `\` and `"` were

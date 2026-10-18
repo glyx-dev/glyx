@@ -234,17 +234,20 @@ pub(crate) fn backend_call<'js>(
     let found = js_commands.borrow().get(&name).cloned();
     if let Some((global_name, key)) = found {
         let f = resolve_js_command(&ctx, &global_name, &key)?;
-        let parsed_args: Value<'js> = ctx.json_parse(args_json)?;
+        let parsed_args: Value<'js> = crate::quickjs_json::parse(&ctx, &args_json)?;
         return f.call((parsed_args,));
     }
 
-    call_rust_command(ctx, name, args_json, commands, queue, tokio, redraw)
+    call_rust_command(ctx, name, args_json, commands, queue, tokio, redraw, false)
 }
 
 /// The Rust-command half of `backend_call`: capability check, then the async handler.
+/// `parse_result`: the caller treats the promise as raw (`__glyxRaw`) and parses it itself, so an object or
+/// array result is parsed natively (see `quickjs_json`) instead of crossing as text for JavaScript's `JSON.parse`.
+/// `__glyx_backend_call`'s promise is documented to resolve with the string, so it stays text there.
 fn call_rust_command<'js>(
     ctx: Ctx<'js>, name: String, args_json: String, commands: BackendRegistry,
-    queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>,
+    queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>, parse_result: bool,
 ) -> rquickjs::Result<rquickjs::Promise<'js>> {
     let Some(cmd) = commands.get(&name) else {
         return QuickJsRuntime::reject_now(&ctx, format!("backend.{name}: no such command registered"));
@@ -253,7 +256,47 @@ fn call_rust_command<'js>(
         return QuickJsRuntime::reject_now(&ctx, format!("backend.{name}: {e}"));
     }
     let handler = cmd.handler.clone();
-    QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, async move { handler(args_json).await })
+    QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, async move {
+        let result = handler(args_json).await;
+        match result {
+            // Only objects and arrays gain from parsing here; a string or scalar result stays text, which
+            // JavaScript's wrapper parses as it always did (a JSON string must not be parsed twice).
+            Ok(json) if parse_result && matches!(json.trim_start().as_bytes().first(), Some(b'{' | b'[')) => {
+                Ok(format!("{}{json}", crate::quickjs_json::PARSED_RESULT_MARKER))
+            }
+            other => other,
+        }
+    })
+}
+
+/// The bytes an `ArrayBuffer` or any typed array / `DataView` holds (a view only the part it covers).
+fn bytes_of<'js>(value: &Value<'js>) -> Option<Vec<u8>> {
+    let obj = value.as_object()?;
+    if let Some(buffer) = rquickjs::ArrayBuffer::from_object(obj.clone()) {
+        return buffer.as_bytes().map(|b| b.to_vec());
+    }
+    let buffer: Object<'js> = obj.get("buffer").ok()?;
+    let offset: usize = obj.get("byteOffset").ok()?;
+    let length: usize = obj.get("byteLength").ok()?;
+    let buffer = rquickjs::ArrayBuffer::from_object(buffer)?;
+    buffer.as_bytes()?.get(offset..offset.checked_add(length)?).map(|b| b.to_vec())
+}
+
+/// A binary command (`add_bytes`) called through `__glyx_backend_call2`: the argument must be bytes,
+/// the answer is an `ArrayBuffer` (see `settle`, which swaps the marker for it).
+fn call_binary_command<'js>(
+    ctx: Ctx<'js>, name: String, args: Option<Value<'js>>, commands: &BackendRegistry,
+    bin: crate::BinaryCommandFn,
+    queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>,
+) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    let cmd = commands.get(&name).expect("checked by the caller");
+    if let Err(e) = crate::command_capabilities_ok(cmd, glyx_security::get()) {
+        return QuickJsRuntime::reject_now(&ctx, format!("backend.{name}: {e}"));
+    }
+    let Some(bytes) = args.as_ref().and_then(bytes_of) else {
+        return QuickJsRuntime::reject_now(&ctx, format!("backend.{name}: expects an ArrayBuffer or a typed array"));
+    };
+    QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, crate::run_binary_command(bin, bytes))
 }
 
 /// `__glyx_backend_call2(name, args) -> Promise` — `backend_call` without the JSON round trip for
@@ -262,9 +305,11 @@ fn call_rust_command<'js>(
 ///  * A JS plugin command is called with `args` exactly as given (no stringify here, no parse there),
 ///    and whatever it returns comes back untouched: a promise, or a plain value for a plugin function
 ///    that is not `async`. A string result stays a string.
-///  * A Rust command takes JSON, so `args` is stringified here (`undefined` becomes `{}`), and the
-///    promise it returns is marked `__glyxRaw = true`: it resolves with the command's JSON string,
-///    which the caller parses. That is how the caller tells the two apart.
+///  * A Rust command takes JSON, so `args` is stringified here (`undefined` becomes `{}`; natively, see
+///    `quickjs_json`), and the promise it returns is marked `__glyxRaw = true`: it resolves with the
+///    command's result, which the caller finishes parsing. An object or array result arrives already
+///    parsed (natively); a string, number or anything that is not JSON arrives as the text. That is how
+///    the caller tells the two apart.
 pub(crate) fn backend_call_value<'js>(
     ctx: Ctx<'js>, name: String, args: Option<Value<'js>>, commands: BackendRegistry,
     js_commands: crate::quickjs_ipc::JsBackendCommands,
@@ -277,14 +322,15 @@ pub(crate) fn backend_call_value<'js>(
         return f.call((arg,));
     }
 
+    if let Some(bin) = commands.get(&name).and_then(|c| c.binary.clone()) {
+        return Ok(call_binary_command(ctx, name, args, &commands, bin, queue, tokio, redraw)?.into_value());
+    }
+
     let args_json = match args {
-        Some(v) if !v.is_undefined() => match ctx.json_stringify(v)? {
-            Some(s) => s.to_string()?,
-            None => "{}".to_string(),
-        },
+        Some(v) if !v.is_undefined() => crate::quickjs_json::stringify(&ctx, v)?.unwrap_or_else(|| "{}".to_string()),
         _ => "{}".to_string(),
     };
-    let promise = call_rust_command(ctx.clone(), name, args_json, commands, queue, tokio, redraw)?;
+    let promise = call_rust_command(ctx.clone(), name, args_json, commands, queue, tokio, redraw, true)?;
     let value = promise.into_value();
     if let Some(obj) = value.as_object() {
         obj.set("__glyxRaw", true)?;

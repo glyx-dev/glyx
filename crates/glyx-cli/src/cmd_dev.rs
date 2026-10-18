@@ -90,7 +90,7 @@ pub(super) fn cmd_dev(inspect: Option<u16>, devtools: Option<u16>, open: bool, p
 
     if is_native_project() {
         // Native project: custom Rust extensions compiled in — use cargo run
-        // Place a trimmed icudtl.dat next to the debug binary so the app
+        // Place icudtl.dat (trimmed to the app's locales, or whole if trimming fails) next to the debug binary so the app
         // (which builds without the embedded ICU data) can load it.
         let dbg_dir = std::path::PathBuf::from("target/debug");
         if let Err(e) = super::icu_trim::trim_icu_for_app(&project_name, &dbg_dir, icupkg.clone()) {

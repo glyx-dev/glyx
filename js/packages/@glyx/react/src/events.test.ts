@@ -2,7 +2,7 @@ import { test, expect } from 'bun:test';
 import {
   dispatchEvents, registerInput, unregisterInput,
   registerPressable, unregisterPressable, registerFocusable, unregisterFocusable, setFocus,
-  registerWheel, unregisterWheel, registerScrollView, unregisterScrollView,
+  registerWheel, unregisterWheel, registerScrollView, unregisterScrollView, setNodeParent, removeNodeFromTree,
 } from './events.js';
 
 // Feed one frame's worth of native events through the real dispatcher.
@@ -121,6 +121,105 @@ test('a wheel handler gets first refusal on scrolling, with modifiers and a node
     dispatch([{ type: 'cursorMoved', x: 0, y: 0, target: undefined }]);
     globalThis.__glyx_getLayout = prevLayout;
   }
+});
+
+// ── Horizontal scrolling: input is routed per axis ─────────────────────────────────────────────────
+
+// Layout stub: node `id` covers [x, x+w] x [y, y+h]. Nesting is declared with setNodeParent, as hostConfig does.
+function withLayouts(rects, fn) {
+  const prev = globalThis.__glyx_getLayout;
+  globalThis.__glyx_getLayout = (id) => rects[id] ?? null;
+  try { fn(); } finally { globalThis.__glyx_getLayout = prev; }
+}
+
+test('horizontal input goes to the nearest node that scrolls sideways, vertical to the nearest that scrolls up and down', () => {
+  const pane = [], list = [];
+  registerScrollView(710, { horizontal: true, onScroll: (dy, dx) => pane.push([dy, dx]), onAbsoluteScroll() {} });
+  registerScrollView(711, { onScroll: (dy, dx) => list.push([dy, dx]), onAbsoluteScroll() {} });   // scrolls up and down; sits inside the pane
+  setNodeParent(711, 710);
+  withLayouts({ 710: { x: 0, y: 0, width: 400, height: 300 }, 711: { x: 50, y: 50, width: 200, height: 200 } }, () => {
+    try {
+      dispatch([{ type: 'cursorMoved', x: 100, y: 100, target: 711 }]);
+      dispatch([{ type: 'scroll', deltaY: 40, deltaX: 0 }]);      // up/down: the list
+      dispatch([{ type: 'scroll', deltaY: 0, deltaX: 30 }]);      // sideways: the pane
+      dispatch([{ type: 'scroll', deltaY: 20, deltaX: 10 }]);     // a diagonal touchpad swipe: each its own way
+      expect(list).toEqual([[40, 0], [20, 0]]);
+      expect(pane).toEqual([[0, 30], [0, 10]]);
+    } finally {
+      unregisterScrollView(710);
+      unregisterScrollView(711);
+      removeNodeFromTree(711);
+      dispatch([{ type: 'cursorMoved', x: 0, y: 0, target: undefined }]);
+    }
+  });
+});
+
+test('one node that scrolls both ways gets both deltas in one call', () => {
+  const calls = [];
+  registerScrollView(712, { horizontal: true, onScroll: (dy, dx) => calls.push([dy, dx]), onAbsoluteScroll() {} });
+  withLayouts({ 712: { x: 0, y: 0, width: 400, height: 300 } }, () => {
+    try {
+      dispatch([{ type: 'cursorMoved', x: 100, y: 100, target: 712 }]);
+      dispatch([{ type: 'scroll', deltaY: 20, deltaX: 10 }]);
+      expect(calls).toEqual([[20, 10]]);
+    } finally {
+      unregisterScrollView(712);
+      dispatch([{ type: 'cursorMoved', x: 0, y: 0, target: undefined }]);
+    }
+  });
+});
+
+test('a node that only scrolls up and down is never offered sideways input', () => {
+  const calls = [];
+  registerScrollView(713, { onScroll: (dy, dx) => calls.push([dy, dx]), onAbsoluteScroll() {} });
+  withLayouts({ 713: { x: 0, y: 0, width: 400, height: 300 } }, () => {
+    try {
+      dispatch([{ type: 'cursorMoved', x: 100, y: 100, target: 713 }]);
+      dispatch([{ type: 'scroll', deltaY: 0, deltaX: 30 }]);
+      expect(calls).toEqual([]);
+    } finally {
+      unregisterScrollView(713);
+      dispatch([{ type: 'cursorMoved', x: 0, y: 0, target: undefined }]);
+    }
+  });
+});
+
+test('Shift+wheel scrolls sideways where something scrolls sideways, and still scrolls up and down elsewhere', () => {
+  const side = [], tall = [];
+  registerScrollView(714, { horizontal: true, vertical: false, onScroll: (dy, dx) => side.push([dy, dx]), onAbsoluteScroll() {} });
+  registerScrollView(715, { onScroll: (dy, dx) => tall.push([dy, dx]), onAbsoluteScroll() {} });
+  withLayouts({ 714: { x: 0, y: 0, width: 100, height: 100 }, 715: { x: 200, y: 0, width: 100, height: 100 } }, () => {
+    try {
+      dispatch([{ type: 'keyInput', key: 'ShiftLeft', pressed: true }]);
+      dispatch([{ type: 'cursorMoved', x: 50, y: 50, target: 714 }]);
+      dispatch([{ type: 'scroll', deltaY: 40, deltaX: 0 }]);        // over the sideways node: becomes sideways
+      dispatch([{ type: 'cursorMoved', x: 250, y: 50, target: 715 }]);
+      dispatch([{ type: 'scroll', deltaY: 40, deltaX: 0 }]);        // over the tall one: stays up/down
+      dispatch([{ type: 'keyInput', key: 'ShiftLeft', pressed: false }]);
+      expect(side).toEqual([[0, 40]]);
+      expect(tall).toEqual([[40, 0]]);
+    } finally {
+      unregisterScrollView(714);
+      unregisterScrollView(715);
+      dispatch([{ type: 'cursorMoved', x: 0, y: 0, target: undefined }]);
+    }
+  });
+});
+
+test('a wheel handler is offered deltaX as well, unchanged by Shift', () => {
+  const wheel = [];
+  registerWheel(716, (e) => { wheel.push([e.deltaX, e.deltaY, e.shift]); return true; });
+  withLayouts({ 716: { x: 0, y: 0, width: 100, height: 100 } }, () => {
+    try {
+      dispatch([{ type: 'cursorMoved', x: 50, y: 50, target: 716 }]);
+      dispatch([{ type: 'scroll', deltaY: 40, deltaX: 12 }]);
+      dispatch([{ type: 'scroll', deltaY: 40 }]);                    // an older runner without deltaX
+      expect(wheel).toEqual([[12, 40, false], [0, 40, false]]);
+    } finally {
+      unregisterWheel(716);
+      dispatch([{ type: 'cursorMoved', x: 0, y: 0, target: undefined }]);
+    }
+  });
 });
 
 test('a wheel handler is only asked while the pointer is over it', () => {

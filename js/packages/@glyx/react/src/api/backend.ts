@@ -18,11 +18,16 @@ import { netActive, netStart, netResponse, netFailed } from '../devNet.js';
 //
 // What goes in and what comes out depends on where the command lives:
 //   * A Rust command takes and returns JSON. The arguments are stringified for it, and the
-//     JSON string it returns is parsed back into a value.
+//     JSON string it returns is parsed back into a value. (On the QuickJS engine, whose own JSON is
+//     slow, the runner does both natively, and the value arrives already parsed.)
 //   * A JS plugin command (`backend.ns.fn`) runs in this same JavaScript heap, so nothing is
 //     serialized: it gets exactly the value you passed (an object stays the same object; a
 //     Uint8Array, Date or undefined survive) and what it returns comes back as it is (a string
 //     result stays a string, even one like "123" or "true").
+//   * A binary Rust command (`cmds.add_bytes("invert", |bytes: Vec<u8>| async move { ... })`) takes
+//     the bytes of an ArrayBuffer or typed array and answers with an ArrayBuffer: no JSON at all, so
+//     bulk data (pixels, audio, tables of numbers) crosses as a copy. About 6 times cheaper than the
+//     same numbers as a JSON array.
 //   A call with no argument passes `{}`.
 //
 // Two call styles are supported:
@@ -37,6 +42,9 @@ function _safeJson(v: unknown): string | undefined {
   try { return JSON.stringify(v); } catch (_) { return undefined; }
 }
 
+// Names the runner has told us are Rust commands (learned from the first call; see _backendCall).
+const _rustCommands = new Set<string>();
+
 function _parseRaw(raw: unknown) {
   if (typeof raw !== 'string') return raw;
   try { return JSON.parse(raw); } catch (_) { return raw; }
@@ -47,16 +55,24 @@ function _backendCall(cmd: string, args: any) {
   var netId = netActive() ? netStart('command', cmd, { method: 'CALL', body: _safeJson(arg) }) : 0;
 
   var result: Promise<any>;
-  if (typeof __glyx_backend_call2 === 'function') {
+  // `__glyx_nativeJson`: the runner (QuickJS) stringifies and parses faster than JavaScript can, so a known
+  // Rust command keeps going through `__glyx_backend_call2` too.
+  if (typeof __glyx_backend_call2 === 'function' && (!_rustCommands.has(cmd) || (globalThis as any).__glyx_nativeJson)) {
     // The runner can pass values straight through (no JSON round trip for JS plugins).
     var ret: any;
     try { ret = __glyx_backend_call2(cmd, arg); }
     catch (e) { netFailed(netId, e); return Promise.reject(e); }
     // The runner marks the promise of a Rust command: it resolves with that command's JSON string.
-    result = ret && ret.__glyxRaw ? ret.then(_parseRaw) : Promise.resolve(ret);
+    if (ret && ret.__glyxRaw) {
+      _rustCommands.add(cmd);
+      result = ret.then(_parseRaw);
+    } else {
+      result = Promise.resolve(ret);
+    }
   } else {
-    // A runner from before __glyx_backend_call2: everything goes through JSON, and any string
-    // result that happens to be JSON is parsed.
+    // A Rust command already seen on V8 (stringifying in JS is a little faster than doing it natively and
+    // marking the promise), or a runner from before __glyx_backend_call2: through JSON, and any
+    // string result that happens to be JSON is parsed.
     result = __glyx_backend_call(cmd, JSON.stringify(arg)).then(_parseRaw);
   }
 

@@ -44,7 +44,7 @@ render(<Counter />);
 ### Core primitives (`core.js`)
 - `View`, `RepaintBoundary`, `Text`, `Image`, `Pressable` — base layout/content/interaction primitives.
 - `useDraggable(handlers)` — low-level drag gesture hook used by higher-level packages (`@glyx-dev/drag-drop`, `@glyx-dev/split-pane`, `@glyx-dev/table`, …).
-- `ScrollView`, `VirtualizedList` — scrollable and virtualized-list containers. `ScrollView` scrolls smoothly by default (`smoothScroll={false}` opts out).
+- `ScrollView`, `VirtualizedList` — scrollable and virtualized-list containers. `ScrollView` scrolls smoothly by default (`smoothScroll={false}` opts out) and scrolls sideways with `horizontal`, or on both axes with `both`.
 - `useWindowSize()`, `useScreenSize()`, `useMediaQuery(minWidth)` — layout/responsive hooks.
 - `getEnv(name)`, `measureText(text, fontSize, maxWidth)` — environment and text-measurement utilities.
 - `SelectionArea`, `SelectableText`, `SelectColorsContext`, `SelectColorsProvider`, `SELECT_COLORS_DARK` — text-selection support.

@@ -279,7 +279,7 @@ export function useDraggable(handlers: any) {
 
 // Low-level wheel hook. Returns an `_glyxOnMount` callback to spread onto a View;
 // wheel/trackpad scrolling over it is offered to `handler` first:
-//   handler({ deltaY, ctrl, shift, x, y }) → true to consume the event (a
+//   handler({ deltaX, deltaY, ctrl, shift, x, y }) → true to consume the event (a
 //   ScrollView underneath then doesn't scroll), anything else to let it through.
 // Used for Ctrl+wheel zoom; combine with other mounts by calling both.
 export function useWheel(handler: any) {
@@ -296,27 +296,40 @@ export function useWheel(handler: any) {
 
 // ── ScrollView ────────────────────────────────────────────────────────────────
 //
-// A vertically-scrollable container backed by a Vello clip layer.
+// A scrollable container backed by a Vello clip layer: vertical by default, sideways with `horizontal`,
+// both ways at once with `both`.
 //
-// The native view receives two extra props that the Rust renderer handles:
+// The native view receives extra props that the Rust renderer handles:
 //   clip: true          — push a Vello clip layer around children
 //   scrollOffsetY: n    — shift children upward by n pixels
+//   scrollOffsetX: n    — (`horizontal` / `both`) shift children left by n pixels; its presence is what makes
+//                         the node scroll sideways and draw a horizontal scrollbar
 //   smoothScroll: true  — Rust eases the drawn offset toward each new
 //                         scrollOffsetY (a spring, no JS per frame) instead of
 //                         jumping; scrollbar drags and touchpads still apply
 //                         instantly. Opt out with `smoothScroll={false}`.
 //
 // Scroll deltas arrive via the `scroll` input event, routed by events.ts to
-// whichever ScrollView the cursor is currently over.  The component converts
+// whichever ScrollView the cursor is currently over (per axis, see events.ts).  The component converts
 // deltas into a React state integer and re-renders, which triggers a
 // visual-only UpdateNode (no Taffy rebuild — incremental layout).
+//
+// `horizontal` scrolls left and right only (like React Native's): the children sit in a row inside a
+// wrapper that is as wide as they are (it does not shrink to the viewport), wheel deltaX and
+// Shift+wheel move it, and it is not eased (`smoothScroll` applies to vertical scrolling).
+// `both` scrolls on both axes at once: the content keeps its natural width and height, and the wheel's
+// two deltas move the two offsets together (so a touchpad pans diagonally). Vertical easing is off there,
+// so the axes stay in step.
 
 export function ScrollView({
   children,
   style: styleProp,
   height,               // layout height — only set if you need a fixed height
   contentHeight,        // explicit content height override (more reliable than auto-detect)
-  showScrollbar   = true,
+  horizontal      = false,
+  both            = false,
+  showsScrollIndicator,  // React Native's name for showScrollbar
+  showScrollbar   = showsScrollIndicator ?? true,
   scrollbarWidth  = 8,
   scrollbarColor  = '#8c8caa99',
   smoothScroll    = true,
@@ -334,6 +347,16 @@ export function ScrollView({
   // runaway when a second scroll request landed before React's previous
   // state update had rendered).
   const scrollYRef = useRef(0);
+  // The same for the x axis, used by a `horizontal` or `both` view.
+  const [scrollX, setScrollX] = useState(0);
+  const scrollXRef    = useRef(0);
+  const maxScrollXRef = useRef(0);
+  // Which axes this view scrolls. Read by the stable callbacks below, so a changed prop takes effect without
+  // re-creating them.
+  const scrollsX = horizontal || both;
+  const scrollsY = both || !horizontal;
+  const axesRef = useRef({ x: scrollsX, y: scrollsY });
+  axesRef.current = { x: scrollsX, y: scrollsY };
 
   // ── Compute max scroll ──────────────────────────────────────────────────────
   // Prefer the explicit `contentHeight` prop when provided (most reliable).
@@ -362,7 +385,10 @@ export function ScrollView({
     const id = nodeIdRef.current;
     if (id == null || typeof __glyx_getLayout === 'undefined') return;
     const l = __glyx_getLayout(id);
-    if (l && typeof l.contentHeight === 'number' && l.contentHeight > 0) {
+    if (axesRef.current.x && l && typeof l.contentWidth === 'number' && l.contentWidth > 0) {
+      maxScrollXRef.current = Math.max(0, l.contentWidth - (l.boxWidth ?? l.width));
+    }
+    if (axesRef.current.y && l && typeof l.contentHeight === 'number' && l.contentHeight > 0) {
       // Unclipped viewport height: contentHeight is measured natively from
       // unclipped rects, so a clipped `height` (this ScrollView half-scrolled
       // out of an outer one) would let the max scroll overshoot.
@@ -370,8 +396,14 @@ export function ScrollView({
     }
   }, []);
 
-  const onScroll = useCallback((deltaY: number) => {
+  const onScroll = useCallback((deltaY: number, deltaX: number = 0) => {
     refreshMaxScroll();
+    if (axesRef.current.x && deltaX !== 0) {
+      const nextX = Math.min(maxScrollXRef.current, Math.max(0, scrollXRef.current + deltaX));
+      scrollXRef.current = nextX;
+      setScrollX(nextX);
+    }
+    if (!axesRef.current.y) return;
     // `scrollYRef.current` (not `scrollY`/the functional-updater `prev`) is
     // the base here deliberately: a function passed to `setScrollY` doesn't
     // run synchronously — React executes it later, at render time. Reading
@@ -385,6 +417,8 @@ export function ScrollView({
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onAbsoluteScroll = useCallback((y: number) => {
+    // Scrollbar drags and scroll-into-view are vertical; a horizontal view has neither yet.
+    if (!axesRef.current.y) return;
     refreshMaxScroll();
     const next = Math.min(maxScrollRef.current, Math.max(0, y));
     scrollYRef.current = next;
@@ -393,8 +427,11 @@ export function ScrollView({
 
   const onMount = useCallback((id: any) => {
     nodeIdRef.current = id;
-    registerScrollView(id, { onScroll, onAbsoluteScroll, getScrollY: () => scrollYRef.current });
-  }, [onScroll, onAbsoluteScroll]);
+    registerScrollView(id, {
+      onScroll, onAbsoluteScroll, getScrollY: () => scrollYRef.current,
+      ...(scrollsX ? { horizontal: true, vertical: scrollsY } : null),
+    });
+  }, [onScroll, onAbsoluteScroll, scrollsX, scrollsY]);
 
   useEffect(() => {
     return () => {
@@ -408,11 +445,13 @@ export function ScrollView({
     // Items stack from top: prevents Taffy centering overflowing content
     // above the viewport origin, which would make early items invisible.
     justifyContent: 'flex-start',
-    alignItems:     'stretch',
-    // Rust: push Vello clip layer + shift children by scrollOffsetY.
+    // `both` sizes the content to itself (a stretched wrapper would be only as wide as the view).
+    alignItems:     both ? 'flex-start' : 'stretch',
+    // Rust: push Vello clip layer + shift children by scrollOffsetY (plus scrollOffsetX when `horizontal` / `both`).
     clip:           true,
-    scrollOffsetY:  scrollY,
-    smoothScroll,
+    ...(both ? { scrollOffsetX: scrollX, scrollOffsetY: scrollY }
+      : horizontal ? { flexDirection: 'row', scrollOffsetX: scrollX }
+      : { scrollOffsetY: scrollY, smoothScroll }),
     // Scrollbar visual props
     showScrollbar,
     scrollbarWidth,
@@ -425,7 +464,10 @@ export function ScrollView({
   return React.createElement(
     'view',
     { _glyxOnMount: onMount, style: finalStyle, ...props },
-    children,
+    // The wrapper keeps the content at its natural width: as a direct child it would shrink to fit the viewport.
+    both ? React.createElement('view', { style: { flexShrink: 0 } }, children)
+      : horizontal ? React.createElement('view', { style: { flexDirection: 'row', flexShrink: 0 } }, children)
+      : children,
   );
 }
 

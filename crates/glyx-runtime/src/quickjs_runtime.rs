@@ -387,11 +387,40 @@ impl QuickJsRuntime {
 
     /// Resolve or reject a promise created by `make_promise`, given its
     /// handle and a `Result<json_string, error_message>` — shared by both
-    /// the immediate (capability-denied) and queued (real async) paths.
+    /// the immediate (capability-denied) and queued (real async) paths. An error rejects with an
+    /// `Error` object (as V8 does); an `Ok` that carries `BINARY_RESULT_MARKER` resolves with an
+    /// `ArrayBuffer` of a binary command's bytes, and one that carries `PARSED_RESULT_MARKER` with the
+    /// value its JSON text parses to.
     pub(crate) fn settle(ctx: &Ctx, handle: PromiseHandle, result: Result<String, String>) {
         let boxed = unsafe { *Box::from_raw(handle.into_raw() as *mut ResolveReject) };
         let (resolve_p, reject_p) = boxed;
         match result {
+            // A binary command's answer: swap the marker for an ArrayBuffer of its bytes.
+            Ok(json) if json.starts_with(crate::BINARY_RESULT_MARKER) => match crate::take_binary_result(&json).flatten() {
+                Some(bytes) => {
+                    if let (Ok(resolve), Ok(buffer)) = (resolve_p.restore(ctx), rquickjs::ArrayBuffer::new(ctx.clone(), bytes)) {
+                        let _ = resolve.call::<_, ()>((buffer,));
+                    }
+                }
+                None => {
+                    if let Ok(reject) = reject_p.restore(ctx) {
+                        if let Ok(exc) = rquickjs::Exception::from_message(ctx.clone(), "binary result lost") {
+                            let _ = reject.call::<_, ()>((exc.into_value(),));
+                        }
+                    }
+                }
+            },
+            // A Rust command's object / array result for a raw promise: the value, parsed natively. Text
+            // the parser refuses goes on as text, for JavaScript's wrapper to deal with.
+            Ok(json) if json.starts_with(crate::quickjs_json::PARSED_RESULT_MARKER) => {
+                let text = &json[crate::quickjs_json::PARSED_RESULT_MARKER.len()..];
+                if let Ok(resolve) = resolve_p.restore(ctx) {
+                    match crate::quickjs_json::parse(ctx, text) {
+                        Ok(value) => { let _ = resolve.call::<_, ()>((value,)); }
+                        Err(_) => { let _ = ctx.catch(); let _ = resolve.call::<_, ()>((text.to_string(),)); }
+                    }
+                }
+            }
             Ok(json) => {
                 if let Ok(resolve) = resolve_p.restore(ctx) {
                     let _ = resolve.call::<_, ()>((json,));
@@ -399,7 +428,11 @@ impl QuickJsRuntime {
             }
             Err(msg) => {
                 if let Ok(reject) = reject_p.restore(ctx) {
-                    let _ = reject.call::<_, ()>((msg,));
+                    // An Error object, as V8 rejects with, so `e.message` works on both engines.
+                    match rquickjs::Exception::from_message(ctx.clone(), &msg) {
+                        Ok(exc) => { let _ = reject.call::<_, ()>((exc.into_value(),)); }
+                        Err(_)  => { let _ = reject.call::<_, ()>((msg,)); }
+                    }
                 }
             }
         }
@@ -494,6 +527,14 @@ struct RegisterState {
 /// Registers every `__glyx_*` binding for this backend. A plain fn item
 /// with a named `'js` generic (not a closure — see `register_core_bindings`'s
 /// doc comment for why that distinction matters here).
+/// `{ width, height }` as a real object (no JSON text in between).
+fn size_object<'js>(ctx: &Ctx<'js>, width: u32, height: u32) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let obj = rquickjs::Object::new(ctx.clone())?;
+    obj.set("width", width)?;
+    obj.set("height", height)?;
+    Ok(obj.into_value())
+}
+
 fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
@@ -707,8 +748,11 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
                     obj.set("boxY", by)?;
                     obj.set("boxWidth", bw)?;
                     obj.set("boxHeight", bh)?;
-                    if let Some(&[_, _, _, ch]) = cache.get(&(id | 0x8000_0000)) {
+                    if let Some(&[_, _, cw, ch]) = cache.get(&(id | 0x8000_0000)) {
                         obj.set("contentHeight", ch)?;
+                        if cw > 0.0 {
+                            obj.set("contentWidth", cw)?;
+                        }
                     }
                     Ok(obj.into_value())
                 }
@@ -803,14 +847,14 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let getter = w.get_window_size.clone();
         let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<rquickjs::Value<'js>> {
             let (width, height) = getter();
-            ctx.json_parse(format!("{{\"width\":{width},\"height\":{height}}}"))
+            size_object(&ctx, width, height)
         })?;
         globals.set("__glyx_getWindowSize", f)?;
 
         let getter = w.get_screen_size.clone();
         let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<rquickjs::Value<'js>> {
             match getter() {
-                Some((width, height)) => ctx.json_parse(format!("{{\"width\":{width},\"height\":{height}}}")),
+                Some((width, height)) => size_object(&ctx, width, height),
                 None => Ok(rquickjs::Value::new_null(ctx.clone())),
             }
         })?;
@@ -1043,8 +1087,12 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: u32| -> rquickjs::Result<rquickjs::Value<'js>> {
             let msgs: Vec<String> = handles.lock().get(&handle)
                 .map(|h| h.inbox.lock().drain(..).collect()).unwrap_or_default();
-            let json = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
-            ctx.json_parse(json)
+            // An array of the strings, built directly: no JSON text in between.
+            let arr = rquickjs::Array::new(ctx.clone())?;
+            for (i, m) in msgs.into_iter().enumerate() {
+                arr.set(i, m)?;
+            }
+            Ok(arr.into_value())
         })?;
         globals.set("__glyx_ws_poll", f)?;
 
@@ -1404,6 +1452,9 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
             )
         })?;
         globals.set("__glyx_backend_call", f)?;
+        // This engine's JSON is slow, so JavaScript should hand Rust commands to `__glyx_backend_call2`
+        // (native JSON) rather than stringify and parse in JS; V8's is fast, so it does not set this.
+        globals.set("__glyx_nativeJson", true)?;
 
         // The JSON-free variant (see `quickjs_ipc::backend_call_value`); `@glyx-dev/react` uses it when present.
         let commands = reg.backend_commands.clone();
@@ -1704,8 +1755,9 @@ fn input_events_to_array<'js>(
                     obj.set("text", t.as_str())?;
                 }
             }
-            InputEvent::Scroll { delta_y } => {
+            InputEvent::Scroll { delta_x, delta_y } => {
                 obj.set("type", "scroll")?;
+                obj.set("deltaX", *delta_x as f64)?;
                 obj.set("deltaY", *delta_y as f64)?;
             }
             InputEvent::ScrollbarDrag { node_id, scroll_y } => {
@@ -2058,6 +2110,13 @@ mod tests {
         let mut b = crate::BackendRegistryBuilder::new();
         b.add("echo", |args| async move { Ok(args) });
         b.add("fails", |_| async move { Err("nope".to_string()) });
+        b.add("text", |_| async move { Ok("\"123\"".to_string()) });
+        b.add("count", |_| async move { Ok("5".to_string()) });
+        b.add("rows", |_| async move { Ok("  [{\"id\":1,\"name\":\"a\"},{\"id\":2,\"name\":\"b\"}]".to_string()) });
+        b.add("broken", |_| async move { Ok("{not json".to_string()) });
+        b.add_bytes("rev", |mut v| async move { v.reverse(); Ok(v) });
+        b.add_bytes("boom", |_| async move { Err("bytes failed".to_string()) });
+        b.add_bytes_gated("secret", &["fs"], |v| async move { Ok(v) });
         new_runtime_with_registry(Some("notes"), PLUGIN_JS, "__glyx_plugin_notes", b.build())
     }
 
@@ -2105,26 +2164,46 @@ mod tests {
     fn call2_stringifies_arguments_for_a_rust_command_and_marks_the_promise() {
         let (_t, mut rt) = call2_runtime();
         rt.eval(
-            "globalThis.__out = [];              const p = __glyx_backend_call2('echo', { a: [1, 2], b: 'x' });              __out.push('marked:' + p.__glyxRaw);              p.then(r => { __out.push(typeof r + ':' + r); });              __glyx_backend_call2('echo').then(r => { __out.push('noarg:' + r); });"
+            "globalThis.__out = [];              const p = __glyx_backend_call2('echo', { a: [1, 2], b: 'x' });              __out.push('marked:' + p.__glyxRaw);              p.then(r => { __out.push(typeof r + ':' + JSON.stringify(r)); });              __glyx_backend_call2('echo').then(r => { __out.push('noarg:' + r); });"
         ).unwrap();
         for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
         let out = rt.eval("__out.join('|')").unwrap();
         assert!(out.contains("marked:true"), "got: {out}");
-        assert!(out.contains(r#"string:{"a":[1,2],"b":"x"}"#), "got: {out}");
-        assert!(out.contains("noarg:{}"), "got: {out}");
+        // An object result arrives already parsed (natively), not as text.
+        assert!(out.contains(r#"object:{"a":[1,2],"b":"x"}"#), "got: {out}");
+        assert!(out.contains("noarg:[object Object]"), "got: {out}");
+    }
+
+    #[test]
+    fn call2_parses_object_and_array_results_natively_and_leaves_the_rest_as_text() {
+        let (_t, mut rt) = call2_runtime();
+        rt.eval(
+            "globalThis.__out = [];              const note = (k) => (r) => { __out.push(k + '=' + typeof r + ':' + (typeof r === 'string' ? r : JSON.stringify(r))); };              __glyx_backend_call2('rows').then(note('rows'));              __glyx_backend_call2('text').then(note('text'));              __glyx_backend_call2('count').then(note('count'));              __glyx_backend_call2('broken').then(note('broken'));              __glyx_backend_call('rows').then(note('v1'));"
+        ).unwrap();
+        for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
+        let out = rt.eval("__out.sort().join('|')").unwrap();
+        // Scalars and strings stay JSON text for the JS wrapper to parse (a JSON string literal must not be
+        // parsed twice); text that is not JSON stays text for the wrapper's fallback.
+        assert!(out.contains(r#"rows=object:[{"id":1,"name":"a"},{"id":2,"name":"b"}]"#), "got: {out}");
+        assert!(out.contains("text=string:\"123\""), "got: {out}");
+        assert!(out.contains("count=string:5"), "got: {out}");
+        assert!(out.contains("broken=string:{not json"), "got: {out}");
+        // `__glyx_backend_call` is documented to resolve with the string, and still does.
+        assert!(out.contains(r#"v1=string:  [{"id":1,"name":"a"},{"id":2,"name":"b"}]"#), "got: {out}");
     }
 
     #[test]
     fn call2_a_plugin_promise_is_not_marked_and_unknown_or_failing_commands_reject() {
         let (_t, mut rt) = call2_runtime();
         rt.eval(
-            "globalThis.__out = [];              __out.push('plugin-marked:' + __glyx_backend_call2('notes.digits').__glyxRaw);              __glyx_backend_call2('missing').catch(e => { __out.push('missing:' + e); });              __glyx_backend_call2('fails').catch(e => { __out.push('fails:' + e); });"
+            "globalThis.__out = [];              __out.push('plugin-marked:' + __glyx_backend_call2('notes.digits').__glyxRaw);              __glyx_backend_call2('missing').catch(e => { __out.push('missing:' + e.message); });              __glyx_backend_call2('fails').catch(e => { __out.push('fails:' + e.message + ':' + (e instanceof Error)); });"
         ).unwrap();
         for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
         let out = rt.eval("__out.join('|')").unwrap();
         assert!(out.contains("plugin-marked:undefined"), "got: {out}");
         assert!(out.contains("no such command"), "got: {out}");
-        assert!(out.contains("fails:nope"), "got: {out}");
+        // Both engines reject with a real Error, so `e.message` works on either.
+        assert!(out.contains("fails:nope:true"), "got: {out}");
     }
 
     /// Old path against new path, for a small and a large argument. Run by hand:
@@ -2132,24 +2211,210 @@ mod tests {
     #[test]
     #[ignore]
     fn bench_backend_call_paths() {
-        let (_t, mut rt) = new_runtime_with_plugin(Some("bench"), crate::BENCH_PLUGIN_JS, "__glyx_plugin_bench");
-        for (label, n, large) in [("small object", 100_000u32, false), ("1000-item array", 2_000u32, true)] {
-            for new_path in [false, true] {
-                let start = std::time::Instant::now();
-                rt.eval(&crate::bench_script(new_path, n, large)).unwrap();
-                let mut spins = 0;
-                while rt.eval("String(__done)").unwrap() != n.to_string() {
-                    rt.tick();
-                    spins += 1;
-                    assert!(spins < 100_000, "calls did not finish");
+        let mut b = crate::BackendRegistryBuilder::new();
+        b.add("echo", |args| async move { Ok(args) });
+        b.add_bytes("echo_bytes", |v| async move { Ok(v) });
+        let (_t, mut rt) = new_runtime_with_registry(Some("bench"), crate::BENCH_PLUGIN_JS, "__glyx_plugin_bench", b.build());
+        // The same loop with NO native call: build the object and settle a promise on it. This is the
+        // engine alone, the floor under every number below.
+        {
+            let n = 100_000u32;
+            let start = std::time::Instant::now();
+            rt.eval(&format!(
+                "globalThis.__done = 0; (() => {{ for (let i = 0; i < {n}; i++) {{ Promise.resolve({{ id: i, title: 'hello', done: false }}).then(() => {{ __done++; }}); }} }})();"
+            )).unwrap();
+            let mut spins = 0u32;
+            while rt.eval("String(__done)").unwrap() != n.to_string() {
+                rt.tick();
+                spins += 1;
+                assert!(spins < 2_000_000, "promises did not settle");
+            }
+            let secs = start.elapsed().as_secs_f64();
+            println!("QuickJS plain JavaScript, no native call (object + promise): {:>9.2} ms total, {:>8.2} us/iteration  ({n})", secs * 1000.0, secs * 1e6 / n as f64);
+        }
+        // What the engine's own JSON costs for the large argument, per call: the floor under a Rust command.
+        rt.eval(
+            "(() => { const a = Array.from({ length: 1000 }, (_, k) => ({ id: k, name: 'item ' + k, tags: ['a', 'b'], ok: true })); \
+              let t = Date.now(); for (let i = 0; i < 300; i++) JSON.stringify(a); const st = (Date.now() - t) / 300; \
+              const s = JSON.stringify(a); t = Date.now(); for (let i = 0; i < 300; i++) JSON.parse(s); const pa = (Date.now() - t) / 300; \
+              globalThis.__json = 'stringify ' + st.toFixed(2) + ' ms, parse ' + pa.toFixed(2) + ' ms, ' + s.length + ' bytes'; })()"
+        ).unwrap();
+        println!("QuickJS JSON of the 1000-item array, per call: {}", rt.eval("globalThis.__json").unwrap());
+        // The same 4000 numbers through a Rust command: as a JSON array (the JSON binding), and as a
+        // Float64Array through a binary command (add_bytes).
+        for (how, script) in [
+            ("JSON array    ", "(name, f) => __glyx_backend_call('echo', JSON.stringify(Array.from(f))).then(raw => Float64Array.from(JSON.parse(raw)))"),
+            ("binary lane   ", "(name, f) => __glyx_backend_call2('echo_bytes', f).then(ab => new Float64Array(ab))"),
+        ] {
+            let n = 2_000u32;
+            let start = std::time::Instant::now();
+            rt.eval(&format!(
+                "globalThis.__done = 0; (() => {{ const call = {script}; const f = Float64Array.from({{ length: 4000 }}, (_, i) => i * 1.5); \
+                 for (let i = 0; i < {n}; i++) {{ call('x', f).then((r) => {{ if (r.length === 4000) __done++; }}); }} }})();"
+            )).unwrap();
+            let mut spins = 0u32;
+            while rt.eval("String(__done)").unwrap() != n.to_string() {
+                rt.tick();
+                spins += 1;
+                if spins % 200 == 0 { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                assert!(spins < 2_000_000, "calls did not finish");
+            }
+            let secs = start.elapsed().as_secs_f64();
+            println!("QuickJS 4000 numbers (32 KB) {how}: {:>9.2} ms total, {:>8.2} us/call  ({n} calls)", secs * 1000.0, secs * 1e6 / n as f64);
+        }
+        // For a Rust command, "call2" is what an app sees on this engine: `__glyx_nativeJson` tells `@glyx-dev/react`
+        // to keep using it (native stringify and parse). On V8 it would use the JSON binding ("old") after the first call.
+        for (kind, command, rust) in [("JS plugin", "bench.echo", false), ("Rust command", "echo", true)] {
+            for (label, n, large) in [("small object", 100_000u32, false), ("1000-item array", 2_000u32, true)] {
+                for new_path in [false, true] {
+                    let start = std::time::Instant::now();
+                    rt.eval(&crate::bench_script(new_path, n, large, command, rust)).unwrap();
+                    let mut spins = 0u32;
+                    while rt.eval("String(__done)").unwrap() != n.to_string() {
+                        rt.tick();
+                        spins += 1;
+                        if spins % 200 == 0 { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                        assert!(spins < 2_000_000, "calls did not finish");
+                    }
+                    let secs = start.elapsed().as_secs_f64();
+                    println!(
+                        "QuickJS {:<12} {:<16} {:<4} path: {:>9.2} ms total, {:>8.2} us/call  ({n} calls)",
+                        kind, label, if !new_path { "old" } else if rust { "call2" } else { "new" }, secs * 1000.0, secs * 1e6 / n as f64
+                    );
                 }
-                let secs = start.elapsed().as_secs_f64();
-                println!(
-                    "QuickJS {:<16} {:<4} path: {:>9.2} ms total, {:>8.2} us/call  ({n} calls)",
-                    label, if new_path { "new" } else { "old" }, secs * 1000.0, secs * 1e6 / n as f64
-                );
             }
         }
+    }
+
+    // ── binary lane: add_bytes commands take and return raw bytes ────────────
+
+    #[test]
+    fn bytes_commands_take_buffers_and_views_and_answer_with_an_arraybuffer() {
+        let (_t, mut rt) = call2_runtime();
+        rt.eval(
+            "globalThis.__out = []; \
+             const show = (tag) => (r) => __out.push(tag + ':' + (r instanceof ArrayBuffer) + ':' + Array.from(new Uint8Array(r)).join(',')); \
+             __glyx_backend_call2('rev', new Uint8Array([1, 2, 3])).then(show('u8')); \
+             __glyx_backend_call2('rev', new Uint8Array([1, 2, 3, 4]).buffer).then(show('buffer')); \
+             __glyx_backend_call2('rev', new Uint8Array([9, 1, 2, 3]).subarray(1, 3)).then(show('view')); \
+             __glyx_backend_call2('rev', new DataView(new Uint8Array([5, 6, 7]).buffer, 1, 2)).then(show('dataview')); \
+             __glyx_backend_call2('rev', new Float64Array([1.5])).then((r) => __out.push('f64:' + r.byteLength)); \
+             __glyx_backend_call2('rev', new Uint8Array(0)).then(show('empty'));"
+        ).unwrap();
+        for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
+        let out = rt.eval("__out.sort().join('|')").unwrap();
+        for expected in [
+            "u8:true:3,2,1",
+            "buffer:true:4,3,2,1",
+            "view:true:2,1",
+            "dataview:true:7,6",
+            "f64:8",
+            "empty:true:",
+        ] {
+            assert!(out.contains(expected), "missing {expected:?} in: {out}");
+        }
+    }
+
+    #[test]
+    fn bytes_commands_reject_what_is_not_bytes_and_their_own_errors_and_missing_capabilities() {
+        let (_t, mut rt) = call2_runtime();
+        rt.eval(
+            "globalThis.__out = []; \
+             const bad = (tag) => (e) => __out.push(tag + ':' + (e instanceof Error) + ':' + e.message); \
+             __glyx_backend_call2('rev', 'not bytes').catch(bad('string')); \
+             __glyx_backend_call2('rev', { a: 1 }).catch(bad('object')); \
+             __glyx_backend_call2('rev').catch(bad('none')); \
+             __glyx_backend_call2('boom', new Uint8Array(1)).catch(bad('boom')); \
+             __glyx_backend_call2('secret', new Uint8Array(1)).catch(bad('secret'));"
+        ).unwrap();
+        for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
+        let out = rt.eval("__out.sort().join('|')").unwrap();
+        assert!(out.contains("string:true:backend.rev: expects an ArrayBuffer or a typed array"), "got: {out}");
+        assert!(out.contains("object:true:backend.rev: expects an ArrayBuffer or a typed array"), "got: {out}");
+        assert!(out.contains("none:true:backend.rev: expects an ArrayBuffer or a typed array"), "got: {out}");
+        assert!(out.contains("boom:true:bytes failed"), "got: {out}");
+        assert!(out.contains("secret:true:backend.secret: missing capability"), "got: {out}");
+    }
+
+    #[test]
+    fn a_bytes_command_called_through_the_json_binding_says_what_it_is() {
+        let (_t, mut rt) = call2_runtime();
+        rt.eval(
+            "globalThis.__out = []; \
+             __glyx_backend_call('rev', '{}').catch((e) => __out.push(e.message));"
+        ).unwrap();
+        for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
+        let out = rt.eval("__out.join('|')").unwrap();
+        assert!(out.contains("binary command"), "got: {out}");
+    }
+
+    /// What drawing one frame of a canvas grid costs on the JavaScript side: the real `GlyxCanvasContext`
+    /// (bundled with esbuild) writing 1200 cells, 70 grid lines and the zebra rows into the command
+    /// buffers, once per frame. Needs three bundles, by path in the environment:
+    ///   GLYX_BENCH_POLYFILLS_JS, GLYX_BENCH_CANVAS_JS (global name CanvasMod), GLYX_BENCH_GRID_JS
+    /// Run by hand (the bundles are built with esbuild from canvas.ts, polyfills.ts and a small grid-drawing script):
+    ///   cargo test -p glyx-runtime --no-default-features --features quickjs --release -- --ignored --nocapture bench_canvas_grid_frame
+    #[test]
+    #[ignore]
+    fn bench_canvas_grid_frame() {
+        let read = |var: &str| std::fs::read_to_string(std::env::var(var).unwrap_or_else(|_| panic!("{var} is not set"))).unwrap();
+        let (_t, mut rt) = new_runtime();
+        rt.eval(&read("GLYX_BENCH_POLYFILLS_JS")).unwrap();
+        rt.eval(&read("GLYX_BENCH_CANVAS_JS")).unwrap();
+        rt.eval(&read("GLYX_BENCH_GRID_JS")).unwrap();
+        rt.eval("globalThis.__ctx = new CanvasMod.GlyxCanvasContext(1);").unwrap();
+        for (cols, rows) in [(10u32, 40u32), (30, 40), (50, 40)] {
+            let frames = 100u32;
+            // warm-up
+            rt.eval(&format!("for (let f = 0; f < 5; f++) __gridFrame(__ctx, f, {cols}, {rows});")).unwrap();
+            let start = std::time::Instant::now();
+            rt.eval(&format!("for (let f = 0; f < {frames}; f++) __gridFrame(__ctx, 1000 + f * 3, {cols}, {rows});")).unwrap();
+            let secs = start.elapsed().as_secs_f64();
+            println!(
+                "QuickJS grid frame, {cols} columns x {rows} rows = {} cells: {:>7.2} ms/frame  ({:.1} us/cell)",
+                cols * rows, secs * 1e3 / frames as f64, secs * 1e6 / (frames * cols * rows) as f64
+            );
+        }
+    }
+
+    // ── Native JSON (`quickjs_json`) against QuickJS's built-in, by hand ─────────────────────────────
+    //
+    // QuickJS's own `JSON.parse` / `JSON.stringify` take about 4 ms each for a 56 KB array, 15 to 20 times
+    // V8's; `quickjs_json` is what the runtime uses on its own paths instead. This times both on the same data:
+    //   cargo test -p glyx-runtime --no-default-features --features quickjs --release -- --ignored --nocapture bench_native_json
+
+    #[test]
+    #[ignore]
+    fn bench_native_json_vs_quickjs() {
+        let rt = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rt).unwrap();
+        ctx.with(|ctx| {
+            let a: rquickjs::Value = ctx
+                .eval("Array.from({ length: 1000 }, (_, k) => ({ id: k, name: 'item ' + k, tags: ['a', 'b'], ok: true }))")
+                .unwrap();
+            let text: String = ctx.json_stringify(a.clone()).unwrap().unwrap().to_string().unwrap();
+            let n = 300u32;
+            let time = |f: &mut dyn FnMut()| { let t = std::time::Instant::now(); for _ in 0..n { f(); } t.elapsed().as_secs_f64() * 1e3 / n as f64 };
+
+            // Same result as the built-in?
+            let mine = crate::quickjs_json::stringify(&ctx, a.clone()).unwrap().unwrap();
+            assert_eq!(mine, text, "native stringify must produce the same text");
+            let parsed = crate::quickjs_json::parse(&ctx, &text).unwrap();
+            let again = ctx.json_stringify(parsed).unwrap().unwrap().to_string().unwrap();
+            assert_eq!(again, text, "native parse must produce the same value");
+
+            let builtin_parse = time(&mut || { std::hint::black_box(ctx.json_parse(text.clone()).unwrap()); });
+            let native_parse_ms = time(&mut || { std::hint::black_box(crate::quickjs_json::parse(&ctx, &text).unwrap()); });
+            let builtin_str = time(&mut || { std::hint::black_box(ctx.json_stringify(a.clone()).unwrap()); });
+            let native_str = time(&mut || { std::hint::black_box(crate::quickjs_json::stringify(&ctx, a.clone()).unwrap()); });
+            println!("QuickJS native JSON ({} bytes): parse built-in {:.2} ms, native {:.2} ms ({:.1}x); stringify built-in {:.2} ms, native {:.2} ms ({:.1}x)",
+                text.len(), builtin_parse, native_parse_ms, builtin_parse / native_parse_ms, builtin_str, native_str, builtin_str / native_str);
+
+            // For reference: how long serde_json alone takes to parse the text into its own tree, and
+            // to write it, i.e. the cost on the Rust side of a command that reads JSON.
+            let tree = time(&mut || { std::hint::black_box(serde_json::from_str::<serde_json::Value>(&text).unwrap()); });
+            println!("QuickJS native JSON: serde_json alone parses the same text in {tree:.2} ms");
+        });
     }
 
     #[test]
@@ -2394,6 +2659,14 @@ mod tests {
         // Queue should be drained — a second poll returns empty.
         let out2 = rt.eval("__glyx_pollEvents().length").expect("eval should succeed");
         assert!(out2.contains('0'), "expected drained queue, got {out2:?}");
+    }
+
+    #[test]
+    fn a_scroll_event_carries_delta_x_and_delta_y() {
+        let (_tokio_rt, mut rt) = new_runtime();
+        rt.push_event(InputEvent::Scroll { delta_x: 12.0, delta_y: -40.0 });
+        let out = rt.eval("const e = __glyx_pollEvents()[0]; JSON.stringify([e.type, e.deltaX, e.deltaY])").unwrap();
+        assert_eq!(out, r#"["scroll",12,-40]"#);
     }
 
     #[test]

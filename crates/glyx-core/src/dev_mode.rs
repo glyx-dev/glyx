@@ -371,10 +371,10 @@ pub(super) fn draw_dev_overlay(state: &mut PerWindowState, frame: &mut AnyFrame)
                 native_mb, delta_rss_mb, delta_native_mb),
             format!("wgpu  buf {:.1}MB×{}  avg {:.1}MB  tex {:.1}MB×{}  waste {:.1}MB",
                 gpu_buf_mb, gpu_buf_n, avg_buf_mb, gpu_tex_mb, gpu_tex_n, gpu_waste_mb),
-            format!("cache {} frags  img {}/{}  labels {}/256  canvas {}",
+            format!("cache {} frags  img {}/{}  labels {}/{}  canvas {}",
                 state.scene_cache.len(),
                 state.images.len(), state.images_by_path.len(),
-                state.label_cache.len(),
+                state.label_cache.len(), state.label_cache.cap(),
                 state.canvas_cmds.len()),
         ];
         dev.overlay_next_refresh = now + Duration::from_millis(250);

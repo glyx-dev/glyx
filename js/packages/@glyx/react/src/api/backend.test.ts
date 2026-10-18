@@ -4,7 +4,8 @@ import { backend } from './backend.js';
 const g = globalThis as any;
 
 // The runner answers a Rust command with a promise marked `__glyxRaw` that resolves with the command's
-// JSON string; a JS plugin's own return value comes back untouched.
+// JSON string (on QuickJS an object or array result arrives already parsed); a JS plugin's own return value
+// comes back untouched.
 function rustCommand(json: string | Promise<string>) {
   const p: any = Promise.resolve(json);
   p.__glyxRaw = true;
@@ -56,6 +57,35 @@ describe('backend calls with __glyx_backend_call2', () => {
     g.__glyx_backend_call2 = (cmd: string) => rustCommand(cmd === 'greet' ? '{"hello":"Alice","n":[1,2]}' : 'plain words');
     expect(await backend.greet({ name: 'Alice' })).toEqual({ hello: 'Alice', n: [1, 2] });
     expect(await backend.say()).toBe('plain words');
+  });
+
+  test('after the first call a Rust command goes straight through JSON (no native stringify, no marking)', async () => {
+    let call2 = 0, call1 = 0;
+    g.__glyx_backend_call2 = () => { call2++; return rustCommand('{"n":1}'); };
+    g.__glyx_backend_call = (_cmd: string, json: string) => { call1++; expect(JSON.parse(json)).toEqual({ a: 1 }); return Promise.resolve('{"n":2}'); };
+    expect(await backend.learned({ a: 1 })).toEqual({ n: 1 });   // first call: call2 finds out it is a Rust command
+    expect(await backend.learned({ a: 1 })).toEqual({ n: 2 });   // from then on: the JSON binding
+    expect(await backend.learned({ a: 1 })).toEqual({ n: 2 });
+    expect([call2, call1]).toEqual([1, 2]);
+    // a JS plugin command keeps using call2
+    g.__glyx_backend_call2 = () => { call2++; return Promise.resolve('x'); };
+    await backend.notes.fresh();
+    await backend.notes.fresh();
+    expect(call2).toBe(3);
+  });
+
+  test('on an engine with native JSON (QuickJS) a known Rust command keeps using call2, and a parsed result passes through', async () => {
+    g.__glyx_nativeJson = true;
+    try {
+      let call2 = 0;
+      g.__glyx_backend_call2 = () => { call2++; return rustCommand({ n: call2 } as any); };   // the runner resolves an object result already parsed
+      g.__glyx_backend_call = () => { throw new Error('the JSON binding must not be used'); };
+      expect(await backend.learnedNative({ a: 1 })).toEqual({ n: 1 });
+      expect(await backend.learnedNative({ a: 1 })).toEqual({ n: 2 });
+      expect(call2).toBe(2);
+    } finally {
+      delete g.__glyx_nativeJson;
+    }
   });
 
   test('rejections pass through, and a plugin that throws synchronously rejects the call', async () => {

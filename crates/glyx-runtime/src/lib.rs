@@ -165,6 +165,8 @@ pub mod icu;
 #[cfg(feature = "quickjs")]
 pub mod quickjs_runtime;
 #[cfg(feature = "quickjs")]
+mod quickjs_json;
+#[cfg(feature = "quickjs")]
 mod quickjs_props;
 #[cfg(feature = "quickjs")]
 mod quickjs_fs;
@@ -237,8 +239,11 @@ pub(crate) const BENCH_PLUGIN_JS: &str =
 /// wrapper did before `__glyx_backend_call2`) or the new one (the value itself), with `mk(i)` as the
 /// argument. `globalThis.__done` counts the calls that have finished.
 #[cfg(test)]
-pub(crate) fn bench_script(new_path: bool, n: u32, large: bool) -> String {
-    let call = if new_path {
+pub(crate) fn bench_script(new_path: bool, n: u32, large: bool, command: &str, rust: bool) -> String {
+    let call = if new_path && rust {
+        // what the wrapper's `_parseRaw` does: QuickJS hands an object / array result over already parsed
+        "(name, a) => __glyx_backend_call2(name, a).then(raw => typeof raw === 'string' ? JSON.parse(raw) : raw)"
+    } else if new_path {
         "(name, a) => __glyx_backend_call2(name, a)"
     } else {
         "(name, a) => __glyx_backend_call(name, JSON.stringify(a)).then(raw => { try { return JSON.parse(raw); } catch (e) { return raw; } })"
@@ -250,8 +255,80 @@ pub(crate) fn bench_script(new_path: bool, n: u32, large: bool) -> String {
     };
     format!(
         "globalThis.__done = 0; (() => {{ const call = {call}; const mk = {mk}; \
-         for (let i = 0; i < {n}; i++) {{ call('bench.echo', mk(i)).then(() => {{ __done++; }}); }} }})();"
+         for (let i = 0; i < {n}; i++) {{ call('{command}', mk(i)).then(() => {{ __done++; }}); }} }})();"
     )
+}
+
+// ── Binary command results ─────────────────────────────────────────────────────
+//
+// A promise is settled from a completion queue whose entries carry `Result<String, String>`. A binary
+// command's result is bytes, so its completion carries a marker plus an id instead, the bytes wait in
+// this table, and the engine's settle step swaps them for an `ArrayBuffer`.
+
+/// Starts the `Ok` string of a completion whose value is bytes in the side table (a NUL first, so no
+/// ordinary command result can start with it by accident).
+pub(crate) const BINARY_RESULT_MARKER: &str = "\u{0}glyx:bytes:";
+
+fn binary_results() -> &'static parking_lot::Mutex<std::collections::HashMap<u64, Vec<u8>>> {
+    static TABLE: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashMap<u64, Vec<u8>>>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Run a binary command and turn its answer into a completion value: the marker and the id of the
+/// bytes it parked in the side table, or the error message.
+pub(crate) async fn run_binary_command(f: BinaryCommandFn, input: Vec<u8>) -> Result<String, String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let bytes = f(input).await?;
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    binary_results().lock().insert(id, bytes);
+    Ok(format!("{BINARY_RESULT_MARKER}{id}"))
+}
+
+/// If `completion` is a binary marker, the bytes it stands for (taken out of the side table).
+pub(crate) fn take_binary_result(completion: &str) -> Option<Option<Vec<u8>>> {
+    let id: u64 = completion.strip_prefix(BINARY_RESULT_MARKER)?.parse().ok()?;
+    Some(binary_results().lock().remove(&id))
+}
+
+#[cfg(test)]
+mod binary_result_tests {
+    use super::*;
+
+    #[test]
+    fn a_binary_result_goes_through_the_side_table_exactly_once() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let f: BinaryCommandFn = std::sync::Arc::new(|v| Box::pin(async move { Ok(v.into_iter().rev().collect()) }));
+        let completion = rt.block_on(run_binary_command(f, vec![1, 2, 3])).unwrap();
+        assert!(completion.starts_with(BINARY_RESULT_MARKER));
+        assert_eq!(take_binary_result(&completion), Some(Some(vec![3, 2, 1])));
+        assert_eq!(take_binary_result(&completion), Some(None), "taken: a second look finds nothing");
+    }
+
+    #[test]
+    fn an_ordinary_result_is_not_mistaken_for_bytes() {
+        assert_eq!(take_binary_result("{\"a\":1}"), None);
+        assert_eq!(take_binary_result(""), None);
+    }
+
+    #[test]
+    fn a_failing_binary_command_returns_its_error() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let f: BinaryCommandFn = std::sync::Arc::new(|_| Box::pin(async { Err("no good".to_string()) }));
+        assert_eq!(rt.block_on(run_binary_command(f, vec![])), Err("no good".to_string()));
+    }
+
+    #[test]
+    fn add_bytes_registers_a_binary_command_whose_json_handler_only_rejects() {
+        let mut b = BackendRegistryBuilder::new();
+        b.add_bytes("rev", |v| async move { Ok(v) });
+        b.add("plain", |a| async move { Ok(a) });
+        let reg = b.build();
+        assert!(reg["rev"].binary.is_some());
+        assert!(reg["plain"].binary.is_none());
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let err = rt.block_on((reg["rev"].handler)("{}".to_string())).unwrap_err();
+        assert!(err.contains("binary command"), "{err}");
+    }
 }
 
 // ── fs.watch events ───────────────────────────────────────────────────────────
@@ -327,15 +404,29 @@ pub type BackendCommandFn = std::sync::Arc<
         + Sync,
 >;
 
+/// The handler of a binary command (`add_bytes`): the argument bytes in, the result bytes out, with
+/// no JSON on either side. Reaches JS as an `ArrayBuffer`.
+pub type BinaryCommandFn = std::sync::Arc<
+    dyn Fn(Vec<u8>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// A registered command's handler plus the capability names (if any) a
 /// caller's app must have declared in `glyx.config.json` to invoke it.
 /// Native `GlyxExtension` commands have no capability enforcement built in
 /// otherwise — unlike JS plugins, which get a load-time capability-subset
 /// check — so `add_gated` exists specifically to let an extension opt a
 /// command into the same named-capability model.
+///
+/// `binary` is set for a command registered with `add_bytes`/`add_bytes_gated`, which takes and
+/// returns raw bytes instead of JSON; its `handler` is then only a stub that rejects.
 pub struct RegisteredCommand {
     pub capabilities: Vec<String>,
     pub handler: BackendCommandFn,
+    /// Set for a command registered with `add_bytes`: it takes and returns raw bytes, and `handler`
+    /// is a stub that only rejects (a JSON caller reached a binary command).
+    pub binary: Option<BinaryCommandFn>,
 }
 
 /// Immutable registry of named backend commands. Built once at startup from the
@@ -373,6 +464,47 @@ impl BackendRegistryBuilder {
         self.commands.insert(name.into(), RegisteredCommand {
             capabilities: capabilities.iter().map(|s| s.to_string()).collect(),
             handler: std::sync::Arc::new(move |args| Box::pin(f(args))),
+            binary: None,
+        });
+    }
+
+    /// Register a **binary** command: it receives the bytes of an `ArrayBuffer` or typed array and
+    /// returns bytes, which reach JS as an `ArrayBuffer`. No JSON on either side, so bulk data (pixels,
+    /// audio, tables of numbers) crosses as a copy instead of as text.
+    ///
+    /// ```ignore
+    /// cmds.add_bytes("invert", |mut pixels: Vec<u8>| async move {
+    ///     for p in pixels.iter_mut() { *p = 255 - *p; }
+    ///     Ok(pixels)
+    /// });
+    /// // JS: const out = await backend.invert(new Uint8Array(pixels));   // out is an ArrayBuffer
+    /// ```
+    ///
+    /// Call it from JS with an `ArrayBuffer` or any typed array / `DataView` (only the bytes the view
+    /// covers are sent); anything else rejects. Only the `__glyx_backend_call2` path can reach it.
+    pub fn add_bytes<F, Fut>(&mut self, name: impl Into<String>, f: F)
+    where
+        F:   Fn(Vec<u8>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Vec<u8>, String>> + Send + 'static,
+    {
+        self.add_bytes_gated(name, &[], f);
+    }
+
+    /// `add_bytes` that also requires the named capabilities, like `add_gated`.
+    pub fn add_bytes_gated<F, Fut>(&mut self, name: impl Into<String>, capabilities: &[&str], f: F)
+    where
+        F:   Fn(Vec<u8>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Vec<u8>, String>> + Send + 'static,
+    {
+        let name = name.into();
+        let stub_name = name.clone();
+        self.commands.insert(name, RegisteredCommand {
+            capabilities: capabilities.iter().map(|s| s.to_string()).collect(),
+            handler: std::sync::Arc::new(move |_| {
+                let n = stub_name.clone();
+                Box::pin(async move { Err(format!("backend.{n} is a binary command: call it with an ArrayBuffer or a typed array")) })
+            }),
+            binary: Some(std::sync::Arc::new(move |bytes| Box::pin(f(bytes)))),
         });
     }
 
@@ -410,6 +542,7 @@ mod backend_registry_tests {
         builder.build().get("test").map(|c| RegisteredCommand {
             capabilities: c.capabilities.clone(),
             handler: c.handler.clone(),
+            binary: c.binary.clone(),
         }).unwrap()
     }
 

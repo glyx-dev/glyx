@@ -173,8 +173,9 @@ pub fn poll_events_callback(
                     set_str!("text", &t);
                 }
             }
-            InputEvent::Scroll { delta_y } => {
+            InputEvent::Scroll { delta_x, delta_y } => {
                 set_str!("type", "scroll");
+                set_num!("deltaX", delta_x);
                 set_num!("deltaY", delta_y);
             }
             InputEvent::ScrollbarDrag { node_id, scroll_y } => {
@@ -314,9 +315,13 @@ pub fn get_layout_callback(
         set_num!("boxWidth",  bw);
         set_num!("boxHeight", bh);
         // Clip (scroll) nodes publish measured content height under the
-        // high-bit key (see glyx-core layout.rs CONTENT_HEIGHT_KEY).
-        if let Some(&[_, _, _, ch]) = cache.get(&(id | 0x8000_0000)) {
+        // high-bit key (see glyx-core layout.rs CONTENT_HEIGHT_KEY), and the
+        // content width too when they scroll sideways (0 otherwise).
+        if let Some(&[_, _, cw, ch]) = cache.get(&(id | 0x8000_0000)) {
             set_num!("contentHeight", ch);
+            if cw > 0.0 {
+                set_num!("contentWidth", cw);
+            }
         }
         rv.set(obj.into());
     } else {

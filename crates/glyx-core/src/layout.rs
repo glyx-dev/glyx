@@ -535,14 +535,14 @@ pub(crate) fn update_scroll_positions(state: &PerWindowState) {
     if let Some(root_id) = state.js_root {
         let layout_cache = state.runtime.layout_cache();
         let mut cache = layout_cache.lock();
-        scroll_walk(root_id, &state.js_nodes, &state.resolved_by_id, 0.0, None, &mut cache);
+        scroll_walk(root_id, &state.js_nodes, &state.resolved_by_id, 0.0, 0.0, None, &mut cache);
     }
 }
 
 /// [x, y, width, height] in screen space of the nearest clipping ancestor.
 type ClipRect = Option<[f32; 4]>;
 
-/// High-bit key marker: `id | CONTENT_HEIGHT_KEY` stores `[0,0,0,content_h]`
+/// High-bit key marker: `id | CONTENT_HEIGHT_KEY` stores `[0,0,content_w,content_h]`
 /// for clip (scroll) nodes.  Node ids are a small counter, so the high bit
 /// never collides with a real id.
 pub(crate) const CONTENT_HEIGHT_KEY: u32 = 0x8000_0000;
@@ -679,6 +679,7 @@ fn scroll_walk(
     id:        u32,
     nodes:     &std::collections::HashMap<u32, JsNode>,
     resolved:  &std::collections::HashMap<NodeId, ResolvedLayout>,
+    scroll_x:  f64,
     scroll_y:  f64,
     clip_rect: ClipRect,
     cache:     &mut std::collections::HashMap<u32, [f32; 4]>,
@@ -695,12 +696,12 @@ fn scroll_walk(
         cache.remove(&(id | UNCLIPPED_KEY));
         let child_ids: SmallVec<[u32; 4]> = node.children.iter().copied().collect();
         for child_id in child_ids {
-            scroll_walk(child_id, nodes, resolved, scroll_y, clip_rect, cache);
+            scroll_walk(child_id, nodes, resolved, scroll_x, scroll_y, clip_rect, cache);
         }
         return;
     }
 
-    let visible_x = rl.x;
+    let visible_x = (rl.x as f64 - scroll_x) as f32;
     let visible_y = (rl.y as f64 - scroll_y) as f32;
     let unclipped = [visible_x, visible_y, rl.width, rl.height];
 
@@ -719,7 +720,7 @@ fn scroll_walk(
             // also get their cache entries invalidated.
             let child_ids: SmallVec<[u32; 4]> = node.children.iter().copied().collect();
             for child_id in child_ids {
-                scroll_walk(child_id, nodes, resolved, scroll_y, clip_rect, cache);
+                scroll_walk(child_id, nodes, resolved, scroll_x, scroll_y, clip_rect, cache);
             }
             return;
         }
@@ -751,6 +752,33 @@ fn scroll_walk(
     let overflows = matches!(node.props.overflow.as_deref(), Some("hidden" | "scroll"));
     let is_clip = node.props.clip.unwrap_or(false) || overflows;
 
+    // Horizontal scrolling is opt-in (see `render_subtree`): only a node carrying `scroll_offset_x` has a
+    // content width and shifts its children sideways.
+    let own_x = node.props.scroll_offset_x;
+    let max_child_right: f64 = if is_clip && own_x.is_some() {
+        node.children.iter()
+            .filter_map(|&cid| {
+                let cn   = nodes.get(&cid)?;
+                let clid = cn.layout_id?;
+                resolved.get(&clid).copied().map(|crl| (crl.x + crl.width) as f64)
+            })
+            .fold(f64::NEG_INFINITY, f64::max)
+    } else {
+        f64::NEG_INFINITY
+    };
+    let mut content_w = 0.0f32;
+    let child_scroll_x = match own_x {
+        None => scroll_x,
+        Some(ox) if is_clip && max_child_right.is_finite() => {
+            let pad = match node.props.padding { Some(LengthValue::Px(px)) => px as f64, _ => 0.0 };
+            content_w = (max_child_right + pad - rl.x as f64).max(0.0) as f32;
+            let max_s = (max_child_right + pad - (rl.x as f64 + rl.width as f64)).max(0.0);
+            scroll_x + (ox as f64).min(max_s).max(0.0)
+        }
+        Some(ox) if is_clip => scroll_x + (ox as f64).max(0.0),
+        Some(ox) => scroll_x + ox as f64,
+    };
+
     let child_scroll_y = {
         let raw = scroll_y + node.props.scroll_offset_y.unwrap_or(0.0) as f64;
         if is_clip {
@@ -770,7 +798,7 @@ fn scroll_walk(
                 // __glyx_getLayout can report it as `contentHeight` — JS ScrollView
                 // uses it to clamp wheel/scrollbar scrolling to real content.
                 let content_h = (max_child_bottom + pad - rl.y as f64).max(0.0) as f32;
-                cache.insert(id | CONTENT_HEIGHT_KEY, [0.0, 0.0, 0.0, content_h]);
+                cache.insert(id | CONTENT_HEIGHT_KEY, [0.0, 0.0, content_w, content_h]);
                 let max_s = (max_child_bottom + pad - (rl.y as f64 + rh)).max(0.0);
                 raw.min(max_s).max(0.0)
             } else {
@@ -792,7 +820,7 @@ fn scroll_walk(
 
     let child_ids: SmallVec<[u32; 4]> = node.children.iter().copied().collect();
     for child_id in child_ids {
-        scroll_walk(child_id, nodes, resolved, child_scroll_y, child_clip, cache);
+        scroll_walk(child_id, nodes, resolved, child_scroll_x, child_scroll_y, child_clip, cache);
     }
 }
 
@@ -1047,15 +1075,49 @@ mod scroll_reveal_tests {
         resolved.insert(NodeId::from(3u64), ResolvedLayout { x: 0.0, y: 0.0, width: 100.0, height: 20.0 });
 
         let mut cache = HashMap::new();
-        scroll_walk(1, &nodes, &resolved, 0.0, None, &mut cache);
+        scroll_walk(1, &nodes, &resolved, 0.0, 0.0, None, &mut cache);
         assert_eq!(cache[&2], [0.0, 50.0, 100.0, 50.0], "plain entry is the visible part");
         assert_eq!(cache[&(2 | UNCLIPPED_KEY)], [0.0, 50.0, 100.0, 100.0], "full box published");
         assert!(!cache.contains_key(&(3 | UNCLIPPED_KEY)), "unclipped node needs no extra entry");
 
         // Child 2 moves fully inside: its stale unclipped entry must go.
         resolved.insert(NodeId::from(2u64), ResolvedLayout { x: 0.0, y: 20.0, width: 100.0, height: 30.0 });
-        scroll_walk(1, &nodes, &resolved, 0.0, None, &mut cache);
+        scroll_walk(1, &nodes, &resolved, 0.0, 0.0, None, &mut cache);
         assert!(!cache.contains_key(&(2 | UNCLIPPED_KEY)));
+    }
+
+    #[test]
+    fn scroll_walk_shifts_a_sideways_scroller_and_publishes_its_content_width() {
+        // 1 = clip container 100x100 that scrolls sideways (offset 60); 2 = child at x 0..300;
+        // 3 = child at x 120..220, outside the viewport until scrolled.
+        let mut nodes = HashMap::new();
+        let mut container = node_with_layout(None, &[2, 3], 1);
+        container.props.clip = Some(true);
+        container.props.scroll_offset_x = Some(60.0);
+        nodes.insert(1, container);
+        nodes.insert(2, node_with_layout(Some(1), &[], 2));
+        nodes.insert(3, node_with_layout(Some(1), &[], 3));
+        let mut resolved = HashMap::new();
+        resolved.insert(NodeId::from(1u64), ResolvedLayout { x: 0.0, y: 0.0, width: 100.0, height: 100.0 });
+        resolved.insert(NodeId::from(2u64), ResolvedLayout { x: 0.0, y: 0.0, width: 300.0, height: 20.0 });
+        resolved.insert(NodeId::from(3u64), ResolvedLayout { x: 120.0, y: 30.0, width: 100.0, height: 20.0 });
+
+        let mut cache = HashMap::new();
+        scroll_walk(1, &nodes, &resolved, 0.0, 0.0, None, &mut cache);
+        assert_eq!(cache[&(1 | CONTENT_HEIGHT_KEY)][2], 300.0, "content width published");
+        assert_eq!(cache[&2], [0.0, 0.0, 100.0, 20.0], "the wide child is clipped to the viewport");
+        assert_eq!(cache[&3], [60.0, 30.0, 40.0, 20.0], "child 3 slid in from x=120 to x=60, clipped at 100");
+
+        // Past the end it clamps: 300 of content in 100 gives at most 200.
+        nodes.get_mut(&1).unwrap().props.scroll_offset_x = Some(999.0);
+        scroll_walk(1, &nodes, &resolved, 0.0, 0.0, None, &mut cache);
+        assert_eq!(cache[&3], [0.0, 30.0, 20.0, 20.0], "clamped at 200: child 3 (x -80..20) keeps 20px in view, not none");
+
+        // Without the prop, wide content never shifts and no width is published.
+        nodes.get_mut(&1).unwrap().props.scroll_offset_x = None;
+        scroll_walk(1, &nodes, &resolved, 0.0, 0.0, None, &mut cache);
+        assert_eq!(cache[&(1 | CONTENT_HEIGHT_KEY)][2], 0.0);
+        assert_eq!(cache[&3], [-9999.0, -9999.0, 0.0, 0.0], "child 3 starts beyond the viewport edge");
     }
 
     #[test]

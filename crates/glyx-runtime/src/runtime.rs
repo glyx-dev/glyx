@@ -578,6 +578,19 @@ impl V8Runtime {
             let resolver = v8::Local::new(&scope, &resolver_global);
 
             match result {
+                // A binary command's answer: swap the marker for an ArrayBuffer of its bytes.
+                Ok(content) if content.starts_with(crate::BINARY_RESULT_MARKER) => match crate::take_binary_result(&content).flatten() {
+                    Some(bytes) => {
+                        let store = v8::ArrayBuffer::new_backing_store_from_vec(bytes).make_shared();
+                        let buffer = v8::ArrayBuffer::with_backing_store(&scope, &store);
+                        resolver.resolve(&scope, buffer.into());
+                    }
+                    None => {
+                        let msg = v8::String::new(&scope, "binary result lost").unwrap();
+                        let exc = v8::Exception::error(&scope, msg);
+                        resolver.reject(&scope, exc);
+                    }
+                },
                 Ok(content) => {
                     let s = v8::String::new(&scope, &content)
                         .unwrap_or_else(|| v8::String::empty(&scope));
@@ -845,10 +858,6 @@ mod tests {
     use super::*;
     use crate::JsPlugin;
 
-    /// Same shape as `QuickJsRuntime::new_runtime_with_plugin` (quickjs_runtime.rs)
-    /// — one JS plugin loaded, for exercising `register_all`/`__glyx_backend_call`'s
-    /// JS-command path end to end on the V8 side, which (unlike QuickJS) had no
-    /// plugin-specific test coverage at all before this.
     /// Two windows: each runtime works in its own isolate whatever order they
     /// were made in, and they can be dropped in any order. (Before, after a
     /// second window opened, calls into the first ran in the second's isolate:
@@ -868,6 +877,15 @@ mod tests {
         assert_eq!(second.eval("who").unwrap(), "second");
     }
 
+    /// A scroll reaches JS with both deltas, in the web's convention.
+    #[test]
+    fn a_scroll_event_carries_delta_x_and_delta_y() {
+        let mut rt = new_runtime_with_plugin(None, "", "__unused_s");
+        rt.push_event(InputEvent::Scroll { delta_x: 12.0, delta_y: -40.0 });
+        let out = rt.eval("const e = __glyx_pollEvents()[0]; JSON.stringify([e.type, e.deltaX, e.deltaY])").unwrap();
+        assert_eq!(out, r#"["scroll",12,-40]"#);
+    }
+
     /// The DevTools CPU profiler samples JS and names the functions it saw.
     #[cfg(feature = "dev")]
     #[test]
@@ -884,6 +902,8 @@ mod tests {
         assert!(rt.profile_stop().is_err(), "not recording any more");
     }
 
+    /// Same shape as `QuickJsRuntime::new_runtime_with_plugin` (quickjs_runtime.rs): one JS plugin
+    /// loaded, for exercising `register_all` and the backend-call JS-command path end to end.
     fn new_runtime_with_plugin(prefix: Option<&str>, bundled_js: &str, global_name: &str) -> V8Runtime {
         new_runtime_with_registry(prefix, bundled_js, global_name, Arc::new(std::collections::HashMap::new())).1
     }
@@ -966,6 +986,9 @@ mod tests {
         let mut b = crate::BackendRegistryBuilder::new();
         b.add("echo", |args| async move { Ok(args) });
         b.add("fails", |_| async move { Err("nope".to_string()) });
+        b.add_bytes("rev", |mut v| async move { v.reverse(); Ok(v) });
+        b.add_bytes("boom", |_| async move { Err("bytes failed".to_string()) });
+        b.add_bytes_gated("secret", &["fs"], |v| async move { Ok(v) });
         new_runtime_with_registry(Some("notes"), PLUGIN_JS, "__glyx_plugin_notes", b.build())
     }
 
@@ -1038,15 +1061,15 @@ mod tests {
         rt.eval(
             "globalThis.__out = []; \
              __out.push('plugin-marked:' + __glyx_backend_call2('notes.digits').__glyxRaw); \
-             __glyx_backend_call2('missing').catch(e => { __out.push('missing:' + e); }); \
-             __glyx_backend_call2('fails').catch(e => { __out.push('fails:' + e); });"
+             __glyx_backend_call2('missing').catch(e => { __out.push('missing:' + e.message); }); \
+             __glyx_backend_call2('fails').catch(e => { __out.push('fails:' + e.message + ':' + (e instanceof Error)); });"
         ).unwrap();
         for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
         let out = rt.eval("__out.join('|')").unwrap();
         assert!(out.contains("plugin-marked:undefined"), "got: {out}");
         assert!(out.contains("no such command"), "got: {out}");
-        // V8 rejects with an Error object ("Error: nope"), QuickJS with the bare string: see framework_issues.md.
-        assert!(out.contains("fails:") && out.contains("nope"), "got: {out}");
+        // Both engines reject with a real Error, so `e.message` works on either.
+        assert!(out.contains("fails:nope:true"), "got: {out}");
     }
 
     /// Old path against new path, for a small and a large argument. Run by hand:
@@ -1054,24 +1077,170 @@ mod tests {
     #[test]
     #[ignore]
     fn bench_backend_call_paths() {
-        let mut rt = new_runtime_with_plugin(Some("bench"), crate::BENCH_PLUGIN_JS, "__glyx_plugin_bench");
-        // Fewer big calls than on QuickJS: all of them are alive at once and the test heap is capped at 256 MB.
-        for (label, n, large) in [("small object", 100_000u32, false), ("1000-item array", 300u32, true)] {
-            for new_path in [false, true] {
-                let start = std::time::Instant::now();
-                rt.eval(&crate::bench_script(new_path, n, large)).unwrap();
-                let mut spins = 0;
-                while rt.eval("String(__done)").unwrap() != n.to_string() {
-                    rt.tick();
-                    spins += 1;
-                    assert!(spins < 100_000, "calls did not finish");
-                }
-                let secs = start.elapsed().as_secs_f64();
-                println!(
-                    "V8 {:<16} {:<4} path: {:>9.2} ms total, {:>8.2} us/call  ({n} calls)",
-                    label, if new_path { "new" } else { "old" }, secs * 1000.0, secs * 1e6 / n as f64
-                );
+        let mut b = crate::BackendRegistryBuilder::new();
+        b.add("echo", |args| async move { Ok(args) });
+        b.add_bytes("echo_bytes", |v| async move { Ok(v) });
+        let (_t, mut rt) = new_runtime_with_registry(Some("bench"), crate::BENCH_PLUGIN_JS, "__glyx_plugin_bench", b.build());
+        // The same loop with NO native call: build the object and settle a promise on it. This is the
+        // engine alone, the floor under every number below.
+        {
+            let n = 100_000u32;
+            let start = std::time::Instant::now();
+            rt.eval(&format!(
+                "globalThis.__done = 0; (() => {{ for (let i = 0; i < {n}; i++) {{ Promise.resolve({{ id: i, title: 'hello', done: false }}).then(() => {{ __done++; }}); }} }})();"
+            )).unwrap();
+            let mut spins = 0u32;
+            while rt.eval("String(__done)").unwrap() != n.to_string() {
+                rt.tick();
+                spins += 1;
+                assert!(spins < 2_000_000, "promises did not settle");
             }
+            let secs = start.elapsed().as_secs_f64();
+            println!("V8 plain JavaScript, no native call (object + promise): {:>9.2} ms total, {:>8.2} us/iteration  ({n})", secs * 1000.0, secs * 1e6 / n as f64);
+        }
+        // What the engine's own JSON costs for the large argument, per call: the floor under a Rust command.
+        rt.eval(
+            "(() => { const a = Array.from({ length: 1000 }, (_, k) => ({ id: k, name: 'item ' + k, tags: ['a', 'b'], ok: true })); \
+              let t = Date.now(); for (let i = 0; i < 300; i++) JSON.stringify(a); const st = (Date.now() - t) / 300; \
+              const s = JSON.stringify(a); t = Date.now(); for (let i = 0; i < 300; i++) JSON.parse(s); const pa = (Date.now() - t) / 300; \
+              globalThis.__json = 'stringify ' + st.toFixed(2) + ' ms, parse ' + pa.toFixed(2) + ' ms, ' + s.length + ' bytes'; })()"
+        ).unwrap();
+        println!("V8 JSON of the 1000-item array, per call: {}", rt.eval("globalThis.__json").unwrap());
+        // The same 4000 numbers through a Rust command: as a JSON array (the JSON binding), and as a
+        // Float64Array through a binary command (add_bytes).
+        for (how, script) in [
+            ("JSON array    ", "(name, f) => __glyx_backend_call('echo', JSON.stringify(Array.from(f))).then(raw => Float64Array.from(JSON.parse(raw)))"),
+            ("binary lane   ", "(name, f) => __glyx_backend_call2('echo_bytes', f).then(ab => new Float64Array(ab))"),
+        ] {
+            let n = 500u32;
+            let start = std::time::Instant::now();
+            rt.eval(&format!(
+                "globalThis.__done = 0; (() => {{ const call = {script}; const f = Float64Array.from({{ length: 4000 }}, (_, i) => i * 1.5); \
+                 for (let i = 0; i < {n}; i++) {{ call('x', f).then((r) => {{ if (r.length === 4000) __done++; }}); }} }})();"
+            )).unwrap();
+            let mut spins = 0u32;
+            while rt.eval("String(__done)").unwrap() != n.to_string() {
+                rt.tick();
+                spins += 1;
+                if spins % 200 == 0 { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                assert!(spins < 2_000_000, "calls did not finish");
+            }
+            let secs = start.elapsed().as_secs_f64();
+            println!("V8 4000 numbers (32 KB) {how}: {:>9.2} ms total, {:>8.2} us/call  ({n} calls)", secs * 1000.0, secs * 1e6 / n as f64);
+        }
+        // For a Rust command "call2" is the first call only: `@glyx-dev/react` learns from it that the name is a
+        // Rust command and uses the JSON binding ("old") for every later call, so "old" is what an app sees.
+        for (kind, command, rust) in [("JS plugin", "bench.echo", false), ("Rust command", "echo", true)] {
+            // Fewer big calls than on QuickJS: all of them are alive at once and the test heap is capped at 256 MB.
+            for (label, n, large) in [("small object", 100_000u32, false), ("1000-item array", 300u32, true)] {
+                for new_path in [false, true] {
+                    let start = std::time::Instant::now();
+                    rt.eval(&crate::bench_script(new_path, n, large, command, rust)).unwrap();
+                    let mut spins = 0u32;
+                    while rt.eval("String(__done)").unwrap() != n.to_string() {
+                        rt.tick();
+                        spins += 1;
+                        if spins % 200 == 0 { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                        assert!(spins < 2_000_000, "calls did not finish");
+                    }
+                    let secs = start.elapsed().as_secs_f64();
+                    println!(
+                        "V8 {:<12} {:<16} {:<4} path: {:>9.2} ms total, {:>8.2} us/call  ({n} calls)",
+                        kind, label, if !new_path { "old" } else if rust { "call2" } else { "new" }, secs * 1000.0, secs * 1e6 / n as f64
+                    );
+                }
+            }
+        }
+    }
+
+    // ── binary lane: add_bytes commands take and return raw bytes ────────────
+
+    #[test]
+    fn bytes_commands_take_buffers_and_views_and_answer_with_an_arraybuffer() {
+        let (_t, mut rt) = call2_runtime();
+        rt.eval(
+            "globalThis.__out = []; \
+             const show = (tag) => (r) => __out.push(tag + ':' + (r instanceof ArrayBuffer) + ':' + Array.from(new Uint8Array(r)).join(',')); \
+             __glyx_backend_call2('rev', new Uint8Array([1, 2, 3])).then(show('u8')); \
+             __glyx_backend_call2('rev', new Uint8Array([1, 2, 3, 4]).buffer).then(show('buffer')); \
+             __glyx_backend_call2('rev', new Uint8Array([9, 1, 2, 3]).subarray(1, 3)).then(show('view')); \
+             __glyx_backend_call2('rev', new DataView(new Uint8Array([5, 6, 7]).buffer, 1, 2)).then(show('dataview')); \
+             __glyx_backend_call2('rev', new Float64Array([1.5])).then((r) => __out.push('f64:' + r.byteLength)); \
+             __glyx_backend_call2('rev', new Uint8Array(0)).then(show('empty'));"
+        ).unwrap();
+        for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
+        let out = rt.eval("__out.sort().join('|')").unwrap();
+        for expected in [
+            "u8:true:3,2,1",
+            "buffer:true:4,3,2,1",
+            "view:true:2,1",
+            "dataview:true:7,6",
+            "f64:8",
+            "empty:true:",
+        ] {
+            assert!(out.contains(expected), "missing {expected:?} in: {out}");
+        }
+    }
+
+    #[test]
+    fn bytes_commands_reject_what_is_not_bytes_and_their_own_errors_and_missing_capabilities() {
+        let (_t, mut rt) = call2_runtime();
+        rt.eval(
+            "globalThis.__out = []; \
+             const bad = (tag) => (e) => __out.push(tag + ':' + (e instanceof Error) + ':' + e.message); \
+             __glyx_backend_call2('rev', 'not bytes').catch(bad('string')); \
+             __glyx_backend_call2('rev', { a: 1 }).catch(bad('object')); \
+             __glyx_backend_call2('rev').catch(bad('none')); \
+             __glyx_backend_call2('boom', new Uint8Array(1)).catch(bad('boom')); \
+             __glyx_backend_call2('secret', new Uint8Array(1)).catch(bad('secret'));"
+        ).unwrap();
+        for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
+        let out = rt.eval("__out.sort().join('|')").unwrap();
+        assert!(out.contains("string:true:backend.rev: expects an ArrayBuffer or a typed array"), "got: {out}");
+        assert!(out.contains("object:true:backend.rev: expects an ArrayBuffer or a typed array"), "got: {out}");
+        assert!(out.contains("none:true:backend.rev: expects an ArrayBuffer or a typed array"), "got: {out}");
+        assert!(out.contains("boom:true:bytes failed"), "got: {out}");
+        assert!(out.contains("secret:true:backend.secret: missing capability"), "got: {out}");
+    }
+
+    #[test]
+    fn a_bytes_command_called_through_the_json_binding_says_what_it_is() {
+        let (_t, mut rt) = call2_runtime();
+        rt.eval(
+            "globalThis.__out = []; \
+             __glyx_backend_call('rev', '{}').catch((e) => __out.push(e.message));"
+        ).unwrap();
+        for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
+        let out = rt.eval("__out.join('|')").unwrap();
+        assert!(out.contains("binary command"), "got: {out}");
+    }
+
+    /// What drawing one frame of a canvas grid costs on the JavaScript side: the real `GlyxCanvasContext`
+    /// (bundled with esbuild) writing 1200 cells, 70 grid lines and the zebra rows into the command
+    /// buffers, once per frame. Needs three bundles, by path in the environment:
+    ///   GLYX_BENCH_POLYFILLS_JS, GLYX_BENCH_CANVAS_JS (global name CanvasMod), GLYX_BENCH_GRID_JS
+    /// Run by hand (the bundles are built with esbuild from canvas.ts, polyfills.ts and a small grid-drawing script):
+    ///   cargo test -p glyx-runtime  --release -- --ignored --nocapture bench_canvas_grid_frame
+    #[test]
+    #[ignore]
+    fn bench_canvas_grid_frame() {
+        let read = |var: &str| std::fs::read_to_string(std::env::var(var).unwrap_or_else(|_| panic!("{var} is not set"))).unwrap();
+        let mut rt = new_runtime_with_plugin(None, "", "__unused_grid");
+        rt.eval(&read("GLYX_BENCH_POLYFILLS_JS")).unwrap();
+        rt.eval(&read("GLYX_BENCH_CANVAS_JS")).unwrap();
+        rt.eval(&read("GLYX_BENCH_GRID_JS")).unwrap();
+        rt.eval("globalThis.__ctx = new CanvasMod.GlyxCanvasContext(1);").unwrap();
+        for (cols, rows) in [(10u32, 40u32), (30, 40), (50, 40)] {
+            let frames = 100u32;
+            // warm-up
+            rt.eval(&format!("for (let f = 0; f < 5; f++) __gridFrame(__ctx, f, {cols}, {rows});")).unwrap();
+            let start = std::time::Instant::now();
+            rt.eval(&format!("for (let f = 0; f < {frames}; f++) __gridFrame(__ctx, 1000 + f * 3, {cols}, {rows});")).unwrap();
+            let secs = start.elapsed().as_secs_f64();
+            println!(
+                "V8 grid frame, {cols} columns x {rows} rows = {} cells: {:>7.2} ms/frame  ({:.1} us/cell)",
+                cols * rows, secs * 1e3 / frames as f64, secs * 1e6 / (frames * cols * rows) as f64
+            );
         }
     }
 

@@ -8,7 +8,7 @@
 // Column: { key, label, width?, minWidth?, sortable?, align?, render?(value,row) }
 
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
-import { View, Text, Pressable, VirtualizedList, measureText, useDraggable } from '@glyx-dev/react';
+import { View, Text, Pressable, ScrollView, VirtualizedList, measureText, useDraggable } from '@glyx-dev/react';
 
 export type SortDirection = 'asc' | 'desc';
 
@@ -75,7 +75,9 @@ interface HeaderCellProps {
 
 function ResizableHeaderCell({ col, width, sorted, dir, onSort, onResize }: HeaderCellProps) {
   const onHandle = useDraggable({ onDragMove: ({ dx }: { dx: number }) => onResize(dx) });
-  return React.createElement(View, { style: { flexDirection: 'row', alignItems: 'stretch' } },
+  // flexShrink 0: when the columns are wider than the table, cells keep their width (and stay lined up
+  // with the body) instead of being squeezed to fit.
+  return React.createElement(View, { style: { flexDirection: 'row', alignItems: 'stretch', flexShrink: 0 } },
     React.createElement(Pressable, {
       onPress: () => col.sortable && onSort(),
       width: width - 6, height: 40,
@@ -96,6 +98,9 @@ function ResizableHeaderCell({ col, width, sorted, dir, onSort, onResize }: Head
 
 /**
  * A table with sortable and resizable columns, optional row selection, and virtualized rows.
+ *
+ * When the columns are wider than `width` the table scrolls sideways (wheel deltaX, Shift+wheel, or the
+ * scrollbar at the bottom), the header moving with the columns; the rows still scroll up and down under it.
  *
  * ```tsx
  * <DataTable
@@ -149,9 +154,14 @@ export function DataTable<Row = any>({
     setWidths((w: number[]) => { const n = w.slice(); n[i] = Math.max(columns[i].minWidth || 48, n[i] + dx); return n; });
   }, [columns]);
 
+  // Columns wider than the table: lay them out at their full width inside a horizontal scroller.
+  const totalW = selW + widths.reduce((a: number, b: number) => a + b, 0);
+  const scrollsX = width != null && totalW > width;
+  const contentW = scrollsX ? totalW : width;
+
   const header = React.createElement(View, {
     style: { flexDirection: 'row', backgroundColor: '#14141A', borderBottomWidth: 1, borderColor: '#2A2A3A' },
-    width, height: HEADER_H,
+    width: contentW, height: HEADER_H,
   },
     selectable && React.createElement(View, { width: selW, height: HEADER_H }),
     ...columns.map((col, i) => React.createElement(ResizableHeaderCell, {
@@ -167,7 +177,7 @@ export function DataTable<Row = any>({
     const rid = idOf(row, index);
     return React.createElement(Pressable, {
       onPress: () => onRowPress?.(row),
-      width, height: rowHeight,
+      width: contentW, height: rowHeight,
       style: {
         flexDirection: 'row',
         backgroundColor: selected.has(rid) ? 'rgba(0,168,120,0.10)' : 'transparent',
@@ -187,22 +197,29 @@ export function DataTable<Row = any>({
       })),
       ...columns.map((col, i) => React.createElement(View, {
         key: String(col.key), width: widths[i], height: rowHeight,
-        style: { paddingHorizontal: 12, justifyContent: 'center', alignItems: col.align === 'right' ? 'flex-end' : 'flex-start' },
+        style: { paddingHorizontal: 12, justifyContent: 'center', alignItems: col.align === 'right' ? 'flex-end' : 'flex-start', flexShrink: 0 },
       },
         col.render ? col.render((row as any)[col.key], row)
                    : React.createElement(Text, { fontSize: CELL_FS, style: { color: '#A0A0B2' } }, String((row as any)[col.key] ?? '')),
       )),
     );
-  }, [columns, widths, selected, selectable, rowHeight, width, onRowPress]); // eslint-disable-line
+  }, [columns, widths, selected, selectable, rowHeight, contentW, onRowPress]); // eslint-disable-line
+
+  const body = [
+    header,
+    React.createElement(VirtualizedList, {
+      data: sortedRows, itemHeight: rowHeight, width: contentW, height: height - HEADER_H,
+      keyExtractor: (r: Row, i: number) => String(idOf(r, i)),
+      renderItem: ({ item, index }: { item: Row; index: number }) => renderRow(item, index),
+    }),
+  ];
 
   return React.createElement(View, {
     width, style: { borderRadius: 8, borderWidth: 1, borderColor: '#2A2A3A', overflow: 'hidden' },
   },
-    header,
-    React.createElement(VirtualizedList, {
-      data: sortedRows, itemHeight: rowHeight, width, height: height - HEADER_H,
-      keyExtractor: (r: Row, i: number) => String(idOf(r, i)),
-      renderItem: ({ item, index }: { item: Row; index: number }) => renderRow(item, index),
-    }),
+    ...(scrollsX
+      ? [React.createElement(ScrollView, { horizontal: true, width, height },
+          React.createElement(View, { width: contentW }, ...body))]
+      : body),
   );
 }

@@ -881,6 +881,42 @@ fn register_dir_filtered(font_cx: &mut FontContext, dir: &std::path::Path) -> us
 mod tests {
     use super::*;
 
+    /// How long shaping takes for the strings of a big grid, cold (every string new) and warm (the same
+    /// strings again: what a cache hit would save). Run by hand:
+    ///   cargo test -p glyx-text --release -- --ignored --nocapture bench_grid_cell_shaping
+    #[test]
+    #[ignore]
+    fn bench_grid_cell_shaping() {
+        let mut ts = TextSystem::new();
+        let cells: Vec<String> = (0..1200)
+            .map(|i| match i % 4 {
+                0 => format!("Item {}", i * 7),
+                1 => format!("{:.2}", i as f64 * 1.37),
+                2 => ["Open", "Closed", "Pending", "In review"][i % 3].to_string(),
+                _ => format!("user{}@example.com", i),
+            })
+            .collect();
+        for (label, size) in [("13 px", 13.0f32), ("16 px", 16.0f32)] {
+            // Cold: each string seen for the first time.
+            let start = std::time::Instant::now();
+            for c in &cells { std::hint::black_box(ts.label(c, size)); }
+            let cold = start.elapsed().as_secs_f64();
+            // Warm: shaping the same strings again (font data and glyph lookups are warm now).
+            let start = std::time::Instant::now();
+            for c in &cells { std::hint::black_box(ts.label(c, size)); }
+            let warm = start.elapsed().as_secs_f64();
+            // Measure only (no layout object kept).
+            let start = std::time::Instant::now();
+            for c in &cells { std::hint::black_box(ts.measure(c, size, f32::MAX)); }
+            let measure = start.elapsed().as_secs_f64();
+            println!(
+                "text at {label}: {} strings: label cold {:.2} ms ({:.1} us each), again {:.2} ms ({:.1} us each), measure {:.2} ms ({:.1} us each)",
+                cells.len(), cold * 1e3, cold * 1e6 / cells.len() as f64, warm * 1e3, warm * 1e6 / cells.len() as f64,
+                measure * 1e3, measure * 1e6 / cells.len() as f64,
+            );
+        }
+    }
+
     #[test]
     fn full_width_counts_trailing_spaces_that_width_drops() {
         // Rich-text lays out each styled span as its own single-line box:

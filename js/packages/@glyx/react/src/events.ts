@@ -30,7 +30,7 @@ const inputRegistry = new Map();
 // ScrollViews register here so scroll events can be routed to whichever
 // scroll view the cursor is currently over.
 const scrollRegistry = new Map();
-// nodeId -> (e: { deltaY, ctrl, shift, x, y }) => boolean. Offered each wheel event
+// nodeId -> (e: { deltaX, deltaY, ctrl, shift, x, y }) => boolean. Offered each wheel event
 // before any ScrollView; returning true consumes it.
 const wheelRegistry = new Map();
 
@@ -222,12 +222,29 @@ export function unregisterInput(nodeId: any) {
   inputRegistry.delete(nodeId);
 }
 
+/** What a scrolling node registers with `registerScrollView`. */
+export interface ScrollHandlers {
+  /**
+   * Wheel / touchpad scrolling over the node, in the web's convention: positive `deltaY` scrolls down,
+   * positive `deltaX` scrolls right. A node that scrolls on one axis ignores the other delta.
+   */
+  onScroll: (deltaY: number, deltaX?: number) => void;
+  onAbsoluteScroll: (y: number) => void;
+  getScrollY?: () => number;
+  /** Scrolls sideways: it is offered horizontal wheel input (and Shift+wheel). Default false. */
+  horizontal?: boolean;
+  /** Scrolls up and down: it is offered vertical wheel input. Default true; set false for a horizontal-only node. */
+  vertical?: boolean;
+}
+
 /**
- * Register a ScrollView node so scroll events are routed to it.
+ * Register a scrolling node so scroll events are routed to it. Vertical and horizontal input are routed
+ * separately: each goes to the deepest node under the pointer that scrolls that way, so a vertical list
+ * inside a horizontal pane scrolls the list up and down and the pane left and right.
  * @param {number} nodeId
- * @param {{ onScroll: (deltaY: number) => void, onAbsoluteScroll?: (y: number) => void }} handlers
+ * @param {ScrollHandlers} handlers
  */
-export function registerScrollView(nodeId: any, handlers: { onScroll: ((deltaY: number) => void) | ((deltaY: number) => void) | ((dy: number) => void); onAbsoluteScroll: ((y: number) => void) | ((y: number) => void) | ((y: any) => void); getScrollY?: (() => number) | (() => number); }) {
+export function registerScrollView(nodeId: any, handlers: ScrollHandlers) {
   scrollRegistry.set(nodeId, handlers);
 }
 
@@ -241,12 +258,12 @@ export function unregisterScrollView(nodeId: any) {
 
 /**
  * Offer wheel/trackpad scrolling over `nodeId` to `handler` before the ScrollView
- * underneath. `handler({ deltaY, ctrl, shift, x, y })` gets the delta, the held
- * modifiers and the pointer position relative to the node; return `true` to
+ * underneath. `handler({ deltaX, deltaY, ctrl, shift, x, y })` gets the deltas (positive scrolls
+ * right / down), the held modifiers and the pointer position relative to the node; return `true` to
  * consume the event (the ScrollView then doesn't scroll), anything else to let
  * it through. The deepest registered node under the pointer is asked first.
  * @param {number} nodeId
- * @param {(e: { deltaY: number, ctrl: boolean, shift: boolean, x: number, y: number }) => boolean | void} handler
+ * @param {(e: { deltaX: number, deltaY: number, ctrl: boolean, shift: boolean, x: number, y: number }) => boolean | void} handler
  */
 export function registerWheel(nodeId: any, handler: (e: any) => any) {
   wheelRegistry.set(nodeId, handler);
@@ -887,25 +904,43 @@ export function dispatchEvents() {
         if (wheelNode !== null) {
           const l = __glyx_getLayout(wheelNode);
           const consumed = wheelRegistry.get(wheelNode)({
-            deltaY: ev.deltaY, ctrl: ctrlHeld, shift: shiftHeld,
+            deltaX: ev.deltaX ?? 0, deltaY: ev.deltaY, ctrl: ctrlHeld, shift: shiftHeld,
             x: l ? cursorX - boxOriginX(l) : 0, y: l ? cursorY - boxOriginY(l) : 0,
           });
           if (consumed === true) break;
         }
-        // Route the scroll delta to the DEEPEST ScrollView the cursor is over.
+        // Route the scroll to the DEEPEST scrolling node the cursor is over, per axis: vertical input goes to
+        // the deepest node that scrolls vertically, horizontal input to the deepest that scrolls
+        // horizontally (a vertical list inside a horizontal pane scrolls each its own way).
         // Registration order is unreliable for nesting (children mount before
         // parents, and side-by-side panes can re-register in any order): a
         // table's inner list inside a page ScrollView must win over the page.
-        let target: any = null;
-        let targetHandlers: any = null;
-        for (const [nodeId, handlers] of scrollRegistry) {
-          if (!hitTest(nodeId, cursorX, cursorY) || isDisabled(nodeId)) continue;
-          if (target === null || isAncestorOf(target, nodeId)) {
-            target = nodeId;
-            targetHandlers = handlers;
+        const deepest = (axis: 'x' | 'y') => {
+          let target: any = null;
+          let targetHandlers: any = null;
+          for (const [nodeId, handlers] of scrollRegistry) {
+            if (axis === 'x' ? handlers.horizontal !== true : handlers.vertical === false) continue;
+            if (!hitTest(nodeId, cursorX, cursorY) || isDisabled(nodeId)) continue;
+            if (target === null || isAncestorOf(target, nodeId)) {
+              target = nodeId;
+              targetHandlers = handlers;
+            }
           }
+          return targetHandlers;
+        };
+        let dx = ev.deltaX ?? 0;
+        let dy = ev.deltaY ?? 0;
+        const sideways = deepest('x');
+        // Shift+wheel scrolls sideways, as on the web, but only where something scrolls sideways: elsewhere
+        // Shift+wheel keeps scrolling up and down.
+        if (shiftHeld && dx === 0 && dy !== 0 && sideways) { dx = dy; dy = 0; }
+        const upDown = dy !== 0 ? deepest('y') : null;
+        if (upDown && upDown === sideways && dx !== 0) {
+          upDown.onScroll(dy, dx);
+        } else {
+          upDown?.onScroll(dy, 0);
+          if (dx !== 0) sideways?.onScroll(0, dx);
         }
-        targetHandlers?.onScroll?.(ev.deltaY);
         break;
       }
 

@@ -91,6 +91,7 @@ pub(crate) fn props_json(p: &NodeProps) -> Value {
     put!("overflow", p.overflow.clone());
     put!("zIndex", p.z_index);
     put!("scrollOffsetY", p.scroll_offset_y);
+    put!("scrollOffsetX", p.scroll_offset_x);
     put!("smoothScroll", p.smooth_scroll);
     put_dbg!("width", p.width);
     put_dbg!("height", p.height);
@@ -152,7 +153,8 @@ use crate::layout::{CONTENT_HEIGHT_KEY, UNCLIPPED_KEY};
 /// `Inspector.getLayout`: every rect Glyx keeps for a node.
 /// `rect` is on-screen and clipped (what clicks use), `unclippedRect` the
 /// same before scroll-container clipping, `layoutRect` Taffy's own result,
-/// `contentHeight` the scrollable height of a scroll container.
+/// `contentHeight` the scrollable height of a scroll container, and `contentWidth` the scrollable width of one
+/// that scrolls sideways (`null` otherwise).
 pub(crate) fn layout_detail(s: &PerWindowState, id: u32) -> Option<Value> {
     let n = s.js_nodes.get(&id)?;
     let cache = s.runtime.layout_cache();
@@ -165,6 +167,7 @@ pub(crate) fn layout_detail(s: &PerWindowState, id: u32) -> Option<Value> {
         "unclippedRect": cache.get(&(id | UNCLIPPED_KEY)).or(cache.get(&id)),
         "layoutRect": layout,
         "contentHeight": cache.get(&(id | CONTENT_HEIGHT_KEY)).map(|r| r[3]),
+        "contentWidth": cache.get(&(id | CONTENT_HEIGHT_KEY)).map(|r| r[2]).filter(|w| *w > 0.0),
     }))
 }
 

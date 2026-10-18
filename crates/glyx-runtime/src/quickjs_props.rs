@@ -149,6 +149,7 @@ pub(crate) fn parse_props_value(props: Value<'_>) -> NodeProps {
 
     out.clip              = get_bool(&obj, "clip");
     out.scroll_offset_y   = get_num(&obj, "scrollOffsetY");
+    out.scroll_offset_x   = get_num(&obj, "scrollOffsetX");
     out.image_id          = get_num(&obj, "imageId").map(|n| n as u32);
     out.image_resize_mode = get_str(&obj, "resizeMode");
     out.z_index           = get_num(&obj, "zIndex").map(|n| n as i32);
@@ -315,7 +316,7 @@ mod tests {
             accessibilityRoleDescription: 'line chart',
             placeholder: 'Search notes',
             textAlign: 'center', borderWidth: 2, borderColor: '#0000ff',
-            clip: true, scrollOffsetY: 100, imageId: 42, resizeMode: 'cover',
+            clip: true, scrollOffsetY: 100, scrollOffsetX: 30, imageId: 42, resizeMode: 'cover',
             zIndex: -3, draggable: true, pressable: true, testID: 'submit-btn',
             textScrollX: 12.5, cameraHandle: 7, mirror: false, videoHandle: 8,
             webviewSrc: 'https://example.com', webviewHtml: '<p>hi</p>',
@@ -393,6 +394,7 @@ mod tests {
             border_color: Some([0, 0, 255, 255]),
             clip: Some(true),
             scroll_offset_y: Some(100.0),
+            scroll_offset_x: Some(30.0),
             image_id: Some(42),
             image_resize_mode: Some("cover".to_string()),
             z_index: Some(-3),

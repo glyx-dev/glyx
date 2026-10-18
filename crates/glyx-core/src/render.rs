@@ -83,7 +83,7 @@ fn apply_opacity(c: peniko::Color, opacity: f32) -> peniko::Color {
 }
 
 
-pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut RenderCtx<'_>) {
+pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32, ctx: &mut RenderCtx<'_>) {
     // ── O4b: clean-node fast path ────────────────────────────────────────
     // If dirty_subtrees is non-empty AND this node is absent from it, the node
     // didn't change this frame.  Replay its cached Vello scene fragment — no
@@ -135,7 +135,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     let Some(layout_id) = node.layout_id                                             else { return };
     let Some(rl)        = ctx.resolved_by_id.get(&layout_id).copied()                    else { return };
 
-    let rx = rl.x as f64;
+    let rx = rl.x as f64 - scroll_x;
     let ry = rl.y as f64 - scroll_y;
     let rw = rl.width  as f64;
     let rh = rl.height as f64;
@@ -155,8 +155,8 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
     // Skip nodes entirely outside the window — analogous to Chromium's tile
     // rasterization: only content inside the visible area generates GPU draw calls.
     //
-    // `ry` already incorporates all accumulated scroll_y from outer ScrollViews,
-    // so this correctly culls items scrolled above or below the visible area.
+    // `rx` / `ry` already incorporate all accumulated scroll_x / scroll_y from outer ScrollViews,
+    // so this correctly culls items scrolled out of view on either axis.
     //
     // Nodes with a CSS transform are exempt: translate/rotate can move an
     // off-screen layout box back into the visible area.
@@ -279,6 +279,32 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                 f64::NEG_INFINITY
             };
 
+            // Horizontal scrolling is opt-in: only a node that carries `scroll_offset_x` (even 0) scrolls
+            // sideways, so an ordinary clip box whose content happens to be wider is not affected.
+            let own_x = node.props.scroll_offset_x;
+            let max_child_right: f64 = if is_clip && own_x.is_some() {
+                node.children.iter()
+                    .filter_map(|&cid| {
+                        let cn   = ctx.nodes.get(&cid)?;
+                        let clid = cn.layout_id?;
+                        ctx.resolved_by_id.get(&clid).copied()
+                            .map(|crl| (crl.x + crl.width) as f64)
+                    })
+                    .fold(f64::NEG_INFINITY, f64::max)
+            } else {
+                f64::NEG_INFINITY
+            };
+            let child_scroll_x = match own_x {
+                None => scroll_x,
+                Some(ox) if is_clip && max_child_right.is_finite() => {
+                    let pad   = match node.props.padding { Some(LengthValue::Px(px)) => px as f64, _ => 0.0 };
+                    let max_s = (max_child_right + pad - (rl.x as f64 + rw)).max(0.0);
+                    scroll_x + (ox as f64).min(max_s).max(0.0)
+                }
+                Some(ox) if is_clip => scroll_x + (ox as f64).max(0.0),
+                Some(ox) => scroll_x + ox as f64,
+            };
+
             let child_scroll_y = {
                 // Inherited scroll (from outer ScrollViews) must always pass through;
                 // clamp only THIS node's own scroll offset against its own overflow.
@@ -308,7 +334,7 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
             // Children in z_order (pre-sorted on change — see `reconcile_z_order`).
             let children = ctx.sorted_children(id);
             for child_id in children {
-                render_subtree(child_id, child_scroll_y, child_opacity, ctx);
+                render_subtree(child_id, child_scroll_x, child_scroll_y, child_opacity, ctx);
             }
 
             // ── Scrollbar (drawn on top of children, inside clip) ────────
@@ -321,6 +347,14 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                 // the distance from this node's top to the furthest child bottom.
                 let content_height = max_child_bottom - rl.y as f64;
                 draw_scrollbar(rx, ry, rw, rh, child_scroll_y, content_height, bar_w, bar_color, ctx.frame);
+            }
+            if is_clip && own_x.is_some() && node.props.show_scrollbar.unwrap_or(true) && max_child_right.is_finite() {
+                let bar_w = node.props.scrollbar_width.unwrap_or(8.0) as f64;
+                let bar_color = node.props.scrollbar_color.as_deref()
+                    .map(parse_scrollbar_color)
+                    .unwrap_or_else(|| peniko::Color::from_rgba8(140, 140, 170, 153));
+                let content_width = max_child_right - rl.x as f64;
+                draw_hscrollbar(rx, ry, rw, rh, child_scroll_x, content_width, bar_w, bar_color, ctx.frame);
             }
 
             if is_clip {
@@ -700,14 +734,14 @@ pub(crate) fn render_subtree(id: u32, scroll_y: f64, opacity: f32, ctx: &mut Ren
                 // append it to the main scene, and store for next-frame replay.
                 let parent_scene = ctx.frame.replace_scene(Scene::new());
                 for child_id in children {
-                    render_subtree(child_id, scroll_y, child_opacity, ctx);
+                    render_subtree(child_id, scroll_x, scroll_y, child_opacity, ctx);
                 }
                 let sub = ctx.frame.replace_scene(parent_scene);
                 ctx.frame.append_scene(&sub, None);
                 ctx.boundary_cache_new.insert(id, sub);
             } else {
                 for child_id in children {
-                    render_subtree(child_id, scroll_y, child_opacity, ctx);
+                    render_subtree(child_id, scroll_x, scroll_y, child_opacity, ctx);
                 }
             }
         }
@@ -825,6 +859,40 @@ pub(crate) fn compute_scrollbar_thumb(
     Some((track_x, thumb_y, bar_width, thumb_h))
 }
 
+/// The horizontal twin of [`compute_scrollbar_thumb`]: the thumb along the bottom edge, as
+/// `(thumb_x, thumb_y, thumb_width, thumb_height)`, or `None` when the content fits.
+pub(crate) fn compute_hscrollbar_thumb(
+    rx: f64, ry: f64, rw: f64, rh: f64,
+    // Current horizontal scroll offset in logical pixels.
+    scroll_x: f64,
+    // Total content width (furthest child right edge - the node's unshifted x).
+    content_width: f64,
+    bar_width: f64,
+) -> Option<(f64, f64, f64, f64)> {
+    if content_width <= rw || rw <= 0.0 {
+        return None;
+    }
+    let track_y = ry + rh - bar_width;
+    let thumb_w = (rw * (rw / content_width)).clamp((bar_width * 0.6).min(rw), rw);
+    let pos_ratio = (scroll_x / (content_width - rw)).clamp(0.0, 1.0);
+    Some((rx + (rw - thumb_w) * pos_ratio, track_y, thumb_w, bar_width))
+}
+
+/// Draw a horizontal scrollbar along the bottom of a clipped node.
+fn draw_hscrollbar(
+    rx: f64, ry: f64, rw: f64, rh: f64,
+    scroll_x: f64,
+    content_width: f64,
+    bar_width: f64,
+    bar_color: peniko::Color,
+    frame: &mut AnyFrame,
+) {
+    let Some((tx, ty, tw, th)) = compute_hscrollbar_thumb(rx, ry, rw, rh, scroll_x, content_width, bar_width)
+    else { return };
+    frame.fill_rounded_rect(rx, ty, rw, th, bar_width * 0.5, bar_color.multiply_alpha(0.3));
+    frame.fill_rounded_rect(tx, ty, tw, th, bar_width * 0.5, bar_color);
+}
+
 /// Draw a vertical scrollbar for a clipped node.
 fn draw_scrollbar(
     rx: f64, ry: f64, rw: f64, rh: f64,
@@ -864,6 +932,19 @@ mod tests {
     fn compute_scrollbar_thumb_does_not_panic_on_a_negative_height_viewport() {
         let result = compute_scrollbar_thumb(0.0, 0.0, 440.0, -5.0, 0.0, 100.0, 8.0);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn the_horizontal_thumb_tracks_the_offset_along_the_bottom_edge() {
+        // 200 wide viewport over 800 of content: a quarter-width thumb that starts flush left...
+        let (x, y, w, h) = compute_hscrollbar_thumb(10.0, 20.0, 200.0, 100.0, 0.0, 800.0, 8.0).unwrap();
+        assert_eq!((x, y, w, h), (10.0, 112.0, 50.0, 8.0));
+        // ...and ends flush right at the maximum offset (800 - 200).
+        let (x, _, w, _) = compute_hscrollbar_thumb(10.0, 20.0, 200.0, 100.0, 600.0, 800.0, 8.0).unwrap();
+        assert_eq!(x + w, 210.0);
+        // Content that fits, or an empty viewport, draws nothing.
+        assert_eq!(compute_hscrollbar_thumb(0.0, 0.0, 200.0, 100.0, 0.0, 200.0, 8.0), None);
+        assert_eq!(compute_hscrollbar_thumb(0.0, 0.0, 0.0, 100.0, 0.0, 200.0, 8.0), None);
     }
 
     #[test]

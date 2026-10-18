@@ -312,8 +312,8 @@ Input goes through the app's event loop into the same handlers as real input.
 | `click` | element, or `x` + `y`; `button?` (`left` / `right` / `middle`) | Moves the pointer to the element's centre (or the point), presses and releases. `{ x, y }`. The element must be on screen. |
 | `type` | `text` | A key press and release per character; `\n` is Enter, `\t` is Tab. Goes to the focused element. |
 | `press` | `key` (`Enter`, `Backspace`, `ArrowLeft`, `KeyS`, …), `modifiers?` (`Control`, `Shift`, `Alt`, `Super`) | Presses a key, with modifiers held around it. |
-| `scroll` | `deltaY` (negative scrolls down), element or `x` + `y`?, `smooth?` | Moves the pointer there first when given, then scrolls. By default the scroll applies at once, like a touchpad; with `smooth: true` it takes the eased path a mouse wheel does, for a `ScrollView` with `smoothScroll`. |
-| `dispatchInput` | `type`: `pointerMove` (`x`, `y`) · `pointerDown` / `pointerUp` (`button?`) · `scroll` (`deltaY`) · `keyDown` / `keyUp` (`key`, `text?`) | One raw event. |
+| `scroll` | `deltaY` and / or `deltaX` (like the web's `WheelEvent`: positive scrolls down / right, so later rows / columns come into view), element or `x` + `y`?, `smooth?` | Moves the pointer there first when given, then scrolls. By default the scroll applies at once, like a touchpad; with `smooth: true` it takes the eased path a mouse wheel does, for a `ScrollView` with `smoothScroll`. |
+| `dispatchInput` | `type`: `pointerMove` (`x`, `y`) · `pointerDown` / `pointerUp` (`button?`) · `scroll` (`deltaY`, `deltaX`) · `keyDown` / `keyUp` (`key`, `text?`) | One raw event. |
 | `screenshot` | element? | `{ format: "png", width, height, data }` (base64): the window, or cropped to the element. Works on any renderer (CPU, wgpu, Direct2D; the last falls back, see [Limitations](#limitations)). |
 | `waitFor` | element or content fields, `condition?` (`exists`, the default · `visible` · `gone`), `timeoutMs?` (default 5000, max 60000) | Replies when the condition holds: `{ nodeIds }`. Error `-32005` on timeout. With `id`, the ID is looked up again on every check, so it works for elements that don't exist yet. |
 

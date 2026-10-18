@@ -128,10 +128,11 @@ pub enum ShellEvent {
     MouseInput { window_handle: u32, button: u8, pressed: bool },
     /// Cursor moved to physical pixel position.
     CursorMoved { window_handle: u32, x: f64, y: f64 },
-    /// Vertical scroll (positive = scroll down).
+    /// Scroll by `delta_x` / `delta_y` pixels, in the web's convention (`WheelEvent.deltaX` / `deltaY`):
+    /// positive scrolls right / down, so the content moves left / up. See [`wheel_deltas`].
     /// `precise`: a touchpad / pixel-delta device, whose deltas are already
     /// smooth (a wheel's line notches are not).
-    Scroll { window_handle: u32, delta_y: f32, precise: bool },
+    Scroll { window_handle: u32, delta_x: f32, delta_y: f32, precise: bool },
     /// Window became occluded (hidden/minimised) or visible again.
     /// `occluded = true` means the window is no longer visible on screen.
     Occluded { window_handle: u32, occluded: bool },
@@ -799,12 +800,8 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                let precise = matches!(delta, MouseScrollDelta::PixelDelta(_));
-                let delta_y = match delta {
-                    MouseScrollDelta::LineDelta(_, y)   => y * 40.0,
-                    MouseScrollDelta::PixelDelta(pos)   => pos.y as f32,
-                };
-                (self.handler)(ShellEvent::Scroll { window_handle: handle, delta_y, precise });
+                let (delta_x, delta_y, precise) = wheel_deltas(&delta);
+                (self.handler)(ShellEvent::Scroll { window_handle: handle, delta_x, delta_y, precise });
                 if let Some(w) = self.window_arcs.get(&handle) {
                     w.request_redraw();
                 }
@@ -842,5 +839,48 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
 
             _ => {}
         }
+    }
+}
+
+/// Pixels a wheel notch ("line") scrolls.
+const WHEEL_LINE_PX: f32 = 40.0;
+
+/// winit's wheel delta as `(delta_x, delta_y, precise)` in the web's convention: positive scrolls right /
+/// down (the content moves left / up).
+///
+/// winit says the opposite: its positive values mean the *content* should move right / down, so the
+/// view scrolls left / up. Passing them through unchanged made every scroll view scroll the wrong way
+/// with a real wheel or touchpad (and made the charts' Ctrl+wheel zoom go the wrong way): the scroll
+/// handlers and the charts all expect the web's convention.
+fn wheel_deltas(delta: &MouseScrollDelta) -> (f32, f32, bool) {
+    match delta {
+        MouseScrollDelta::LineDelta(x, y) => (-x * WHEEL_LINE_PX, -y * WHEEL_LINE_PX, false),
+        MouseScrollDelta::PixelDelta(pos) => (-pos.x as f32, -pos.y as f32, true),
+    }
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+    use winit::dpi::PhysicalPosition;
+
+    #[test]
+    fn a_wheel_turned_toward_you_scrolls_down() {
+        // On Windows that is a negative winit line delta (the content should move up).
+        assert_eq!(wheel_deltas(&MouseScrollDelta::LineDelta(0.0, -1.0)), (0.0, 40.0, false));
+        assert_eq!(wheel_deltas(&MouseScrollDelta::LineDelta(0.0, 2.0)), (0.0, -80.0, false));
+    }
+
+    #[test]
+    fn a_wheel_tilted_right_scrolls_right() {
+        // winit's x is positive when the content should move right, so a view scrolling right is negative.
+        assert_eq!(wheel_deltas(&MouseScrollDelta::LineDelta(-1.0, 0.0)), (40.0, 0.0, false));
+    }
+
+    #[test]
+    fn a_touchpad_is_precise_and_follows_the_same_convention() {
+        // Fingers moving down drag the content down (positive for winit): the view scrolls up.
+        assert_eq!(wheel_deltas(&MouseScrollDelta::PixelDelta(PhysicalPosition::new(3.0, 12.0))), (-3.0, -12.0, true));
+        assert_eq!(wheel_deltas(&MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -5.0))), (0.0, 5.0, true));
     }
 }

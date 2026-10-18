@@ -518,6 +518,8 @@ Glyx distinguishes two types of layout changes:
 
 After `compute()`, `update_scroll_positions()` walks the JS tree and, for each `ScrollView` node, adds `scroll_offset_y` to the layout positions of all its children. This is a post-processing step because Taffy positions children absolutely relative to their parent's top-left, ignoring scroll state.
 
+Sideways scrolling is opt-in per node: a clipping node that carries `scroll_offset_x` (even 0) shifts its children left by it, clamped to the content width, and draws a horizontal scrollbar; one without it never scrolls sideways, however wide its content. `render_subtree` and `scroll_walk` carry a `scroll_x` next to `scroll_y`, so rendering and hit testing agree, and the scene-cache cascade fires when either offset changes. It is not eased (`smoothScroll` is vertical only). In JS the wheel is routed per axis (`events.ts`): vertical input goes to the deepest node that scrolls vertically, horizontal input (and Shift+wheel) to the deepest that scrolls horizontally, so a vertical list inside a horizontal pane, or one `ScrollView both`, scrolls as expected.
+
 The hit-test binding `__glyx_getLayout(id)` returns scroll-adjusted positions, so JS-side event dispatch always uses the correct visual coordinates.
 
 ---

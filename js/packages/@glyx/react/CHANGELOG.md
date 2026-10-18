@@ -3,16 +3,23 @@
 ## [Unreleased]
 
 ### Added
+- **Horizontal wheel input.** `useWheel` handlers get `deltaX` (positive scrolls right), `registerScrollView` takes a typed `ScrollHandlers` with optional `horizontal` / `vertical` flags, and wheel input is routed per axis to the deepest node that scrolls that way. Shift+wheel scrolls sideways where something scrolls sideways.
+- **`<ScrollView horizontal>`** scrolls left and right (wheel deltaX, Shift+wheel, the horizontal scrollbar): the children keep their natural width and a bar shows when they are wider than the view. **`<ScrollView both>`** scrolls on both axes at once (content at its natural width and height; vertical easing is off so the axes stay in step). `showsScrollIndicator` is accepted as React Native's name for `showScrollbar`. Until now `horizontal` was silently ignored (the design `Tabs` `scrollable` option passes it). Style gains `scrollOffsetX`; `__glyx_getLayout` reports `contentWidth` for a sideways scroller. Needs a runner with `scrollOffsetX`; with an older runner the content simply does not move.
 - **Written in TypeScript.** The source is now TypeScript (`src/*.ts`), strictly type-checked, and the package ships its declarations (`types/`). They cover the whole public API: every component and its props, `StyleProp`/`GlyxStyle`, `fs`, `db`, `dialog`, `clipboard`, `notification`, `audio`, `system`, `glyxWindow`, `tray`, `menubar`, ... The old hand-written file covered 46 of 119 exports.
 - `Pressable`'s `onPointerMove` event is typed `{ x, y, locationX, locationY }` (it always carried `locationX`/`locationY`).
 
 ### Changed
+- On the QuickJS engine a Rust command always goes through `__glyx_backend_call2`, which stringifies and parses natively and is about 1.5x faster than JSON in JavaScript there (the runner announces it with `__glyx_nativeJson`). V8 is unchanged.
 - **JS plugin calls (`backend.ns.fn(args)`) no longer go through JSON.** The plugin gets exactly the value you pass and its result comes
   back untouched, so objects, `Uint8Array`, `Date` and `undefined` survive, and the call is about 3 to 6 times cheaper (measured, see
   step 7 of the roadmap). Behaviour change: a plugin that returns a string such as `"123"` or `"true"` used to get a number or a boolean
   back; it now gets the string. A plugin that mutates its argument now mutates the caller's object. Rust commands are unchanged
   (JSON in, JSON out). A call with no argument still passes `{}`. Needs a runner with `__glyx_backend_call2`; with an older runner it
   falls back to the JSON path.
+
+- Binary Rust commands (`add_bytes`) are called like any other: `await backend.invert(new Uint8Array(pixels))` resolves with an `ArrayBuffer`.
+- A Rust command already called once goes straight through the JSON binding (a little cheaper than the first call, which has to find out
+  what kind of command it is); JS plugin calls always use the value path.
 
 ### Fixed
 - The webview message poll parsed `"[]"` on every frame; it now skips an empty queue like the other pollers.

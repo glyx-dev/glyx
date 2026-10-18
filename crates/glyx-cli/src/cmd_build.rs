@@ -29,7 +29,8 @@ pub(super) fn cmd_build(
         other => bail!("Unknown build mode '{other}'. Use: snapshot, bundle, portable"),
     };
 
-    // Ship a trimmed icudtl.dat next to the binary so packaged apps stay light.
+    // Ship icudtl.dat next to the binary: trimmed to the app's locales so packaged apps stay light, or
+    // the full data if it cannot be trimmed here (V8 projects only; QuickJS has no ICU).
     if let Some(ref bin) = bin_path {
         if let Some(dir) = bin.parent() {
             if let Err(e) = super::icu_trim::trim_icu_for_app(&project_name, dir, icupkg) {

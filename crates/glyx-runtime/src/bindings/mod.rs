@@ -221,11 +221,15 @@ pub struct Completion {
     /// Opaque handle back to whatever promise-resolver representation the
     /// engine backend that created it uses. See `PromiseHandle`'s doc.
     pub resolver_ptr: PromiseHandle,
+    /// `Ok` resolves the promise with that string, `Err` rejects it with an Error carrying the
+    /// message. The one exception: an `Ok` that starts with `BINARY_RESULT_MARKER` stands for the
+    /// bytes of a binary command (`add_bytes`), which the engine swaps for an `ArrayBuffer`.
     pub result:       Result<String, String>,
 }
 
 // SAFETY: Completion only contains a usize and a Result<String,String>.
-// The usize is a raw pointer that is only ever dereferenced on the V8 thread.
+// The usize is a raw pointer that is only ever dereferenced on the thread of the engine that made it
+// (the V8 or the QuickJS thread; see `PromiseHandle`).
 unsafe impl Send for Completion {}
 
 pub type CompletionQueue = Arc<Mutex<VecDeque<Completion>>>;
@@ -299,8 +303,8 @@ pub enum InputEvent {
     DragEnd { x: f32, y: f32 },
     /// Keyboard key pressed or released.
     KeyInput { key: String, text: Option<String>, pressed: bool },
-    /// Vertical scroll delta (positive = down).
-    Scroll { delta_y: f32 },
+    /// Scroll delta in the web's convention (`WheelEvent.deltaX` / `deltaY`): positive scrolls right / down.
+    Scroll { delta_x: f32, delta_y: f32 },
     /// Absolute scroll position set by a scrollbar thumb drag.
     ScrollbarDrag { node_id: u32, scroll_y: f32 },
     /// Absolute scroll position needed to bring a newly-focused node (Tab/
@@ -958,6 +962,11 @@ pub struct NodeProps {
     /// Children are rendered offset upward by this amount, producing the
     /// visual effect of scrolling down through content taller than the node.
     pub scroll_offset_y: Option<f32>,
+    /// Horizontal scroll offset in pixels (positive = scrolled toward the right). Setting it, even to 0,
+    /// makes a clipping node scroll sideways: its children shift left by this amount, clamped to the content
+    /// width, and it draws a horizontal scrollbar when the content is wider. Without it the node never
+    /// scrolls sideways, however wide its content.
+    pub scroll_offset_x: Option<f32>,
 
     //  Image €€€
     /// Native image resource identifier returned by `__glyx_createImage`.
@@ -2434,6 +2443,7 @@ fn parse_props(
 
     props.clip            = get_bool_prop(scope, obj, "clip");
     props.scroll_offset_y = get_num_prop(scope, obj, "scrollOffsetY");
+    props.scroll_offset_x = get_num_prop(scope, obj, "scrollOffsetX");
     props.image_id        = get_num_prop(scope, obj, "imageId").map(|v| v as u32);
     props.image_resize_mode = get_str_prop(scope, obj, "resizeMode");
     props.z_index         = get_num_prop(scope, obj, "zIndex").map(|v| v as i32);

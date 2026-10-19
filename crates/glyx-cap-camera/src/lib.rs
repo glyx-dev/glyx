@@ -9,11 +9,19 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-// ── Internal state ────────────────────────────────────────────────────────────
+// ── Internal state ────────────────────────────────────────────────
+
+/// The newest frame the camera thread has finished: its bytes, size and number. The thread decodes into a buffer of its own and swaps it
+/// in, so a reader never waits for a decode and nothing is allocated per frame.
+struct Slot {
+    rgba: Vec<u8>,
+    w:    u32,
+    h:    u32,
+    seq:  u64,
+}
 
 struct CameraHandle {
-    /// Latest decoded RGBA frame: (width, height, rgba_bytes)
-    latest: Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>,
+    latest: Arc<Mutex<Slot>>,
     stop:   Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -32,7 +40,19 @@ fn with_state<R>(f: impl FnOnce(&mut CameraState) -> R) -> R {
     f(g.as_mut().unwrap())
 }
 
-// ── ABI function implementations ──────────────────────────────────────────────
+/// The stream mode to ask for given the size the preview will be shown at: the smallest frame that is at least that big and runs at 15
+/// frames a second or more (else the largest there is), so a small preview does not decode full-size frames.
+fn pick_format(formats: &[nokhwa::utils::CameraFormat], hint: (u32, u32)) -> Option<nokhwa::utils::CameraFormat> {
+    let area = |f: &nokhwa::utils::CameraFormat| u64::from(f.width()) * u64::from(f.height());
+    let big_enough = |f: &&nokhwa::utils::CameraFormat| f.width() >= hint.0 && f.height() >= hint.1;
+    let smooth = formats.iter().filter(big_enough).filter(|f| f.frame_rate() >= 15);
+    smooth.min_by_key(|f| (area(f), std::cmp::Reverse(f.frame_rate())))
+        .or_else(|| formats.iter().filter(big_enough).min_by_key(|f| (area(f), std::cmp::Reverse(f.frame_rate()))))
+        .or_else(|| formats.iter().max_by_key(|f| (area(f), f.frame_rate())))
+        .copied()
+}
+
+// ── ABI function implementations ────────────────────────────────────────────
 
 unsafe extern "C" fn camera_list(
     out_buf: *mut u8,
@@ -64,10 +84,14 @@ unsafe extern "C" fn camera_list(
 }
 
 unsafe extern "C" fn camera_open(index: u32) -> u32 {
+    camera_open_sized(index, 0, 0)
+}
+
+unsafe extern "C" fn camera_open_sized(index: u32, hint_w: u32, hint_h: u32) -> u32 {
     use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
     use nokhwa::pixel_format::RgbAFormat;
 
-    let latest = Arc::new(Mutex::new(None::<(u32, u32, Vec<u8>)>));
+    let latest = Arc::new(Mutex::new(Slot { rgba: Vec::new(), w: 0, h: 0, seq: 0 }));
     let stop   = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let latest_clone = Arc::clone(&latest);
     let stop_clone   = Arc::clone(&stop);
@@ -78,15 +102,27 @@ unsafe extern "C" fn camera_open(index: u32) -> u32 {
             Ok(c)  => c,
             Err(e) => { log::warn!("[glyx-cap-camera] open index {index}: {e}"); return; }
         };
+        if hint_w > 0 && hint_h > 0 {
+            if let Ok(formats) = cam.compatible_camera_formats() {
+                if let Some(f) = pick_format(&formats, (hint_w, hint_h)) {
+                    let _ = cam.set_camera_requset(RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Exact(f)));
+                }
+            }
+        }
         if let Err(e) = cam.open_stream() {
             log::warn!("[glyx-cap-camera] stream open: {e}"); return;
         }
+        let mut back: Vec<u8> = Vec::new();
         while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
             match cam.frame() {
                 Ok(frame) => {
-                    if let Ok(rgba) = frame.decode_image::<RgbAFormat>() {
-                        let (w, h) = (rgba.width(), rgba.height());
-                        *latest_clone.lock() = Some((w, h, rgba.into_raw()));
+                    let res = frame.resolution();
+                    let (w, h) = (res.width(), res.height());
+                    back.resize(w as usize * h as usize * 4, 0);
+                    if frame.decode_image_to_buffer::<RgbAFormat>(&mut back).is_ok() {
+                        let mut slot = latest_clone.lock();
+                        std::mem::swap(&mut slot.rgba, &mut back);
+                        slot.w = w; slot.h = h; slot.seq += 1;
                     }
                 }
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
@@ -103,6 +139,27 @@ unsafe extern "C" fn camera_open(index: u32) -> u32 {
     })
 }
 
+unsafe extern "C" fn camera_frame(
+    handle:  u32,
+    out_buf: *mut u8,
+    buf_cap: usize,
+    out_w:   *mut u32,
+    out_h:   *mut u32,
+    seq:     *mut u64,
+) -> usize {
+    let slot = with_state(|s| s.handles.get(&handle).map(|h| Arc::clone(&h.latest)));
+    let Some(slot) = slot else { return 0 };
+    let slot = slot.lock();
+    if slot.seq == 0 { return 0; }
+    *out_w = slot.w;
+    *out_h = slot.h;
+    let n = slot.w as usize * slot.h as usize * 4;
+    if slot.seq <= *seq || n > buf_cap || slot.rgba.len() < n { return 0; }
+    std::ptr::copy_nonoverlapping(slot.rgba.as_ptr(), out_buf, n);
+    *seq = slot.seq;
+    n
+}
+
 unsafe extern "C" fn camera_close(handle: u32) {
     with_state(|s| {
         if let Some(h) = s.handles.remove(&handle) {
@@ -117,7 +174,7 @@ unsafe extern "C" fn camera_capture(
     buf_cap: usize,
 ) -> usize {
     let frame = with_state(|s| {
-        s.handles.get(&handle).and_then(|h| h.latest.lock().clone())
+        s.handles.get(&handle).and_then(|h| { let slot = h.latest.lock(); (slot.seq > 0).then(|| (slot.w, slot.h, slot.rgba.clone())) })
     });
     let (w, h, rgba) = match frame {
         Some(f) => f,
@@ -188,6 +245,8 @@ static CAMERA_CAP: CameraCap = CameraCap {
     record_start: camera_record_start,
     record_stop:  camera_record_stop,
     shutdown:     camera_shutdown,
+    open_sized:   camera_open_sized,
+    frame:        camera_frame,
 };
 
 /// Return the static vtable reference.

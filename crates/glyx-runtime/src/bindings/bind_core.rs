@@ -15,7 +15,7 @@ pub fn get_time(
     rv.set(v8::Number::new(scope, ms).into());
 }
 
-/// `__glyx_request_frame(ms)` â€” schedule a redraw after `ms` milliseconds.
+/// `__glyx_request_frame(ms)` — schedule a redraw after `ms` milliseconds.
 ///
 /// Called by the `setTimeout` polyfill so timer-driven animation loops
 /// (canvas, React scheduler) wake the winit event loop at the right time
@@ -404,9 +404,9 @@ pub fn measure_text_callback(
 //
 // Returns the character index (0-based) nearest to `x` pixels from the left
 // edge of `text` shaped at `fontSize` / `maxWidth`. Used by SelectableText for
-// pointer hit-testing (mouse-down / drag â†’ selection range).
+// pointer hit-testing (mouse-down / drag → selection range).
 //
-// Signature: __glyx_text_char_at_x(text, fontSize, maxWidth, x) â†’ number
+// Signature: __glyx_text_char_at_x(text, fontSize, maxWidth, x) → number
 
 pub fn text_char_at_x_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -553,7 +553,7 @@ pub fn text_caret_at_callback(
 // Returns the value of an environment variable as a string, or JS `null` if
 // the variable is absent OR the name is not in the `env.allow` capability list.
 //
-// Returning null (rather than throwing) is intentional â€” a capability miss is
+// Returning null (rather than throwing) is intentional — a capability miss is
 // not a programmer error; the app should handle missing values gracefully.
 
 pub fn get_env_callback(
@@ -569,7 +569,7 @@ pub fn get_env_callback(
         .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
 
-    // Silent null for undeclared names â€” does not reveal that the var exists.
+    // Silent null for undeclared names — does not reveal that the var exists.
     if !glyx_security::get().can_get_env(&name) {
         rv.set(v8::null(scope).into());
         return;
@@ -596,7 +596,7 @@ pub fn read_file_callback(
         .map(|s| s.to_rust_string_lossy(scope.as_ref()))
         .unwrap_or_default();
 
-    // Capability gate â€” per-path glob check; throws a JS Error when denied.
+    // Capability gate — per-path glob check; throws a JS Error when denied.
     // M1: canonicalize then check -- TOCTOU-safe; open the returned canonical path.
     let path = match glyx_security::resolve_and_check_read(std::path::Path::new(&path)) {
         Ok(c)  => c.to_string_lossy().into_owned(),

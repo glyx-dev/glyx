@@ -42,7 +42,6 @@ pub(crate) struct RenderCtx<'a> {
     pub win_w: f64,
     pub win_h: f64,
     /// Live camera streams — read-only; latest_image drawn directly via Vello.
-    #[cfg(feature = "camera")]
     pub camera_streams: &'a std::collections::HashMap<u32, CameraStream>,
     /// Video playback streams — read-only; latest_image drawn directly via Vello.
     pub video_streams: &'a std::collections::HashMap<u32, VideoStream>,
@@ -694,7 +693,6 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
             }
         }
         NodeType::Camera => {
-            #[cfg(feature = "camera")]
             if let Some(handle_id) = node.props.camera_handle {
                 if let Some(stream) = ctx.camera_streams.get(&handle_id) {
                     if let Some(img) = &stream.latest_image {

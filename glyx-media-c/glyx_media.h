@@ -169,6 +169,64 @@ GLYX_EXPORT int vm_encoder_write_rgba(
 );
 
 /**
+ * Like vm_encoder_open, for frames that come with their own times (a camera): write them with vm_encoder_write_rgba_at.
+ * fps_hint is only a hint for the encoder's rate control and key-frame spacing; the file's timing is the frames' own. The output is a
+ * fragmented MP4 (an index up front and a fragment at each key frame), so a recording the app did not get to finish still plays up to
+ * its last second. The bit rate follows the frame size (about 0.08 bit a pixel). Optional: older libraries lack it.
+ */
+GLYX_EXPORT VmEncoder* vm_encoder_open_timed(
+    const char* output_path,
+    int         width,
+    int         height,
+    int         fps_hint
+);
+
+/**
+ * vm_encoder_open_timed with an AAC audio track (mono for one input channel, stereo for more) fed by vm_encoder_write_audio. audio_rate is
+ * the samples a second of what will be written. If the audio track cannot be made the file is recorded without one: ask vm_encoder_has_audio.
+ */
+GLYX_EXPORT VmEncoder* vm_encoder_open_timed_av(
+    const char* output_path,
+    int         width,
+    int         height,
+    int         fps_hint,
+    int         audio_rate,
+    int         audio_channels
+);
+
+/** 1 when the encoder has an audio track, else 0. */
+GLYX_EXPORT int vm_encoder_has_audio(VmEncoder* enc);
+
+/**
+ * Write n_frames of interleaved 16-bit samples (audio_channels values per frame) to the audio track. start_ms is when the first of them was
+ * captured, in milliseconds from the start of the recording on the same clock as the video frames' times; it matters only for the first
+ * chunk (after it the track is as continuous as the samples). Returns 0 on success.
+ */
+GLYX_EXPORT int vm_encoder_write_audio(
+    VmEncoder*     enc,
+    const int16_t* samples,
+    int            n_frames,
+    int64_t        start_ms
+);
+
+/**
+ * Write one RGBA frame shown at pts_ms milliseconds from the start of the recording (an encoder from vm_encoder_open_timed; -1 on
+ * any other). Times that do not increase are nudged forward by a millisecond. The frame is read, not kept: the caller may reuse it.
+ */
+GLYX_EXPORT int vm_encoder_write_rgba_at(
+    VmEncoder*     enc,
+    const uint8_t* rgba,
+    int            len,
+    int64_t        pts_ms
+);
+
+/**
+ * The name of the codec the encoder opened with (for example "h264_mf" or "libopenh264"), for diagnostics. The environment variable
+ * GLYX_VIDEO_ENCODER names an encoder to try first. Optional: older libraries lack it.
+ */
+GLYX_EXPORT const char* vm_encoder_name(VmEncoder* enc);
+
+/**
  * Finalize the MP4, flush all buffered frames, and close the encoder.
  * The output file is complete and playable after this returns.
  */

@@ -130,15 +130,17 @@ impl SplashState {
 // ── Camera / Video streams ────────────────────────────────────────────────────
 
 /// Live camera capture stream. Owned by `PerWindowState`.
-#[cfg(feature = "camera")]
 pub(super) struct CameraStream {
-    pub(super) frame_buf:      Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>,
-    pub(super) last_raw_frame: Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>,
+    /// The newest frame, not yet taken by the renderer. Frames are shared (`Arc`), never copied: the preview, the still-photo slot and the
+    /// recorder all hold the one buffer the camera thread decoded into, and the thread reuses a buffer once nobody holds it.
+    pub(super) frame_buf:      Arc<Mutex<Option<(u32, u32, Arc<FrameBytes>)>>>,
+    /// The last frame the camera delivered, for `capture()` (a still photo). Never taken by the renderer.
+    pub(super) last_raw_frame: Arc<Mutex<Option<(u32, u32, Arc<FrameBytes>)>>>,
     pub(super) stop_flag:      Arc<std::sync::atomic::AtomicBool>,
     pub(super) latest_image:   Option<peniko::ImageData>,
     #[allow(dead_code)]
     pub(super) capture_fps:    Arc<std::sync::atomic::AtomicU32>,
-    pub(super) record_frame_tx: Arc<Mutex<Option<std::sync::mpsc::SyncSender<(u32, u32, Vec<u8>)>>>>,
+    pub(super) record_frame_tx: Arc<Mutex<Option<std::sync::mpsc::SyncSender<crate::camera_record::RecFrame>>>>,
     pub(super) record_done_rx:  Option<std::sync::mpsc::Receiver<Result<String, String>>>,
 }
 
@@ -404,7 +406,6 @@ pub(super) struct PerWindowState {
     /// (mirrors `gpu_upgrade_failed`'s role for the TinySkia/Vello path).
     #[cfg(all(target_os = "windows", feature = "canvas3d"))]
     pub(super) d2d_3d_bridge_failed: bool,
-    #[cfg(feature = "camera")]
     pub(super) camera_streams: std::collections::HashMap<u32, CameraStream>,
     pub(super) video_streams: std::collections::HashMap<u32, VideoStream>,
     /// Resolved once at window-creation time (mirrors `renderer_3d`'s lazy-init

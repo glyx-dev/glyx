@@ -18,7 +18,7 @@
 //! Every vtable starts with a `version: u32` field. Loaders reject modules
 //! whose version is outside the supported range (`ABI_VERSION_MIN..=ABI_VERSION`).
 
-pub const ABI_VERSION:     u32 = 1;
+pub const ABI_VERSION:     u32 = 2;
 pub const ABI_VERSION_MIN: u32 = 1;
 
 // ── Audio ─────────────────────────────────────────────────────────────────────
@@ -185,6 +185,25 @@ pub struct CameraCap {
     ) -> i32,
 
     pub shutdown: unsafe extern "C" fn(),
+
+    // ── Added in ABI version 2 (a vtable whose `version` is 1 ends at `shutdown`: do not read these) ──
+
+    /// Like `open`, with a hint of the size (in pixels) the preview will be shown at, so the camera can be asked for a stream that
+    /// size instead of its largest (`0, 0`: no hint). Returns a non-zero handle, or 0 on error.
+    pub open_sized: unsafe extern "C" fn(index: u32, hint_w: u32, hint_h: u32) -> u32,
+
+    /// Copy the newest frame of `handle` as top-down RGBA into `out_buf` when it is newer than `*seq`, and set `*seq` to its number.
+    /// Returns the bytes written (`w * h * 4`), or 0 when there is no newer frame, or `out_buf` (`buf_cap` bytes) is too small for it:
+    /// `*out_w` and `*out_h` are set to the newest frame's size in either case once there is one, so the caller can size a buffer and ask
+    /// again. The frame is a copy: the camera keeps nothing of the caller's.
+    pub frame: unsafe extern "C" fn(
+        handle:  u32,
+        out_buf: *mut u8,
+        buf_cap: usize,
+        out_w:   *mut u32,
+        out_h:   *mut u32,
+        seq:     *mut u64,
+    ) -> usize,
 }
 
 // ── Gamepad ───────────────────────────────────────────────────────────────────

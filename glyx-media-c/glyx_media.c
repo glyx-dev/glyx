@@ -27,6 +27,9 @@
 #include <libavutil/avutil.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavutil/audio_fifo.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/samplefmt.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -217,22 +220,36 @@ struct VmEncoder {
     AVStream*         stream;
     struct SwsContext* sws_ctx;
     AVFrame*          yuv_frame;
-    AVFrame*          rgba_frame;
     AVPacket*         packet;
     int               width;
     int               height;
     int               fps;
     int64_t           next_pts;
-    uint8_t*          rgba_buf;
+    int               timed;      /* frames carry their own times (vm_encoder_write_rgba_at) */
+    int64_t           last_pts;
+    const char*       codec_name; /* the encoder that opened (static string from the codec table) */
+    /* The audio track, when there is one (vm_encoder_open_timed_av): AAC, fed 16-bit interleaved samples. */
+    AVCodecContext*   a_codec;
+    AVStream*         a_stream;
+    struct SwrContext* a_swr;      /* S16 interleaved (any channel count) -> FLTP at the track's layout */
+    AVAudioFifo*      a_fifo;      /* the converted samples waiting for a full AAC frame */
+    AVFrame*          a_frame;
+    int               a_rate;
+    int               a_in_channels;
+    int64_t           a_next_pts;  /* in samples */
+    int               a_started;
 };
 
-/* H.264 encoders to try, best first. `libx264` exists only in GPL FFmpeg
+/* H.264 encoders to try, best first: a GPU's own encoder (the least CPU, and the vendor's licence covers the codec), then Windows'
+ * Media Foundation one (licensed by the OS but heavy: about twice the CPU and 8 times the memory of OpenH264 at 720p), then OpenH264, which is
+ * built from source here (so without Cisco's patent grant: use it by choosing it with GLYX_VIDEO_ENCODER, not by default), then MPEG-4.
+ *
+ * (Older comment follows.) H.264 encoders to try, best first. `libx264` exists only in GPL FFmpeg
  * builds (Glyx ships LGPL); the OS / hardware encoders need no GPL code.
  * FFmpeg's own MPEG-4 encoder is the last resort: always present, and still
  * plays in .mp4 files everywhere. */
 static const char* const ENCODERS[] = {
-    "libx264", "h264_mf", "h264_nvenc", "h264_qsv", "h264_amf",
-    "h264_videotoolbox", "h264_vaapi", "libopenh264", "mpeg4", NULL
+    "libx264", "h264_nvenc", "h264_qsv", "h264_amf", "h264_videotoolbox", "h264_vaapi", "h264_mf", "libopenh264", "mpeg4", NULL
 };
 
 /* The pixel format to feed `codec`: YUV420P when it takes it, else NV12,
@@ -256,19 +273,29 @@ static enum AVPixelFormat pick_pix_fmt(const AVCodec* codec) {
     return fmts[0];
 }
 
-/* Open the first encoder in ENCODERS that works on this machine. */
-static AVCodecContext* open_encoder(const AVFormatContext* fmt, int width, int height, int fps, const AVCodec** out_codec) {
-    for (int i = 0; ENCODERS[i]; i++) {
-        const AVCodec* codec = avcodec_find_encoder_by_name(ENCODERS[i]);
+/* Open an encoder that works on this machine: the one named by GLYX_VIDEO_ENCODER if that opens (to choose, or to compare), else the first
+ * in ENCODERS. */
+static AVCodecContext* open_encoder(const AVFormatContext* fmt, int width, int height, int fps, int timed, const AVCodec** out_codec) {
+    const char* wanted = getenv("GLYX_VIDEO_ENCODER");
+    for (int i = (wanted && *wanted) ? -1 : 0; ENCODERS[i < 0 ? 0 : i]; i++) {
+        const char* name = i < 0 ? wanted : ENCODERS[i];
+        const AVCodec* codec = avcodec_find_encoder_by_name(name);
         if (!codec) continue;
         AVCodecContext* c = avcodec_alloc_context3(codec);
         if (!c) continue;
         c->width     = width;
         c->height    = height;
-        c->time_base = (AVRational){1, fps};
+        /* A timed encoder counts in milliseconds (frames come with their capture times); the other counts frames. */
+        c->time_base = timed ? (AVRational){1, 1000} : (AVRational){1, fps};
         c->framerate = (AVRational){fps, 1};
         c->pix_fmt   = pick_pix_fmt(codec);
-        c->bit_rate  = 2000000;
+        /* About 0.08 bit a pixel: 2.2 Mbps for 720p at 30, 5 for 1080p (it was a flat 2 Mbps for any size). */
+        {
+            double bps = 0.08 * (double)width * (double)height * (double)(fps > 0 ? fps : 30);
+            if (bps < 1000000.0)  bps = 1000000.0;
+            if (bps > 20000000.0) bps = 20000000.0;
+            c->bit_rate = (int64_t)bps;
+        }
         c->gop_size  = fps; /* one I-frame per second */
         av_opt_set(c->priv_data, "preset", "fast", 0);  /* x264 / nvenc; ignored elsewhere */
         if (fmt->oformat->flags & AVFMT_GLOBALHEADER)
@@ -279,17 +306,98 @@ static AVCodecContext* open_encoder(const AVFormatContext* fmt, int width, int h
     return NULL;
 }
 
-VmEncoder* vm_encoder_open(const char* output_path, int width, int height, int fps) {
+static void audio_free(VmEncoder* enc);
+
+/* Add an AAC track (mono for one input channel, else stereo). Returns 0 on success; the file then has no audio and the caller can go on. */
+static int audio_open(VmEncoder* enc, int rate, int in_channels) {
+    const AVCodec* ac = avcodec_find_encoder_by_name("aac");
+    if (!ac) return -1;
+    int out_channels = in_channels == 1 ? 1 : 2;
+    enc->a_codec = avcodec_alloc_context3(ac);
+    if (!enc->a_codec) return -1;
+    AVCodecContext* c = enc->a_codec;
+    c->sample_rate = rate;
+    c->sample_fmt  = AV_SAMPLE_FMT_FLTP;
+    av_channel_layout_default(&c->ch_layout, out_channels);
+    c->bit_rate    = out_channels == 1 ? 64000 : 128000;
+    c->time_base   = (AVRational){1, rate};
+    if (enc->fmt_ctx->oformat->flags & AVFMT_GLOBALHEADER) c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    if (avcodec_open2(c, ac, NULL) < 0) goto fail;
+
+    enc->a_stream = avformat_new_stream(enc->fmt_ctx, NULL);
+    if (!enc->a_stream) goto fail;
+    avcodec_parameters_from_context(enc->a_stream->codecpar, c);
+    enc->a_stream->time_base = c->time_base;
+
+    AVChannelLayout in_layout;
+    av_channel_layout_default(&in_layout, in_channels);
+    if (swr_alloc_set_opts2(&enc->a_swr, &c->ch_layout, AV_SAMPLE_FMT_FLTP, rate,
+                            &in_layout, AV_SAMPLE_FMT_S16, rate, 0, NULL) < 0 || swr_init(enc->a_swr) < 0) {
+        av_channel_layout_uninit(&in_layout);
+        goto fail;
+    }
+    av_channel_layout_uninit(&in_layout);
+
+    enc->a_fifo = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, out_channels, 1);
+    enc->a_frame = av_frame_alloc();
+    if (!enc->a_fifo || !enc->a_frame) goto fail;
+    enc->a_frame->format      = AV_SAMPLE_FMT_FLTP;
+    enc->a_frame->sample_rate = rate;
+    enc->a_frame->nb_samples  = c->frame_size > 0 ? c->frame_size : 1024;
+    av_channel_layout_copy(&enc->a_frame->ch_layout, &c->ch_layout);
+    if (av_frame_get_buffer(enc->a_frame, 0) < 0) goto fail;
+    enc->a_rate = rate;
+    enc->a_in_channels = in_channels;
+    return 0;
+fail:
+    audio_free(enc);
+    return -1;
+}
+
+static void audio_free(VmEncoder* enc) {
+    if (enc->a_frame) av_frame_free(&enc->a_frame);
+    if (enc->a_fifo)  { av_audio_fifo_free(enc->a_fifo); enc->a_fifo = NULL; }
+    if (enc->a_swr)   swr_free(&enc->a_swr);
+    if (enc->a_codec) avcodec_free_context(&enc->a_codec);
+    enc->a_stream = NULL;
+    enc->a_rate = 0;
+}
+
+/* Encode what the FIFO holds in whole AAC frames (all of it when `flush`, the last one short). */
+static int audio_drain(VmEncoder* enc, int flush) {
+    int frame_size = enc->a_frame->nb_samples;
+    while (av_audio_fifo_size(enc->a_fifo) >= frame_size || (flush && av_audio_fifo_size(enc->a_fifo) > 0)) {
+        int n = av_audio_fifo_size(enc->a_fifo);
+        if (n > frame_size) n = frame_size;
+        if (av_frame_make_writable(enc->a_frame) < 0) return -1;
+        if (av_audio_fifo_read(enc->a_fifo, (void**)enc->a_frame->data, n) < n) return -1;
+        enc->a_frame->nb_samples = n;
+        enc->a_frame->pts = enc->a_next_pts;
+        enc->a_next_pts += n;
+        if (avcodec_send_frame(enc->a_codec, enc->a_frame) < 0) return -1;
+        enc->a_frame->nb_samples = frame_size;
+        while (avcodec_receive_packet(enc->a_codec, enc->packet) == 0) {
+            av_packet_rescale_ts(enc->packet, enc->a_codec->time_base, enc->a_stream->time_base);
+            enc->packet->stream_index = enc->a_stream->index;
+            av_interleaved_write_frame(enc->fmt_ctx, enc->packet);
+            av_packet_unref(enc->packet);
+        }
+    }
+    return 0;
+}
+
+static VmEncoder* encoder_open(const char* output_path, int width, int height, int fps, int timed, int audio_rate, int audio_channels) {
     VmEncoder* enc = (VmEncoder*)calloc(1, sizeof(VmEncoder));
     if (!enc) return NULL;
-    enc->width = width; enc->height = height; enc->fps = fps;
+    enc->width = width; enc->height = height; enc->fps = fps; enc->timed = timed; enc->last_pts = -1;
 
     if (avformat_alloc_output_context2(&enc->fmt_ctx, NULL, NULL, output_path) < 0) {
         free(enc); return NULL;
     }
 
     const AVCodec* codec = NULL;
-    enc->codec_ctx = open_encoder(enc->fmt_ctx, width, height, fps, &codec);
+    enc->codec_ctx = open_encoder(enc->fmt_ctx, width, height, fps, timed, &codec);
+    if (enc->codec_ctx) enc->codec_name = codec->name;
     if (!enc->codec_ctx) { avformat_free_context(enc->fmt_ctx); free(enc); return NULL; }
     enc->stream = avformat_new_stream(enc->fmt_ctx, codec);
     if (!enc->stream) {
@@ -300,12 +408,20 @@ VmEncoder* vm_encoder_open(const char* output_path, int width, int height, int f
     avcodec_parameters_from_context(enc->stream->codecpar, enc->codec_ctx);
     enc->stream->time_base = enc->codec_ctx->time_base;
 
+    /* An audio track must be declared before the header is written. If it cannot be made, record without. */
+    enc->packet = av_packet_alloc();
+    if (audio_rate > 0 && audio_channels > 0) audio_open(enc, audio_rate, audio_channels);
+
     if (!(enc->fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
         if (avio_open(&enc->fmt_ctx->pb, output_path, AVIO_FLAG_WRITE) < 0) {
             avcodec_free_context(&enc->codec_ctx);
             avformat_free_context(enc->fmt_ctx); free(enc); return NULL;
         }
     }
+
+    /* A fragmented MP4 (a fragment at each key frame, an index up front) stays playable up to the last fragment if the app dies
+     * mid-recording; a plain one keeps its index at the end and is lost. Other containers ignore the option. */
+    if (timed) av_opt_set(enc->fmt_ctx->priv_data, "movflags", "frag_keyframe+empty_moov+default_base_moof", 0);
 
     if (avformat_write_header(enc->fmt_ctx, NULL) < 0) {
         avcodec_free_context(&enc->codec_ctx);
@@ -318,32 +434,66 @@ VmEncoder* vm_encoder_open(const char* output_path, int width, int height, int f
                                   SWS_BILINEAR, NULL, NULL, NULL);
 
     enc->yuv_frame  = av_frame_alloc();
-    enc->rgba_frame = av_frame_alloc();
-    enc->packet     = av_packet_alloc();
 
     enc->yuv_frame->format = enc->codec_ctx->pix_fmt;
     enc->yuv_frame->width  = width;
     enc->yuv_frame->height = height;
     av_frame_get_buffer(enc->yuv_frame, 0);
 
-    int rgba_size = width * height * 4;
-    enc->rgba_buf = (uint8_t*)av_malloc(rgba_size);
-    av_image_fill_arrays(enc->rgba_frame->data, enc->rgba_frame->linesize,
-                         enc->rgba_buf, AV_PIX_FMT_RGBA, width, height, 1);
-
     return enc;
 }
 
-int vm_encoder_write_rgba(VmEncoder* enc, const uint8_t* rgba, int len) {
-    if (len < enc->width * enc->height * 4) return -1;
-    memcpy(enc->rgba_buf, rgba, enc->width * enc->height * 4);
+VmEncoder* vm_encoder_open(const char* output_path, int width, int height, int fps) {
+    return encoder_open(output_path, width, height, fps, 0, 0, 0);
+}
 
-    sws_scale(enc->sws_ctx,
-              (const uint8_t* const*)enc->rgba_frame->data, enc->rgba_frame->linesize,
-              0, enc->height,
+VmEncoder* vm_encoder_open_timed(const char* output_path, int width, int height, int fps_hint) {
+    return encoder_open(output_path, width, height, fps_hint, 1, 0, 0);
+}
+
+VmEncoder* vm_encoder_open_timed_av(const char* output_path, int width, int height, int fps_hint, int audio_rate, int audio_channels) {
+    return encoder_open(output_path, width, height, fps_hint, 1, audio_rate, audio_channels);
+}
+
+int vm_encoder_has_audio(VmEncoder* enc) {
+    return enc && enc->a_codec ? 1 : 0;
+}
+
+int vm_encoder_write_audio(VmEncoder* enc, const int16_t* samples, int n_frames, int64_t start_ms) {
+    if (!enc || !enc->a_codec || n_frames <= 0) return -1;
+    if (!enc->a_started) {
+        /* The track starts where the first chunk started, on the recording's clock (the video's first frame is 0). */
+        enc->a_next_pts = start_ms > 0 ? (int64_t)((double)start_ms * enc->a_rate / 1000.0) : 0;
+        enc->a_started = 1;
+    }
+    int out_channels = enc->a_codec->ch_layout.nb_channels;
+    uint8_t** conv = NULL;
+    if (av_samples_alloc_array_and_samples(&conv, NULL, out_channels, n_frames, AV_SAMPLE_FMT_FLTP, 0) < 0) return -1;
+    const uint8_t* in[1] = { (const uint8_t*)samples };
+    int got = swr_convert(enc->a_swr, conv, n_frames, in, n_frames);
+    int rc = 0;
+    if (got > 0) {
+        if (av_audio_fifo_write(enc->a_fifo, (void**)conv, got) < got) rc = -1;
+    } else if (got < 0) rc = -1;
+    av_freep(&conv[0]);
+    av_freep(&conv);
+    if (rc == 0) rc = audio_drain(enc, 0);
+    return rc;
+}
+
+/* Encode one frame at presentation time `pts` (in the encoder's time base). */
+static int encoder_write(VmEncoder* enc, const uint8_t* rgba, int len, int64_t pts) {
+    if (len < enc->width * enc->height * 4) return -1;
+
+    av_frame_make_writable(enc->yuv_frame);
+
+    /* Scale straight from the caller's frame (it used to be copied into a buffer of ours first). */
+    const uint8_t* src[4]    = { rgba, NULL, NULL, NULL };
+    int            src_ls[4] = { enc->width * 4, 0, 0, 0 };
+    sws_scale(enc->sws_ctx, src, src_ls, 0, enc->height,
               enc->yuv_frame->data, enc->yuv_frame->linesize);
 
-    enc->yuv_frame->pts = enc->next_pts++;
+    enc->yuv_frame->pts = pts;
 
     if (avcodec_send_frame(enc->codec_ctx, enc->yuv_frame) < 0) return -1;
 
@@ -357,8 +507,36 @@ int vm_encoder_write_rgba(VmEncoder* enc, const uint8_t* rgba, int len) {
     return 0;
 }
 
+int vm_encoder_write_rgba(VmEncoder* enc, const uint8_t* rgba, int len) {
+    return encoder_write(enc, rgba, len, enc->next_pts++);
+}
+
+int vm_encoder_write_rgba_at(VmEncoder* enc, const uint8_t* rgba, int len, int64_t pts_ms) {
+    if (!enc->timed) return -1;
+    /* Times must increase: two frames in the same millisecond get consecutive ones. */
+    if (pts_ms <= enc->last_pts) pts_ms = enc->last_pts + 1;
+    enc->last_pts = pts_ms;
+    return encoder_write(enc, rgba, len, pts_ms);
+}
+
+const char* vm_encoder_name(VmEncoder* enc) {
+    return (enc && enc->codec_name) ? enc->codec_name : "";
+}
+
 void vm_encoder_close(VmEncoder* enc) {
     if (!enc) return;
+
+    /* Flush the audio track: what is left in the FIFO (the last frame short), then the encoder. */
+    if (enc->a_codec) {
+        audio_drain(enc, 1);
+        avcodec_send_frame(enc->a_codec, NULL);
+        while (avcodec_receive_packet(enc->a_codec, enc->packet) == 0) {
+            av_packet_rescale_ts(enc->packet, enc->a_codec->time_base, enc->a_stream->time_base);
+            enc->packet->stream_index = enc->a_stream->index;
+            av_interleaved_write_frame(enc->fmt_ctx, enc->packet);
+            av_packet_unref(enc->packet);
+        }
+    }
 
     /* Flush encoder */
     avcodec_send_frame(enc->codec_ctx, NULL);
@@ -373,8 +551,7 @@ void vm_encoder_close(VmEncoder* enc) {
 
     if (enc->sws_ctx)    sws_freeContext(enc->sws_ctx);
     if (enc->yuv_frame)  av_frame_free(&enc->yuv_frame);
-    if (enc->rgba_frame) av_frame_free(&enc->rgba_frame);
-    if (enc->rgba_buf)   av_free(enc->rgba_buf);
+    if (enc->a_codec)    audio_free(enc);
     if (enc->packet)     av_packet_free(&enc->packet);
     if (enc->codec_ctx)  avcodec_free_context(&enc->codec_ctx);
     if (!(enc->fmt_ctx->oformat->flags & AVFMT_NOFILE))

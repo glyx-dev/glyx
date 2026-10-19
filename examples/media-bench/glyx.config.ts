@@ -18,6 +18,8 @@ export default defineConfig({
   capabilities: {
     audio:  true,
     video:  true,
+    camera: true,
+    microphone: true,
     fs:     { read: ['**'], write: [] },
     db:     false,
     dialog: false,

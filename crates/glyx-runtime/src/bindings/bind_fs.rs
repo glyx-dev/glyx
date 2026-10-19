@@ -194,7 +194,7 @@ pub fn append_file_callback(
     });
 }
 
-/// `__glyx_listDir(path) -> Promise<string>` â€” JSON array of `{ name, isDir }` objects.
+/// `__glyx_listDir(path) -> Promise<string>` — JSON array of `{ name, isDir }` objects.
 pub fn list_dir_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
@@ -276,7 +276,7 @@ pub fn delete_file_callback(
     });
 }
 
-/// `__glyx_mkdirp(path) -> Promise<void>` â€” creates the directory and all parents.
+/// `__glyx_mkdirp(path) -> Promise<void>` — creates the directory and all parents.
 pub fn mkdirp_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,
@@ -306,7 +306,7 @@ pub fn mkdirp_callback(
     });
 }
 
-/// `__glyx_stat(path) -> Promise<string>` â€” JSON `{ size, mtime, isDir, isFile }`.
+/// `__glyx_stat(path) -> Promise<string>` — JSON `{ size, mtime, isDir, isFile }`.
 pub fn stat_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:   v8::FunctionCallbackArguments,

@@ -33,7 +33,10 @@ export const Camera = React.forwardRef(function Camera({ mirror, style, ...rest 
     get handle() { return cameraHandle; },
 
     async start(deviceIndex = 0) {
-      const handle = parseInt(await __glyx_camera_open(deviceIndex));
+      // The size the preview is shown at: the camera is asked for a stream about that big instead of its largest.
+      const w = style && typeof style.width === 'number' ? style.width : 0;
+      const h = style && typeof style.height === 'number' ? style.height : 0;
+      const handle = parseInt(await __glyx_camera_open(deviceIndex, w, h));
       setCameraHandle(handle);
       return handle;
     },
@@ -48,10 +51,15 @@ export const Camera = React.forwardRef(function Camera({ mirror, style, ...rest 
       if (cameraHandle === null) throw new Error('Camera not open');
       return __glyx_camera_capture(String(cameraHandle));
     },
-    /** Start MP4 recording (H.264, video only) with the glyx-media encoder, or an `ffmpeg` executable if that is unavailable. @param {string} outputPath */
-    startRecord(outputPath: any) {
+    /**
+     * Start MP4 recording (H.264) with the glyx-media encoder, or an `ffmpeg` executable (video only) if that is unavailable. When the app has
+     * the `microphone` capability the microphone is recorded as an AAC audio track, unless `{ audio: false }` is passed.
+     * @param {string} outputPath
+     * @param {{ audio?: boolean }} [options]
+     */
+    startRecord(outputPath: any, options?: { audio?: boolean }) {
       if (cameraHandle === null) throw new Error('Camera not open');
-      __glyx_camera_record_start(String(cameraHandle), outputPath);
+      __glyx_camera_record_start(String(cameraHandle), outputPath, options && options.audio);
     },
     /** Stop recording and flush MP4. @returns {Promise<string>} path */
     async stopRecord() {

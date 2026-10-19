@@ -3,6 +3,12 @@ name    = "glyx-media"
 version = "0.2.0"
 edition = "2021"
 
+[features]
+# Honor GLYX_MEDIA_SKIP_VERIFY=1 in an optimized build too (a debug build always skips), so a release-profile runner built for development can use
+# a media library built from the source checkout, which is not signed with the release key. glyx-core's `dev` feature turns it on; a production
+# build never has `dev`.
+skip-verify = []
+
 [dependencies]
 libloading  = { workspace = true }
 sha2        = { workspace = true }

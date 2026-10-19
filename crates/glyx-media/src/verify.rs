@@ -92,8 +92,17 @@ pub fn sha256_hex(data: &[u8]) -> String {
 ///  2. Debug build (`cfg!(debug_assertions)`) — allows locally-built DLLs with
 ///     stub signatures when developing without a CI signing key.
 ///
-/// **Never** skip in release builds without the env var.
+/// **Never** skip in release builds without the env var, and in a release build only when the crate's `skip-verify` feature is on (glyx-core's
+/// `dev` feature turns it on; a production build does not have it).
 fn skip_verify() -> bool {
+    #[cfg(all(not(debug_assertions), feature = "skip-verify"))]
+    {
+        if std::env::var("GLYX_MEDIA_SKIP_VERIFY").as_deref() == Ok("1") {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| log::warn!("[glyx-media] GLYX_MEDIA_SKIP_VERIFY=1 — Ed25519 check bypassed (dev build only)"));
+            return true;
+        }
+    }
     #[cfg(debug_assertions)]
     {
         if std::env::var("GLYX_MEDIA_SKIP_VERIFY").as_deref() == Ok("1") {

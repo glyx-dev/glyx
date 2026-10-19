@@ -22,10 +22,10 @@ pub fn canvas_update_callback(
     state.frame_scene.borrow_mut().push(SceneCommand::CanvasUpdate { id, cmds, append: false });
 }
 
-/// `__glyx_canvas_flush(id, f32buf, floatCount, u8buf, strLen, append)` â€” sync.
+/// `__glyx_canvas_flush(id, f32buf, floatCount, u8buf, strLen, append)` — sync.
 ///
 /// Binary fast path: decodes the command stream straight out of the shared
-/// backing store (no JSON.stringify, no V8â†’Rust string copy, no serde parse).
+/// backing store (no JSON.stringify, no V8→Rust string copy, no serde parse).
 /// The typed-array views are passed by reference each call (no per-flush
 /// allocation). Falls back via the JSON `__glyx_canvas_update` binding when
 /// the binary protocol isn't active.
@@ -79,7 +79,7 @@ pub fn canvas_flush_callback(
     state.frame_scene.borrow_mut().push(SceneCommand::CanvasUpdate { id, cmds, append });
 }
 
-/// `__glyx_canvas3d_update(id, sceneJson)` â€” sync.
+/// `__glyx_canvas3d_update(id, sceneJson)` — sync.
 /// Parses a JSON Scene3D and pushes a Canvas3DUpdate scene command.
 #[cfg(feature = "canvas3d")]
 pub fn canvas3d_update_callback(
@@ -157,7 +157,7 @@ pub fn webview_poll_callback(
     rv.set(s.into());
 }
 
-/// `__glyx_canvas3d_load_gltf(id, path)` â€” sync.
+/// `__glyx_canvas3d_load_gltf(id, path)` — sync.
 /// Signals that a GLTF file should be loaded for this canvas on the render side.
 /// (Actual loading happens in glyx-core on next frame via renderer_3d.)
 #[cfg(feature = "canvas3d")]
@@ -233,7 +233,7 @@ pub fn canvas_export_callback(
     rv.set_uint32(req_id);
 }
 
-/// `__glyx_canvas3d_unload_gltf(path)` â€” drop a GLTF model from the LRU cache.
+/// `__glyx_canvas3d_unload_gltf(path)` — drop a GLTF model from the LRU cache.
 /// Useful before loading a large new model to reclaim GPU memory immediately.
 #[cfg(feature = "canvas3d")]
 pub fn canvas3d_unload_gltf_callback(

@@ -1645,20 +1645,22 @@ pub enum SceneCommand {
     /// `message` event) — the JS→page half of the postMessage bridge.
     #[cfg(feature = "webview")]
     WebviewPostMessage { id: u32, msg: String },
-    /// Open a camera device and start the capture loop in glyx-core.
+    /// Open a camera device and start the capture loop in glyx-core (a runtime built with the `camera` feature). `size_hint` is the size in
+    /// pixels the preview will be shown at, so the camera can be asked for a stream about that size.
     #[cfg(feature = "camera")]
-    OpenCamera  { handle_id: u32, device_index: u32 },
+    OpenCamera  { handle_id: u32, device_index: u32, size_hint: Option<(u32, u32)> },
+    /// A camera the camera capability library opened (the runtime has no camera of its own): glyx-core pulls its frames from the library
+    /// and draws and records them like any other. `cap` is the address of the library's static `CameraCap` vtable, which stays loaded
+    /// for the life of the process.
+    AttachCapCamera { handle_id: u32, cap: usize },
     /// Stop the capture loop and release the camera device.
-    #[cfg(feature = "camera")]
     CloseCamera { handle_id: u32 },
     /// Capture the current frame to a PNG file. Resolves with the file path.
-    #[cfg(feature = "camera")]
     CaptureCamera { handle_id: u32, tx: OneshotSender<Result<String, String>> },
-    /// Start recording the camera feed to an MP4 file (video only): the glyx-media encoder, or an `ffmpeg` executable when that is unavailable.
-    #[cfg(feature = "camera")]
-    StartCameraRecord { handle_id: u32, output_path: String },
+    /// Start recording the camera feed to an MP4 file: the glyx-media encoder (with the microphone as an audio track when `audio` is set and
+    /// the app has the `microphone` capability), or an `ffmpeg` executable (video only) when that is unavailable.
+    StartCameraRecord { handle_id: u32, output_path: String, audio: bool },
     /// Stop recording and flush the MP4. Resolves with the final file path.
-    #[cfg(feature = "camera")]
     StopCameraRecord { handle_id: u32, tx: OneshotSender<Result<String, String>> },
     //  Video player €€€
     /// Open a video file/URL for playback. glyx-core spawns a decode thread.
@@ -2105,18 +2107,12 @@ pub fn register_all(
         register!("__glyx_ai_unload_transcribe", ai_unload_transcribe_callback);
     }
 
-    //  Camera + Microphone
-    #[cfg(feature = "camera")]
+    //  Camera + Microphone (the bindings exist with or without the `camera` feature: without it the camera is the capability library's)
     register!("__glyx_camera_list",         camera_list_callback);
-    #[cfg(feature = "camera")]
     register!("__glyx_camera_open",         camera_open_callback);
-    #[cfg(feature = "camera")]
     register!("__glyx_camera_close",        camera_close_callback);
-    #[cfg(feature = "camera")]
     register!("__glyx_camera_capture",      camera_capture_callback);
-    #[cfg(feature = "camera")]
     register!("__glyx_camera_record_start", camera_record_start_callback);
-    #[cfg(feature = "camera")]
     register!("__glyx_camera_record_stop",  camera_record_stop_callback);
     register!("__glyx_microphone_list",     microphone_list_callback);
     register!("__glyx_microphone_record",   microphone_record_callback);

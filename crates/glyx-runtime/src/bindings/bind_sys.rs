@@ -591,7 +591,7 @@ pub fn system_get_info_callback(
     rv.set(promise.into());
 }
 
-/// `__glyx_system_getDarkMode()` â†' `"dark" | "light" | "unknown"` (sync, ~1 Âµs)
+/// `__glyx_system_getDarkMode()` â†' `"dark" | "light" | "unknown"` (sync, ~1 µs)
 ///
 /// Reads the OS appearance preference directly â€" Windows registry key, macOS
 /// NSUserDefaults, Linux gsettings.  No blocking I/O; safe to call every frame
@@ -613,7 +613,7 @@ pub fn system_get_dark_mode_callback(
     rv.set(s.into());
 }
 
-/// `__glyx_system_getBatterySaver()` â†' boolean (sync, ~1 Âµs on Windows)
+/// `__glyx_system_getBatterySaver()` â†' boolean (sync, ~1 µs on Windows)
 ///
 /// Returns `true` if battery-saver / power-saver mode is active.
 /// Uses `GetSystemPowerStatus()` on Windows (one kernel call, no extra crate).

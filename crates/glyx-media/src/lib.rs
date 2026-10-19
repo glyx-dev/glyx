@@ -55,6 +55,12 @@ type FnDecoderSetOutputSize  = unsafe extern "C" fn(*mut c_void, c_int, c_int) -
 type FnEncoderOpen           = unsafe extern "C" fn(*const c_char, c_int, c_int, c_int) -> *mut c_void;
 type FnEncoderWriteRgba      = unsafe extern "C" fn(*mut c_void, *const u8, c_int) -> c_int;
 type FnEncoderClose          = unsafe extern "C" fn(*mut c_void);
+type FnEncoderOpenTimed      = unsafe extern "C" fn(*const c_char, c_int, c_int, c_int) -> *mut c_void;
+type FnEncoderWriteRgbaAt    = unsafe extern "C" fn(*mut c_void, *const u8, c_int, i64) -> c_int;
+type FnEncoderOpenTimedAv    = unsafe extern "C" fn(*const c_char, c_int, c_int, c_int, c_int, c_int) -> *mut c_void;
+type FnEncoderHasAudio       = unsafe extern "C" fn(*mut c_void) -> c_int;
+type FnEncoderWriteAudio     = unsafe extern "C" fn(*mut c_void, *const i16, c_int, i64) -> c_int;
+type FnEncoderName           = unsafe extern "C" fn(*mut c_void) -> *const c_char;
 type FnAudioDecoderOpen        = unsafe extern "C" fn(*const c_char, *mut c_int, *mut c_int) -> *mut c_void;
 type FnAudioDecoderNextSamples = unsafe extern "C" fn(*mut c_void, *mut i16, c_int) -> c_int;
 type FnAudioDecoderSeek        = unsafe extern "C" fn(*mut c_void, c_double);
@@ -75,6 +81,12 @@ pub struct GlyxMedia {
     encoder_open:             FnEncoderOpen,
     encoder_write_rgba:       FnEncoderWriteRgba,
     encoder_close:            FnEncoderClose,
+    fn_encoder_open_timed:    Option<FnEncoderOpenTimed>,       // optional — older DLLs can only write at a constant rate
+    fn_encoder_write_rgba_at: Option<FnEncoderWriteRgbaAt>,
+    fn_encoder_open_timed_av: Option<FnEncoderOpenTimedAv>,     // optional — older DLLs cannot write an audio track
+    fn_encoder_has_audio:     Option<FnEncoderHasAudio>,
+    fn_encoder_write_audio:   Option<FnEncoderWriteAudio>,
+    fn_encoder_name:          Option<FnEncoderName>,
     audio_decoder_open:       FnAudioDecoderOpen,
     audio_decoder_next_samp:  FnAudioDecoderNextSamples,
     fn_audio_decoder_seek:    Option<FnAudioDecoderSeek>,
@@ -140,6 +152,12 @@ impl GlyxMedia {
         let fn_decoder_set_output_size = unsafe {
             lib.get::<FnDecoderSetOutputSize>(b"vm_decoder_set_output_size\0").ok().map(|s| *s)
         };
+        let fn_encoder_open_timed = unsafe { lib.get::<FnEncoderOpenTimed>(b"vm_encoder_open_timed\0").ok().map(|s| *s) };
+        let fn_encoder_write_rgba_at = unsafe { lib.get::<FnEncoderWriteRgbaAt>(b"vm_encoder_write_rgba_at\0").ok().map(|s| *s) };
+        let fn_encoder_open_timed_av = unsafe { lib.get::<FnEncoderOpenTimedAv>(b"vm_encoder_open_timed_av\0").ok().map(|s| *s) };
+        let fn_encoder_has_audio = unsafe { lib.get::<FnEncoderHasAudio>(b"vm_encoder_has_audio\0").ok().map(|s| *s) };
+        let fn_encoder_write_audio = unsafe { lib.get::<FnEncoderWriteAudio>(b"vm_encoder_write_audio\0").ok().map(|s| *s) };
+        let fn_encoder_name = unsafe { lib.get::<FnEncoderName>(b"vm_encoder_name\0").ok().map(|s| *s) };
         let fn_audio_decoder_seek = unsafe {
             lib.get::<FnAudioDecoderSeek>(b"vm_audio_decoder_seek\0").ok().map(|s| *s)
         };
@@ -155,6 +173,12 @@ impl GlyxMedia {
             encoder_open:            sym!(lib, b"vm_encoder_open\0",                 FnEncoderOpen),
             encoder_write_rgba:      sym!(lib, b"vm_encoder_write_rgba\0",           FnEncoderWriteRgba),
             encoder_close:           sym!(lib, b"vm_encoder_close\0",                FnEncoderClose),
+            fn_encoder_open_timed,
+            fn_encoder_open_timed_av,
+            fn_encoder_has_audio,
+            fn_encoder_write_audio,
+            fn_encoder_name,
+            fn_encoder_write_rgba_at,
             audio_decoder_open:      sym!(lib, b"vm_audio_decoder_open\0",           FnAudioDecoderOpen),
             audio_decoder_next_samp: sym!(lib, b"vm_audio_decoder_next_samples\0",   FnAudioDecoderNextSamples),
             fn_audio_decoder_seek,
@@ -242,6 +266,71 @@ impl GlyxMedia {
             return Err(format!("glyx-media: vm_encoder_open returned null for '{output_path}'"));
         }
         Ok(VmEncoder { ptr, media: std::marker::PhantomData })
+    }
+
+    /// Whether the loaded library can write frames with their own times (`encoder_open_timed`).
+    pub fn has_timed_encoder(&self) -> bool {
+        self.fn_encoder_open_timed.is_some() && self.fn_encoder_write_rgba_at.is_some()
+    }
+
+    /// Open an MP4 encoder for frames that carry their own times (see `encoder_write_rgba_at`): a fragmented file that survives a crash, a bit
+    /// rate that follows the size, no constant frame rate. `fps_hint` only steers the encoder. Errors when the library is too old.
+    pub fn encoder_open_timed(&self, output_path: &str, width: u32, height: u32, fps_hint: u32) -> Result<VmEncoder, String> {
+        let Some(f) = self.fn_encoder_open_timed else { return Err("glyx-media: this library cannot write timed frames".into()) };
+        let c_path = CString::new(output_path).map_err(|e| e.to_string())?;
+        let ptr = unsafe { f(c_path.as_ptr(), width as c_int, height as c_int, fps_hint as c_int) };
+        if ptr.is_null() {
+            return Err(format!("glyx-media: vm_encoder_open_timed returned null for '{output_path}'"));
+        }
+        Ok(VmEncoder { ptr, media: std::marker::PhantomData })
+    }
+
+    /// Whether the loaded library can put an audio track in a recording (`encoder_open_timed_av`).
+    pub fn has_audio_encoder(&self) -> bool {
+        self.fn_encoder_open_timed_av.is_some() && self.fn_encoder_write_audio.is_some() && self.fn_encoder_has_audio.is_some()
+    }
+
+    /// `encoder_open_timed` with an AAC audio track of `audio_channels` channels at `audio_rate` samples a second. If the track cannot be made
+    /// the file has none (`encoder_has_audio` says which).
+    pub fn encoder_open_timed_av(&self, output_path: &str, width: u32, height: u32, fps_hint: u32, audio_rate: u32, audio_channels: u32) -> Result<VmEncoder, String> {
+        let Some(f) = self.fn_encoder_open_timed_av else { return Err("glyx-media: this library cannot write audio".into()) };
+        let c_path = CString::new(output_path).map_err(|e| e.to_string())?;
+        let ptr = unsafe { f(c_path.as_ptr(), width as c_int, height as c_int, fps_hint as c_int, audio_rate as c_int, audio_channels as c_int) };
+        if ptr.is_null() {
+            return Err(format!("glyx-media: vm_encoder_open_timed_av returned null for '{output_path}'"));
+        }
+        Ok(VmEncoder { ptr, media: std::marker::PhantomData })
+    }
+
+    /// Whether the encoder has an audio track.
+    pub fn encoder_has_audio(&self, enc: &VmEncoder) -> bool {
+        self.fn_encoder_has_audio.map_or(false, |f| unsafe { f(enc.ptr) } != 0)
+    }
+
+    /// Write interleaved 16-bit samples to the audio track. `start_ms` is when the first of them was captured, in milliseconds from the start
+    /// of the recording on the video frames' clock (used for the first chunk only).
+    pub fn encoder_write_audio(&self, enc: &VmEncoder, samples: &[i16], channels: u32, start_ms: i64) -> Result<(), String> {
+        let Some(f) = self.fn_encoder_write_audio else { return Err("glyx-media: this library cannot write audio".into()) };
+        let frames = samples.len() / channels.max(1) as usize;
+        let rc = unsafe { f(enc.ptr, samples.as_ptr(), frames as c_int, start_ms) };
+        if rc != 0 { return Err(format!("glyx-media: vm_encoder_write_audio error (rc={rc})")); }
+        Ok(())
+    }
+
+    /// The name of the codec the encoder opened with, for diagnostics (for example `h264_qsv`).
+    pub fn encoder_name(&self, enc: &VmEncoder) -> String {
+        match self.fn_encoder_name {
+            Some(f) => { let p = unsafe { f(enc.ptr) }; if p.is_null() { String::new() } else { unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned() } }
+            None => String::new(),
+        }
+    }
+
+    /// Write an RGBA frame shown `pts_ms` milliseconds after the recording began (to an encoder from `encoder_open_timed`).
+    pub fn encoder_write_rgba_at(&self, enc: &VmEncoder, rgba: &[u8], pts_ms: i64) -> Result<(), String> {
+        let Some(f) = self.fn_encoder_write_rgba_at else { return Err("glyx-media: this library cannot write timed frames".into()) };
+        let rc = unsafe { f(enc.ptr, rgba.as_ptr(), rgba.len() as c_int, pts_ms) };
+        if rc != 0 { return Err(format!("glyx-media: vm_encoder_write_rgba_at error (rc={rc})")); }
+        Ok(())
     }
 
     /// Write an RGBA frame to the encoder.

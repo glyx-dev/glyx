@@ -122,6 +122,8 @@ mod devtools_net;
 #[cfg(feature = "dev")]
 mod devtools_caps;
 mod av_clock;
+mod camera_record;
+mod camera_feed;
 mod scene;
 mod canvas_damage;
 mod damage_rects;
@@ -1707,7 +1709,6 @@ pub fn run(mut config: AppConfig) -> bool {
                     canvas3d_dirty:  std::collections::HashSet::new(),
                     #[cfg(feature = "canvas3d")]
                     renderer_3d:     None,
-                    #[cfg(feature = "camera")]
                     camera_streams:  std::collections::HashMap::new(),
                     video_streams:   std::collections::HashMap::new(),
                     #[cfg(feature = "webview")]
@@ -2352,13 +2353,12 @@ pub fn run(mut config: AppConfig) -> bool {
                 }
 
                 // 5a. Pull latest camera frames and dirty only the nodes displaying them.
-                #[cfg(feature = "camera")]
                 let mut updated_camera_handles: Vec<u32> = Vec::new();
-                #[cfg(feature = "camera")]
                 for (handle_id, stream) in s.camera_streams.iter_mut() {
                     if let Some((w, h, data)) = stream.frame_buf.lock().take() {
+                        // Shared with the camera thread's pool, which reuses the bytes once this image is replaced.
                         stream.latest_image = Some(peniko::ImageData {
-                            data: peniko::Blob::from(data),
+                            data: peniko::Blob::new(data),
                             format: peniko::ImageFormat::Rgba8,
                             alpha_type: peniko::ImageAlphaType::Alpha,
                             width: w, height: h,
@@ -2366,8 +2366,6 @@ pub fn run(mut config: AppConfig) -> bool {
                         updated_camera_handles.push(*handle_id);
                     }
                 }
-                #[cfg(not(feature = "camera"))]
-                let updated_camera_handles: Vec<u32> = Vec::new();
                 // 5b. Pull latest video frames and dirty only the nodes displaying them.
                 // Also drain video events into the runtime's video_events queue.
                 let mut updated_video_handles: Vec<u32> = Vec::new();
@@ -2819,7 +2817,6 @@ pub fn run(mut config: AppConfig) -> bool {
                         canvas3d_overlays: &mut canvas3d_overlays,
                         #[cfg(feature = "webview")]
                         webview_overlays: &mut webview_overlays,
-                        #[cfg(feature = "camera")]
                         camera_streams:    &s.camera_streams,
                         video_streams:     &s.video_streams,
                         cursor_blink_on:   s.cursor_blink_on,

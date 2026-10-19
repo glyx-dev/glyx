@@ -3,10 +3,21 @@ use smallvec::SmallVec;
 use crate::layout::layout_props_changed;
 use crate::render_props::{parse_box_shadow, parse_gradient, parse_transform};
 
+/// The stream mode to ask a camera for given the size (pixels) its preview will be shown at: the smallest frame that is at least that big and
+/// runs at 15 frames a second or more (else the largest there is), so a small preview does not decode full-size frames.
+#[cfg(feature = "camera")]
+fn pick_camera_format(formats: &[nokhwa::utils::CameraFormat], hint: (u32, u32)) -> Option<nokhwa::utils::CameraFormat> {
+    let area = |f: &nokhwa::utils::CameraFormat| u64::from(f.width()) * u64::from(f.height());
+    let big_enough = |f: &&nokhwa::utils::CameraFormat| f.width() >= hint.0 && f.height() >= hint.1;
+    formats.iter().filter(big_enough).filter(|f| f.frame_rate() >= 15).min_by_key(|f| (area(f), std::cmp::Reverse(f.frame_rate())))
+        .or_else(|| formats.iter().filter(big_enough).min_by_key(|f| (area(f), std::cmp::Reverse(f.frame_rate()))))
+        .or_else(|| formats.iter().max_by_key(|f| (area(f), f.frame_rate())))
+        .copied()
+}
+
 /// Locate the ffmpeg binary.
 /// Priority: `FFMPEG_PATH` env var → ffmpeg-sidecar (dev) → common install locations → PATH.
-#[cfg(feature = "camera")]
-fn find_ffmpeg() -> String {
+pub(crate) fn find_ffmpeg() -> String {
     // 1. Explicit override.
     if let Ok(p) = std::env::var("FFMPEG_PATH") {
         if !p.is_empty() { return p; }
@@ -859,18 +870,13 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 }
             }
             #[cfg(feature = "camera")]
-            SceneCommand::OpenCamera { handle_id, device_index } => {
-                let frame_buf       = Arc::new(Mutex::new(None::<(u32, u32, Vec<u8>)>));
-                let last_raw_frame  = Arc::new(Mutex::new(None::<(u32, u32, Vec<u8>)>));
-                let stop_flag       = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let capture_fps     = Arc::new(std::sync::atomic::AtomicU32::new(30));
-                let record_frame_tx = Arc::new(Mutex::new(None::<std::sync::mpsc::SyncSender<(u32, u32, Vec<u8>)>>));
-                let buf_clone      = Arc::clone(&frame_buf);
-                let raw_clone      = Arc::clone(&last_raw_frame);
-                let stop_clone     = Arc::clone(&stop_flag);
-                let fps_clone      = Arc::clone(&capture_fps);
-                let rec_tx_clone   = Arc::clone(&record_frame_tx);
-                let redraw         = Arc::clone(&state.request_redraw);
+            SceneCommand::OpenCamera { handle_id, device_index, size_hint } => {
+                let feed        = crate::camera_feed::CameraFeed::new(Arc::clone(&state.request_redraw));
+                let stop_flag   = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let capture_fps = Arc::new(std::sync::atomic::AtomicU32::new(30));
+                let thread_feed = feed.clone();
+                let stop_clone  = Arc::clone(&stop_flag);
+                let fps_clone   = Arc::clone(&capture_fps);
 
                 std::thread::spawn(move || {
                     use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
@@ -881,33 +887,39 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         Ok(c)  => c,
                         Err(e) => { log::warn!("[camera] open failed: {e}"); return; }
                     };
+                    // A preview of a known size does not need the camera's largest stream: ask for one about that size, which also cuts
+                    // the cost of decoding every frame.
+                    if let Some(hint) = size_hint {
+                        if let Ok(formats) = cam.compatible_camera_formats() {
+                            if let Some(f) = pick_camera_format(&formats, hint) {
+                                let _ = cam.set_camera_requset(RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Exact(f)));
+                            }
+                        }
+                    }
                     if let Err(e) = cam.open_stream() {
                         log::warn!("[camera] stream open failed: {e}"); return;
                     }
 
-                    let actual_fps = cam.camera_format().frame_rate().clamp(1, 240);
+                    let format = cam.camera_format();
+                    let actual_fps = format.frame_rate().clamp(1, 240);
                     fps_clone.store(actual_fps, std::sync::atomic::Ordering::Relaxed);
-                    log::info!("[camera] stream open (nokhwa reports {}fps)", actual_fps);
+                    log::info!("[camera] stream open: {}x{} (nokhwa reports {}fps)", format.width(), format.height(), actual_fps);
 
                     // No pre-throttling — forward every frame as it arrives.
-                    // The recording thread measures actual inter-frame intervals and uses
-                    // that rate as the encoder FPS, so playback speed is always correct.
+                    // The recorder gives each frame its capture time, so playback speed is right whatever rate the camera delivers.
+                    // Frames are decoded into buffers from a pool and shared (never copied) with the preview, the still-photo slot and the
+                    // recorder; a buffer is free again once nothing but the pool holds it. Steady state allocates nothing. If every
+                    // buffer is still in use the frame is dropped: a camera that outruns its consumers should not pile frames up.
+                    let mut pool: Vec<Arc<crate::state::FrameBytes>> = Vec::new();
                     while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                         match cam.frame() {
                             Ok(frame) => {
-                                if let Ok(rgba) = frame.decode_image::<RgbAFormat>() {
-                                    let (w, h) = (rgba.width(), rgba.height());
-                                    let data = rgba.into_raw();
-                                    // Keep a permanent copy for CaptureCamera (still photo).
-                                    *raw_clone.lock() = Some((w, h, data.clone()));
-                                    // Forward to recording thread if active (try_send = non-blocking).
-                                    if let Some(tx) = rec_tx_clone.lock().as_ref() {
-                                        let _ = tx.try_send((w, h, data.clone()));
-                                    }
-                                    // Render loop uses take() to detect new frames.
-                                    *buf_clone.lock() = Some((w, h, data));
-                                    // Wake the winit event loop to paint the new frame.
-                                    redraw();
+                                let res = frame.resolution();
+                                let (w, h) = (res.width(), res.height());
+                                let Some(i) = crate::camera_feed::free_buffer(&mut pool, w as usize * h as usize * 4) else { continue };
+                                let Some(buf) = Arc::get_mut(&mut pool[i]) else { continue };
+                                if frame.decode_image_to_buffer::<RgbAFormat>(&mut buf.0).is_ok() {
+                                    thread_feed.publish(w, h, &pool[i]);
                                 }
                             }
                             // No frame ready yet — brief backoff to avoid busy-looping.
@@ -918,22 +930,37 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 });
 
                 state.camera_streams.insert(handle_id, CameraStream {
-                    frame_buf,
-                    last_raw_frame,
+                    frame_buf:       feed.frame_buf,
+                    last_raw_frame:  feed.last_raw_frame,
                     stop_flag,
-                    latest_image: None,
+                    latest_image:    None,
                     capture_fps,
-                    record_frame_tx,
-                    record_done_rx: None,
+                    record_frame_tx: feed.record_frame_tx,
+                    record_done_rx:  None,
                 });
             }
-            #[cfg(feature = "camera")]
+            // A camera the camera capability library opened (see `SceneCommand::AttachCapCamera`): its frames are pulled from the library.
+            SceneCommand::AttachCapCamera { handle_id, cap } => {
+                // SAFETY: `cap` is the address of the library's static vtable, which the runtime keeps loaded for the life of the process.
+                let cap: &'static glyx_cap_abi::CameraCap = unsafe { &*(cap as *const glyx_cap_abi::CameraCap) };
+                let feed      = crate::camera_feed::CameraFeed::new(Arc::clone(&state.request_redraw));
+                let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                crate::camera_feed::spawn_cap_poller(cap, handle_id, feed.clone(), Arc::clone(&stop_flag));
+                state.camera_streams.insert(handle_id, CameraStream {
+                    frame_buf:       feed.frame_buf,
+                    last_raw_frame:  feed.last_raw_frame,
+                    stop_flag,
+                    latest_image:    None,
+                    capture_fps:     Arc::new(std::sync::atomic::AtomicU32::new(30)),
+                    record_frame_tx: feed.record_frame_tx,
+                    record_done_rx:  None,
+                });
+            }
             SceneCommand::CloseCamera { handle_id } => {
                 if let Some(stream) = state.camera_streams.remove(&handle_id) {
                     stream.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
-            #[cfg(feature = "camera")]
             SceneCommand::CaptureCamera { handle_id, tx } => {
                 let result = if let Some(stream) = state.camera_streams.get(&handle_id) {
                     // Read last_raw_frame — never taken by render loop, always available.
@@ -941,7 +968,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         Some((w, h, data)) => {
                             let path = format!("{}/glyx_photo_{}.png",
                                 std::env::temp_dir().display(), handle_id);
-                            match image::save_buffer(&path, &data, w, h, image::ColorType::Rgba8) {
+                            match image::save_buffer(&path, &data.0, w, h, image::ColorType::Rgba8) {
                                 Ok(())  => Ok(path),
                                 Err(e)  => Err(format!("capture save failed: {e}")),
                             }
@@ -953,140 +980,25 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 };
                 let _ = tx.0.send(result);
             }
-            #[cfg(feature = "camera")]
-            SceneCommand::StartCameraRecord { handle_id, output_path } => {
+            SceneCommand::StartCameraRecord { handle_id, output_path, audio } => {
                 if let Some(stream) = state.camera_streams.get_mut(&handle_id) {
-                    // Buffer enough frames for FPS calibration before the encoder opens.
-                    // 8 slots: capture thread can pipeline frames while calibration runs.
-                    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(u32, u32, Vec<u8>)>(8);
+                    // The recorder takes frames as the camera delivers them (shared, with their arrival times); a short queue, so a recorder that
+                    // falls behind makes the camera drop frames instead of holding them (see `camera_record`).
+                    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<crate::camera_record::RecFrame>(crate::camera_record::REC_QUEUE);
                     let (done_tx, done_rx)   = std::sync::mpsc::channel::<Result<String, String>>();
                     *stream.record_frame_tx.lock() = Some(frame_tx);
                     stream.record_done_rx = Some(done_rx);
-
-                    std::thread::spawn(move || {
-                        // ── Phase 1: Calibrate actual frame delivery rate ──────────────────
-                        // Collect up to CAL_FRAMES to measure inter-frame intervals.
-                        // Using (N-1) intervals / elapsed avoids including thread-spawn lag.
-                        const CAL_FRAMES: usize = 8;
-                        let frame_timeout = std::time::Duration::from_secs(2);
-                        let mut buffered: Vec<(u32, u32, Vec<u8>)> = Vec::with_capacity(CAL_FRAMES);
-                        let mut t_first: Option<std::time::Instant> = None;
-                        let mut t_last  = std::time::Instant::now();
-
-                        loop {
-                            if buffered.len() >= CAL_FRAMES { break; }
-                            match frame_rx.recv_timeout(frame_timeout) {
-                                Ok(f) => {
-                                    let now = std::time::Instant::now();
-                                    if t_first.is_none() { t_first = Some(now); }
-                                    t_last = now;
-                                    buffered.push(f);
-                                }
-                                Err(_) => break, // channel closed or timeout
-                            }
+                    let fps_hint = stream.capture_fps.load(std::sync::atomic::Ordering::Relaxed);
+                    // The microphone is opened here (it starts capturing now) and handed to the recorder, which ends it with the recording.
+                    let mic = if audio {
+                        match glyx_sysapi::microphone::MicCapture::start(None) {
+                            Ok(m) => Some(m),
+                            Err(e) => { log::warn!("[camera] recording without audio: {e}"); None }
                         }
-
-                        if buffered.is_empty() {
-                            let _ = done_tx.send(Err("no frames received".to_string()));
-                            return;
-                        }
-
-                        let fps: u32 = if buffered.len() >= 2 {
-                            let span = (t_last - t_first.unwrap()).as_secs_f64().max(0.001);
-                            let intervals = (buffered.len() - 1) as f64;
-                            ((intervals / span).round() as u32).clamp(5, 60)
-                        } else {
-                            24 // single-frame recording — conservative default
-                        };
-                        log::info!("[camera] encoder fps={fps} (measured over {} calibration frames)", buffered.len());
-
-                        let (w, h) = (buffered[0].0, buffered[0].1);
-
-                        // ── Phase 2: Open encoder and write all frames ────────────────────
-                        if let Some(media) = glyx_media::get_media() {
-                            match media.encoder_open(&output_path, w, h, fps) {
-                                Ok(enc) => {
-                                    let mut ok = true;
-                                    // drain(): the calibration frames (~4-8 MB each) are
-                                    // freed as they're written, not held all recording long.
-                                    for (_, _, data) in buffered.drain(..) {
-                                        if media.encoder_write_rgba(&enc, &data).is_err() { ok = false; break; }
-                                    }
-                                    buffered.shrink_to_fit();
-                                    if ok {
-                                        for (_, _, data) in frame_rx.iter() {
-                                            if media.encoder_write_rgba(&enc, &data).is_err() { ok = false; break; }
-                                        }
-                                    }
-                                    media.encoder_close(enc);
-                                    let _ = done_tx.send(if ok {
-                                        Ok(output_path)
-                                    } else {
-                                        Err("glyx-media encoder write failed".to_string())
-                                    });
-                                    return;
-                                }
-                                Err(e) => {
-                                    log::warn!("[camera] glyx-media encoder unavailable: {e}, falling back to ffmpeg");
-                                }
-                            }
-                        }
-
-                        // ── Fallback: subprocess ffmpeg ───────────────────────────────────
-                        use std::process::{Command, Stdio};
-                        use std::io::Write;
-
-                        let ffmpeg_bin = find_ffmpeg();
-                        let fps_str = fps.to_string();
-                        let child = Command::new(&ffmpeg_bin)
-                            .args([
-                                "-y",
-                                "-f", "rawvideo",
-                                "-pixel_format", "rgba",
-                                "-video_size", &format!("{}x{}", w, h),
-                                "-framerate", &fps_str,
-                                "-i", "pipe:0",
-                                "-vf", "format=yuv420p",
-                                "-c:v", "libx264",
-                                "-preset", "ultrafast",
-                                "-crf", "23",
-                                &output_path,
-                            ])
-                            .stdin(Stdio::piped())
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null())
-                            .spawn();
-
-                        let mut child = match child {
-                            Ok(c)  => c,
-                            Err(e) => {
-                                let _ = done_tx.send(Err(format!(
-                                    "ffmpeg not found (tried '{ffmpeg_bin}'): {e}\n\
-                                     Install ffmpeg and make sure it is in PATH, \
-                                     or set the FFMPEG_PATH environment variable."
-                                )));
-                                return;
-                            }
-                        };
-
-                        let mut stdin = child.stdin.take().unwrap();
-                        for (_, _, data) in buffered.drain(..) {
-                            if stdin.write_all(&data).is_err() { break; }
-                        }
-                        drop(buffered);
-                        while let Ok((_, _, data)) = frame_rx.recv() {
-                            if stdin.write_all(&data).is_err() { break; }
-                        }
-                        drop(stdin); // close stdin → ffmpeg finalises the MP4
-                        match child.wait() {
-                            Ok(status) if status.success() => { let _ = done_tx.send(Ok(output_path)); }
-                            Ok(status) => { let _ = done_tx.send(Err(format!("ffmpeg exited with {status}"))); }
-                            Err(e)     => { let _ = done_tx.send(Err(format!("ffmpeg wait error: {e}"))); }
-                        }
-                    });
+                    } else { None };
+                    std::thread::spawn(move || crate::camera_record::run(frame_rx, done_tx, output_path, fps_hint, mic));
                 }
             }
-            #[cfg(feature = "camera")]
             SceneCommand::StopCameraRecord { handle_id, tx } => {
                 if let Some(stream) = state.camera_streams.get_mut(&handle_id) {
                     // Drop the sender — signals recording thread to stop.

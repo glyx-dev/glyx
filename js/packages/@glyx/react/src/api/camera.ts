@@ -31,8 +31,8 @@ export const camera = {
    * @param {number} handle
    * @param {string} outputPath  Absolute path for the output MP4.
    */
-  startRecord(handle: any, outputPath: any) {
-    __glyx_camera_record_start(String(handle), outputPath);
+  startRecord(handle: any, outputPath: any, options?: { audio?: boolean }) {
+    __glyx_camera_record_start(String(handle), outputPath, options && options.audio);
   },
   /**
    * Stop recording and flush the MP4.

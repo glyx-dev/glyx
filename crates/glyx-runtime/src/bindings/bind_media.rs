@@ -74,7 +74,7 @@ pub fn audio_play_callback(
     rv.set(promise.into());
 }
 
-/// `__glyx_audio_pause(handle)` â†’ void (sync)
+/// `__glyx_audio_pause(handle)` → void (sync)
 #[cfg(feature = "audio")]
 pub fn audio_pause_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -96,7 +96,7 @@ pub fn audio_pause_callback(
     }
 }
 
-/// `__glyx_audio_resume(handle)` â†’ void (sync)
+/// `__glyx_audio_resume(handle)` → void (sync)
 #[cfg(feature = "audio")]
 pub fn audio_resume_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -117,7 +117,7 @@ pub fn audio_resume_callback(
     }
 }
 
-/// `__glyx_audio_stop(handle)` â†’ void (sync)
+/// `__glyx_audio_stop(handle)` → void (sync)
 ///
 /// Stops playback and removes the sink from the map.
 #[cfg(feature = "audio")]
@@ -138,7 +138,7 @@ pub fn audio_stop_callback(
     state.audio_trackers.lock().remove(&id);
 }
 
-/// `__glyx_audio_setVolume(handle, volume)` â†’ void (sync)
+/// `__glyx_audio_setVolume(handle, volume)` → void (sync)
 #[cfg(feature = "audio")]
 pub fn audio_set_volume_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -157,7 +157,7 @@ pub fn audio_set_volume_callback(
     }
 }
 
-/// `__glyx_audio_getVolume(handle)` â†’ f32 (sync)
+/// `__glyx_audio_getVolume(handle)` → f32 (sync)
 #[cfg(feature = "audio")]
 pub fn audio_get_volume_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -174,7 +174,7 @@ pub fn audio_get_volume_callback(
     rv.set(v8::Number::new(scope, vol as f64).into());
 }
 
-/// `__glyx_audio_poll()` â†’ JSON string â€” drained each frame by JS.
+/// `__glyx_audio_poll()` → JSON string — drained each frame by JS.
 ///
 /// Scans sinks; for any that have finished playing emits `{"handle":N,"event":"ended"}`.
 /// Finished sinks are removed from the map.
@@ -224,7 +224,7 @@ pub fn audio_poll_callback(
     rv.set(s.into());
 }
 
-/// `__glyx_audio_get_time(handle)` â†’ f64 seconds (sync).
+/// `__glyx_audio_get_time(handle)` → f64 seconds (sync).
 ///
 /// Returns the current playback position. Based on wall-clock tracking since
 /// rodio 0.17 has no built-in get_pos(). Returns 0.0 for unknown handles.
@@ -244,7 +244,7 @@ pub fn audio_get_time_callback(
     rv.set(v8::Number::new(scope, t).into());
 }
 
-/// `__glyx_audio_duration(handle)` â†’ Promise<f64> seconds.
+/// `__glyx_audio_duration(handle)` → Promise<f64> seconds.
 ///
 /// Uses a robust probe: the header-declared frame count when available, otherwise
 /// a seek past the end of the stream (Symphonia clamps to the real end and reports
@@ -329,7 +329,7 @@ fn probe_audio_duration(path: &str) -> f64 {
     -1.0
 }
 
-/// `__glyx_audio_seek(handle, seconds)` â†’ Promise<void>.
+/// `__glyx_audio_seek(handle, seconds)` → Promise<void>.
 ///
 /// Stops the current sink, re-opens the file, skips `seconds` via
 /// `skip_duration`, and inserts a fresh sink. Updates the tracker.
@@ -359,9 +359,9 @@ pub fn audio_seek_callback(
     let was_paused = state.audio_trackers.lock()
         .get(&id).map(|t| t.started_at.is_none()).unwrap_or(false);
 
-    // NOTE: do NOT remove the old sink here â€” that would let audio_poll_callback
+    // NOTE: do NOT remove the old sink here — that would let audio_poll_callback
     // see a "gap" and fire a spurious "ended" event before the new sink is ready.
-    // Instead, we atomically swap oldâ†’new inside spawn_blocking while holding the Mutex.
+    // Instead, we atomically swap old→new inside spawn_blocking while holding the Mutex.
 
     let Some(handle) = state.audio_handle.borrow().as_ref().map(Clone::clone) else {
         rv.set(reject_promise_with_error(scope, "audio device unavailable").into());
@@ -658,7 +658,7 @@ pub fn camera_list_callback(
     });
 }
 
-/// `__glyx_camera_open(deviceIndex) â†’ Promise<string>` â€” resolves with handle ID string.
+/// `__glyx_camera_open(deviceIndex) → Promise<string>` — resolves with handle ID string.
 #[cfg(feature = "camera")]
 pub fn camera_open_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -676,6 +676,10 @@ pub fn camera_open_callback(
     }
 
     let device_index = args.get(0).number_value(scope).unwrap_or_default() as u32;
+    let size_hint = {
+        let (w, h) = (args.get(1).number_value(scope).unwrap_or(0.0), args.get(2).number_value(scope).unwrap_or(0.0));
+        (w >= 1.0 && h >= 1.0).then(|| (w as u32, h as u32))
+    };
     let handle_id = state.next_camera_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let scene = Arc::clone(&state.scene);
 
@@ -689,15 +693,14 @@ pub fn camera_open_callback(
             if device_index as usize >= devices.len() {
                 return Err(format!("camera device index {device_index} not found"));
             }
-            scene.lock().push_back(SceneCommand::OpenCamera { handle_id, device_index });
+            scene.lock().push_back(SceneCommand::OpenCamera { handle_id, device_index, size_hint });
             Ok(handle_id.to_string())
         }).await.map_err(|e| e.to_string()).and_then(|r| r);
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
-/// `__glyx_camera_close(handleId)` â€” sync. Pushes CloseCamera scene command.
-#[cfg(feature = "camera")]
+/// `__glyx_camera_close(handleId)` — sync. Pushes CloseCamera scene command.
 pub fn camera_close_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
@@ -717,9 +720,8 @@ pub fn camera_close_callback(
     state.scene.lock().push_back(SceneCommand::CloseCamera { handle_id });
 }
 
-/// `__glyx_camera_capture(handleId) â†’ Promise<string>` â€” saves current frame as JPEG.
+/// `__glyx_camera_capture(handleId) → Promise<string>` — saves current frame as JPEG.
 /// Resolves with the absolute path to the saved `.jpg` file.
-#[cfg(feature = "camera")]
 pub fn camera_capture_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
@@ -755,8 +757,7 @@ pub fn camera_capture_callback(
     });
 }
 
-/// `__glyx_camera_record_start(handleId, outputPath)` â€” sync. Starts MP4 recording (video only): the glyx-media encoder, or an `ffmpeg` executable when that is unavailable.
-#[cfg(feature = "camera")]
+/// `__glyx_camera_record_start(handleId, outputPath)` — sync. Starts MP4 recording (video only): the glyx-media encoder, or an `ffmpeg` executable when that is unavailable.
 pub fn camera_record_start_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
@@ -773,13 +774,15 @@ pub fn camera_record_start_callback(
         .unwrap_or_default()
         .parse::<u32>().unwrap_or(0);
     let output_path = v8_arg_to_string(scope, &args, 1);
+    // The microphone goes into the recording when the app may use it and has not said otherwise (`{ audio: false }`).
+    let may_listen = glyx_security::get().microphone;
+    let audio = may_listen && { let a = args.get(2); a.is_undefined() || a.is_null() || a.boolean_value(scope) };
 
-    state.scene.lock().push_back(SceneCommand::StartCameraRecord { handle_id, output_path });
+    state.scene.lock().push_back(SceneCommand::StartCameraRecord { handle_id, output_path, audio });
 }
 
-/// `__glyx_camera_record_stop(handleId) â†’ Promise<string>` â€” stops recording.
+/// `__glyx_camera_record_stop(handleId) → Promise<string>` — stops recording.
 /// Resolves with the absolute path to the finished MP4 file.
-#[cfg(feature = "camera")]
 pub fn camera_record_stop_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
@@ -862,129 +865,30 @@ pub fn camera_open_callback(
         None => { rv.set(reject_promise_with_error(scope, "camera capability not loaded").into()); return; }
     };
     let device_index = args.get(0).number_value(scope).unwrap_or_default() as u32;
+    let (hint_w, hint_h) = {
+        let (w, h) = (args.get(1).number_value(scope).unwrap_or(0.0), args.get(2).number_value(scope).unwrap_or(0.0));
+        if w >= 1.0 && h >= 1.0 { (w as u32, h as u32) } else { (0, 0) }
+    };
+    let scene = Arc::clone(&state.scene);
     let (resolver, promise, queue, redraw) = make_promise(scope, state);
     rv.set(promise.into());
     state.tokio.spawn(async move {
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let id = unsafe { (cap.open)(device_index) };
+            // A library older than ABI 2 can open a camera but cannot hand over its frames, so there would be nothing to show.
+            if cap.version < 2 { return Err("the camera capability library is too old to show a preview (rebuild it: needs ABI 2)".to_string()); }
+            let id = unsafe { (cap.open_sized)(device_index, hint_w, hint_h) };
             if id == 0 { return Err(format!("camera.open device {device_index} failed")); }
+            // Glyx-core pulls the frames from the library and draws and records them (see `SceneCommand::AttachCapCamera`).
+            scene.lock().push_back(SceneCommand::AttachCapCamera { handle_id: id, cap: cap as *const glyx_cap_abi::CameraCap as usize });
             Ok(id.to_string())
         }).await.map_err(|e| e.to_string()).and_then(|r| r);
         enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
     });
 }
 
-#[cfg(not(feature = "camera"))]
-pub fn camera_close_callback(
-    scope: &mut v8::PinScope<'_, '_, v8::Context>,
-    args:  v8::FunctionCallbackArguments,
-    _rv:   v8::ReturnValue,
-) {
-    let ctx = scope.get_current_context();
-    let scope = &mut v8::ContextScope::new(scope, ctx);
-    let data  = args.data();
-    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
-    let state = unsafe { &*(ext.value() as *const AsyncState) };
-    let handle_id = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
-        .unwrap_or_default()
-        .parse::<u32>().unwrap_or(0);
-    if let Some(cap) = state.caps.camera { unsafe { (cap.close)(handle_id) }; }
-}
+// ── Microphone bindings ───────────────────────────────────────────────────────
 
-#[cfg(not(feature = "camera"))]
-pub fn camera_capture_callback(
-    scope: &mut v8::PinScope<'_, '_, v8::Context>,
-    args:  v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let ctx = scope.get_current_context();
-    let scope = &mut v8::ContextScope::new(scope, ctx);
-    let data  = args.data();
-    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
-    let state = unsafe { &*(ext.value() as *const AsyncState) };
-    if !glyx_security::get().camera {
-        rv.set(reject_cap_promise(scope, "camera").into()); return;
-    }
-    let cap = match state.caps.camera {
-        Some(c) => c,
-        None => { rv.set(reject_promise_with_error(scope, "camera capability not loaded").into()); return; }
-    };
-    let handle_id = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
-        .unwrap_or_default()
-        .parse::<u32>().unwrap_or(0);
-    let (resolver, promise, queue, redraw) = make_promise(scope, state);
-    rv.set(promise.into());
-    state.tokio.spawn(async move {
-        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            // Write JPEG bytes to a temp file and return the path.
-            let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8 MB max JPEG
-            let n = unsafe { (cap.capture)(handle_id, buf.as_mut_ptr(), buf.len()) };
-            if n == 0 { return Err("no frame available yet".to_string()); }
-            let path = format!("{}/glyx_photo_{}.jpg",
-                std::env::temp_dir().display(), handle_id);
-            std::fs::write(&path, &buf[..n]).map_err(|e| format!("save: {e}"))?;
-            Ok(path)
-        }).await.map_err(|e| e.to_string()).and_then(|r| r);
-        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
-    });
-}
-
-#[cfg(not(feature = "camera"))]
-pub fn camera_record_start_callback(
-    scope: &mut v8::PinScope<'_, '_, v8::Context>,
-    args:  v8::FunctionCallbackArguments,
-    _rv:   v8::ReturnValue,
-) {
-    let ctx = scope.get_current_context();
-    let scope = &mut v8::ContextScope::new(scope, ctx);
-    let data  = args.data();
-    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
-    let state = unsafe { &*(ext.value() as *const AsyncState) };
-    let handle_id = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
-        .unwrap_or_default()
-        .parse::<u32>().unwrap_or(0);
-    if let Some(cap) = state.caps.camera { unsafe { (cap.record_start)(handle_id) }; }
-}
-
-#[cfg(not(feature = "camera"))]
-pub fn camera_record_stop_callback(
-    scope: &mut v8::PinScope<'_, '_, v8::Context>,
-    args:  v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let ctx = scope.get_current_context();
-    let scope = &mut v8::ContextScope::new(scope, ctx);
-    let data  = args.data();
-    let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
-    let state = unsafe { &*(ext.value() as *const AsyncState) };
-    let cap = match state.caps.camera {
-        Some(c) => c,
-        None => { rv.set(reject_promise_with_error(scope, "camera capability not loaded").into()); return; }
-    };
-    let handle_id = args.get(0).to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope.as_ref()))
-        .unwrap_or_default()
-        .parse::<u32>().unwrap_or(0);
-    let (resolver, promise, queue, redraw) = make_promise(scope, state);
-    rv.set(promise.into());
-    state.tokio.spawn(async move {
-        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let mut buf = vec![0u8; 4096];
-            let mut out_len: usize = 0;
-            let rc = unsafe { (cap.record_stop)(handle_id, buf.as_mut_ptr(), &mut out_len, buf.len()) };
-            if rc != 0 { return Err("record_stop failed (not supported via DLL — use --features camera)".to_string()); }
-            Ok(String::from_utf8_lossy(&buf[..out_len]).into_owned())
-        }).await.map_err(|e| e.to_string()).and_then(|r| r);
-        enqueue_completion(&queue, redraw.as_ref(), Completion { resolver_ptr: resolver, result });
-    });
-}
-
-// â”€â”€ Microphone bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-/// `__glyx_microphone_list() â†’ Promise<string>` â€” JSON array of mic devices.
+/// `__glyx_microphone_list() → Promise<string>` — JSON array of mic devices.
 pub fn microphone_list_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
@@ -1014,7 +918,7 @@ pub fn microphone_list_callback(
     });
 }
 
-/// `__glyx_microphone_record(deviceName, durationMs) â†’ Promise<string>` â€” path to WAV file.
+/// `__glyx_microphone_record(deviceName, durationMs) → Promise<string>` — path to WAV file.
 pub fn microphone_record_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args:  v8::FunctionCallbackArguments,
@@ -1049,9 +953,9 @@ pub fn microphone_record_callback(
     });
 }
 
-// â”€â”€ HID callbacks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── HID callbacks ─────────────────────────────────────────────────────────────
 
-/// `__glyx_hid_enumerate() â†’ Promise<JSON>` â€” list HID devices.
+/// `__glyx_hid_enumerate() → Promise<JSON>` — list HID devices.
 #[cfg(feature = "hid")]
 pub fn hid_enumerate_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -1096,7 +1000,7 @@ pub fn hid_enumerate_callback(
     });
 }
 
-/// `__glyx_hid_open(vendorId, productId) â†’ Promise<handleId>` â€” open a HID device.
+/// `__glyx_hid_open(vendorId, productId) → Promise<handleId>` — open a HID device.
 #[cfg(feature = "hid")]
 pub fn hid_open_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -1137,7 +1041,7 @@ pub fn hid_open_callback(
     });
 }
 
-/// `__glyx_hid_read(handleId, timeoutMs) â†’ Promise<JSON>` â€” read bytes from device.
+/// `__glyx_hid_read(handleId, timeoutMs) → Promise<JSON>` — read bytes from device.
 #[cfg(feature = "hid")]
 pub fn hid_read_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -1176,7 +1080,7 @@ pub fn hid_read_callback(
     });
 }
 
-/// `__glyx_hid_write(handleId, dataJson) â†’ Promise<bytesWritten>` â€” write bytes to device.
+/// `__glyx_hid_write(handleId, dataJson) → Promise<bytesWritten>` — write bytes to device.
 #[cfg(feature = "hid")]
 pub fn hid_write_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -1214,7 +1118,7 @@ pub fn hid_write_callback(
     });
 }
 
-/// `__glyx_hid_close(handleId)` â€” close a HID device handle (sync, no promise).
+/// `__glyx_hid_close(handleId)` — close a HID device handle (sync, no promise).
 #[cfg(feature = "hid")]
 pub fn hid_close_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
@@ -1374,9 +1278,9 @@ pub fn hid_close_callback(
     if let Some(cap) = state.caps.hid { unsafe { (cap.close)(handle_id) }; }
 }
 
-// â”€â”€ Updater callbacks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Updater callbacks ──────────────────────────────────────────────────────────
 
-/// `__glyx_updater_check(owner, repo, currentVersion) â†’ Promise<JSON>`
+/// `__glyx_updater_check(owner, repo, currentVersion) → Promise<JSON>`
 ///
 /// Fetches the latest GitHub release and returns:
 ///   `{ hasUpdate: bool, latestVersion: string, body: string }`
@@ -1415,7 +1319,7 @@ pub fn video_open_callback(
     });
 }
 
-/// `__glyx_video_seek(handleId: string, seconds: number)` â€” sync
+/// `__glyx_video_seek(handleId: string, seconds: number)` — sync
 ///
 /// Seeks the video to `seconds`. No-op if the handle is not active.
 pub fn video_seek_callback(
@@ -1437,7 +1341,7 @@ pub fn video_seek_callback(
         .push_back(SceneCommand::SeekVideo { handle_id, seconds });
 }
 
-/// `__glyx_video_set_volume(handleId: string, volume: number)` â€” sync
+/// `__glyx_video_set_volume(handleId: string, volume: number)` — sync
 ///
 /// Sets playback volume (0.0 = mute, 1.0 = normal, up to 2.0).
 /// Applied to the audio sink within ~50ms.
@@ -1459,7 +1363,7 @@ pub fn video_set_volume_callback(
         .push_back(SceneCommand::SetVideoVolume { handle_id, volume });
 }
 
-/// `__glyx_video_close(handleId: string)` â€” sync
+/// `__glyx_video_close(handleId: string)` — sync
 ///
 /// Stops playback and releases all resources for this video handle.
 pub fn video_close_callback(
@@ -1480,7 +1384,7 @@ pub fn video_close_callback(
         .push_back(SceneCommand::CloseVideo { handle_id });
 }
 
-/// `__glyx_video_pause(handleId: string)` â€” sync
+/// `__glyx_video_pause(handleId: string)` — sync
 ///
 /// Pauses the decode thread (spin-wait) and the audio sink.
 pub fn video_pause_callback(
@@ -1497,7 +1401,7 @@ pub fn video_pause_callback(
     state.scene.lock().push_back(SceneCommand::PauseVideo { handle_id });
 }
 
-/// `__glyx_video_play(handleId: string)` â€” sync
+/// `__glyx_video_play(handleId: string)` — sync
 ///
 /// Resumes the decode thread and audio sink after a pause.
 pub fn video_play_callback(
@@ -1514,7 +1418,7 @@ pub fn video_play_callback(
     state.scene.lock().push_back(SceneCommand::ResumeVideo { handle_id });
 }
 
-/// `__glyx_video_poll() â†’ JSON`
+/// `__glyx_video_poll() → JSON`
 ///
 /// Returns a JSON array of pending video events since the last poll.
 /// Each event: `{type:"ended",id:N}` or `{type:"metadata",id:N,width:W,height:H,fps:F,durationSecs:D}`.

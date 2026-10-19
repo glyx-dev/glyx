@@ -9,6 +9,6 @@
     "!src/**/*.test.ts"
   ],
   "scripts": {
-    "test": "bun test"
+    "test": "bun test --preload ../testing/setup.js"
   }
 }

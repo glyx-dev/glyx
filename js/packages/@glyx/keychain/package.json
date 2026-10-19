@@ -15,6 +15,6 @@
     "@glyx-dev/react": "^0.2.0"
   },
   "scripts": {
-    "test": "bun test"
+    "test": "bun test --preload ../testing/setup.js"
   }
 }

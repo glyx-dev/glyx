@@ -15,6 +15,6 @@
     "react-reconciler": "^0.29.0"
   },
   "scripts": {
-    "test": "bun test"
+    "test": "bun test --preload ../testing/setup.js"
   }
 }

@@ -15,7 +15,7 @@
     "./setup": "./setup.js"
   },
   "scripts": {
-    "test": "bun test"
+    "test": "bun test --preload ../testing/setup.js"
   },
   "description": "Test utilities for Glyx apps \u2014 compatible with Bun's test runner",
   "peerDependencies": {

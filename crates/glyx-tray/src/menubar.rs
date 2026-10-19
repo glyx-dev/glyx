@@ -128,9 +128,24 @@ fn validate_children(path: &str, items: &[MenuBarItem], seen: &mut HashSet<Strin
     Ok(())
 }
 
+/// The ids of the native popup menu that is open right now, and what was chosen in it. A popup is modal (the call that shows it returns when
+/// the menu closes), and `muda` reports the choice through the shared event handler while it is still inside that call, so the handler
+/// leaves the answer here for it to pick up.
+static POPUP_IDS: LazyLock<Mutex<HashMap<String, Option<bool>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static POPUP_CHOSEN: LazyLock<Mutex<Option<MenuBarEvent>>> = LazyLock::new(|| Mutex::new(None));
+
 /// Called by the shared `muda` event handler. True when the click belonged to
-/// a menu bar (and was queued), false when it is the tray's.
+/// a menu bar or to the open popup (and was queued), false when it is the tray's.
 pub(crate) fn dispatch(id: &str) -> bool {
+    {
+        let mut popup = POPUP_IDS.lock().unwrap();
+        if let Some(state) = popup.get_mut(id) {
+            // As with the menu bar, `muda` has flipped a check item already; mirror it.
+            let checked = state.as_mut().map(|c| { *c = !*c; *c });
+            *POPUP_CHOSEN.lock().unwrap() = Some(MenuBarEvent { id: id.to_string(), checked });
+            return true;
+        }
+    }
     if !IDS.lock().unwrap().contains(id) { return false; }
     // The click on a check item already flipped it inside `muda`; mirror that.
     let checked = CHECKED.lock().unwrap().get_mut(id).map(|state| { *state = !*state; *state });
@@ -198,6 +213,37 @@ mod imp {
         }
         Ok(())
     }
+
+    /// Show `items` as a native popup menu at the cursor, on the window `hwnd`, and wait for it to close. `None` when it was dismissed.
+    #[cfg(target_os = "windows")]
+    pub(super) fn popup(hwnd: isize, items: &[MenuBarItem]) -> Result<Option<MenuBarEvent>, String> {
+        use muda::ContextMenu;
+        crate::ensure_event_handler();
+        let root = Submenu::new("", true);
+        let mut entries = HashMap::new();
+        append(&root, items, &mut entries)?;
+        let mut checks = HashMap::new();
+        collect_checked(items, &mut checks);
+        {
+            let mut popup = POPUP_IDS.lock().unwrap();
+            popup.clear();
+            for id in entries.keys() { popup.insert(id.clone(), checks.get(id).copied()); }
+        }
+        *POPUP_CHOSEN.lock().unwrap() = None;
+        // SAFETY: `hwnd` is this window's own handle, and this runs on the window's thread.
+        let _ = unsafe { root.show_context_menu_for_hwnd(hwnd, None) };
+        POPUP_IDS.lock().unwrap().clear();
+        Ok(POPUP_CHOSEN.lock().unwrap().take())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn popup(_hwnd: isize, _items: &[MenuBarItem]) -> Result<Option<MenuBarEvent>, String> {
+        Err(NO_POPUP.into())
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[allow(dead_code)]
+    const NO_POPUP: &str = "a native popup menu is not available on macOS yet: use the drawn menu";
 
     /// Windows: the menu belongs to one window. macOS: there is one app menu, so the key is always 0.
     pub(super) fn install(key: isize, items: &[MenuBarItem]) -> Result<(), String> {
@@ -308,6 +354,9 @@ mod imp {
 mod imp {
     use super::*;
     const NOT_YET: &str = "a native menu bar is only available on Windows and macOS: use <MenuBar> here";
+    pub(super) fn popup(_hwnd: isize, _items: &[MenuBarItem]) -> Result<Option<MenuBarEvent>, String> {
+        Err("a native popup menu is only available on Windows: use the drawn menu".into())
+    }
     pub(super) fn install(_hwnd: isize, _items: &[MenuBarItem]) -> Result<(), String> { Err(NOT_YET.into()) }
     pub(super) fn remove(_hwnd: isize) -> bool { false }
     pub(super) fn set_enabled(_id: &str, _enabled: bool) -> bool { false }
@@ -319,6 +368,18 @@ pub fn set_menu_bar(hwnd: isize, items: &[MenuBarItem]) -> Result<(), String> {
     validate(items)?;
     imp::install(hwnd, items)
 }
+
+/// Show a native popup (context) menu at the cursor over the window with this native handle (HWND), and wait for it to close: the item
+/// that was chosen, or `None` when it was dismissed. Unlike the menu bar the entries need not be submenus, and ids need only be unique
+/// inside this one menu. Windows only for now (`context_menu_supported`).
+pub fn show_context_menu(hwnd: isize, items: &[MenuBarItem]) -> Result<Option<MenuBarEvent>, String> {
+    if items.is_empty() { return Err("a context menu needs at least one item".into()); }
+    validate_children("context menu", items, &mut HashSet::new())?;
+    imp::popup(hwnd, items)
+}
+
+/// Whether `show_context_menu` can show a native popup on this platform.
+pub fn context_menu_supported() -> bool { cfg!(target_os = "windows") }
 
 /// Remove a window's menu bar. False when it had none.
 pub fn clear_menu_bar(hwnd: isize) -> bool { imp::remove(hwnd) }

@@ -189,6 +189,32 @@ pub fn menubar_set_callback(
     rv.set(s.into());
 }
 
+/// `__glyx_contextmenu_show(items_json: string) -> string` (JSON: see `menubar_api::popup`). Blocks while the native menu is open.
+pub fn contextmenu_show_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let hwnd = window_state(&args).window.as_ref().and_then(|w| w.hwnd);
+    let json = v8_arg_to_string(scope, &args, 0);
+    let reply = crate::menubar_api::popup(hwnd, &json);
+    let s = v8::String::new(scope, &reply).unwrap();
+    rv.set(s.into());
+}
+
+/// `__glyx_contextmenu_supported() -> bool`
+pub fn contextmenu_supported_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let _scope = &mut v8::ContextScope::new(scope, ctx);
+    rv.set_bool(crate::menubar_api::popup_supported());
+}
+
 /// `__glyx_menubar_clear() -> bool`
 pub fn menubar_clear_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,

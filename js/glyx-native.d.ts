@@ -112,6 +112,8 @@ declare var __glyx_menubar_set: any;
 declare var __glyx_menubar_set_checked: any;
 declare var __glyx_menubar_set_enabled: any;
 declare var __glyx_menubar_supported: any;
+declare var __glyx_contextmenu_show: any;
+declare var __glyx_contextmenu_supported: any;
 declare var __glyx_microphone_list: any;
 declare var __glyx_microphone_record: any;
 declare var __glyx_mkdirp: any;

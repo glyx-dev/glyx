@@ -1989,6 +1989,8 @@ pub fn register_all(
     register!("__glyx_menubar_set_enabled", menubar_set_enabled_callback);
     register!("__glyx_menubar_set_checked", menubar_set_checked_callback);
     register!("__glyx_menubar_supported",   menubar_supported_callback);
+    register!("__glyx_contextmenu_show",     contextmenu_show_callback);
+    register!("__glyx_contextmenu_supported", contextmenu_supported_callback);
 
     //  Shell (Tier 1: scoped exec)
     #[cfg(feature = "shell")]

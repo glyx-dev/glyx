@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A right click outside an open popover now dismisses it** (only a left click did), which a context menu needs.
+
 ### Added
 - **`<Camera>` works in JS-only apps, and records sound.** The component passes the size it is shown at so the camera can be asked for a stream about that big. `startRecord(path, options?)` (and `camera.startRecord(handle, path, options?)`) puts the microphone in the MP4 as an AAC track when the app has the `microphone` capability; `{ audio: false }` records the picture only. Recordings are fragmented MP4 files, so they survive a crash.
 - **A complete 2D canvas.** The canvas context gains the web's drawing state and paths: `translate` / `rotate` / `scale` / `transform` / `setTransform` / `resetTransform` / `getTransform`, `save` / `restore`, `globalAlpha`, `globalCompositeOperation`, `lineCap` / `lineJoin` / `miterLimit` / `setLineDash` / `lineDashOffset`, `shadowColor` / `shadowBlur` / `shadowOffsetX` / `shadowOffsetY`, `createRadialGradient` and `createConicGradient` (and gradients as `strokeStyle`), `rect`, `roundRect`, `ellipse`, `arcTo`, paths with several sub-paths (`moveTo` now starts a new one instead of drawing a line to it) and `fill('evenodd')`, `loadImage` and `drawImage`, `clip()` to a path, rotated text (a rotated, skewed or mirrored transform now turns `fillText` too), and PNG export / pixel reads: `toDataURL()`, `toPNG()`, `toBlob()` and `getImageData()` (all asynchronous). `quadraticCurveTo` takes an optional segment count (as `bezierCurveTo` does), so a long freehand stroke can use fewer. Colour strings now accept `rgb()`, `rgba()` and CSS colour names. State is sent to the native side lazily and only when it changes. Needs a runner with the new canvas commands; with an older runner the new calls are ignored or draw nothing. Defaults are unchanged (round line ends and joins).

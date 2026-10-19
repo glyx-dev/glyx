@@ -958,6 +958,7 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
             crate::menubar_api::set(hwnd, &json, crate::menubar_api::sink(Arc::clone(&events), redraw.clone()))
         })?)?;
         globals.set("__glyx_menubar_clear", Function::new(ctx.clone(), move || crate::menubar_api::clear(hwnd))?)?;
+        globals.set("__glyx_contextmenu_show", Function::new(ctx.clone(), move |json: String| crate::menubar_api::popup(hwnd, &json))?)?;
     }
 
     // `__glyx_battery_getStatus() -> Promise<JSON | null>` — real
@@ -1691,6 +1692,7 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_menubar_set_enabled", Function::new(ctx.clone(), |id: String, on: bool| crate::menubar_api::set_enabled(&id, on))?)?;
         globals.set("__glyx_menubar_set_checked", Function::new(ctx.clone(), |id: String, on: bool| crate::menubar_api::set_checked(&id, on))?)?;
         globals.set("__glyx_menubar_supported", Function::new(ctx.clone(), crate::menubar_api::supported)?)?;
+        globals.set("__glyx_contextmenu_supported", Function::new(ctx.clone(), crate::menubar_api::popup_supported)?)?;
     }
 
     // ── Canvas / webview messaging (crate::quickjs_canvas) ──────────────

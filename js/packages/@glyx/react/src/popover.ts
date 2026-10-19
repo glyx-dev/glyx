@@ -77,6 +77,8 @@ export function PopoverHost(): React.ReactElement | null {
     // feedback:false — opacity feedback on a container multiplies through the
     // subtree, which made the whole popover dim on hover.
     onPress: () => _popoverStore.close(p.id),
+    // A right click elsewhere dismisses it too (a context menu is closed by clicking away with either button).
+    onRightPress: () => _popoverStore.close(p.id),
     feedback: false,
     style: { position: 'absolute', left: 0, top: 0, width: winW, height: winH, zIndex: 9000 },
   },

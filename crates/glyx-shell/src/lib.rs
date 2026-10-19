@@ -309,6 +309,24 @@ impl Default for ShellConfig {
     }
 }
 
+/// `GLYX_STARTUP_TRACE=1`: print how long after the process reached `main` each startup phase finished (`[startup]  12.3 ms  what`), to
+/// see where a launch goes. Costs one atomic load per mark when off.
+///
+/// The marks are kept in memory and printed together when the mark that starts with `core: first frame rendered` arrives: printing as
+/// they happen costs about 12 ms each to a redirected stderr, which would be most of what it measures.
+pub fn startup_mark(what: &str) {
+    static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static MARKS: std::sync::Mutex<Vec<(f64, String)>> = std::sync::Mutex::new(Vec::new());
+    let t0 = *T0.get_or_init(std::time::Instant::now);
+    if !*ON.get_or_init(|| std::env::var_os("GLYX_STARTUP_TRACE").is_some()) { return; }
+    let Ok(mut marks) = MARKS.lock() else { return };
+    marks.push((t0.elapsed().as_secs_f64() * 1000.0, what.to_string()));
+    if what.starts_with("core: first frame rendered") {
+        for (ms, w) in marks.drain(..) { eprintln!("[startup] {ms:>7.1} ms  {w}"); }
+    }
+}
+
 /// Run the shell event loop, calling `handler` for every `ShellEvent`.
 ///
 /// Blocks until all windows are closed. Must be called from the main thread.
@@ -318,9 +336,11 @@ pub fn run<F>(config: ShellConfig, handler: F) -> bool
 where
     F: FnMut(ShellEvent) + 'static,
 {
+    startup_mark("shell: run() entered");
     let event_loop = EventLoop::<GlyxUserEvent>::with_user_event()
         .build()
         .expect("Failed to create EventLoop");
+    startup_mark("shell: event loop built");
 
     let control_flow = if config.continuous {
         ControlFlow::Poll
@@ -354,6 +374,7 @@ where
         a11y_tx,
     };
 
+    startup_mark("shell: running the event loop");
     event_loop.run_app(&mut app).expect("Event loop error");
     app.restart_requested
 }
@@ -457,8 +478,10 @@ impl ShellApp {
         #[cfg(feature = "a11y")]
         let attrs = attrs.with_visible(false);
 
+        startup_mark("shell: creating the window");
         match event_loop.create_window(attrs) {
             Ok(w) => {
+                startup_mark("shell: window created");
                 let window = Arc::new(w);
                 self.windows.insert(window.id(), handle);
                 self.window_arcs.insert(handle, Arc::clone(&window));
@@ -480,6 +503,7 @@ impl ShellApp {
                     A11yUpdateFn(Arc::new(move |update| { let _ = tx.send((handle, update)); }))
                 };
 
+                startup_mark("shell: calling the handler with WindowReady");
                 (self.handler)(ShellEvent::WindowReady {
                     window_handle: handle,
                     window,
@@ -497,6 +521,7 @@ impl ApplicationHandler<GlyxUserEvent> for ShellApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // Only create the main window on the first resume.
         if !self.windows.is_empty() { return; }
+        startup_mark("shell: resumed (first)");
 
         // Pre-init splash window: created (and shown) FIRST, before any of
         // the main window's GPU/backend/JS setup — see `ShellEvent::SplashWindowReady`'s

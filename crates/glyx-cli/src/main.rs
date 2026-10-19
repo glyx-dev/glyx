@@ -1362,24 +1362,110 @@ fn copy_app_payload(dest_root: &Path, bin: &Path) -> Result<()> {
     copy_media_dll_if_needed(dest_root)
 }
 
-/// Copy the cached glyx-media DLL **and all FFmpeg runtime DLLs** into `dest_root`
-/// when `capabilities.video: true` is declared in glyx.config.json.
-fn copy_media_dll_if_needed(dest_root: &Path) -> Result<()> {
-    // Capability lives at capabilities.video (or capabilities.camera/microphone),
-    // not at the top level.
-    let config_str = std::fs::read_to_string("glyx.config.json").unwrap_or_default();
-    let media_enabled: bool = serde_json::from_str::<serde_json::Value>(&config_str)
+/// Whether the app's config declares a capability that needs the media library: any of video / camera / microphone, at
+/// `capabilities.<name>` (not the top level). Reads `glyx.config.ts` or `.json`.
+fn media_declared_in_config() -> bool {
+    let src = resolve_config_json().unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(&src)
         .ok()
         .and_then(|v| {
             let caps = v.get("capabilities")?;
-            // Any of video / camera / microphone requires the media DLL.
-            let video = caps.get("video").and_then(|b| b.as_bool()).unwrap_or(false);
-            let cam   = caps.get("camera").and_then(|b| b.as_bool()).unwrap_or(false);
-            let mic   = caps.get("microphone").and_then(|b| b.as_bool()).unwrap_or(false);
-            Some(video || cam || mic)
+            let on = |k: &str| caps.get(k).and_then(|b| b.as_bool()).unwrap_or(false);
+            Some(on("video") || on("camera") || on("microphone"))
         })
-        .unwrap_or(false);
-    if !media_enabled { return Ok(()); }
+        .unwrap_or(false)
+}
+
+/// The media library `glyx dev` runs the app with. Inside a source checkout it is built from `glyx-media-c` (a minute or two,
+/// once, again only when those sources change) into `<checkout>/target/glyx-media-local`, and the app is pointed at it with
+/// `GLYX_MEDIA_DIR`: the user cache (`~/.glyx/cache/media`) keeps the signed library `glyx build` packages. Anywhere else, or
+/// when that cannot be done, the library comes from the Glyx release into the cache. Returns the directory to point the
+/// app at, if there is one. Says plainly when neither works.
+pub(crate) fn prepare_media_for_dev() -> Option<PathBuf> {
+    if !media_declared_in_config() { return None; }
+    if let Some(dir) = build_media_from_source() { return Some(dir); }
+    ensure_media_downloaded_for_dev();
+    None
+}
+
+/// The checksum of what the library is built from: the C sources, the build script and the version it is named for.
+fn media_source_stamp(src: &Path) -> Option<String> {
+    let mut h = crc32fast::Hasher::new();
+    for f in ["glyx_media.c", "glyx_media.h", "build-windows.ps1"] {
+        h.update(&std::fs::read(src.join(f)).ok()?);
+    }
+    h.update(glyx_media::download::GLYX_MEDIA_VERSION.as_bytes());
+    Some(format!("{:08x}", h.finalize()))
+}
+
+/// Builds glyx-media from the checkout's `glyx-media-c` with its own scripts (`build-windows.ps1`, which finds MSVC with
+/// `vswhere`, then `generate-dev-manifest.ps1`, an unsigned manifest that debug builds and `GLYX_MEDIA_SKIP_VERIFY` accept).
+/// The scripts write to `%USERPROFILE%\.glyx\cache\media`, so they run with `USERPROFILE` pointing into the checkout's
+/// `target`, which keeps the user's cache (and the signed library in it) untouched. `None`: not a source checkout, not
+/// Windows (the other platforms still download), turned off with `GLYX_MEDIA_NO_BUILD=1`, or the build failed (reported).
+fn build_media_from_source() -> Option<PathBuf> {
+    if !cfg!(target_os = "windows") || std::env::var("GLYX_MEDIA_NO_BUILD").as_deref() == Ok("1") { return None; }
+    let home = glyx_source_checkout()?;
+    let src = home.join("glyx-media-c");
+    if !src.join("build-windows.ps1").exists() || !src.join("generate-dev-manifest.ps1").exists() { return None; }
+    let stamp = media_source_stamp(&src)?;
+
+    let root = home.join("target").join("glyx-media-local");
+    let dir = root.join(".glyx").join("cache").join("media");
+    let stem = glyx_media::download::dll_stem();
+    let dll = dir.join(format!("{stem}.dll"));
+    let stamp_file = dir.join(format!("{stem}.source-stamp"));
+    let built = |dir: &Path| dir.join(format!("{stem}.manifest.json")).exists() && dir.join(format!("{stem}.manifest.sig")).exists();
+    if dll.exists() && built(&dir) && std::fs::read_to_string(&stamp_file).ok().as_deref() == Some(stamp.as_str()) {
+        return Some(dir);
+    }
+
+    println!("  Building glyx-media from source ({}): a minute or two, once, and again only when those files change.", src.display());
+    println!("    GLYX_MEDIA_NO_BUILD=1 downloads the release library instead.");
+    let run = |script: &str| -> Result<(), String> {
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(src.join(script))
+            .current_dir(&src)
+            .env("USERPROFILE", &root)
+            .output()
+            .map_err(|e| format!("could not run powershell: {e}"))?;
+        if out.status.success() { return Ok(()); }
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let tail: Vec<&str> = text.lines().rev().filter(|l| !l.trim().is_empty()).take(8).collect::<Vec<_>>().into_iter().rev().collect();
+        Err(format!("{script} failed:\n      {}", tail.join("\n      ")))
+    };
+    let result = std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("cannot create {}: {e}", dir.display()))
+        .and_then(|_| run("build-windows.ps1"))
+        .and_then(|_| run("generate-dev-manifest.ps1"))
+        .and_then(|_| if dll.exists() { Ok(()) } else { Err(format!("{} was not produced", dll.display())) })
+        .and_then(|_| std::fs::write(&stamp_file, &stamp).map_err(|e| format!("cannot write the stamp: {e}")));
+    match result {
+        Ok(()) => { println!("  glyx-media built: {}", dll.display()); Some(dir) }
+        Err(e) => {
+            println!("  ⚠ building glyx-media from source failed, so the release library is used instead: {e}");
+            println!("    (it needs MSVC: the \"C++ build tools\" workload of Build Tools for Visual Studio)");
+            None
+        }
+    }
+}
+
+/// The release library, into the user cache, when the app declares video, camera or microphone and this Glyx's version is not
+/// there yet; says plainly when it cannot be had.
+fn ensure_media_downloaded_for_dev() {
+    let Ok(cache_dir) = glyx_media::download::cache_dir() else { return };
+    let media_dll = cache_dir.join(format!("{}.{}", glyx_media::download::dll_stem(), glyx_media::download::dll_ext()));
+    ensure_media_cached(&cache_dir, &media_dll);
+    if !media_dll.exists() {
+        println!("  ⚠ video, camera and microphone won't work: {}", glyx_media::download::unavailable_reason());
+    }
+}
+
+/// Copy the cached glyx-media DLL **and all FFmpeg runtime DLLs** into `dest_root`
+/// when `capabilities.video: true` is declared in glyx.config.json.
+fn copy_media_dll_if_needed(dest_root: &Path) -> Result<()> {
+    if !media_declared_in_config() { return Ok(()); }
 
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))

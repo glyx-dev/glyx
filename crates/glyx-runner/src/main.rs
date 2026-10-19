@@ -33,9 +33,15 @@ const TRAILER_MAGIC: u64 = 0x4C52_5458_4F4C_4556;
 /// Footer size in bytes (v1): 6×u64 + 4×u32 + 1×u64 = 72.
 const FOOTER_SIZE: i64 = 72;
 
+/// Footer `flags` bit 0: the JS section is `[u32 LE n][n bytes of the app compiled by this runner's engine][the source]`, not just the
+/// source. The compiled part is QuickJS bytecode; the runtime falls back to the source if it rejects it.
+const FLAG_PRECOMPILED_JS: u32 = 1;
+
 struct TrailerPayload {
     snapshot:    Vec<u8>,
     js_src:      String,
+    /// The app compiled for this engine, when the trailer carries it (see `FLAG_PRECOMPILED_JS`).
+    js_compiled: Option<Vec<u8>>,
     config_json: String,
 }
 
@@ -67,7 +73,7 @@ fn read_trailer() -> Option<TrailerPayload> {
     let cfg_off   = u64::from_le_bytes(footer[32..40].try_into().ok()?);
     let cfg_len   = u64::from_le_bytes(footer[40..48].try_into().ok()?) as usize;
     let version   = u32::from_le_bytes(footer[48..52].try_into().ok()?);
-    // flags   = u32::from_le_bytes(footer[52..56]) — reserved, ignored for now
+    let flags      = u32::from_le_bytes(footer[52..56].try_into().ok()?);
     let stored_crc = u32::from_le_bytes(footer[56..60].try_into().ok()?);
     // reserved = footer[60..64] — ignored
 
@@ -112,10 +118,19 @@ fn read_trailer() -> Option<TrailerPayload> {
         return None;
     }
 
+    // With the precompiled flag the JS section is `[u32 n][compiled][source]`; a section that does not add up is as bad as a bad CRC.
+    let (js_compiled, js_bytes) = if flags & FLAG_PRECOMPILED_JS != 0 {
+        let n = u32::from_le_bytes(js_bytes.get(..4)?.try_into().ok()?) as usize;
+        let compiled = js_bytes.get(4..4usize.checked_add(n)?)?.to_vec();
+        (Some(compiled), js_bytes[4 + n..].to_vec())
+    } else {
+        (None, js_bytes)
+    };
+
     let js_src      = String::from_utf8(js_bytes) .ok()?;
     let config_json = String::from_utf8(cfg_bytes).ok()?;
 
-    Some(TrailerPayload { snapshot, js_src, config_json })
+    Some(TrailerPayload { snapshot, js_src, js_compiled, config_json })
 }
 
 /// `~/.glyx/updates/<exe_stem>/pending.js`
@@ -178,7 +193,35 @@ fn load_verified_pending_js() -> Option<String> {
     }
 }
 
+/// `glyx-runner --glyx-compile-js <app.js> <out> [<snapshot>]`: what `glyx build` runs to compile the app with the engine of the very runner it is
+/// about to embed it in (QuickJS bytecode only loads into the build that wrote it). Exits 0 with `<out>` written; 2 when this engine
+/// has no precompiled form; 1 on a compile error.
+fn compile_js_mode() -> Option<i32> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) != Some("--glyx-compile-js") { return None; }
+    let (Some(input), Some(output)) = (args.get(2), args.get(3)) else {
+        eprintln!("usage: glyx-runner --glyx-compile-js <app.js> <out>");
+        return Some(1);
+    };
+    let source = match std::fs::read_to_string(input) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("cannot read {input}: {e}"); return Some(1); }
+    };
+    // V8 compiles against the snapshot the app will run on (QuickJS has none).
+    let snapshot = args.get(4).and_then(|p| std::fs::read(p).ok());
+    Some(match glyx_core::compile_app_js(&source, snapshot.as_deref()) {
+        None => 2,
+        Some(Err(e)) => { eprintln!("{e}"); 1 }
+        Some(Ok(bytes)) => match std::fs::write(output, bytes) {
+            Ok(()) => 0,
+            Err(e) => { eprintln!("cannot write {output}: {e}"); 1 }
+        },
+    })
+}
+
 fn main() {
+    if let Some(code) = compile_js_mode() { std::process::exit(code); }
+    glyx_core::startup_mark("runner: main");
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
         .format_module_path(false)
@@ -192,11 +235,14 @@ fn main() {
     // by updater_download_js) verifies against the embedded UPDATE_PUBKEY.
     // A missing or invalid sig deletes both files and falls back to the
     // embedded bundle — a tampered pending.js is never executed.
+    glyx_core::startup_mark("runner: logger ready");
     let pending_js = load_verified_pending_js();
+    glyx_core::startup_mark("runner: pending update checked");
 
     let mut config = if let Some(payload) = read_trailer() {
+        glyx_core::startup_mark("runner: trailer read");
         eprintln!("[glyx] Loading app from embedded binary trailer.");
-        glyx_core::AppConfig::from_trailer(payload.snapshot, payload.js_src, &payload.config_json)
+        glyx_core::AppConfig::from_trailer(payload.snapshot, payload.js_src, payload.js_compiled, &payload.config_json)
     } else {
         glyx_core::AppConfig::from_config()
     };
@@ -206,6 +252,7 @@ fn main() {
         config.js_src = Some(js);
     }
 
+    glyx_core::startup_mark("runner: config ready");
     let restart = glyx_core::run(config);
 
     if restart {

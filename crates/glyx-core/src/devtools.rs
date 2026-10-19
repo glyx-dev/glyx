@@ -105,13 +105,27 @@ pub(crate) const BUNDLE_URL: &str = "glyx://app/bundle.js";
 /// profile frames back to source files.
 static BUNDLE_SOURCE_MAP: Mutex<Option<Arc<str>>> = Mutex::new(None);
 
-/// With devtools on: remember `js`'s inline source map and name the script.
+/// The bundle's source map decoded (positions and the embedded sources), for `bundle_map`; dropped when a new bundle is loaded.
+static DECODED_MAP: Mutex<Option<Arc<crate::source_map::SourceMap>>> = Mutex::new(None);
+
+/// The current bundle's source map, decoded the first time it is asked for.
+pub(crate) fn bundle_map() -> Option<Arc<crate::source_map::SourceMap>> {
+    if let Some(m) = DECODED_MAP.lock().clone() { return Some(m); }
+    let b64 = BUNDLE_SOURCE_MAP.lock().clone()?;
+    let decoded = Arc::new(crate::source_map::SourceMap::from_base64(&b64)?);
+    *DECODED_MAP.lock() = Some(Arc::clone(&decoded));
+    Some(decoded)
+}
+
+/// Remember `js`'s inline source map (always) and, with devtools on, name the script.
 /// Otherwise `js` is evaluated as is.
 pub(crate) fn prepare_bundle(js: &str) -> std::borrow::Cow<'_, str> {
-    if std::env::var_os("GLYX_DEVTOOLS_PORT").is_none() { return js.into(); }
     const MARK: &str = "//# sourceMappingURL=data:application/json;base64,";
+    // Kept with or without DevTools: the error overlay maps stack frames in the bundle back to the app's own files with it.
     let map = js.rfind(MARK).map(|i| Arc::<str>::from(js[i + MARK.len()..].trim_end()));
     *BUNDLE_SOURCE_MAP.lock() = map;
+    *DECODED_MAP.lock() = None;
+    if std::env::var_os("GLYX_DEVTOOLS_PORT").is_none() { return js.into(); }
     format!("{js}
 //# sourceURL={BUNDLE_URL}
 ").into()
@@ -913,6 +927,12 @@ impl Devtools {
                 let win = target_window(req.window_id, windows)?;
                 let s = windows.get_mut(&win).expect("target_window checked it");
                 Ok(s.label_cache.stats_json())
+            })().into(),
+            // The pixel cache for canvases repainted unchanged: bitmaps held, bytes against the budget, blits so far.
+            ("Performance", "getCanvasCache") => (|| {
+                let win = target_window(req.window_id, windows)?;
+                let s = windows.get_mut(&win).expect("target_window checked it");
+                Ok(s.canvas_pixels.stats_json())
             })().into(),
             ("Performance", "setLabelCache") => (|| {
                 let win = target_window(req.window_id, windows)?;

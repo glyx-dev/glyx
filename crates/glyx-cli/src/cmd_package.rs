@@ -385,7 +385,7 @@ pub(super) fn package_windows(name: &str, bin: &Path) -> Result<()> {
                 Err(e) => println!("  Warning: exe icon not embedded ({e})"),
             }
             if let Some(t) = saved_trailer {
-                match write_trailer(&exe_dest, &t.snapshot, &t.js, &t.config) {
+                match write_trailer(&exe_dest, &t.snapshot, &t.js, &t.config, t.flags) {
                     Ok(_)  => println!("  Trailer restored after icon patch (config/capabilities intact)"),
                     Err(e) => println!("  Warning: failed to restore trailer after icon patch: {e} — this package's capabilities will not work!"),
                 }

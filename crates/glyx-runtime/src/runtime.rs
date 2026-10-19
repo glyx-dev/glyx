@@ -403,8 +403,49 @@ impl V8Runtime {
 
     // ── Script execution ──────────────────────────────────────────────────────
 
+    /// Compiles `source` as `eval` would and returns V8's code cache for it, which `eval_with_cache` hands back so a launch skips parsing and
+    /// compiling it. Made with the very runner the app is embedded in (`glyx-runner --glyx-compile-js`): V8 only accepts a cache from the same
+    /// build and flags, and falls back to compiling the source when it does not.
+    ///
+    /// `snapshot` is the V8 snapshot the app runs on, when it has one: V8 checks a code cache against the read-only data it was made with, so
+    /// one made in a plain isolate is rejected by an isolate restored from a custom snapshot.
+    pub fn compile_to_code_cache(source: &str, snapshot: Option<&[u8]>) -> Result<Vec<u8>, String> {
+        crate::init_v8();
+        let mut isolate = v8::Isolate::new(glyx_create_params(snapshot.filter(|s| !s.is_empty()).map(|s| s.to_vec()), 64));
+        v8::scope!(let scope, &mut isolate);
+        let context = v8::Context::new(&scope, Default::default());
+        let scope = &mut v8::ContextScope::new(scope, context);
+        let code = v8::String::new(scope, source).ok_or("could not create the source string")?;
+        // The same origin `eval` uses: it is part of what V8 checks the cache against.
+        let name = source.trim_end().rsplit_once('\n')
+            .map_or(source.trim_end(), |(_, last)| last)
+            .strip_prefix("//# sourceURL=").unwrap_or("app.js");
+        let resource_name: v8::Local<v8::Value> = v8::String::new(scope, name).ok_or("bad script name")?.into();
+        let source_map_url: v8::Local<v8::Value> = v8::String::new(scope, "").ok_or("bad map url")?.into();
+        let origin = v8::ScriptOrigin::new(scope, resource_name, 0, 0, false, -1, Some(source_map_url), false, false, false, None);
+        let mut src = v8::script_compiler::Source::new(code, Some(&origin));
+        let unbound = v8::script_compiler::compile_unbound_script(
+            scope, &mut src,
+            v8::script_compiler::CompileOptions::NoCompileOptions,
+            v8::script_compiler::NoCacheReason::NoReason,
+        ).ok_or("compile error")?;
+        let cache = unbound.create_code_cache().ok_or("V8 could not make a code cache for this script")?;
+        Ok(cache.to_vec())
+    }
+
     pub fn eval(&mut self, source: &str) -> Result<String, RuntimeError> {
+        self.eval_with_cache(source, None)
+    }
+
+    /// `eval`, compiling from V8's code cache for `source` when one is given (made by `compile_to_code_cache` in the same V8 build with the
+    /// same flags). A cache V8 does not accept (another V8 version or flag set, a damaged blob) costs nothing but the usual compile: V8 reports
+    /// it as rejected and compiles the source, so the script still runs.
+    pub fn eval_with_cache(&mut self, source: &str, cache: Option<&[u8]>) -> Result<String, RuntimeError> {
         let _entered = self.enter();
+        // Timing for `GLYX_STARTUP_TRACE=1`, for the app's own (large) script only.
+        let trace = std::env::var_os("GLYX_STARTUP_TRACE").is_some() && source.len() > 100_000;
+        let t_start = std::time::Instant::now();
+        let t_compiled: std::time::Instant;
         // All V8 handle-scope work is in a nested block so every borrow of
         // `self.isolate` is released before `low_memory_notification()` runs.
         let result = {
@@ -438,15 +479,32 @@ impl V8Runtime {
                 None,
             );
 
-            let script = v8::Script::compile(try_catch, code, Some(&origin))
-                .ok_or_else(|| {
-                    let exc = try_catch.exception().unwrap();
-                    let msg = exc
-                        .to_string(try_catch)
-                        .map(|s| s.to_rust_string_lossy(try_catch.as_ref()))
+            macro_rules! compile_error {
+                ($tc:expr) => {{
+                    let msg = $tc.exception()
+                        .and_then(|exc| exc.to_string($tc))
+                        .map(|s| s.to_rust_string_lossy($tc.as_ref()))
                         .unwrap_or_else(|| "Compile error".into());
                     RuntimeError::CompileError(msg)
-                })?;
+                }};
+            }
+            let script = match cache {
+                None => v8::Script::compile(try_catch, code, Some(&origin)).ok_or_else(|| compile_error!(try_catch))?,
+                Some(bytes) => {
+                    let mut src = v8::script_compiler::Source::new_with_cached_data(
+                        code, Some(&origin), v8::script_compiler::CachedData::new(bytes));
+                    let unbound = v8::script_compiler::compile_unbound_script(
+                        try_catch, &mut src,
+                        v8::script_compiler::CompileOptions::ConsumeCodeCache,
+                        v8::script_compiler::NoCacheReason::NoReason,
+                    ).ok_or_else(|| compile_error!(try_catch))?;
+                    if src.get_cached_data().map_or(false, |c| c.rejected()) {
+                        log::warn!("V8 rejected the app's code cache; compiled the source instead.");
+                    }
+                    unbound.bind_to_current_context(try_catch)
+                }
+            };
+            t_compiled = std::time::Instant::now();
 
             match script.run(try_catch) {
                 Some(val) => {
@@ -477,9 +535,17 @@ impl V8Runtime {
                 }
             }
         };
+        let t_ran = std::time::Instant::now();
         // Release parse-time garbage (AST nodes, bytecode, temp strings).
         // Notify on both success and error -- V8 trims what it can regardless.
         self.isolate.low_memory_notification();
+        if trace {
+            let ms = |a: std::time::Instant, b: std::time::Instant| b.duration_since(a).as_secs_f64() * 1000.0;
+            let now = std::time::Instant::now();
+            eprintln!("[startup]           V8 eval of {} KB ({}): compile {:.1} ms, run {:.1} ms, low-memory GC {:.1} ms",
+                source.len() / 1024, if cache.is_some() { "with code cache" } else { "from source" },
+                ms(t_start, t_compiled), ms(t_compiled, t_ran), ms(t_ran, now));
+        }
         result
     }
 
@@ -762,6 +828,10 @@ impl JsRuntime for V8Runtime {
         self.eval(source)
     }
 
+    fn eval_precompiled(&mut self, compiled: &[u8], source: &str) -> Option<Result<(), RuntimeError>> {
+        Some(self.eval_with_cache(source, Some(compiled)).map(|_| ()))
+    }
+
     fn init_canvas_buffers(&mut self, protocol: &str, buffer_kb: usize) {
         self.init_canvas_buffers(protocol, buffer_kb);
     }
@@ -875,6 +945,31 @@ mod tests {
         drop(first); // not the reverse of creation order
         second.gc_hint();
         assert_eq!(second.eval("who").unwrap(), "second");
+    }
+
+    /// The app compiled to a code cache runs from it, and gives the result the source gives; a cache V8 does not accept (damaged, empty,
+    /// not V8's at all) still runs the app, by compiling the source.
+    #[test]
+    fn an_app_runs_from_its_code_cache_and_from_a_bad_one() {
+        crate::init_v8();
+        let src = "globalThis.__cc = (function () { var n = 0; for (var i = 0; i < 100; i++) n += i; return n; })(); __cc + 1;";
+        let cache = V8Runtime::compile_to_code_cache(src, None).expect("a code cache");
+        assert!(cache.len() > 16, "a real blob");
+
+        let mut with = new_runtime_with_plugin(None, "", "__unused_cc1");
+        assert_eq!(with.eval_with_cache(src, Some(&cache)).unwrap(), "4951");
+        assert_eq!(with.eval("__cc").unwrap(), "4950");
+
+        for bad in [vec![], vec![0u8; 64], b"not a V8 code cache at all".to_vec(), cache[..cache.len() / 2].to_vec()] {
+            let mut rt = new_runtime_with_plugin(None, "", "__unused_cc2");
+            assert_eq!(rt.eval_with_cache(src, Some(&bad)).unwrap(), "4951", "rejected cache {} bytes", bad.len());
+        }
+
+        // A cache for other source is not trusted for this one: it is rejected, and the source it was handed is what runs.
+        let other = V8Runtime::compile_to_code_cache("globalThis.__other = 7; 7;", None).unwrap();
+        let mut rt = new_runtime_with_plugin(None, "", "__unused_cc3");
+        assert_eq!(rt.eval_with_cache(src, Some(&other)).unwrap(), "4951");
+        assert!(matches!(rt.eval("typeof __other").unwrap().as_str(), "undefined"), "the other script did not run");
     }
 
     /// A scroll reaches JS with both deltas, in the web's convention.

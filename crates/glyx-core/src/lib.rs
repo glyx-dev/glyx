@@ -101,6 +101,12 @@ mod label_cache;
 mod canvas_paint;
 mod canvas_export;
 mod canvas_cache;
+mod gpu_probe;
+mod scroll_blit;
+#[cfg(feature = "dev")]
+mod error_overlay;
+#[cfg(feature = "dev")]
+mod source_map;
 mod state;
 mod dev_mode;
 #[cfg(feature = "dev")]
@@ -293,6 +299,19 @@ impl LabelKey {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+pub use glyx_shell::startup_mark;
+
+/// Compiles an app's JS into the form this runner's engine can run without parsing it: QuickJS bytecode, or V8's code cache. `glyx build`
+/// calls this through the runner it is about to embed the app in (`glyx-runner --glyx-compile-js`), so the result matches the engine exactly.
+pub fn compile_app_js(source: &str, snapshot: Option<&[u8]>) -> Option<Result<Vec<u8>, String>> {
+    #[cfg(feature = "quickjs")]
+    { let _ = snapshot; return Some(glyx_runtime::quickjs_runtime::compile_script_to_bytecode(source, "app.js")); }
+    #[cfg(all(feature = "v8", not(feature = "quickjs")))]
+    { return Some(glyx_runtime::V8Runtime::compile_to_code_cache(source, snapshot)); }
+    #[cfg(not(any(feature = "quickjs", feature = "v8")))]
+    { let _ = (source, snapshot); None }
+}
+
 /// Top-level configuration passed to [`run`].
 pub struct AppConfig {
     /// Window / display settings.
@@ -314,6 +333,9 @@ pub struct AppConfig {
     /// });
     /// ```
     pub js_src: Option<String>,
+    /// `js_src` already compiled (QuickJS bytecode, or a V8 code cache) by the runner this app ships in, from the build's trailer.
+    /// Used instead of parsing the source; if the runtime rejects it the source is evaluated as before.
+    pub js_precompiled: Option<Vec<u8>>,
     /// Pre-executed V8 snapshot blob (from glyx-snapshot tool).
     ///
     /// When provided, the isolate is restored from the snapshot (fast startup ~50ms).
@@ -353,6 +375,7 @@ impl AppConfig {
         AppConfig {
             window,
             js_src,
+            js_precompiled: None,
             snapshot_blob,
             dev_mode:      build_dev_mode_config(),
             extensions:    vec![],
@@ -366,7 +389,7 @@ impl AppConfig {
     /// Called by glyx-runner when it detects embedded payload in its own bytes.
     /// The trailer is written by `glyx build --mode snapshot` for JS-only projects
     /// without invoking cargo.
-    pub fn from_trailer(snapshot_blob: Vec<u8>, js_src: String, config_json: &str) -> Self {
+    pub fn from_trailer(snapshot_blob: Vec<u8>, js_src: String, js_precompiled: Option<Vec<u8>>, config_json: &str) -> Self {
         let mut window = WindowConfig::default();
         let (caps, js_plugins) = apply_config_json(config_json, &mut window);
         glyx_security::init(caps);
@@ -374,6 +397,7 @@ impl AppConfig {
         AppConfig {
             window,
             js_src: Some(js_src),
+            js_precompiled,
             snapshot_blob: Some(snapshot_blob),
             dev_mode: None,
             extensions: vec![],
@@ -863,6 +887,7 @@ fn build_window_controller(
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn run(mut config: AppConfig) -> bool {
+    startup_mark("core: run() entered");
     // On Windows, Ctrl+C causes STATUS_CONTROL_C_EXIT (0xc000013a) by default,
     // which cargo treats as a failure even though the user intentionally quit.
     // Install a console ctrl handler that exits cleanly with code 0.
@@ -1047,7 +1072,8 @@ pub fn run(mut config: AppConfig) -> bool {
         glyx_runtime::icu::set_default_locale(locale);
     }
 
-    let AppConfig { mut window, js_src, snapshot_blob, dev_mode: _dev_mode, extensions, js_plugins, locales: _locales } = config;
+    let AppConfig { mut window, js_src, js_precompiled, snapshot_blob, dev_mode: _dev_mode, extensions, js_plugins, locales: _locales } = config;
+    let js_precompiled_arc = Arc::new(js_precompiled);
     // Capture before `window` is moved into glyx_shell::run().
     let window_decorations = window.decorations;
 
@@ -1129,7 +1155,12 @@ pub fn run(mut config: AppConfig) -> bool {
     #[cfg(feature = "dev")]
     let mut devtools_started = false;
 
+    startup_mark("core: entering the shell (window and event loop)");
     let restart = glyx_shell::run(window, move |event| {
+        {
+            static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !FIRST.swap(true, std::sync::atomic::Ordering::Relaxed) { startup_mark("core: first shell event"); }
+        }
         match event {
             // ── Pre-init splash window — paint it immediately, before any
             // GPU/JS setup for the real main window even starts. ──────────
@@ -1141,7 +1172,7 @@ pub fn run(mut config: AppConfig) -> bool {
                             let bg    = splash.background;
                             let scale = splash.image_scale;
                             let rgba  = composite_splash_frame(bg, splash.current_image(), scale, w, h);
-                            sp.present_rgba(&rgba, w, h, None);
+                            sp.present_rgba(&rgba, w, h, None, None);
                         }
                         pending_splash = Some((window, sp));
                     }
@@ -1150,6 +1181,7 @@ pub fn run(mut config: AppConfig) -> bool {
             }
             // ── Window ready — initialise per-window subsystems ──────────
             ShellEvent::WindowReady { window_handle, window, proxy: ev_proxy, #[cfg(feature = "a11y")] a11y_update } => {
+                startup_mark("core: window ready");
                 #[cfg(feature = "dev")]
                 if !devtools_started {
                     devtools_started = true;
@@ -1164,9 +1196,8 @@ pub fn run(mut config: AppConfig) -> bool {
                 // if the backend resolves to TinySkia, we present via softbuffer
                 // and never initialise wgpu at all (saves ~20 MB private +
                 // ~47 MB GPU-shared on iGPUs where GPU memory is system RAM).
-                let (probe_tier, probe_name) =
-                    pollster::block_on(glyx_gpu::probe_adapter_info())
-                        .unwrap_or((glyx_gpu::GpuTier::None, "no adapter".into()));
+                let (probe_tier, probe_name) = gpu_probe::probe();
+                startup_mark("core: GPU adapter probe done");
                 let backend_kind = resolve_backend(render_mode_config, probe_tier, force_cpu);
                 // renderMode:'gpu' forced on a tier the 'auto' heuristic would have
                 // routed to TinySkia (integrated/virtual GPU, or no adapter) puts
@@ -1326,6 +1357,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     });
                 }
 
+                startup_mark("core: renderer and present ready");
                 // Construct the selected JsRuntime backend. Compile-time choice
                 // (see memory/backend-droppability-goals.md — picking one drops
                 // the other's dependency entirely, not a runtime toggle).
@@ -1407,6 +1439,7 @@ pub fn run(mut config: AppConfig) -> bool {
 
                 // Set up the Canvas2D binary command buffer (or mark json mode).
                 // No-op under quickjs (canvas bindings aren't ported yet).
+                startup_mark("core: JS runtime object created");
                 rt.init_canvas_buffers(&canvas_protocol, canvas_buffer_kb);
 
                 rt.register_extensions(&*extensions_arc);
@@ -1527,7 +1560,21 @@ pub fn run(mut config: AppConfig) -> bool {
                 if std::env::var_os("GLYX_DEVTOOLS_PORT").is_some() {
                     let _ = rt.eval("globalThis.__glyx_devtools = true;");
                 }
-                if let Some(ref js) = *js_src_arc {
+                startup_mark("core: JS runtime ready");
+                // A release build carries the app already compiled by this very runner (QuickJS bytecode, a V8 code cache): run
+                // that and skip the parse. If the runtime rejects it, the source is evaluated as before.
+                let mut ran_precompiled = false;
+                if let (Some(compiled), Some(js)) = ((*js_precompiled_arc).as_deref(), (*js_src_arc).as_deref()) {
+                    match rt.eval_precompiled(compiled, js) {
+                        Some(Ok(())) => {
+                            log::info!("Window {}: JS eval complete (precompiled).", window_handle);
+                            ran_precompiled = true;
+                        }
+                        Some(Err(e)) => log::warn!("Window {}: precompiled app rejected ({}); evaluating the source.", window_handle, e),
+                        None => {}
+                    }
+                }
+                if let (Some(js), false) = ((*js_src_arc).as_ref(), ran_precompiled) {
                     #[cfg(feature = "dev")]
                     let js = &*devtools::prepare_bundle(js);
                     match rt.eval(js) {
@@ -1540,6 +1587,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     }
                 }
 
+                startup_mark("core: app evaluated");
                 let win = window.clone();
                 let request_redraw: Arc<dyn Fn() + Send + Sync> =
                     Arc::new(move || win.request_redraw());
@@ -1597,6 +1645,8 @@ pub fn run(mut config: AppConfig) -> bool {
                     image_cache_hits: 0,
                     image_cache_misses: 0,
                     canvas_pixels: canvas_cache::CanvasPixelCache::new(canvas_cache_budget),
+                    scroll_drawn: std::collections::HashMap::new(),
+                    frame_serial: 0,
                     label_cache:  label_cache::LabelCache::new(label_cache::pinned_entries(std::env::var("GLYX_LABEL_CACHE").ok().as_deref(), label_cache_entries)),
                     cursor_x:     0.0,
                     cursor_y:     0.0,
@@ -1710,6 +1760,10 @@ pub fn run(mut config: AppConfig) -> bool {
                     #[cfg(feature = "dev")]
                     overlay_was_drawn: false,
                     #[cfg(feature = "dev")]
+                    overlay_renderer: None,
+                    #[cfg(feature = "dev")]
+                    overlay_bbox: None,
+                    #[cfg(feature = "dev")]
                     frame_details: None,
                     #[cfg(feature = "dev")]
                     gpu_screenshot: None,
@@ -1733,6 +1787,9 @@ pub fn run(mut config: AppConfig) -> bool {
                             overlay_next_refresh:  Instant::now(),
                             overlay_next_redraw:    Instant::now(),
                             last_js_error:          initial_eval_error,
+                            error_dismissed:        None,
+                            error_view:             None,
+                            error_panel:            None,
                             startup_rss_bytes:      0,
                             startup_v8_total_bytes: 0,
                         })
@@ -1850,6 +1907,19 @@ pub fn run(mut config: AppConfig) -> bool {
                     }
                     // Matches JS clearing the ring on any click (events.ts).
                     if pressed { s.focus_visible = false; }
+                    // A click on the error overlay's panel opens the place the error names in the editor (the app does not see it).
+                    #[cfg(feature = "dev")]
+                    if button == 0 && pressed {
+                        if let Some(dev) = s.dev_mode.as_ref() {
+                            if let (Some(_), Some([px, py, pw, ph])) = (dev_mode::visible_error(dev), dev.error_panel) {
+                                let (cx, cy) = (s.cursor_x as f64, s.cursor_y as f64);
+                                if cx >= px && cx <= px + pw && cy >= py && cy <= py + ph {
+                                    dev_mode::open_error_in_editor(dev);
+                                    return;
+                                }
+                            }
+                        }
+                    }
                     // Native fallback close control (see CLOSE_BTN_SIZE doc)
                     // — only live when JS has never rendered anything, so it
                     // can never intercept a real app's own clicks.
@@ -2001,9 +2071,22 @@ pub fn run(mut config: AppConfig) -> bool {
                         _ => {}
                     }
 
+                    // The error overlay takes Escape (dismiss) and Enter (open the place in the editor) while it is up, and the app
+                    // does not see them.
+                    #[cfg(feature = "dev")]
+                    let mut consumed_by_error_overlay = false;
                     #[cfg(feature = "dev")]
                     if let Some(dev) = s.dev_mode.as_mut() {
                         match key.as_str() {
+                            "Escape" if pressed && dev_mode::visible_error(dev).is_some() => {
+                                dev.error_dismissed = dev.last_js_error.clone();
+                                consumed_by_error_overlay = true;
+                                (s.request_redraw)();
+                            }
+                            "Enter" | "NumpadEnter" if pressed && dev_mode::visible_error(dev).is_some() => {
+                                dev_mode::open_error_in_editor(dev);
+                                consumed_by_error_overlay = true;
+                            }
                             "ControlLeft" | "ControlRight" => dev.ctrl_down = pressed,
                             "ShiftLeft" | "ShiftRight"     => dev.shift_down = pressed,
                             "KeyD" if pressed && dev.ctrl_down && dev.shift_down => {
@@ -2026,6 +2109,8 @@ pub fn run(mut config: AppConfig) -> bool {
                             _ => {}
                         }
                     }
+                    #[cfg(feature = "dev")]
+                    if consumed_by_error_overlay { return; }
                     s.runtime.push_event(InputEvent::KeyInput { key, text, pressed });
                 }
             }
@@ -2142,6 +2227,10 @@ pub fn run(mut config: AppConfig) -> bool {
                 if let Some(d) = devtools.as_mut() { d.pump(&mut windows); }
             }
             ShellEvent::RedrawRequested { window_handle } => {
+                {
+                    static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !FIRST.swap(true, std::sync::atomic::Ordering::Relaxed) { startup_mark("core: first redraw requested"); }
+                }
                 #[cfg(feature = "dev")]
                 if let Some(d) = devtools.as_mut() { d.pump(&mut windows); }
                 let Some(s) = windows.get_mut(&window_handle) else { return };
@@ -2316,6 +2405,10 @@ pub fn run(mut config: AppConfig) -> bool {
                 // 5. Single layout pass.
                 let layout_start = Instant::now();
                 recompute_layout(s);
+                {
+                    static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !FIRST.swap(true, std::sync::atomic::Ordering::Relaxed) { startup_mark("core: first frame: layout done"); }
+                }
                 // Detect any position/size changes that cascaded out of layout and
                 // add them to dirty_nodes before building the dirty subtree set.
                 update_dirty_from_layout(s);
@@ -2404,6 +2497,14 @@ pub fn run(mut config: AppConfig) -> bool {
                 #[cfg(not(feature = "dev"))]
                 { s.idle_gate_frames = 0; }
 
+                // Dev overlays on the CPU renderer are drawn into their own layer and composited when the frame is presented, so
+                // they never decide whether the app is rendered; on the other renderers they are drawn into the app's frame.
+                #[cfg(feature = "dev")]
+                let overlay_layer = matches!(s.gpu, Present::Soft(_)) && matches!(s.renderer, glyx_renderer::AnyRenderer::TinySkia(_));
+                #[cfg(not(feature = "dev"))]
+                #[allow(unused_variables)]
+                let overlay_layer = false;
+
                 // Dev: compute whether a full render is actually required.
                 #[cfg(feature = "dev")]
                 let needs_full_render = {
@@ -2414,12 +2515,14 @@ pub fn run(mut config: AppConfig) -> bool {
                         (d.overlay_visible
                             && (d.overlay_lines.is_empty()               // first overlay draw
                                 || Instant::now() >= d.overlay_next_refresh)) // 250ms text refresh
-                        || d.last_js_error.is_some()                 // error banner active
+                        || dev_mode::visible_error(d).is_some()      // error banner active
                     }).unwrap_or(false);
-                    scene_needs_gpu || overlay_refresh_due
+                    scene_needs_gpu
                         // Devtools overlays draw on top of the scene: render
                         // while one is up, and once more after (to clear it).
-                        || s.devtools_highlight.is_some() || !s.flashes.is_empty() || s.overlay_was_drawn
+                        || (!overlay_layer
+                            && (overlay_refresh_due
+                                || s.devtools_highlight.is_some() || !s.flashes.is_empty() || s.overlay_was_drawn))
                 };
                 #[cfg(not(feature = "dev"))]
                 let _needs_full_render = true;
@@ -2489,6 +2592,8 @@ pub fn run(mut config: AppConfig) -> bool {
                     // Stamp last_frame_at so FPS reflects the visual refresh rate
                     // (~20fps from the overlay timer), not the full-render rate (~4fps).
                     s.perf.lock().last_frame_at = Some(frame_start);
+                    if overlay_layer { dev_mode::render_overlay_layer(s); }
+                    let overlay = dev_mode::overlay_pixels(&s.overlay_renderer, s.overlay_bbox);
                     match &mut s.gpu {
                         Present::Gpu(gpu) => {
                             let texture = texture.expect("wgpu path always acquires a texture");
@@ -2501,7 +2606,7 @@ pub fn run(mut config: AppConfig) -> bool {
                                 gpu.poll();
                             }
                         }
-                        Present::Soft(sp) => sp.re_present(),
+                        Present::Soft(sp) => sp.re_present(overlay),
                         #[cfg(target_os = "windows")]
                         Present::Direct2D(_) => unreachable!("excluded via direct2d_active guard above"),
                     }
@@ -2580,15 +2685,29 @@ pub fn run(mut config: AppConfig) -> bool {
                         (None, None)
                     };
 
-                let frame_damage: Option<Vec<damage_rects::Rect>> = {
+                // A frame that is only a scroll of one scroller is done by moving the last frame's rows and drawing just the exposed ones
+                // (see `scroll_blit`); anything it is not sure about falls through to the usual damage below.
+                let scroll_blit = if matches!(s.gpu, Present::Soft(_))
+                    && matches!(s.renderer, glyx_renderer::AnyRenderer::TinySkia(_))
+                    && !s.splash_state.as_ref().map_or(false, |sp| sp.is_visible())
+                {
+                    scroll_blit::detect(s, blink_changed)
+                } else {
+                    None
+                };
+
+                let frame_damage: Option<Vec<damage_rects::Rect>> = if let Some(b) = &scroll_blit {
+                    Some(b.damage.clone())
+                } else {
                     let soft = matches!(s.gpu, Present::Soft(_));
                     let splash_up = s.splash_state.as_ref().map_or(false, |sp| sp.is_visible());
                     #[cfg(feature = "dev")]
-                    let overlay_up = s.dev_mode.as_ref()
-                        .map_or(false, |d| d.overlay_visible || d.last_js_error.is_some())
-                        || s.devtools_highlight.is_some()
-                        || !s.flashes.is_empty()
-                        || s.overlay_was_drawn;
+                    let overlay_up = !overlay_layer
+                        && (s.dev_mode.as_ref()
+                            .map_or(false, |d| d.overlay_visible || dev_mode::visible_error(d).is_some())
+                            || s.devtools_highlight.is_some()
+                            || !s.flashes.is_empty()
+                            || s.overlay_was_drawn);
                     #[cfg(not(feature = "dev"))]
                     let overlay_up = false;
 
@@ -2648,11 +2767,17 @@ pub fn run(mut config: AppConfig) -> bool {
                 let mut present_ms = 0.0_f64;
                 let mut pace_ms = 0.0_f64;
 
+                {
+                    static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !FIRST.swap(true, std::sync::atomic::Ordering::Relaxed) { startup_mark("core: first frame: before drawing"); }
+                }
                 let mut frame = match (&s.renderer, &frame_damage) {
                     (glyx_renderer::AnyRenderer::TinySkia(_), Some(_)) => {
                         match &mut s.renderer {
-                            glyx_renderer::AnyRenderer::TinySkia(r) =>
-                                glyx_renderer::AnyFrame::TinySkia(r.begin_frame_damaged(frame_damage.as_deref())),
+                            glyx_renderer::AnyRenderer::TinySkia(r) => match (&scroll_blit, frame_damage.as_deref()) {
+                                (Some(b), Some(damage)) => glyx_renderer::AnyFrame::TinySkia(r.begin_frame_scrolled(damage, b.region, b.dy)),
+                                _ => glyx_renderer::AnyFrame::TinySkia(r.begin_frame_damaged(frame_damage.as_deref())),
+                            },
                             _ => unreachable!(),
                         }
                     }
@@ -2665,6 +2790,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 let mut webview_overlays: Vec<(u32, f32, f32, f32, f32)> = Vec::new();
 
                 if let Some(root_id) = s.js_root {
+                    s.frame_serial += 1;
                     let mut render_ctx = RenderCtx {
                         nodes:             &s.js_nodes,
                         overrides:         &motion_overrides,
@@ -2678,6 +2804,8 @@ pub fn run(mut config: AppConfig) -> bool {
                         canvas_cmds:       &s.canvas_cmds,
                         canvas_anim:       &canvas_anim,
                         canvas_pixels:     &mut s.canvas_pixels,
+                        scroll_drawn:      &mut s.scroll_drawn,
+                        frame_serial:      s.frame_serial,
                         #[cfg(feature = "canvas3d")]
                         canvas3d_overlays: &mut canvas3d_overlays,
                         #[cfg(feature = "webview")]
@@ -2857,16 +2985,16 @@ pub fn run(mut config: AppConfig) -> bool {
                     }
                 }
 
+                // The other renderers draw the overlays into the app's own frame; the CPU renderer's are in a layer of their
+                // own, rendered just before the frame is presented (`render_overlay_layer`).
                 #[cfg(feature = "dev")]
-                draw_dev_overlay(s, &mut frame);
-
-                #[cfg(feature = "dev")]
-                draw_error_overlay(s, &mut frame);
-
-                #[cfg(feature = "dev")]
-                {
+                if !overlay_layer {
+                    draw_dev_overlay(s, &mut frame);
+                    draw_error_overlay(s, &mut frame);
                     dev_mode::draw_devtools_highlight(s, &mut frame);
                     s.overlay_was_drawn = s.devtools_highlight.is_some() || !s.flashes.is_empty();
+                } else {
+                    s.overlay_was_drawn = false;
                 }
 
                 // (overlay timer reschedule moved to before the blit-only fast path above)
@@ -3031,7 +3159,17 @@ pub fn run(mut config: AppConfig) -> bool {
                     s.canvas3d_last_used = Some(Instant::now());
                 }
 
+                {
+                    static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !FIRST.swap(true, std::sync::atomic::Ordering::Relaxed) { startup_mark("core: first frame: drawn, presenting"); }
+                }
                 let gpu_start = Instant::now();
+                #[cfg(feature = "dev")]
+                if overlay_layer { dev_mode::render_overlay_layer(s); }
+                #[cfg(feature = "dev")]
+                let overlay = dev_mode::overlay_pixels(&s.overlay_renderer, s.overlay_bbox);
+                #[cfg(not(feature = "dev"))]
+                let overlay: Option<soft_present::OverlayPixels> = None;
                 match &mut s.gpu {
                     Present::Gpu(gpu) => {
                         let texture = texture.expect("wgpu path always acquires a texture");
@@ -3133,7 +3271,7 @@ pub fn run(mut config: AppConfig) -> bool {
                              glyx_renderer::AnyFrame::TinySkia(f)) => {
                                 r.finish_frame_soft(f, |rgba, w, h, damage| {
                                     let t = Instant::now();
-                                    sp.present_rgba(rgba, w, h, damage);
+                                    sp.present_rgba(rgba, w, h, damage, overlay);
                                     pace_ms = sp.last_pace_ms();
                                     present_ms = (t.elapsed().as_secs_f64() * 1000.0 - pace_ms).max(0.0);
                                 });
@@ -3265,6 +3403,10 @@ pub fn run(mut config: AppConfig) -> bool {
                 s.boundary_scene_cache_new.clear();
 
                 let gpu_time_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
+                {
+                    static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !FIRST.swap(true, std::sync::atomic::Ordering::Relaxed) { startup_mark("core: first frame rendered and presented"); }
+                }
 
                 // Record perf sample (skips the first frame where frame_time_ms = 0).
                 let (frame_time_ms, js_time_ms, layout_time_ms) = perf_snapshot_pre;

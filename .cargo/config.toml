@@ -6,6 +6,12 @@
 [build]
 # Native build: no custom linker needed — zigbuild is opt-in via `cargo zigbuild` command.
 
+# Windows (MSVC): `libmimalloc-sys` and `rusty_v8` link the static CRT (/MT, see vendor/README.md) while some C libraries
+# default to /MD, so every final link printed `LNK4098: defaultlib 'LIBCMT' conflicts with use of other libs`. The mix is
+# long-standing and works; the warning only repeated itself in every build's terminal output.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "link-arg=/IGNORE:4098"]
+
 [profile.release]
 # Mirrors workspace Cargo.toml release profile — defined here so it applies
 # to all crates even when invoked from a sub-crate directory.

@@ -284,6 +284,8 @@ pub(super) fn handle_dev_build_events(state: &mut PerWindowState) {
                             dev.last_reload = Some(Instant::now());
                             dev.last_build_message = "reload ok".to_string();
                             dev.last_js_error = None;
+                            dev.error_dismissed = None;
+                            dev.error_view = None;
                         }
                     }
                     Err(e) => {
@@ -310,6 +312,56 @@ pub(super) fn handle_dev_build_events(state: &mut PerWindowState) {
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
         }
     }
+}
+
+/// Whether any dev overlay is up: the debug overlay, the error banner, the DevTools highlight or paint flashes.
+#[cfg(feature = "dev")]
+pub(super) fn overlay_active(state: &PerWindowState) -> bool {
+    state.dev_mode.as_ref().map_or(false, |d| d.overlay_visible || visible_error(d).is_some())
+        || state.devtools_highlight.is_some()
+        || !state.flashes.is_empty()
+}
+
+/// CPU renderer: draw the dev overlays into their own transparent, window-sized layer (`PerWindowState::overlay_renderer`),
+/// which the presenter composites over the finished app frame. The app's frame stays clean, so an overlay appearing, changing
+/// or going away costs the overlay's own drawing (and a copy of the frame), not a repaint of the app. With no overlay up the
+/// layer is released.
+#[cfg(feature = "dev")]
+pub(super) fn render_overlay_layer(state: &mut PerWindowState) {
+    use glyx_renderer::{AnyFrame, TinySkiaRenderer};
+    if !overlay_active(state) {
+        state.overlay_renderer = None;
+        state.overlay_bbox = None;
+        return;
+    }
+    let (w, h) = (state.gpu.width().max(1), state.gpu.height().max(1));
+    let mut r = match state.overlay_renderer.take() {
+        Some(r) if r.size() == (w, h) => r,
+        _ => {
+            let mut r = TinySkiaRenderer::new_cpu_only(w, h);
+            r.background_color = glyx_renderer::peniko::Color::from_rgba8(0, 0, 0, 0);
+            r
+        }
+    };
+    let mut frame = AnyFrame::TinySkia(r.begin_frame());
+    draw_dev_overlay(state, &mut frame);
+    draw_error_overlay(state, &mut frame);
+    draw_devtools_highlight(state, &mut frame);
+    let AnyFrame::TinySkia(f) = frame else { unreachable!("built as tiny-skia above") };
+    r.finish_frame_soft(f, |_, _, _, _| {});
+    state.overlay_bbox = r.retained_pixels().and_then(|px| crate::soft_present::pixel_bbox(px, w, h));
+    state.overlay_renderer = Some(r);
+}
+
+/// The overlay layer, for the presenter: its pixels and the box that has anything in it. Takes the two fields rather than the whole
+/// window state so the caller can still borrow its other fields (the presenter, the renderer) while the pixels are in use.
+#[cfg(feature = "dev")]
+pub(super) fn overlay_pixels<'a>(
+    renderer: &'a Option<glyx_renderer::TinySkiaRenderer>,
+    bbox: Option<[u32; 4]>,
+) -> Option<crate::soft_present::OverlayPixels<'a>> {
+    let rgba = renderer.as_ref()?.retained_pixels()?;
+    Some(crate::soft_present::OverlayPixels { rgba, bbox: bbox? })
 }
 
 #[cfg(feature = "dev")]
@@ -506,10 +558,45 @@ pub(super) fn draw_devtools_highlight(state: &mut PerWindowState, frame: &mut An
     frame.draw_text(&lbl, x + 5.0, ty + 2.0, peniko::Color::from_rgba8(230, 240, 255, 255));
 }
 
+/// The error the overlay is showing: the last JS error, unless the developer dismissed that very one (Escape).
+#[cfg(feature = "dev")]
+pub(super) fn visible_error(dev: &crate::state::DevModeState) -> Option<&String> {
+    dev.last_js_error.as_ref().filter(|e| dev.error_dismissed.as_ref() != Some(*e))
+}
+
+/// Enter or a click on the error panel: opens the first place in the app's own code that the error names in the developer's editor.
+#[cfg(feature = "dev")]
+pub(super) fn open_error_in_editor(dev: &crate::state::DevModeState) {
+    let Some(loc) = dev.error_view.as_ref().and_then(|v| v.loc.clone()) else {
+        log::info!("[glyx] the error names no place in the app's own source to open");
+        return;
+    };
+    let root = std::env::current_dir().unwrap_or_default();
+    match crate::error_overlay::open_in_editor(&loc, &root) {
+        Some(ran) => log::info!("[glyx] opened {}:{} in the editor: {ran}", loc.file, loc.line),
+        None => log::warn!("[glyx] could not open {}:{} (set GLYX_EDITOR, e.g. \"code -g {{file}}:{{line}}:{{col}}\")", loc.file, loc.line),
+    }
+}
+
 #[cfg(feature = "dev")]
 pub(super) fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFrame) {
-    let Some(dev) = state.dev_mode.as_ref() else { return };
-    let Some(ref err) = dev.last_js_error.clone() else { return };
+    let Some(err) = state.dev_mode.as_ref().and_then(|d| visible_error(d)).cloned() else {
+        if let Some(dev) = state.dev_mode.as_mut() { dev.error_panel = None; }
+        return;
+    };
+    let root = std::env::current_dir().unwrap_or_default();
+    // Where the error is and the source around it: read once per error, not every frame. A source map path is relative to the bundle's
+    // output folder, so that is searched too.
+    if let Some(dev) = state.dev_mode.as_mut() {
+        if dev.error_view.as_ref().map_or(true, |v| v.err != err) {
+            let mut roots = vec![root.clone()];
+            if let Some(out) = crate::config::build_dev_mode_config().and_then(|c| c.output_js.parent().map(|p| root.join(p))) { roots.push(out); }
+            let map = crate::devtools::bundle_map();
+            dev.error_view = Some(crate::error_overlay::ErrorView::build(&err, &roots, map.as_deref()));
+        }
+    }
+    let view = state.dev_mode.as_ref().and_then(|d| d.error_view.clone()).expect("built just above");
+    let err = view.shown.clone();
 
     let win_w = state.gpu.width()  as f64;
     let win_h = state.gpu.height() as f64;
@@ -537,24 +624,36 @@ pub(super) fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFram
         if let Some(last) = msg.last_mut() { last.push('…'); }
     }
 
+    // The source lines around the failure: [from, to) of the excerpt, trimmed from the end farther from the error line when room is short.
+    let (mut exc_from, mut exc_to) = view.excerpt.as_ref().map_or((0, 0), |e| (0, e.lines.len()));
+    let exc_at = view.excerpt.as_ref().map_or(0, |e| e.at);
+
     // Size the panel to its content, up to 60% of the window; stack frames
-    // give way first, then message lines.
+    // give way first, then source lines, then message lines.
     const HEAD: f64 = 32.0;
     const MSG_H: f64 = 20.0;
     const FRAME_H: f64 = 18.0;
     const FOOT: f64 = 24.0;
+    const EXC_HEAD: f64 = 20.0;
+    const EXC_H: f64 = 16.0;
     let max_panel = (win_h * 0.6).max(120.0).min(win_h);
     let total_frames = frame_lines.len();
-    let height = |m: usize, f: usize| HEAD + m as f64 * MSG_H + 5.0 + f as f64 * FRAME_H + FOOT
+    let height = |m: usize, f: usize, e: usize| HEAD + m as f64 * MSG_H + 5.0
+        + if e > 0 { EXC_HEAD + e as f64 * EXC_H + 6.0 } else { 0.0 }
+        + f as f64 * FRAME_H + FOOT
         + if total_frames > f && f > 0 { FRAME_H } else { 0.0 };
     let mut n_frames = total_frames.min(7);
-    while n_frames > 0 && height(msg.len(), n_frames) > max_panel { n_frames -= 1; }
-    while msg.len() > 1 && height(msg.len(), n_frames) > max_panel {
+    while n_frames > 0 && height(msg.len(), n_frames, exc_to - exc_from) > max_panel { n_frames -= 1; }
+    while exc_to - exc_from > 1 && height(msg.len(), n_frames, exc_to - exc_from) > max_panel {
+        if exc_at - exc_from > exc_to - 1 - exc_at { exc_from += 1 } else { exc_to -= 1 }
+    }
+    while msg.len() > 1 && height(msg.len(), n_frames, exc_to - exc_from) > max_panel {
         msg.pop();
         if let Some(last) = msg.last_mut() { last.push('…'); }
     }
-    let panel_h = height(msg.len(), n_frames).min(max_panel);
+    let panel_h = height(msg.len(), n_frames, exc_to - exc_from).min(max_panel);
     let panel_y = win_h - panel_h;
+    if let Some(dev) = state.dev_mode.as_mut() { dev.error_panel = Some([0.0, panel_y, win_w, panel_h]); }
 
     frame.fill_rounded_rect(0.0, panel_y, win_w, panel_h, 0.0,
         peniko::Color::from_rgba8(26, 4, 4, 252));
@@ -586,14 +685,40 @@ pub(super) fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFram
     }
     y += 5.0;
 
+    // Where it happened, and the lines around it, the failing one marked.
+    if let (Some(ex), true) = (view.excerpt.as_ref(), exc_to > exc_from) {
+        if let Some(place) = view.place(&root) {
+            let hint = pick_fitting(&["  ·  Enter or click: open in editor", "  ·  Enter: open", ""], frame_ch.saturating_sub(place.chars().count()));
+            let lbl = state.text_sys.label(&format!("{place}{hint}"), 11.0);
+            frame.draw_text(&lbl, 16.0, y, source_col);
+        }
+        y += EXC_HEAD;
+        let col = view.loc.as_ref().map_or(0, |l| l.col as usize);
+        for idx in exc_from..exc_to {
+            let text = &ex.lines[idx];
+            let is_err = idx == ex.at;
+            if is_err {
+                frame.fill_rect(0.0, y - 2.0, win_w, EXC_H, peniko::Color::from_rgba8(220, 50, 50, 55));
+            }
+            let num = state.text_sys.label(&format!("{:>4}", ex.first_line as usize + idx), 10.5);
+            frame.draw_text(&num, 16.0, y, dim_col);
+            let shown = truncate_chars(text, frame_ch.saturating_sub(8));
+            let lbl = state.text_sys.label(&shown, 11.0);
+            let line_col = if is_err { peniko::Color::from_rgba8(255, 232, 232, 255) } else { frame_col };
+            frame.draw_text(&lbl, 56.0, y, line_col);
+            if is_err && col > 0 {
+                // A bar under the failing column; the text is not monospaced, so the offset is the measured width of what comes before it.
+                let before: String = text.chars().take(col - 1).collect();
+                let x = 56.0 + state.text_sys.label(&before, 11.0).width() as f64;
+                frame.fill_rect(x, y + EXC_H - 5.0, 7.0, 2.0, peniko::Color::from_rgba8(255, 110, 110, 255));
+            }
+            y += EXC_H;
+        }
+        y += 6.0;
+    }
+
     for t in frame_lines.iter().take(n_frames) {
-        let is_user = t.contains(".jsx") || t.contains(".tsx")
-                   || (t.contains(".ts") && !t.contains("node_modules"))
-                   || (t.contains(".js")
-                       && !t.contains("node_modules")
-                       && !t.contains("polyfills")
-                       && !t.contains("chunk-"));
-        let col = if is_user { source_col } else { frame_col };
+        let col = if crate::error_overlay::is_user_file(t) { source_col } else { frame_col };
         let lbl = state.text_sys.label(&truncate_chars(t, frame_ch), 10.5);
         frame.draw_text(&lbl, 26.0, y, col);
         y += FRAME_H;
@@ -604,11 +729,11 @@ pub(super) fn draw_error_overlay(state: &mut PerWindowState, frame: &mut AnyFram
     }
 
     // The full text is always in the terminal and on the clipboard (Ctrl+C);
-    // the footer says so in as many words as fit.
+    // the footer says what the keys do in as many words as fit.
     let hint = pick_fitting(&[
-        "Ctrl+C copies the full error (also in the terminal)  ·  save any file to rebuild",
-        "Ctrl+C copies the full error  ·  also in the terminal",
-        "Ctrl+C: copy full error",
+        "Enter: open in editor  ·  Esc: dismiss  ·  Ctrl+C: copy the full error (also in the terminal)  ·  save a file to rebuild",
+        "Enter: open  ·  Esc: dismiss  ·  Ctrl+C: copy full error",
+        "Esc: dismiss  ·  Ctrl+C: copy",
     ], (win_w as usize).saturating_sub(32) / 5);
     let hint_lbl = state.text_sys.label(hint, 10.0);
     frame.draw_text(&hint_lbl, 16.0, panel_y + panel_h - 16.0, dim_col);

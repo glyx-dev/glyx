@@ -75,7 +75,7 @@ fn glyph_path(verbs: &[Verb], points: &[swash::zeno::Point], origin: (f64, f64))
 /// Appends the sub-paths of `path` to `out` as flat polygons (those with fewer than three points are dropped).
 fn flatten_into(path: &BezPath, out: &mut Vec<Vec<f32>>) {
     let mut cur: Vec<f32> = Vec::new();
-    let mut finish = |cur: &mut Vec<f32>, out: &mut Vec<Vec<f32>>| {
+    let finish = |cur: &mut Vec<f32>, out: &mut Vec<Vec<f32>>| {
         if cur.len() >= 6 { out.push(std::mem::take(cur)); } else { cur.clear(); }
     };
     kurbo::flatten(path.iter(), TOLERANCE_PX, |el| match el {

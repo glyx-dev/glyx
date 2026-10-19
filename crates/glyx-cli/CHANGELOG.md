@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+- **`glyx dev --devtools` prints the DevTools link** (it only did with `--open`); `--open` also opens it in the browser.
+- **`glyx dev` builds the media library from source in a source checkout** (Windows): `glyx-media-c`'s own scripts, into `<checkout>/target/glyx-media-local`, with the app pointed at it by `GLYX_MEDIA_DIR`; again only when the C sources, the header or the build script change. The user cache keeps the signed release library that `glyx build` packages. It falls back to the release download when MSVC is missing or the build fails, and `GLYX_MEDIA_NO_BUILD=1` downloads instead.
+- **`glyx build` precompiles a QuickJS app** with the runner it embeds it in (`glyx-runner --glyx-compile-js`), so the app starts without being parsed; the source stays in the trailer as the fallback. `GLYX_NO_PRECOMPILE=1` ships the source alone.
+
+### Fixed
+- **A native project's `glyx dev` ran without ICU data** (`Intl` and `toLocaleString` were unavailable, with a warning): it placed the data under the project's own `target/debug`, but cargo builds the executable into the workspace's `target/debug`. The app is now pointed at the file with `GLYX_ICU_DATA`.
+- **Videos did not play in a native project run with `glyx dev` ("glyx-media DLL not loaded").** A native project runs with `cargo run`, which never fetched the media library, and the library is named for the Glyx version that needs it (`glyx-media-0.2.0-...`), so an older one left in `~/.glyx/cache/media` (`glyx-media-1.0.0-...`) was never picked up. `glyx dev` now downloads this version into the cache (when the app declares video, camera or microphone) and says plainly when it cannot. The check for those capabilities also reads `glyx.config.ts`, not only `glyx.config.json`, so a TypeScript config no longer skips staging the media library for `glyx dev` and `glyx build`.
+- The "media library not available" error names the file this Glyx wants, where it looked, and any other version found in the cache, instead of pointing at `glyx runtime build`.
+
 ### Changed
 - **`glyx build` skips the V8 snapshot for a QuickJS project** (`engine: 'quickjs'`): QuickJS cannot use one, so it no longer downloads the release's base snapshot or builds one, and the binary's snapshot section is empty.
 

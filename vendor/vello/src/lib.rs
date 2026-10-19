@@ -323,7 +323,7 @@ pub(crate) type Result<T, E = Error> = std::result::Result<T, E>;
 pub struct Renderer {
     #[cfg_attr(
         not(feature = "hot_reload"),
-        expect(
+        allow(
             dead_code,
             reason = "Options are only used to reinitialise on a hot reload"
         )

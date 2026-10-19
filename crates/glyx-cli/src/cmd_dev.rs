@@ -33,14 +33,14 @@ fn forget_devtools_file(devtools: Option<u16>) {
 }
 
 pub(super) fn cmd_dev(inspect: Option<u16>, devtools: Option<u16>, open: bool, p: pm::Pm, icupkg: Option<PathBuf>) -> Result<()> {
-    // `--open`: DevTools UI server for the lifetime of this command, opened
-    // on this app (it attaches once the app writes its discovery file).
-    let _devtools_ui = if open && devtools.is_some() {
+    // `--devtools`: a DevTools UI server for the lifetime of this command, with its link printed (it attaches to this
+    // app once the app writes its discovery file). `--open` also opens it in the browser.
+    let _devtools_ui = if devtools.is_some() {
         let ui = super::cmd_inspect::DevtoolsUi::start(None)?;
         let app = std::env::current_dir().map(|d| d.join(DEVTOOLS_FILE)).unwrap_or_else(|_| PathBuf::from(DEVTOOLS_FILE));
         let url = ui.url(Some(&app));
         println!("[glyx] DevTools: {url}");
-        super::cmd_inspect::open_url(&url);
+        if open { super::cmd_inspect::open_url(&url); }
         Some(ui)
     } else {
         None
@@ -92,20 +92,27 @@ pub(super) fn cmd_dev(inspect: Option<u16>, devtools: Option<u16>, open: bool, p
         // Native project: custom Rust extensions compiled in — use cargo run
         // Place icudtl.dat (trimmed to the app's locales, or whole if trimming fails) next to the debug binary so the app
         // (which builds without the embedded ICU data) can load it.
+        // `cargo run` builds into the workspace's own target directory, not this project's, so the app is pointed at the
+        // file with GLYX_ICU_DATA rather than relying on it sitting next to the executable.
         let dbg_dir = std::path::PathBuf::from("target/debug");
-        if let Err(e) = super::icu_trim::trim_icu_for_app(&project_name, &dbg_dir, icupkg.clone()) {
-            log::warn!("ICU trim skipped: {e}");
-        }
+        let icu_dat = match super::icu_trim::trim_icu_for_app(&project_name, &dbg_dir, icupkg.clone()) {
+            Ok(Some(dat)) => Some(std::env::current_dir().map(|d| d.join(&dat)).unwrap_or(dat)),
+            Ok(None) => None,
+            Err(e) => { log::warn!("ICU trim skipped: {e}"); None }
+        };
 
         // Native project: custom Rust extensions compiled in — use cargo run.
         // Explicit --features (not the project's own Cargo.toml default) so
         // glyx.config's "engine" is honored even though the example crates'
         // own defaults are all v8.
+        let media_dir = super::prepare_media_for_dev();
         let mut cmd = Command::new("cargo");
         cmd.args(["run", "-p", &project_name, "--no-default-features", "--features", &format!("dev,{engine}")])
             .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
             .env("GLYX_CONFIG_JSON", &config_json)
             .env("GLYX_MEDIA_SKIP_VERIFY", "1");
+        if let Some(dat) = &icu_dat { cmd.env("GLYX_ICU_DATA", dat); }
+        if let Some(dir) = &media_dir { cmd.env("GLYX_MEDIA_DIR", dir); }
         if let Some(port) = inspect {
             cmd.env("GLYX_INSPECT_PORT", port.to_string());
         }
@@ -141,6 +148,8 @@ pub(super) fn cmd_dev(inspect: Option<u16>, devtools: Option<u16>, open: bool, p
         }
 
         let mut cmd = Command::new(&runner);
+        // The media library built from the checkout's sources, when there is one (see `prepare_media_for_dev`).
+        if let Some(dir) = super::prepare_media_for_dev() { cmd.env("GLYX_MEDIA_DIR", dir); }
         if skip_cap_verify {
             cmd.env("GLYX_UNSAFE_SKIP_CAP_VERIFY", "1");
         }

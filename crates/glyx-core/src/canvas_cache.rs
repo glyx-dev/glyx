@@ -62,9 +62,18 @@ impl CanvasPixelCache {
         mb.map_or(DEFAULT_BUDGET_BYTES, |m| (m.min(256) as usize) * 1024 * 1024)
     }
 
+    #[cfg(test)]
     pub fn bytes(&self) -> usize { self.bytes }
+    #[cfg(test)]
     pub fn budget(&self) -> usize { self.budget }
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools and tests
     pub fn count(&self) -> usize { self.entries.values().filter(|e| e.pixels.is_some()).count() }
+
+    /// For DevTools (`Performance.getCanvasCache`): what is cached, against the budget, and how often it paid off.
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools only
+    pub fn stats_json(&self) -> serde_json::Value {
+        serde_json::json!({ "bitmaps": self.count(), "bytes": self.bytes, "budgetBytes": self.budget, "blits": self.hits })
+    }
 
     /// The canvas's commands changed (or it is gone): forget what was learnt about it.
     pub fn invalidate(&mut self, id: u32) {

@@ -512,6 +512,7 @@ impl Transition {
         self
     }
 
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools only
     pub(crate) fn is_spring(&self) -> bool { self.spring.is_some() }
 
     /// Progress velocity (progress-units per second): zero for a tween and for
@@ -1033,8 +1034,10 @@ impl CanvasTween {
         pace_progress(self.spring.as_ref(), self.easing, self.duration_ms, self.start, now)
     }
 
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools only
     pub(crate) fn is_spring(&self) -> bool { self.spring.is_some() }
 
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools only
     pub(crate) fn start(&self) -> Instant { self.start }
 
     /// The commands to draw at `now`, and whether it has arrived at `to`.

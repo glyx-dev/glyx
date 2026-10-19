@@ -356,6 +356,33 @@ impl ByteBudgetCache {
     }
 }
 
+/// Moves the rows of the `w` x `h` region at `(x, y)` up by `dy` (down when `dy` is negative), within the pixmap: the rows that slide past
+/// the region's edge are dropped and the `|dy|` rows at the other edge are left as they were (the caller redraws them). The region is clamped to
+/// the pixmap; the region actually moved is returned, or `None` when there was nothing to move.
+fn shift_rows(pixmap: &mut tiny_skia::Pixmap, x: i32, y: i32, w: i32, h: i32, dy: i32) -> Option<(u32, u32, u32, u32)> {
+    let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
+    let (x0, y0) = (x.max(0), y.max(0));
+    let (x1, y1) = ((x + w).min(pw), (y + h).min(ph));
+    let (w, h) = (x1 - x0, y1 - y0);
+    if w <= 0 || h <= 0 || dy == 0 || dy.abs() >= h { return None; }
+    let stride = pw as usize * 4;
+    let (cols_from, cols_to) = (x0 as usize * 4, x1 as usize * 4);
+    let data = pixmap.data_mut();
+    let n = (h - dy.abs()) as usize;
+    for i in 0..n {
+        // Moving up, a row is read from below it: top to bottom. Moving down, bottom to top.
+        let (dst, src) = if dy > 0 {
+            let row = y0 as usize + i;
+            (row, row + dy as usize)
+        } else {
+            let row = (y1 - 1) as usize - i;
+            (row, row - (-dy) as usize)
+        };
+        data.copy_within(src * stride + cols_from..src * stride + cols_to, dst * stride + cols_from);
+    }
+    Some((x0 as u32, y0 as u32, w as u32, h as u32))
+}
+
 /// `peniko::ImageData` bytes are linear-premultiplied (`glyx-core/src/scene.rs`'s
 /// `rgba_to_peniko`, chosen for Vello's colorspace-correct GPU compositing).
 /// TinySkia blits raw bytes with no colorspace conversion of its own, so
@@ -496,6 +523,9 @@ pub struct TinySkiaFrame {
     /// Damage region for partial redraw (`None` = full frame).  Draws are
     /// clipped to these rects via the base mask AND bbox-culled for speed.
     damage:       Option<RectSet>,
+    /// Regions whose pixels were moved (a scroll's shift) rather than redrawn: they are part of what changed on screen even though nothing
+    /// is drawn in them, so `damage()` reports them for the presenter.
+    shifted:      Vec<(u32, u32, u32, u32)>,
     /// Current transform (node `transform` props, composed down the tree),
     /// applied to every draw and clip. Identity keeps tiny-skia's fast paths.
     xf:           tiny_skia::Transform,
@@ -511,7 +541,7 @@ impl TinySkiaFrame {
     fn new(width: u32, height: u32, bg: peniko::Color, shared: TinySkiaShared)
         -> Option<Self>
     {
-        Self::new_damaged(width, height, bg, shared, None)
+        Self::new_damaged(width, height, bg, shared, None, None)
     }
 
     /// Create a frame, optionally restricted to a damage rect.
@@ -524,6 +554,9 @@ impl TinySkiaFrame {
     fn new_damaged(
         width: u32, height: u32, bg: peniko::Color, mut shared: TinySkiaShared,
         damage: Option<&[(f64, f64, f64, f64)]>,
+        // A region of the last frame to scroll by whole rows before the damage is cleared and redrawn: `([x, y, w, h], dy)`, rows moving up for a
+        // positive `dy`. Applied only to a partial frame; the damage is then what the shift exposed.
+        shift: Option<([i32; 4], i32)>,
     ) -> Option<Self> {
         // Partial redraw needs last frame's pixels — only valid when the
         // pooled pixmap exists at the same size.
@@ -575,6 +608,12 @@ impl TinySkiaFrame {
             RectSet::from_slice(&out)
         });
 
+        // The scroll happens before anything is cleared: the rows that move are the ones the damage is about to erase.
+        let mut shifted = Vec::new();
+        if let (Some(([x, y, w, h], dy)), Some(_)) = (shift, &damage_set) {
+            if let Some(region) = shift_rows(&mut pixmap, x, y, w, h, dy) { shifted.push(region); }
+        }
+
         let q = bg.to_rgba8();
         let bg_color = tiny_skia::Color::from_rgba8(q.r, q.g, q.b, q.a);
         match &damage_set {
@@ -600,6 +639,7 @@ impl TinySkiaFrame {
             mask_is_rects: false,
             pending_base: damage_set,
             damage:       damage_set,
+            shifted,
             xf:           tiny_skia::Transform::identity(),
             xf_stack:     Vec::new(),
             blend:        tiny_skia::BlendMode::SourceOver,
@@ -609,10 +649,14 @@ impl TinySkiaFrame {
 
     /// The clamped damage rects this frame was created with (`None` = full).
     pub fn damage(&self) -> Option<Vec<(u32, u32, u32, u32)>> {
-        self.damage.map(|set| set.iter().map(|d| {
-            (d.left() as u32, d.top() as u32,
-             (d.right() - d.left()) as u32, (d.bottom() - d.top()) as u32)
-        }).collect())
+        self.damage.map(|set| {
+            let mut out: Vec<_> = set.iter().map(|d| {
+                (d.left() as u32, d.top() as u32,
+                 (d.right() - d.left()) as u32, (d.bottom() - d.top()) as u32)
+            }).collect();
+            out.extend(self.shifted.iter().copied());
+            out
+        })
     }
 
     /// Whether this frame repaints only part of the window.
@@ -1610,6 +1654,15 @@ impl TinySkiaRenderer {
     /// Finalize a frame for software present: hands the premultiplied RGBA8
     /// pixel data (plus the frame's damage rect, `None` = full) to `write`,
     /// then returns the pixmap to the pool.  No GPU work.
+    /// The pixels (premultiplied RGBA8) of the last finished frame, when it is still held: what an overlay layer hands to the
+    /// presenter after `finish_frame_soft`.
+    pub fn retained_pixels(&self) -> Option<&[u8]> {
+        self.shared.as_ref()?.pixmap.as_ref().map(|p| p.data())
+    }
+
+    /// The size this renderer draws at.
+    pub fn size(&self) -> (u32, u32) { (self.width, self.height) }
+
     pub fn finish_frame_soft(
         &mut self,
         frame: TinySkiaFrame,
@@ -1655,7 +1708,19 @@ impl TinySkiaRenderer {
     /// when no pooled pixmap is available — first frame or just-resized).
     pub fn begin_frame_damaged(&mut self, damage: Option<&[(f64, f64, f64, f64)]>) -> TinySkiaFrame {
         let shared = self.shared.take().expect("skia: frame already in progress");
-        TinySkiaFrame::new_damaged(self.width, self.height, self.background_color, shared, damage)
+        TinySkiaFrame::new_damaged(self.width, self.height, self.background_color, shared, damage, None)
+            .expect("Pixmap creation failed — zero-sized window?")
+    }
+
+    /// `begin_frame_damaged` for a scroll: the pixels of `region` (`[x, y, w, h]` in whole pixels) are first moved up by `dy` rows (down when
+    /// negative) in the last frame, and `damage` should be just the rows that exposed (plus anything else that changed, such as a scrollbar). What
+    /// was moved is reported by `TinySkiaFrame::damage()` so it is presented too. A frame that turns out to be a full one needs no shift and gets
+    /// none.
+    pub fn begin_frame_scrolled(
+        &mut self, damage: &[(f64, f64, f64, f64)], region: [i32; 4], dy: i32,
+    ) -> TinySkiaFrame {
+        let shared = self.shared.take().expect("skia: frame already in progress");
+        TinySkiaFrame::new_damaged(self.width, self.height, self.background_color, shared, Some(damage), Some((region, dy)))
             .expect("Pixmap creation failed — zero-sized window?")
     }
 
@@ -1988,6 +2053,75 @@ mod transform_tests {
         let mut r = TinySkiaRenderer::new_cpu_only(64, 16);
         let full = r.begin_frame();
         assert!(!full.is_outside_damage(0.0, 0.0, 10.0, 16.0), "a full frame draws everything");
+    }
+
+    /// A list drawn at scroll offset `off` inside the window region `[0, 8, 96, 64]`: striped rows with a circle and a line each, so edges and
+    /// anti-aliasing cross the rows' boundaries.
+    fn draw_list(frame: &mut TinySkiaFrame, off: i32) {
+        frame.push_layer(0.0, 8.0, 96.0, 64.0);
+        for i in 0..14i32 {
+            let y = 8.0 + (i * 13 - off) as f64;
+            let shade = (40 + i * 13) as u8;
+            frame.fill_rect(2.0, y, 80.0, 11.0, peniko::Color::from_rgba8(shade, 120, 255 - shade, 255));
+            frame.fill_circle(88.0, y + 5.5, 4.0, peniko::Color::from_rgba8(250, 200, shade, 255));
+            frame.stroke_line(4.0, y + 12.0, 70.0, y + 12.0, 1.5, peniko::Color::from_rgba8(255, 255, 255, 200));
+        }
+        frame.pop_layer();
+    }
+
+    fn pixels(r: &mut TinySkiaRenderer, f: TinySkiaFrame) -> (Vec<u8>, Option<Vec<(u32, u32, u32, u32)>>) {
+        let mut out = Vec::new();
+        let mut dmg = None;
+        r.finish_frame_soft(f, |px, _, _, d| { out = px.to_vec(); dmg = d.map(|d| d.to_vec()); });
+        (out, dmg)
+    }
+
+    /// The scroll blit: the last frame's rows are moved and only the rows that came into view are drawn. The result must be the pixels a full
+    /// render at the new offset gives (whole-pixel offsets), whichever way the list moves, apart from a unit of rounding on anti-aliased edges
+    /// that a clip edge cuts (a few bytes of 30,000).
+    #[test]
+    fn a_scrolled_frame_matches_a_full_render_to_within_rounding() {
+        let region = [0, 8, 96, 64];
+        for (from, to) in [(0, 9), (9, 22), (40, 31), (22, 0), (5, 6)] {
+            let dy = to - from;
+            // Last frame, at `from`.
+            let mut r = TinySkiaRenderer::new_cpu_only(96, 80);
+            let mut f = r.begin_frame();
+            draw_list(&mut f, from);
+            let _ = pixels(&mut r, f);
+
+            // This frame: shift, then draw only the exposed rows.
+            let strip = if dy > 0 { (0.0, (8 + 64 - dy) as f64, 96.0, dy as f64) } else { (0.0, 8.0, 96.0, (-dy) as f64) };
+            let mut f = r.begin_frame_scrolled(&[strip], region, dy);
+            draw_list(&mut f, to);
+            let (scrolled, damage) = pixels(&mut r, f);
+            let damage = damage.expect("a partial frame");
+            assert!(damage.contains(&(0, 8, 96, 64)), "the moved region is presented: {damage:?}");
+
+            // The same offset rendered whole.
+            let mut full = TinySkiaRenderer::new_cpu_only(96, 80);
+            let mut f = full.begin_frame();
+            draw_list(&mut f, to);
+            let (whole, _) = pixels(&mut full, f);
+            // A shape clipped by the layer's edge in this frame and not in the last (or the other way round) is rasterized through a mask the other
+            // way, so an anti-aliased edge pixel can differ by a unit; anything more would be a real error.
+            let worst = scrolled.iter().zip(&whole).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap_or(0);
+            let differing = scrolled.iter().zip(&whole).filter(|(a, b)| a != b).count();
+            assert!(worst <= 2 && differing <= 160, "scroll {from} -> {to}: worst channel difference {worst}, {differing} differing bytes");
+        }
+    }
+
+    #[test]
+    fn shifting_rows_clamps_to_the_pixmap_and_ignores_a_shift_that_moves_everything_out() {
+        let mut pm = tiny_skia::Pixmap::new(4, 4).unwrap();
+        for y in 0..4u32 { for x in 0..4u32 { pm.pixels_mut()[(y * 4 + x) as usize] = tiny_skia::PremultipliedColorU8::from_rgba(y as u8 * 10, 0, 0, 255).unwrap(); } }
+        assert_eq!(shift_rows(&mut pm, 0, 0, 4, 4, 4), None, "as many rows as the region has: nothing stays in view");
+        assert_eq!(shift_rows(&mut pm, 0, 0, 4, 4, 0), None);
+        assert_eq!(shift_rows(&mut pm, 9, 9, 4, 4, 1), None, "outside the pixmap");
+        assert_eq!(shift_rows(&mut pm, -2, 0, 4, 4, 1), Some((0, 0, 2, 4)), "clamped to the pixmap");
+        // Rows moved up by one: row 0 now holds what was row 1 (in the two columns that were moved).
+        assert_eq!(pm.pixel(0, 0).unwrap().red(), 10);
+        assert_eq!(pm.pixel(3, 0).unwrap().red(), 0, "a column outside the region is untouched");
     }
 
     #[test]

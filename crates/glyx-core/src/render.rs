@@ -23,6 +23,10 @@ pub(crate) struct RenderCtx<'a> {
     pub canvas_anim: &'a std::collections::HashMap<u32, Vec<CanvasCmd>>,
     /// Bitmaps of canvases that were repainted unchanged (see `canvas_cache.rs`).
     pub canvas_pixels: &'a mut crate::canvas_cache::CanvasPixelCache,
+    /// What each scroller passed on to its children as of the frames drawn so far: `(x, y, frame serial)`. Written as nodes are drawn.
+    pub scroll_drawn: &'a mut std::collections::HashMap<u32, (f64, f64, u64)>,
+    /// Which frame is being drawn (`PerWindowState::frame_serial` after this frame's increment).
+    pub frame_serial: u64,
     /// Accumulated (canvas3d_id, x, y, w, h) for post-Vello 3D overlay rendering.
     #[cfg(feature = "canvas3d")]
     pub canvas3d_overlays: &'a mut Vec<(u32, f32, f32, f32, f32)>,
@@ -88,6 +92,41 @@ fn apply_opacity(c: peniko::Color, opacity: f32) -> peniko::Color {
     if opacity >= 1.0 { c } else { c.multiply_alpha(opacity) }
 }
 
+
+/// The scroll offsets a clipping node passes on to its children: what it inherits from the scrollers around it, plus its own offset clamped to
+/// what its content allows, in whole pixels (so scrolling is a shift of whole pixels, which `scroll_blit` can do by moving the last frame's
+/// rows). Shared by the renderer and by the blit's detection, so both mean the same thing by "how far this has scrolled".
+///
+/// `rect` is the node's layout rectangle `(x, y, w, h)`; `max_child_bottom` / `max_child_right` are the furthest child edges (infinite when not
+/// a clip node or no children); `pad` the node's padding.
+pub(crate) fn child_scroll_of(
+    scroll_x: f64, scroll_y: f64, own_x: Option<f32>, own_y: Option<f32>, is_clip: bool,
+    max_child_bottom: f64, max_child_right: f64, pad: f64, rect: (f64, f64, f64, f64),
+) -> (f64, f64) {
+    let (rx, ry, rw, rh) = rect;
+    let x = match own_x {
+        None => scroll_x,
+        Some(ox) if is_clip && max_child_right.is_finite() => {
+            let max_s = (max_child_right + pad - (rx + rw)).max(0.0);
+            scroll_x + (ox as f64).min(max_s).max(0.0)
+        }
+        Some(ox) if is_clip => scroll_x + (ox as f64).max(0.0),
+        Some(ox) => scroll_x + ox as f64,
+    };
+    // Inherited scroll (from outer ScrollViews) must always pass through; clamp only THIS node's own scroll offset against its own overflow.
+    // Otherwise a small clip:true box inside a scrolled ancestor would reset its children to the un-scrolled position (text drifts out of
+    // the box and appears to vanish).
+    let own = own_y.unwrap_or(0.0) as f64;
+    let y = if is_clip && max_child_bottom.is_finite() {
+        let max_s = (max_child_bottom + pad - (ry + rh)).max(0.0);
+        scroll_y + own.min(max_s).max(0.0)
+    } else if is_clip {
+        scroll_y + own.max(0.0)
+    } else {
+        scroll_y + own
+    };
+    (x.round(), y.round())
+}
 
 pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32, ctx: &mut RenderCtx<'_>) {
     // ── O4b: clean-node fast path ────────────────────────────────────────
@@ -300,34 +339,15 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
             } else {
                 f64::NEG_INFINITY
             };
-            let child_scroll_x = match own_x {
-                None => scroll_x,
-                Some(ox) if is_clip && max_child_right.is_finite() => {
-                    let pad   = match node.props.padding { Some(LengthValue::Px(px)) => px as f64, _ => 0.0 };
-                    let max_s = (max_child_right + pad - (rl.x as f64 + rw)).max(0.0);
-                    scroll_x + (ox as f64).min(max_s).max(0.0)
-                }
-                Some(ox) if is_clip => scroll_x + (ox as f64).max(0.0),
-                Some(ox) => scroll_x + ox as f64,
-            };
-
-            let child_scroll_y = {
-                // Inherited scroll (from outer ScrollViews) must always pass through;
-                // clamp only THIS node's own scroll offset against its own overflow.
-                // Otherwise a small clip:true box inside a scrolled ancestor would
-                // reset its children to the un-scrolled position (text drifts out of
-                // the box and appears to vanish).
-                let own = node.props.scroll_offset_y.unwrap_or(0.0) as f64;
-                if is_clip && max_child_bottom.is_finite() {
-                    let pad   = match node.props.padding { Some(LengthValue::Px(px)) => px as f64, _ => 0.0 };
-                    let max_s = (max_child_bottom + pad - (rl.y as f64 + rh)).max(0.0);
-                    scroll_y + own.min(max_s).max(0.0)
-                } else if is_clip {
-                    scroll_y + own.max(0.0)
-                } else {
-                    scroll_y + own
-                }
-            };
+            let pad = match node.props.padding { Some(LengthValue::Px(px)) => px as f64, _ => 0.0 };
+            let (child_scroll_x, child_scroll_y) = child_scroll_of(
+                scroll_x, scroll_y, own_x, node.props.scroll_offset_y, is_clip, max_child_bottom, max_child_right, pad,
+                (rl.x as f64, rl.y as f64, rw, rh),
+            );
+            // What a scroller showed this frame, so the next frame can tell a pure scroll from anything else (see `scroll_blit`).
+            if own_x.is_some() || node.props.scroll_offset_y.is_some() {
+                ctx.scroll_drawn.insert(id, (child_scroll_x, child_scroll_y, ctx.frame_serial));
+            }
 
             // The clipping ancestor's visible rect, before this node's own joins the stack.
             let outer_clip = ctx.clips.last().copied();
@@ -859,9 +879,10 @@ fn draw_scrollbar(
     let Some((tx, ty, tw, th)) = compute_scrollbar_thumb(rx, ry, rw, rh, scroll_y, content_height, bar_width)
     else { return };
 
-    // Track background
+    // Track background: the viewport's full height, so it stays put while the thumb moves (it was drawn from the thumb's top, so it slid
+    // with it and was clipped by the viewport; `scroll_blit` relies on it not moving).
     let track_color = bar_color.multiply_alpha(0.3);
-    frame.fill_rounded_rect(tx, ty, tw, rh, bar_width * 0.5, track_color);
+    frame.fill_rounded_rect(tx, ry, tw, rh, bar_width * 0.5, track_color);
 
     // Thumb
     frame.fill_rounded_rect(tx, ty, tw, th, bar_width * 0.5, bar_color);

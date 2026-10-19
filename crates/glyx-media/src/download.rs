@@ -62,6 +62,29 @@ pub fn dll_stem() -> String {
     format!("glyx-media-{}-{}-{}", GLYX_MEDIA_VERSION, platform(), arch())
 }
 
+/// Why `find_cached_media` / `get_media` came back empty, in words for the developer: which file this Glyx looks for, where, and
+/// which other versions are lying in the cache (a library from an older Glyx is named for its own version and is never picked up).
+pub fn unavailable_reason() -> String {
+    unavailable_reason_in(cache_dir().ok().as_deref())
+}
+
+fn unavailable_reason_in(dir: Option<&std::path::Path>) -> String {
+    let want = format!("{}.{}", dll_stem(), dll_ext());
+    let mut msg = format!("this Glyx ({GLYX_MEDIA_VERSION}) needs {want}, which was not found beside the program or in {}",
+        dir.map_or("the cache".to_string(), |d| d.display().to_string()));
+    let others: Vec<String> = dir
+        .and_then(|d| std::fs::read_dir(d).ok())
+        .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("glyx-media-") && n.ends_with(&format!(".{}", dll_ext())) && *n != want)
+            .collect())
+        .unwrap_or_default();
+    if !others.is_empty() {
+        msg.push_str(&format!("; the cache holds {} from another version, which cannot be used", others.join(", ")));
+    }
+    msg.push_str(". `glyx dev` and `glyx build` download it for apps that declare video, camera or microphone; if the download fails,         check the network, or build it (glyx-media-c/README.md). If it is there, see the [glyx-media] warnings in the log for why it did not load.");
+    msg
+}
+
 /// The local cache directory, created if needed.
 pub fn cache_dir() -> Result<PathBuf, String> {
     let home = dirs_or_fallback();
@@ -106,6 +129,21 @@ fn asset_url(name: &str) -> String {
 pub fn find_cached_media() -> Option<PathBuf> {
     let stem = dll_stem();
     let ext  = dll_ext();
+
+    // 0. `GLYX_MEDIA_DIR`: a directory to look in first. `glyx dev` sets it to the media library it built from the source checkout's
+    //    `glyx-media-c`; it is checked like any other (a release build still insists on a signed manifest).
+    if let Ok(dir) = std::env::var("GLYX_MEDIA_DIR") {
+        let dll = PathBuf::from(dir).join(format!("{stem}.{ext}"));
+        if dll.exists() {
+            match verify_cached_dll(&dll) {
+                Ok(_) => {
+                    log::debug!("[glyx-media] using DLL from GLYX_MEDIA_DIR: {}", dll.display());
+                    return Some(dll);
+                }
+                Err(e) => log::warn!("[glyx-media] GLYX_MEDIA_DIR DLL failed verification: {e}"),
+            }
+        }
+    }
 
     // 1. Beside the running exe (production install)
     if let Ok(exe) = std::env::current_exe() {
@@ -369,6 +407,24 @@ mod tests {
             builder.append_data(&mut h, name, *data).unwrap();
         }
         builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn the_unavailable_message_names_the_file_wanted_and_older_versions_in_the_cache() {
+        let d = std::env::temp_dir().join(format!("glyx-media-why-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let ext = dll_ext();
+        std::fs::write(d.join(format!("glyx-media-0.0.1-{}-{}.{ext}", platform(), arch())), b"x").unwrap();
+        std::fs::write(d.join("avcodec-63.dll"), b"x").unwrap(); // not a glyx-media library: not listed
+        let msg = unavailable_reason_in(Some(&d));
+        assert!(msg.contains(&format!("{}.{ext}", dll_stem())), "{msg}");
+        assert!(msg.contains("glyx-media-0.0.1-") && msg.contains("another version"), "{msg}");
+        assert!(!msg.contains("avcodec"), "{msg}");
+        // With nothing else in the cache it does not talk about other versions.
+        std::fs::remove_file(d.join(format!("glyx-media-0.0.1-{}-{}.{ext}", platform(), arch()))).unwrap();
+        assert!(!unavailable_reason_in(Some(&d)).contains("another version"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

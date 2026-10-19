@@ -450,6 +450,63 @@ impl QuickJsRuntime {
     }
 }
 
+/// Compiles `source`, a classic script, to QuickJS bytecode without running it. The bytecode carries the engine's format version and
+/// only loads into the QuickJS build that wrote it, which is why `glyx build` makes it with the very runner it embeds it in
+/// (`glyx-runner --glyx-compile-js`). Compiled strict, as `Ctx::eval` does, so running it is the same as evaluating the source.
+/// The functions' source text is left out (QuickJS otherwise keeps a copy of each function's text in memory, for
+/// `Function.prototype.toString`, which then answers `[native code]`); line numbers for stack traces are kept.
+pub fn compile_script_to_bytecode(source: &str, name: &str) -> Result<Vec<u8>, String> {
+    use rquickjs::qjs;
+    let rt = rquickjs::Runtime::new().map_err(|e| format!("QuickJS runtime: {e}"))?;
+    let context = rquickjs::Context::full(&rt).map_err(|e| format!("QuickJS context: {e}"))?;
+    let c_name = std::ffi::CString::new(name).map_err(|e| e.to_string())?;
+    // QuickJS reads the source as a C string (and wants it NUL-terminated).
+    let c_src = std::ffi::CString::new(source).map_err(|_| "the script contains a NUL byte".to_string())?;
+    context.with(|ctx| {
+        // SAFETY: `raw` is this context's live pointer for the whole closure; the compiled function object is freed once its bytes
+        // are copied out, and the buffer QuickJS allocates for them is released with its own allocator.
+        unsafe {
+            let raw = ctx.as_raw().as_ptr();
+            let flags = (qjs::JS_EVAL_TYPE_GLOBAL | qjs::JS_EVAL_FLAG_STRICT | qjs::JS_EVAL_FLAG_COMPILE_ONLY) as i32;
+            let func = qjs::JS_Eval(raw, c_src.as_ptr(), source.len() as _, c_name.as_ptr(), flags);
+            if qjs::JS_VALUE_GET_TAG(func) == qjs::JS_TAG_EXCEPTION {
+                return Err(format!("compile error: {}", QuickJsRuntime::catch_message(&ctx)));
+            }
+            let mut len = std::mem::MaybeUninit::uninit();
+            let buf = qjs::JS_WriteObject(raw, len.as_mut_ptr(), func, (qjs::JS_WRITE_OBJ_BYTECODE | qjs::JS_WRITE_OBJ_STRIP_SOURCE) as i32);
+            qjs::JS_FreeValue(raw, func);
+            if buf.is_null() {
+                return Err(format!("could not write the bytecode: {}", QuickJsRuntime::catch_message(&ctx)));
+            }
+            let bytes = std::slice::from_raw_parts(buf, len.assume_init() as usize).to_vec();
+            qjs::js_free(raw, buf as *mut _);
+            Ok(bytes)
+        }
+    })
+}
+
+/// Runs bytecode made by [`compile_script_to_bytecode`] as a global script. A format-version mismatch (another QuickJS build)
+/// or a damaged blob is a `CompileError`; an exception while the script runs is a `JsException`, as for `eval`.
+fn run_bytecode(ctx: &rquickjs::Ctx, bytes: &[u8]) -> Result<(), RuntimeError> {
+    use rquickjs::qjs;
+    // SAFETY: `raw` is this context's live pointer; `JS_ReadObject` validates the header and version before it reads further and
+    // reports an exception rather than reading past `bytes`; `JS_EvalFunction` takes ownership of the function object it is given,
+    // and the value it returns is freed here.
+    unsafe {
+        let raw = ctx.as_raw().as_ptr();
+        let func = qjs::JS_ReadObject(raw, bytes.as_ptr(), bytes.len() as _, qjs::JS_READ_OBJ_BYTECODE as i32);
+        if qjs::JS_VALUE_GET_TAG(func) == qjs::JS_TAG_EXCEPTION {
+            return Err(RuntimeError::CompileError(QuickJsRuntime::catch_message(ctx)));
+        }
+        let result = qjs::JS_EvalFunction(raw, func);
+        if qjs::JS_VALUE_GET_TAG(result) == qjs::JS_TAG_EXCEPTION {
+            return Err(RuntimeError::JsException(QuickJsRuntime::catch_message(ctx)));
+        }
+        qjs::JS_FreeValue(raw, result);
+        Ok(())
+    }
+}
+
 /// Shared state every `__glyx_*` binding closure needs to capture. Bundled
 /// into one `Clone` struct instead of passing ~10 separate args around —
 /// each binding closure below clones only the fields it needs out of this.
@@ -1936,6 +1993,10 @@ impl JsRuntime for QuickJsRuntime {
         }
     }
 
+    fn eval_precompiled(&mut self, compiled: &[u8], _source: &str) -> Option<Result<(), RuntimeError>> {
+        Some(self.ctx.with(|ctx| run_bytecode(&ctx, compiled)))
+    }
+
     fn eval(&mut self, source: &str) -> Result<String, RuntimeError> {
         let src = source.to_string();
         self.ctx.with(|ctx| {
@@ -2521,6 +2582,49 @@ mod tests {
         rt.tick();
         let gone = rt.eval("globalThis.__gone").expect("eval should succeed");
         assert!(gone.contains("no such command"), "got: {gone}");
+    }
+
+    #[test]
+    fn bytecode_compiled_in_one_runtime_runs_in_another() {
+        let src = "globalThis.__bc = (function () { var n = 0; for (var i = 0; i < 10; i++) n += i; return n + 1; })();";
+        let bytecode = compile_script_to_bytecode(src, "app.js").expect("compile");
+        assert!(bytecode.len() > 8, "a real blob, not an empty one");
+        // Not the source text: it is the engine's own format.
+        assert!(!String::from_utf8_lossy(&bytecode).contains("for (var"), "stored as bytecode, not source");
+
+        let (_tokio_rt, mut rt) = new_runtime();
+        match rt.eval_precompiled(&bytecode, src) {
+            Some(Ok(())) => {}
+            other => panic!("expected the bytecode to run, got {other:?}"),
+        }
+        let out = rt.eval("globalThis.__bc").expect("read back");
+        assert!(out.contains("46"), "expected 46, got {out:?}");
+    }
+
+    #[test]
+    fn bytecode_is_strict_like_eval_and_reports_errors() {
+        // A compile error is reported at compile time, with the engine's message.
+        let err = compile_script_to_bytecode("var = ;", "app.js").unwrap_err();
+        assert!(err.contains("compile error"), "got: {err}");
+        // Strict, as Ctx::eval is: assigning to an undeclared name throws instead of creating a global.
+        let bytecode = compile_script_to_bytecode("undeclared_name = 1;", "app.js").expect("compiles");
+        let (_tokio_rt, mut rt) = new_runtime();
+        match rt.eval_precompiled(&bytecode, "") {
+            Some(Err(RuntimeError::JsException(msg))) => assert!(msg.contains("undeclared_name"), "got: {msg}"),
+            other => panic!("expected a ReferenceError from strict mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damaged_or_foreign_bytecode_is_rejected_not_run() {
+        let (_tokio_rt, mut rt) = new_runtime();
+        for blob in [vec![], vec![0u8; 3], vec![99, 1, 2, 3, 4, 5, 6, 7, 8, 9], b"globalThis.__ran = 1".to_vec()] {
+            match rt.eval_precompiled(&blob, "globalThis.__ran = 1") {
+                Some(Err(RuntimeError::CompileError(_))) | Some(Err(RuntimeError::JsException(_))) => {}
+                other => panic!("expected a rejection for {blob:?}, got {other:?}"),
+            }
+        }
+        assert!(rt.eval("typeof globalThis.__ran").unwrap().contains("undefined"), "nothing ran");
     }
 
     #[test]

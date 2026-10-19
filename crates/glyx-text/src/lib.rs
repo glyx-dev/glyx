@@ -228,6 +228,15 @@ pub struct TextSystem {
 
 impl TextSystem {
     pub fn new() -> Self {
+        let t0 = std::time::Instant::now();
+        let ts = Self::new_untimed();
+        if std::env::var_os("GLYX_STARTUP_TRACE").is_some() {
+            eprintln!("[startup]           TextSystem::new took {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
+        }
+        ts
+    }
+
+    fn new_untimed() -> Self {
         let mut font_cx = FontContext::new();
 
         // ── Platform font registration ─────────────────────────────────────

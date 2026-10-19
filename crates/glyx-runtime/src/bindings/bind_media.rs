@@ -1406,8 +1406,7 @@ pub fn video_open_callback(
         let result = tokio::task::spawn_blocking(move || {
             // Verify the DLL is available before pushing the scene command.
             if glyx_media::get_media().is_none() {
-                return Err("GlyxMediaNotAvailable: glyx-media DLL not loaded. \
-                    Run `glyx runtime build` to download and cache the media DLL.".to_string());
+                return Err(format!("GlyxMediaNotAvailable: the glyx-media library is not available: {}", glyx_media::download::unavailable_reason()));
             }
             scene.lock().push_back(SceneCommand::OpenVideo { handle_id, url });
             Ok(handle_id.to_string())

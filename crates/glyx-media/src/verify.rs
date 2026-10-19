@@ -97,7 +97,9 @@ fn skip_verify() -> bool {
     #[cfg(debug_assertions)]
     {
         if std::env::var("GLYX_MEDIA_SKIP_VERIFY").as_deref() == Ok("1") {
-            log::warn!("[glyx-media] GLYX_MEDIA_SKIP_VERIFY=1 — Ed25519 check bypassed (dev only)");
+            // Every check calls this (the cache lookup, the load, each manifest); say it once.
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| log::warn!("[glyx-media] GLYX_MEDIA_SKIP_VERIFY=1 — Ed25519 check bypassed (dev only)"));
             return true;
         }
         log::debug!("[glyx-media] debug build — Ed25519 verification skipped");
@@ -138,8 +140,6 @@ fn verify_signature(pubkey: &[u8; 32], manifest_bytes: &[u8], sig_bytes: &[u8]) 
 pub fn verify_manifest(manifest_bytes: &[u8], sig_bytes: &[u8]) -> Result<Manifest, String> {
     if !skip_verify() {
         verify_signature(PUBKEY, manifest_bytes, sig_bytes)?;
-    } else {
-        log::warn!("[glyx-media] GLYX_MEDIA_SKIP_VERIFY=1 — Ed25519 check bypassed (dev only)");
     }
 
     // Strip UTF-8 BOM if present (PowerShell 5.1 Set-Content writes one).

@@ -266,7 +266,9 @@ pub(super) fn build_portable_mode(target: Option<&str>, project_name: &str, p: p
 ///   32       8    cfg_offset   u64 LE
 ///   40       8    cfg_len      u64 LE
 ///   48       4    version      u32 LE  = 1
-///   52       4    flags        u32 LE  = 0  (reserved: compression, encryption…)
+///   52       4    flags        u32 LE  bit 0 = `FLAG_PRECOMPILED_JS`: the JS section is
+///                              [u32 LE n][n bytes: the app compiled by the embedded runner's
+///                              engine (QuickJS bytecode)][the source]; other bits reserved
 ///   56       4    crc32        u32 LE  CRC32 of snap+js+cfg payload bytes
 ///   60       4    reserved     u32 LE  = 0
 ///   64       8    magic        u64 LE  = b"GLYXTRL"
@@ -296,13 +298,50 @@ pub(super) fn append_trailer_snapshot(
         .with_context(|| format!("copy runner → {}", dest.display()))?;
 
     let snap_bytes   = std::fs::read(snapshot) .with_context(|| format!("read {}", snapshot.display()))?;
-    let js_bytes     = std::fs::read(app_js)   .with_context(|| format!("read {}", app_js.display()))?;
+    let js_source    = std::fs::read(app_js)   .with_context(|| format!("read {}", app_js.display()))?;
     let config_bytes = std::fs::read(app_config).with_context(|| format!("read {}", app_config.display()))?;
 
-    write_trailer(&dest, &snap_bytes, &js_bytes, &config_bytes)?;
+    // QuickJS evaluates source on every launch unless the app is already compiled: have the runner just copied (the very engine that
+    // will load it) compile the app, and store that ahead of the source (which stays, as the fallback).
+    let (js_section, flags) = match precompile_with_runner(&dest, app_js, snapshot, &super::read_engine_from_config()) {
+        Some(compiled) => {
+            let mut section = Vec::with_capacity(4 + compiled.len() + js_source.len());
+            section.extend_from_slice(&(compiled.len() as u32).to_le_bytes());
+            section.extend_from_slice(&compiled);
+            section.extend_from_slice(&js_source);
+            println!("✓ App precompiled for {}: {} KB ({}) ahead of the {} KB source", super::read_engine_from_config(), compiled.len() / 1024,
+                if super::read_engine_from_config() == "quickjs" { "bytecode" } else { "V8 code cache" }, js_source.len() / 1024);
+            (section, FLAG_PRECOMPILED_JS)
+        }
+        None => (js_source, 0),
+    };
+
+    write_trailer(&dest, &snap_bytes, &js_section, &config_bytes, flags)?;
     println!("✓ Binary: {} (no cargo recompile)", dest.display());
 
     Ok(std::env::current_dir()?.join(dest))
+}
+
+/// Footer `flags` bit 0: the JS section starts with the app compiled by the embedded runner's engine (see `append_trailer_snapshot`).
+pub(super) const FLAG_PRECOMPILED_JS: u32 = 1;
+
+/// Has `runner` (the exe the app is about to be embedded in) compile `app_js` for its own engine: `glyx-runner --glyx-compile-js`
+/// (QuickJS bytecode, or V8's code cache; either loads only into the build that wrote it). `None`, with a note, when the runner is too old
+/// to know the flag or the compile fails, so the build carries on with the source alone.
+/// `GLYX_NO_PRECOMPILE=1` turns it off (to compare, or to ship the source alone).
+fn precompile_with_runner(runner: &Path, app_js: &Path, snapshot: &Path, engine: &str) -> Option<Vec<u8>> {
+    let _ = engine; // both engines have a precompiled form; the runner says if it has none (exit 2)
+    if std::env::var("GLYX_NO_PRECOMPILE").as_deref() == Ok("1") { return None; }
+    let out = std::env::temp_dir().join(format!("glyx-precompiled-{}.bin", std::process::id()));
+    let status = std::process::Command::new(runner).arg("--glyx-compile-js").arg(app_js).arg(&out).arg(snapshot).status();
+    let result = match status {
+        Ok(s) if s.success() => std::fs::read(&out).ok().filter(|b| !b.is_empty()),
+        Ok(s) if s.code() == Some(2) => None,
+        Ok(s) => { println!("⚠ precompiling the app failed (exit {:?}); shipping the source alone, which QuickJS parses at launch.", s.code()); None }
+        Err(e) => { println!("⚠ could not run the runner to precompile the app ({e}); shipping the source alone."); None }
+    };
+    let _ = std::fs::remove_file(&out);
+    result
 }
 
 /// Append a GLYXTRL trailer (snapshot + JS + config + footer) onto `dest`,
@@ -314,12 +353,11 @@ pub(super) fn append_trailer_snapshot(
 /// icon-embedding step (rcedit rewrites the PE image and discards anything
 /// appended past the end of the file it recognizes, so the trailer must be
 /// re-written — with fresh offsets — after rcedit runs, not just copied).
-pub(super) fn write_trailer(dest: &Path, snap_bytes: &[u8], js_bytes: &[u8], config_bytes: &[u8]) -> Result<u32> {
+pub(super) fn write_trailer(dest: &Path, snap_bytes: &[u8], js_bytes: &[u8], config_bytes: &[u8], flags: u32) -> Result<u32> {
     use std::io::Write;
 
     const MAGIC:   u64 = 0x4C52_5458_4F4C_4556; // b"GLYXTRL" little-endian
     const VERSION: u32 = 1;
-    const FLAGS:   u32 = 0; // reserved for future feature bits
 
     // CRC32 over the entire payload for integrity checking at runtime.
     let mut digest = crc32fast::Hasher::new();
@@ -350,7 +388,7 @@ pub(super) fn write_trailer(dest: &Path, snap_bytes: &[u8], js_bytes: &[u8], con
     file.write_all(&cfg_offset.to_le_bytes())                .context("write footer")?;
     file.write_all(&(config_bytes.len() as u64).to_le_bytes()).context("write footer")?;
     file.write_all(&VERSION.to_le_bytes())                   .context("write footer")?;
-    file.write_all(&FLAGS.to_le_bytes())                     .context("write footer")?;
+    file.write_all(&flags.to_le_bytes())                     .context("write footer")?;
     file.write_all(&crc32.to_le_bytes())                     .context("write footer")?;
     file.write_all(&0u32.to_le_bytes())                      .context("write footer")?; // reserved
     file.write_all(&MAGIC.to_le_bytes())                     .context("write footer")?;
@@ -371,6 +409,8 @@ pub(super) struct TrailerBytes {
     pub snapshot: Vec<u8>,
     pub js:       Vec<u8>,
     pub config:   Vec<u8>,
+    /// The footer's flags, so re-trailering keeps what the JS section means.
+    pub flags:    u32,
 }
 
 /// If `path` carries a valid GLYXTRL trailer, read its payload out, truncate
@@ -402,6 +442,7 @@ pub(super) fn strip_trailer(path: &Path) -> Result<Option<TrailerBytes>> {
     let js_len   = u64::from_le_bytes(footer[24..32].try_into().unwrap()) as usize;
     let cfg_off  = u64::from_le_bytes(footer[32..40].try_into().unwrap());
     let cfg_len  = u64::from_le_bytes(footer[40..48].try_into().unwrap()) as usize;
+    let flags    = u32::from_le_bytes(footer[52..56].try_into().unwrap());
 
     let mut snapshot = vec![0u8; snap_len];
     f.seek(SeekFrom::Start(snap_off))?;
@@ -420,7 +461,7 @@ pub(super) fn strip_trailer(path: &Path) -> Result<Option<TrailerBytes>> {
     let file = std::fs::OpenOptions::new().write(true).open(path)?;
     file.set_len(snap_off)?;
 
-    Ok(Some(TrailerBytes { snapshot, js, config }))
+    Ok(Some(TrailerBytes { snapshot, js, config, flags }))
 }
 
 /// For JS-only bundle/portable builds: find the cached prod runner and copy it

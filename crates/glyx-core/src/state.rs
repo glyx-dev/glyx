@@ -292,6 +292,10 @@ pub(super) struct PerWindowState {
     pub(super) label_cache: crate::label_cache::LabelCache,
     /// Bitmaps of canvases that are repainted unchanged (see `canvas_cache.rs`).
     pub(super) canvas_pixels: crate::canvas_cache::CanvasPixelCache,
+    /// What each scroller passed on to its children when it was last drawn: `(x, y, frame serial)` (see `render::child_scroll_of`).
+    pub(super) scroll_drawn: std::collections::HashMap<u32, (f64, f64, u64)>,
+    /// Counts the frames rendered; a `scroll_drawn` entry is only trusted when it is from the frame just before this one.
+    pub(super) frame_serial: u64,
     pub(super) cursor_x:     f32,
     pub(super) cursor_y:     f32,
     pub(super) drag_active:  bool,
@@ -486,6 +490,14 @@ pub(super) struct PerWindowState {
     /// leave stale overlay pixels behind once it's gone.
     #[cfg(feature = "dev")]
     pub(super) overlay_was_drawn: bool,
+    /// The dev overlays' own layer (CPU renderer only): a transparent window-sized frame they are drawn into, composited over the
+    /// finished app frame when it is presented, so showing, changing or hiding one never repaints the app (it is why
+    /// `overlay_was_drawn` is only set on the other renderers). Held only while an overlay is up (4 bytes a pixel).
+    #[cfg(feature = "dev")]
+    pub(super) overlay_renderer: Option<glyx_renderer::TinySkiaRenderer>,
+    /// The box `[x, y, w, h]` of what is in that layer.
+    #[cfg(feature = "dev")]
+    pub(super) overlay_bbox: Option<[u32; 4]>,
     /// Per-frame "why did this render" records while a devtools client
     /// streams frames with detail (`Performance.enableFrames { detail }`).
     #[cfg(feature = "dev")]
@@ -622,6 +634,12 @@ pub(super) struct DevModeState {
     pub(super) overlay_next_refresh: Instant,
     pub(super) overlay_next_redraw:  Instant,
     pub(super) last_js_error: Option<String>,
+    /// The error the developer pressed Escape on: the overlay stays hidden for that one, and comes back for a different one.
+    pub(super) error_dismissed: Option<String>,
+    /// Where the error is and the source around it (see `error_overlay`), built when the overlay first draws it.
+    pub(super) error_view: Option<crate::error_overlay::ErrorView>,
+    /// The overlay panel's rectangle `[x, y, w, h]` as last drawn: a click inside it opens the editor.
+    pub(super) error_panel: Option<[f64; 4]>,
     pub(super) startup_rss_bytes: u64,
     pub(super) startup_v8_total_bytes: usize,
 }

@@ -39,6 +39,11 @@ pub trait JsRuntime {
     /// Evaluate a JS source string, returning the result as a string.
     fn eval(&mut self, source: &str) -> Result<String, RuntimeError>;
 
+    /// Run a script from the precompiled form `glyx build` stored next to its source (QuickJS bytecode, or a V8 code cache), so a
+    /// launch skips parsing and compiling it. `None`: this runtime has no such form for `compiled`, so the caller evaluates the
+    /// source as usual. `Some(Err(_))`: it was rejected (made by another build of the engine); the caller evaluates the source.
+    fn eval_precompiled(&mut self, _compiled: &[u8], _source: &str) -> Option<Result<(), RuntimeError>> { None }
+
     /// Set up the Canvas2D binary command buffer (or mark json mode).
     /// Default: no-op — canvas bindings are V8-only for now (not yet ported
     /// to the QuickJS backend, see memory/quickjs-milestone0-progress.md).

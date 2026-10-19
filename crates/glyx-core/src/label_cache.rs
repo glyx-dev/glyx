@@ -82,9 +82,11 @@ impl LabelCache {
         }
     }
 
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools only
     pub(crate) fn sizing(&self) -> Sizing { self.sizing }
     pub(crate) fn len(&self) -> usize { self.lru.len() }
     pub(crate) fn cap(&self) -> usize { self.lru.cap().get() }
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools only
     pub(crate) fn clear(&mut self) { self.lru.clear(); }
 
     /// Looks a label up without touching its recency or the counters (accessibility, tests).
@@ -110,12 +112,14 @@ impl LabelCache {
     }
 
     /// Pins the size (a live setting, or DevTools): the cache stops sizing itself. Clamped to the allowed range.
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools only
     pub(crate) fn set_fixed(&mut self, entries: usize) {
         self.sizing = Sizing::Fixed;
         self.resize(entries.clamp(MIN_ENTRIES, MAX_ENTRIES));
     }
 
     /// Back to sizing itself, from the default.
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools only
     pub(crate) fn set_auto(&mut self) {
         self.sizing = Sizing::Auto;
         self.calm = 0;
@@ -123,6 +127,7 @@ impl LabelCache {
     }
 
     /// What DevTools shows: the size, how full it is, how it is sized, and totals since start.
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))] // DevTools only
     pub(crate) fn stats_json(&self) -> serde_json::Value {
         let hit_rate = if self.total_lookups == 0 { serde_json::Value::Null }
             else { serde_json::json!(1.0 - self.total_misses as f64 / self.total_lookups as f64) };

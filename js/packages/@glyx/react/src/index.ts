@@ -7,6 +7,7 @@ import Reconciler from 'react-reconciler';
 import HostConfig, { markLibraryComponents, setDevRoot } from './hostConfig.js';
 import * as coreExports from './core.js';
 import * as controlsExports from './controls.js';
+import * as colorPickerExports from './colorPicker.js';
 import * as canvasExports from './canvas.js';
 import * as mediaExports from './media.js';
 import * as popoverExports from './popover.js';
@@ -27,6 +28,7 @@ export { MenuBar } from './menuBarView.js';
 export { StyleSheet, flattenStyle } from './style.js';
 export * from './popover.js';
 export * from './controls.js';
+export * from './colorPicker.js';
 export * from './canvas.js';
 export * from './media.js';
 export * from './webview.js';
@@ -51,7 +53,7 @@ const rootContainer = GlyxReconciler.createContainer(
 setDevRoot(rootContainer);
 
 // Devtools component names skip past Glyx's own components (hostConfig.ts).
-for (const m of [coreExports, controlsExports, canvasExports, mediaExports, popoverExports]) {
+for (const m of [coreExports, controlsExports, colorPickerExports, canvasExports, mediaExports, popoverExports]) {
   markLibraryComponents(Object.values(m));
 }
 

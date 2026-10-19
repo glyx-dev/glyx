@@ -49,7 +49,7 @@ render(<Counter />);
 - `getEnv(name)`, `measureText(text, fontSize, maxWidth)` — environment and text-measurement utilities.
 - `SelectionArea`, `SelectableText`, `SelectColorsContext`, `SelectColorsProvider`, `SELECT_COLORS_DARK` — text-selection support.
 - `WindowControls` — minimize/maximize/close controls for frameless windows.
-- Form controls: `TextInput`, `PasswordInput`, `NumericInput`, `Checkbox`, `Switch`, `RadioGroup`, `Radio`, `FileInput`, `Slider`, `Select`, `DatePicker`, `TimePicker`, `DateTimePicker` (from `controls.js`).
+- Form controls: `TextInput`, `PasswordInput`, `NumericInput`, `Checkbox`, `Switch`, `RadioGroup`, `Radio`, `FileInput`, `Slider`, `Select`, `ColorPicker`, `DatePicker`, `TimePicker`, `DateTimePicker` (from `controls.js`).
 
 ### Canvas / 3D (`canvas.js`)
 - `Canvas` — 2D canvas component (path/fill/stroke/text drawing API).

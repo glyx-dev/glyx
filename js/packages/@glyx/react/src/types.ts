@@ -293,6 +293,23 @@ export interface TextInputProps {
   [key: string]: any;
 }
 
+export interface ColorPickerProps {
+  /** The colour, as `#rgb`, `#rrggbb` or `#rrggbbaa` (default `#000000`). */
+  value?:         string;
+  /** Called with a hex string as the colour changes: `#rrggbb`, or `#rrggbbaa` when `alpha` is on and the colour is not opaque. */
+  onValueChange?: (hex: string) => void;
+  onChange?:      (hex: string) => void;
+  /** Show an opacity strip (default false). */
+  alpha?:         boolean;
+  /** Preset swatches under the picker: `true` for a default row, or your own list of hex colours. */
+  presets?:       boolean | string[];
+  disabled?:      boolean;
+  /** Width of the button (default 240). */
+  width?:         number;
+  style?:         StyleProp;
+  [key: string]: any;
+}
+
 export interface CheckboxProps {
   checked?: boolean;
   onChange?: (checked: boolean) => void;

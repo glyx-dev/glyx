@@ -175,8 +175,8 @@ function _normSeries({ data, series, color, name, palette = DEFAULT_PALETTE }: R
 // engine moves the previous drawing toward it (a canvas `transition`), so no
 // JavaScript runs per frame. Critically damped: quick, never overshooting the
 // data. (The line and area charts' hover crosshair is not part of this canvas: it
-// has its own narrow layer that glides with the tooltip card, see `_HoverColumn`;
-// the other charts still draw their hover state here.) A resized chart redraws
+// has its own narrow layer that glides with the tooltip card, see `_HoverColumn`, and so does the bar chart's lightened bar (unless
+// `hoverDim` asks for the other bars to dim), the scatter and candlestick charts likewise; the pie chart still draws its hover state here.) A resized chart redraws
 // instantly. When a draw gains or loses parts (an axis tick, a label), what
 // lines up still eases and the new or removed parts appear or vanish at once;
 // a data line that gained a point replaces the old one.
@@ -333,6 +333,11 @@ export interface AreaChartProps extends LineChartProps {
 export interface BarChartProps extends CartesianChartProps {
   /** Stack the series in one bar per x, instead of side by side. */
   stacked?: boolean;
+  /**
+   * Dim the other bars while one is hovered (default false). The hovered bar is lightened in its own small layer that glides between bars,
+   * so a hover repaints a strip; dimming the rest redraws the whole chart on every step, which costs far more CPU.
+   */
+  hoverDim?: boolean;
 }
 
 /** One slice of a pie chart. */
@@ -372,6 +377,11 @@ export interface ScatterChartProps extends CartesianChartProps<ScatterPoint> {
   /** Dot radius in px for plain points (default 4). */
   radius?:  number;
   formatX?: (x: number) => string;
+  /**
+   * Dim everything but the hovered dot (default false). The hovered dot is emphasised in its own small layer that glides between
+   * them, so a hover repaints a strip; dimming the rest redraws the whole chart on every step, which costs far more CPU.
+   */
+  hoverDim?: boolean;
 }
 
 /** One candle. */
@@ -386,6 +396,12 @@ export interface Candle {
 
 export interface CandlestickChartProps extends ChartBaseProps {
   data?:         Candle[];
+  /**
+   * Dim everything but the hovered candle (default false). The hovered candle is emphasised in its own small layer that glides between
+   * them, so a hover repaints a strip; dimming the rest redraws the whole chart on every step, which costs far more CPU.
+   */
+  hoverDim?: boolean;
+
   showGrid?:     boolean;
   showLabels?:   boolean;
   /** Colour of candles that closed at or above their open. */
@@ -1226,6 +1242,34 @@ function _BarChartInner(props: any) {
   }, [series, width, chartH, showLabels, n, stack, props.labelRotation]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const slots = _barSlots(layout.slot, series.length, stack);
+  const hoverDim = props.hoverDim === true;
+  // What the chart's own canvas shows of the hover: nothing, unless the others are dimmed (see `hoverDim`).
+  const canvasActive = hoverDim ? activeIdx : null;
+  // One bar's segments: where each goes, its colour and whether it rises; `x0` is the group's centre (the slot offsets are from it).
+  const barShapes = (i: number, x0: number) => {
+    const out: any[] = [];
+    for (const seg of _barSegments(series, i, stack)) {
+      const yA = layout.toY(seg.v0), yB = layout.toY(seg.v1);
+      const top = Math.min(yA, yB);
+      let h = Math.abs(yA - yB);
+      if (stack && h < 0.5) continue;
+      out.push({ seg, c: (!multi && rows[i].color) || series[seg.k].color, x: x0 + slots.offset(seg.k), top, h: Math.max(1, h), up: seg.v1 >= seg.v0 });
+    }
+    return out;
+  };
+  const paintBar = (ctx: any, b: any, base: any) => {
+    if (stack) {
+      ctx.fillStyle = base;
+    } else {
+      const g = ctx.createLinearGradient(0, b.top, 0, b.top + b.h);
+      g.addColorStop(0, b.up ? _lighten(base, 0.18) : base);
+      g.addColorStop(1, b.up ? base : _lighten(base, 0.18));
+      ctx.fillStyle = g;
+    }
+    const r = Math.min(6, slots.w / 2);
+    _roundRectPath(ctx, b.x, b.top, slots.w, b.h, b.seg.top ? r : 0, b.seg.bottom ? r : 0);
+    ctx.fill();
+  };
   const draw = (ctx: any) => {
     if (n === 0) return;
     const L = layout;
@@ -1233,28 +1277,9 @@ function _BarChartInner(props: any) {
     _drawYAxis(ctx, L, T, { showGrid, showLabels, gridDash: props.gridDash });
     const zeroY = toY(0);
     rows.forEach((_: any, i: any | null) => {
-      const dim = activeIdx != null && i !== activeIdx;
-      for (const seg of _barSegments(series, i, stack)) {
-        const c = (!multi && rows[i].color) || series[seg.k].color;
-        const x = toX(i) + slots.offset(seg.k);
-        const yA = toY(seg.v0), yB = toY(seg.v1);
-        const top = Math.min(yA, yB);
-        let h = Math.abs(yA - yB);
-        if (stack && h < 0.5) continue;
-        h = Math.max(1, h);
-        const base = activeIdx === i ? _lighten(c, 0.12) : _rgba(c, dim ? 0.45 : 1);
-        const up = seg.v1 >= seg.v0;
-        if (stack) {
-          ctx.fillStyle = base;
-        } else {
-          const g = ctx.createLinearGradient(0, top, 0, top + h);
-          g.addColorStop(0, up ? _lighten(base, 0.18) : base);
-          g.addColorStop(1, up ? base : _lighten(base, 0.18));
-          ctx.fillStyle = g;
-        }
-        const r = Math.min(6, slots.w / 2);
-        _roundRectPath(ctx, x, top, slots.w, h, seg.top ? r : 0, seg.bottom ? r : 0);
-        ctx.fill();
+      const dim = canvasActive != null && i !== canvasActive;
+      for (const b of barShapes(i, toX(i))) {
+        paintBar(ctx, b, canvasActive === i ? _lighten(b.c, 0.12) : _rgba(b.c, dim ? 0.45 : 1));
       }
     });
     if (showGrid) {
@@ -1306,7 +1331,17 @@ function _BarChartInner(props: any) {
       { style: { width, height: chartH, position: 'relative' } },
       React.createElement(_ChartCanvas, {
         width, height: chartH, draw, animate, exportRef: props.exportRef,
-        deps: [series, width, chartH, showGrid, showLabels, activeIdx, stack, T, props.gridDash, props.labelRotation],
+        deps: [series, width, chartH, showGrid, showLabels, canvasActive, stack, T, props.gridDash, props.labelRotation],
+      }),
+      // The hovered bar, lightened, in its own layer that glides from bar to bar (see `_HoverColumn`).
+      hoverDim ? null : React.createElement(_HoverColumn, {
+        x: activeIdx != null && n > 0 ? layout.toX(activeIdx) : null,
+        top: layout.PAD.top, width: 2 * Math.ceil(slots.total / 2 + 2), height: layout.H + 1,
+        draw: (ctx: any, cx: number) => {
+          if (activeIdx == null) return;
+          for (const b of barShapes(activeIdx, cx)) paintBar(ctx, b, _lighten(b.c, 0.12));
+        },
+        deps: [series, layout, slots.total, slots.w, stack, activeIdx],
       }),
       React.createElement(_Interaction, {
         width, height: chartH, T, count: n, pick, active: activeIdx, setActive,
@@ -1721,6 +1756,17 @@ function _ScatterChartInner(props: any) {
   }, [pts, width, chartH, showLabels]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pos = pts.map((p) => [layout.toXv(p.x), layout.toY(p.y)]);
+  const hoverDim = props.hoverDim === true;
+  // What the chart's own canvas shows of the hover: nothing, unless the others are dimmed (see `hoverDim`).
+  const canvasActive = hoverDim ? activeIdx : null;
+  // One dot, its place given (`px`, `py`): the hovered one is a little bigger and nearly opaque.
+  const paintDot = (ctx: any, j: number, px: number, py: number, hot: boolean, dim: boolean) => {
+    const p = pts[j];
+    const r = _bubbleRadius(p.size, maxSize, radius);
+    ctx.fillStyle = _rgba(p.color, hot ? 0.95 : dim ? 0.3 : maxSize > 0 ? 0.55 : 0.8);
+    ctx.fillCircle(px, py, hot ? r + 1.5 : r);
+    if (maxSize > 0 || hot) { ctx.strokeStyle = p.color; ctx.lineWidth = 1.5; ctx.strokeCircle(px, py, hot ? r + 1.5 : r); }
+  };
   const draw = (ctx: any) => {
     if (n === 0) return;
     const L = layout;
@@ -1743,13 +1789,9 @@ function _ScatterChartInner(props: any) {
       ctx.strokeLine(PAD.left, y, PAD.left + W, y);
     }
     ctx.pushClip(PAD.left - 8, PAD.top - 8, W + 16, H + 16);
-    pts.forEach((p, j) => {
-      const r = _bubbleRadius(p.size, maxSize, radius);
-      const hot = j === activeIdx;
-      const dim = activeIdx != null && !hot;
-      ctx.fillStyle = _rgba(p.color, hot ? 0.95 : dim ? 0.3 : maxSize > 0 ? 0.55 : 0.8);
-      ctx.fillCircle(pos[j][0], pos[j][1], hot ? r + 1.5 : r);
-      if (maxSize > 0 || hot) { ctx.strokeStyle = p.color; ctx.lineWidth = 1.5; ctx.strokeCircle(pos[j][0], pos[j][1], hot ? r + 1.5 : r); }
+    pts.forEach((_p, j) => {
+      const hot = j === canvasActive;
+      paintDot(ctx, j, pos[j][0], pos[j][1], hot, canvasActive != null && !hot);
     });
     ctx.popClip();
     ctx.textBaseline = 'top';
@@ -1792,7 +1834,15 @@ function _ScatterChartInner(props: any) {
       { style: { width, height: chartH, position: 'relative' } },
       React.createElement(_ChartCanvas, {
         width, height: chartH, draw, animate, exportRef: props.exportRef,
-        deps: [pts, width, chartH, radius, showGrid, showLabels, activeIdx, T, props.gridDash],
+        deps: [pts, width, chartH, radius, showGrid, showLabels, canvasActive, T, props.gridDash],
+      }),
+      // The hovered dot, emphasised, in its own layer that glides from dot to dot (see `_HoverColumn`).
+      hoverDim ? null : React.createElement(_HoverColumn, {
+        x: activeIdx != null && n > 0 ? pos[activeIdx][0] : null,
+        top: Math.max(0, layout.PAD.top - 8), width: 2 * Math.ceil(_bubbleRadius(pts[activeIdx ?? 0]?.size, maxSize, radius) + 5),
+        height: Math.min(chartH, layout.PAD.top + layout.H + 8) - Math.max(0, layout.PAD.top - 8),
+        draw: (ctx: any, cx: number) => { if (activeIdx != null) paintDot(ctx, activeIdx, cx, pos[activeIdx][1], true, false); },
+        deps: [pts, pos, radius, maxSize, activeIdx],
       }),
       React.createElement(_Interaction, {
         width, height: chartH, T, count: n, pick, active: activeIdx, setActive,
@@ -1848,24 +1898,29 @@ function _CandlestickChartInner(props: any) {
   }, [rows, width, height, showLabels, n, props.labelRotation]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const bodyW = Math.max(2, Math.min(18, layout.slot * 0.6));
+  const hoverDim = props.hoverDim === true;
+  // What the chart's own canvas shows of the hover: nothing, unless the others are dimmed (see `hoverDim`).
+  const canvasActive = hoverDim ? activeIdx : null;
+  // One candle with its centre at `x`: the wick and the body.
+  const paintCandle = (ctx: any, c: any, x: number, base: any) => {
+    const wx = Math.round(x) + 0.5;
+    ctx.strokeStyle = base; ctx.lineWidth = 1.5;
+    ctx.strokeLine(wx, layout.toY(c.high), wx, layout.toY(c.low));
+    const yTop = layout.toY(Math.max(c.open, c.close)), yBot = layout.toY(Math.min(c.open, c.close));
+    ctx.fillStyle = base;
+    _roundRectPath(ctx, x - bodyW / 2, yTop, bodyW, Math.max(1.5, yBot - yTop), Math.min(2, bodyW / 2), Math.min(2, bodyW / 2));
+    ctx.fill();
+  };
   const draw = (ctx: any) => {
     if (n === 0) return;
     const L = layout;
-    const { toX, toY } = L;
+    const { toX } = L;
     _drawYAxis(ctx, L, T, { showGrid, showLabels, gridDash: props.gridDash });
     candles.forEach((c: any, i: null) => {
       if (!c) return;
       const col = c.up ? upColor : downColor;
-      const dim = activeIdx != null && i !== activeIdx;
-      const base = activeIdx === i ? _lighten(col, 0.12) : _rgba(col, dim ? 0.4 : 1);
-      const x = toX(i as any);
-      const wx = Math.round(x) + 0.5;
-      ctx.strokeStyle = base; ctx.lineWidth = 1.5;
-      ctx.strokeLine(wx, toY(c.high), wx, toY(c.low));
-      const yTop = toY(Math.max(c.open, c.close)), yBot = toY(Math.min(c.open, c.close));
-      ctx.fillStyle = base;
-      _roundRectPath(ctx, x - bodyW / 2, yTop, bodyW, Math.max(1.5, yBot - yTop), Math.min(2, bodyW / 2), Math.min(2, bodyW / 2));
-      ctx.fill();
+      const dim = canvasActive != null && i !== canvasActive;
+      paintCandle(ctx, c, toX(i as any), canvasActive === i ? _lighten(col, 0.12) : _rgba(col, dim ? 0.4 : 1));
     });
     if (showGrid) {
       ctx.strokeStyle = T.baseline; ctx.lineWidth = 1;
@@ -1915,7 +1970,17 @@ function _CandlestickChartInner(props: any) {
     { style: { width, height, position: 'relative' }, animation: _ENTRANCE },
     React.createElement(_ChartCanvas, {
       width, height, draw, animate, exportRef: props.exportRef,
-      deps: [rows, width, height, showGrid, showLabels, activeIdx, upColor, downColor, T, props.gridDash, props.labelRotation],
+      deps: [rows, width, height, showGrid, showLabels, canvasActive, upColor, downColor, T, props.gridDash, props.labelRotation],
+    }),
+    // The hovered candle, lightened, in its own layer that glides from candle to candle (see `_HoverColumn`).
+    hoverDim ? null : React.createElement(_HoverColumn, {
+      x: activeIdx != null && candles[activeIdx] ? layout.toX(activeIdx) : null,
+      top: layout.PAD.top, width: 2 * Math.ceil(bodyW / 2 + 3), height: layout.H + 1,
+      draw: (ctx: any, cx: number) => {
+        const c = candles[activeIdx as number];
+        if (c) paintCandle(ctx, c, cx, _lighten(c.up ? upColor : downColor, 0.12));
+      },
+      deps: [candles, layout, bodyW, upColor, downColor, activeIdx],
     }),
     React.createElement(_Interaction, {
       width, height, T, count: n, pick, active: activeIdx, setActive,

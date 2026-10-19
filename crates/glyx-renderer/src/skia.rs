@@ -247,12 +247,13 @@ fn polyline_runs_near(pts: &[f32], l: f32, t: f32, r: f32, b: f32, reach: f32) -
     runs
 }
 
-/// Narrows a clip mask to the box `(l, t, r, b)` in place: everything outside
+/// Reference version of `mask_narrowed_copy`, kept for its tests: narrows a clip mask to the box `(l, t, r, b)` in place: everything outside
 /// is zeroed, and the edge pixels a fractional box only partly covers keep that
 /// fraction. What `Mask::intersect_path` does for a rectangle, without
 /// rasterizing a path and multiplying the whole buffer: a window-sized mask
 /// costs a few hundred microseconds this way instead of a couple of
 /// milliseconds, and a chart inside a rounded card pushes a clip or two per frame.
+#[cfg(test)]
 fn mask_intersect_rect(m: &mut tiny_skia::Mask, l: f32, t: f32, r: f32, b: f32) {
     let (w, h) = (m.width() as usize, m.height() as usize);
     let clamp_to = |v: f32, max: usize| (v.max(0.0) as usize).min(max);
@@ -275,6 +276,32 @@ fn mask_intersect_rect(m: &mut tiny_skia::Mask, l: f32, t: f32, r: f32, b: f32) 
         if cl < 1.0 { line[x0] = (line[x0] as f32 * cl + 0.5) as u8; }
         if cr < 1.0 && (x1 - 1 != x0 || cl >= 1.0) { line[x1 - 1] = (line[x1 - 1] as f32 * cr + 0.5) as u8; }
     }
+}
+
+/// `parent` narrowed to the box `(l, t, r, b)`, as a new mask: the same as `parent.clone()` followed by `mask_intersect_rect`, but made from
+/// a fresh all-zero mask that only the box's rows are copied into, so it costs the box and not the window (a scroller inside a rounded card
+/// pushes one of these per frame; a window-sized clone and sweep was a few hundred microseconds each).
+fn mask_narrowed_copy(parent: &tiny_skia::Mask, l: f32, t: f32, r: f32, b: f32) -> Option<tiny_skia::Mask> {
+    let (w, h) = (parent.width() as usize, parent.height() as usize);
+    let mut m = tiny_skia::Mask::new(parent.width(), parent.height())?;
+    let clamp_to = |v: f32, max: usize| (v.max(0.0) as usize).min(max);
+    let (x0, x1) = (clamp_to(l.floor(), w), clamp_to(r.ceil(), w));
+    let (y0, y1) = (clamp_to(t.floor(), h), clamp_to(b.ceil(), h));
+    if x1 <= x0 || y1 <= y0 { return Some(m); }
+    let cov = |i: usize, lo: f32, hi: f32| (hi.min(i as f32 + 1.0) - lo.max(i as f32)).clamp(0.0, 1.0);
+    let (src, dst) = (parent.data(), m.data_mut());
+    for row in y0..y1 {
+        let line = &mut dst[row * w..(row + 1) * w];
+        line[x0..x1].copy_from_slice(&src[row * w + x0..row * w + x1]);
+        let cy = cov(row, t, b);
+        if cy < 1.0 {
+            for v in line[x0..x1].iter_mut() { *v = (*v as f32 * cy + 0.5) as u8; }
+        }
+        let (cl, cr) = (cov(x0, l, r), cov(x1 - 1, l, r));
+        if cl < 1.0 { line[x0] = (line[x0] as f32 * cl + 0.5) as u8; }
+        if cr < 1.0 && (x1 - 1 != x0 || cl >= 1.0) { line[x1 - 1] = (line[x1 - 1] as f32 * cr + 0.5) as u8; }
+    }
+    Some(m)
 }
 
 // ── Glyph cache ───────────────────────────────────────────────────────────────
@@ -1447,11 +1474,7 @@ impl TinySkiaFrame {
         let saved_pending = self.pending_base.take();
         let saved_flag = std::mem::replace(&mut self.mask_is_rects, false);
         let new_mask = match saved.as_ref() {
-            Some(parent) => {
-                let mut m = parent.clone();
-                m.intersect_path(path, rule, true, self.xf);
-                Some(m)
-            }
+            Some(parent) => intersect_mask(parent, path, rule, self.xf),
             None => {
                 let w = self.pixmap.width();
                 let h = self.pixmap.height();
@@ -1480,8 +1503,7 @@ impl TinySkiaFrame {
             // copy of it to this rect directly instead of rasterizing a path.
             if !(r > l && b > t) { return false; }
             let Some(parent) = self.current_mask.take() else { return false };
-            let mut narrowed = parent.clone();
-            mask_intersect_rect(&mut narrowed, l, t, r, b);
+            let Some(narrowed) = mask_narrowed_copy(&parent, l, t, r, b) else { self.current_mask = Some(parent); return false };
             self.clip_stack.push((Some(parent), self.pending_base.take(), false));
             self.current_mask = Some(narrowed);
             return true;
@@ -1532,6 +1554,31 @@ impl TinySkiaFrame {
         self.pending_base = pending;
         self.mask_is_rects = rects;
     }
+}
+
+/// `parent` narrowed to `path`: the same mask as `parent.clone()` followed by `intersect_path`, but made from a fresh (all zero) mask that the
+/// path is filled into and the parent's coverage multiplied in over the path's own box only. `intersect_path` walks the whole window-sized
+/// mask for every nested clip (a rounded card inside a rounded card, a list inside a rounded table), which cost about a millisecond each on a
+/// 1280 x 800 window; this costs what the path's box does, and touches (so commits) only those pages.
+fn intersect_mask(parent: &tiny_skia::Mask, path: &tiny_skia::Path, rule: tiny_skia::FillRule, xf: tiny_skia::Transform) -> Option<tiny_skia::Mask> {
+    let (w, h) = (parent.width(), parent.height());
+    let mut m = tiny_skia::Mask::new(w, h)?;
+    m.fill_path(path, rule, true, xf);
+    let b = path.bounds().transform(xf)?;
+    // A pixel of margin for the anti-aliased edge.
+    let (x0, y0) = ((b.left().floor() as i64 - 1).clamp(0, i64::from(w)) as usize, (b.top().floor() as i64 - 1).clamp(0, i64::from(h)) as usize);
+    let (x1, y1) = ((b.right().ceil() as i64 + 1).clamp(0, i64::from(w)) as usize, (b.bottom().ceil() as i64 + 1).clamp(0, i64::from(h)) as usize);
+    let stride = w as usize;
+    let (pd, md) = (parent.data(), m.data_mut());
+    for y in y0..y1 {
+        let row = y * stride;
+        for (c, p) in md[row + x0..row + x1].iter_mut().zip(&pd[row + x0..row + x1]) {
+            // (c * p) / 255, rounded.
+            let v = u32::from(*c) * u32::from(*p) + 128;
+            *c = ((v + (v >> 8)) >> 8) as u8;
+        }
+    }
+    Some(m)
 }
 
 // ── Persistent staging buffers ────────────────────────────────────────────────
@@ -2267,6 +2314,67 @@ mod canvas_cost {
 
     /// Prints what a frame of two chart canvases costs on the CPU renderer,
     /// with the whole window repainted and with only the charts' region.
+    #[test]
+    fn narrowing_a_mask_to_a_rect_matches_the_in_place_version() {
+        let mut parent = tiny_skia::Mask::new(300, 200).unwrap();
+        parent.fill_path(&rrect_path(20.0, 10.0, 240.0, 170.0, 30.0).unwrap(), tiny_skia::FillRule::Winding, true, tiny_skia::Transform::identity());
+        for (l, t, r, b) in [(10.0, 5.0, 110.5, 85.25), (200.0, 120.0, 400.0, 300.0), (-20.0, -20.0, 0.4, 0.6), (50.0, 50.0, 50.0, 90.0), (60.2, 70.2, 60.7, 70.9)] {
+            let mut want = parent.clone();
+            mask_intersect_rect(&mut want, l, t, r, b);
+            let got = mask_narrowed_copy(&parent, l, t, r, b).unwrap();
+            assert_eq!(want.data(), got.data(), "{l},{t},{r},{b}");
+        }
+    }
+
+    #[test]
+    fn narrowing_a_mask_matches_intersect_path() {
+        let mut parent = tiny_skia::Mask::new(300, 200).unwrap();
+        parent.fill_path(&rrect_path(20.0, 10.0, 240.0, 170.0, 30.0).unwrap(), tiny_skia::FillRule::Winding, true, tiny_skia::Transform::identity());
+        for (x, y, w, h, r) in [(10.0, 5.0, 100.0, 80.0, 12.0), (200.0, 120.0, 150.0, 120.0, 8.0), (-20.0, -20.0, 80.0, 60.0, 0.0), (400.0, 300.0, 10.0, 10.0, 2.0)] {
+            let path = rrect_path(x, y, w, h, r).unwrap();
+            let mut want = parent.clone();
+            want.intersect_path(&path, tiny_skia::FillRule::Winding, true, tiny_skia::Transform::identity());
+            let got = intersect_mask(&parent, &path, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity()).unwrap();
+            let worst = want.data().iter().zip(got.data()).map(|(a, b)| (i32::from(*a) - i32::from(*b)).abs()).max().unwrap();
+            assert!(worst <= 1, "{x},{y},{w},{h}: worst difference {worst}");
+        }
+    }
+
+    /// What a rounded clip costs on a full-size window: a mask the size of the window is made for each. 30 cards with rounded corners
+    /// (the usual shape of a dashboard) against the same 30 with square corners.
+    /// `cargo test --release -p glyx-renderer rounded_clip_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "benchmark: prints timings"]
+    fn rounded_clip_cost() {
+        use std::time::Instant;
+        let ink = peniko::Color::from_rgba8(129, 140, 248, 255);
+        for (w, h) in [(1280u32, 800u32), (1920, 1080)] {
+            let mut r = TinySkiaRenderer::new_cpu_only(w, h);
+            let seed = r.begin_frame();
+            r.finish_frame_soft(seed, |_, _, _, _| {});
+            let mut time = |label: &str, radius: f64, nested: bool| {
+                let frames = 60;
+                let t0 = Instant::now();
+                for _ in 0..frames {
+                    let mut f = r.begin_frame();
+                    if nested { f.push_rounded_layer(4.0, 4.0, f64::from(w) - 8.0, f64::from(h) - 8.0, 12.0); }
+                    for i in 0..30 {
+                        let (x, y) = (10.0 + f64::from(i % 5) * 240.0, 10.0 + f64::from(i / 5) * 120.0);
+                        if radius > 0.0 { f.push_rounded_layer(x, y, 220.0, 100.0, radius); } else { f.push_layer(x, y, 220.0, 100.0); }
+                        f.fill_rect(x, y, 220.0, 100.0, ink);
+                        f.pop_layer();
+                    }
+                    if nested { f.pop_layer(); }
+                    r.finish_frame_soft(f, |_, _, _, _| {});
+                }
+                println!("{w}x{h} {label:<34} {:6.2} ms", t0.elapsed().as_secs_f64() * 1000.0 / f64::from(frames));
+            };
+            time("30 square clips", 0.0, false);
+            time("30 rounded clips", 12.0, false);
+            time("30 rounded clips in a rounded clip", 12.0, true);
+        }
+    }
+
     /// `cargo test -p glyx-renderer canvas_cost -- --ignored --nocapture`
     #[test]
     #[ignore = "benchmark: prints timings"]

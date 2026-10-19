@@ -365,6 +365,80 @@ pub(crate) fn rebuild_layout_from_scene(
     }
 }
 
+/// Brings the layout tree in line with the scene after nodes were added, removed or moved, without throwing the tree away: new nodes get a
+/// layout node, removed ones lose theirs, and every container's children are set to its JS children where they differ. Taffy keeps what it has
+/// cached for the nodes that did not change, so a virtualized list that scrolls by a few rows lays out the rows that came in and the path
+/// above them, not the whole window (the full rebuild plus a layout with nothing cached was about 5 ms for the 1300 nodes of `big-table`).
+///
+/// Returns `false` when it cannot (no layout yet, the root changed), and the caller rebuilds from scratch; so does a tree that has gathered
+/// more than twice as many layout nodes as there are scene nodes (the detached children of removed nodes), to bound what is held.
+pub(crate) fn sync_layout_structure(
+    layout:  &mut LayoutTree,
+    nodes:   &mut std::collections::HashMap<u32, JsNode>,
+    root_id: u32,
+    removed: &mut Vec<taffy::NodeId>,
+) -> bool {
+    let Some(wrapper) = layout.root() else { return false };
+    let Some(root_lid) = nodes.get(&root_id).and_then(|n| n.layout_id) else { return false };
+    if layout.children(wrapper).map_or(true, |c| c != [root_lid]) { return false; }
+    if layout.node_count() > 2 * nodes.len() + 64 { return false; }
+
+    for lid in removed.drain(..) {
+        let _ = layout.remove(lid);
+    }
+
+    // The nodes reachable from the root, parents before children.
+    let mut order: Vec<u32> = Vec::with_capacity(nodes.len());
+    let mut stack = vec![root_id];
+    while let Some(id) = stack.pop() {
+        let Some(node) = nodes.get(&id) else { continue };
+        order.push(id);
+        stack.extend(node.children.iter().rev().copied());
+        if order.len() > nodes.len() { return false; } // a cycle in the scene: let the rebuild deal with it
+    }
+
+    // A layout node for each that has none yet (as a leaf; its children are set below).
+    for &id in &order {
+        let Some(node) = nodes.get(&id) else { continue };
+        if node.layout_id.is_some() { continue; }
+        let style = to_taffy_style(&node.node_type, &node.props);
+        let tag = Some(format!("js-{}", id));
+        let lid = match node.node_type {
+            NodeType::Text => {
+                let props = &node.props;
+                let font_size = props.font_size.unwrap_or(16.0);
+                let ctx = TextMeasureCtx {
+                    text: props.text.clone().unwrap_or_default(),
+                    font_size,
+                    max_height: props.number_of_lines.map(|n| n as f32 * font_size * 1.4),
+                    bold:   glyx_runtime::text_props::is_bold(props.font_weight.as_deref()),
+                    italic: props.font_style.as_deref() == Some("italic"),
+                    line_height: props.line_height,
+                    single_line: props.text_scroll_x.is_some(),
+                };
+                layout.add_text_node(style, ctx, tag)
+            }
+            _ => layout.add_node(style, tag),
+        };
+        match lid {
+            Ok(lid) => { if let Some(n) = nodes.get_mut(&id) { n.layout_id = Some(lid); } }
+            Err(_) => return false,
+        }
+    }
+
+    // Every container's children, where they differ from what the layout tree holds.
+    for &id in &order {
+        let Some(node) = nodes.get(&id) else { continue };
+        let Some(lid) = node.layout_id else { continue };
+        let want: SmallVec<[taffy::NodeId; 8]> = node.children.iter().filter_map(|c| nodes.get(c).and_then(|n| n.layout_id)).collect();
+        match layout.children(lid) {
+            Ok(have) if have.as_slice() == want.as_slice() => {}
+            _ => { if layout.set_children(lid, &want).is_err() { return false; } }
+        }
+    }
+    true
+}
+
 pub(crate) fn layout_props_changed(new: &NodeProps, old: &NodeProps) -> bool {
     new.width  != old.width || new.height != old.height ||
     new.flex   != old.flex || new.flex_direction != old.flex_direction ||
@@ -401,8 +475,12 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
     let Some(root_id) = state.js_root else { return };
 
     if state.layout_structure_dirty {
-        // Tree structure changed (nodes added/removed/reparented) — full rebuild.
-        rebuild_layout_from_scene(&mut state.layout, &mut state.js_nodes, root_id);
+        // Tree structure changed (nodes added/removed/reparented): bring the layout tree in line with the scene, keeping what Taffy
+        // has cached for the subtrees that did not change; a full rebuild only when that cannot be done (see `sync_layout_structure`).
+        if !sync_layout_structure(&mut state.layout, &mut state.js_nodes, root_id, &mut state.layout_removed) {
+            rebuild_layout_from_scene(&mut state.layout, &mut state.js_nodes, root_id);
+            state.layout_removed.clear();
+        }
         state.layout_structure_dirty = false;
     }
     // else: incremental path — set_style + mark_dirty already applied per-node in
@@ -1065,6 +1143,92 @@ fn parse_single_placement(s: &str) -> GridPlacement {
 mod scroll_reveal_tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// A small scene: a column holding `count` fixed-height rows, each a row of two boxes.
+    fn row_scene(rows: &[u32]) -> std::collections::HashMap<u32, JsNode> {
+        use glyx_runtime::bindings::{LengthValue, NodeProps};
+        let boxed = |w: f32, h: f32| NodeProps { width: Some(LengthValue::Px(w)), height: Some(LengthValue::Px(h)), ..NodeProps::default() };
+        let mut nodes = std::collections::HashMap::new();
+        let mut list = JsNode::new(NodeType::View, NodeProps { flex_direction: Some("column".into()), ..boxed(300.0, 1000.0) });
+        for &r in rows {
+            let (row_id, a, b) = (100 + r * 3, 101 + r * 3, 102 + r * 3);
+            let mut row = JsNode::new(NodeType::View, NodeProps { flex_direction: Some("row".into()), ..boxed(300.0, 20.0 + (r % 3) as f32) });
+            row.parent = Some(1);
+            for (id, w) in [(a, 40.0 + r as f32), (b, 60.0)] {
+                let mut n = JsNode::new(NodeType::View, boxed(w, 10.0));
+                n.parent = Some(row_id);
+                nodes.insert(id, n);
+                row.children.push(id);
+            }
+            list.children.push(row_id);
+            nodes.insert(row_id, row);
+        }
+        nodes.insert(1, list);
+        nodes
+    }
+
+    /// Every node's place after a layout of the scene, keyed by JS id.
+    fn placed(layout: &mut LayoutTree, nodes: &std::collections::HashMap<u32, JsNode>) -> Vec<(u32, [f32; 4])> {
+        let mut resolved = Vec::new();
+        layout.compute_with_measure(400.0, 1200.0, &mut resolved, |_, _, _, _, _| taffy::prelude::Size::ZERO).unwrap();
+        let by_layout: std::collections::HashMap<_, _> = resolved.into_iter().collect();
+        let mut out: Vec<(u32, [f32; 4])> = nodes.iter()
+            .filter_map(|(&id, n)| by_layout.get(&n.layout_id?).map(|r| (id, [r.x, r.y, r.width, r.height])))
+            .collect();
+        out.sort_by_key(|(id, _)| *id);
+        out
+    }
+
+    #[test]
+    fn syncing_the_layout_tree_gives_the_places_a_full_rebuild_gives() {
+        // A window of rows that advances: rows leave at the top, new ones arrive at the bottom, one is swapped for another.
+        let mut layout = LayoutTree::new();
+        let mut nodes = row_scene(&[0, 1, 2, 3, 4, 5]);
+        rebuild_layout_from_scene(&mut layout, &mut nodes, 1);
+        let before = placed(&mut layout, &nodes);
+        assert!(!before.is_empty());
+        let mut removed = Vec::new();
+
+        for step in 1..8u32 {
+            // Drop the first row (and its boxes), add one at the end, as a scroll of one row does.
+            let first = nodes.get(&1).unwrap().children[0];
+            let gone: Vec<u32> = std::iter::once(first).chain(nodes.get(&first).unwrap().children.iter().copied()).collect();
+            for g in gone {
+                if let Some(lid) = nodes.get(&g).and_then(|n| n.layout_id) { removed.push(lid); }
+                nodes.remove(&g);
+            }
+            nodes.get_mut(&1).unwrap().children.retain(|c| *c != first);
+            let fresh = row_scene(&[5 + step]);
+            for (id, mut n) in fresh {
+                if id == 1 { continue; }
+                if n.parent == Some(1) { nodes.get_mut(&1).unwrap().children.push(id); }
+                n.layout_id = None;
+                nodes.insert(id, n);
+            }
+            assert!(sync_layout_structure(&mut layout, &mut nodes, 1, &mut removed), "step {step} fell back");
+            let synced = placed(&mut layout, &nodes);
+
+            // The same scene laid out from scratch.
+            let mut fresh_layout = LayoutTree::new();
+            let mut copy: std::collections::HashMap<u32, JsNode> = nodes.iter().map(|(&id, n)| {
+                let mut c = JsNode::new(n.node_type.clone(), n.props.clone());
+                c.parent = n.parent;
+                c.children = n.children.clone();
+                (id, c)
+            }).collect();
+            rebuild_layout_from_scene(&mut fresh_layout, &mut copy, 1);
+            assert_eq!(synced, placed(&mut fresh_layout, &copy), "step {step}");
+        }
+        // Nothing piled up: the tree holds about what the scene does.
+        assert!(layout.node_count() <= nodes.len() + 2, "{} layout nodes for {} scene nodes", layout.node_count(), nodes.len());
+    }
+
+    #[test]
+    fn syncing_declines_when_there_is_no_layout_yet() {
+        let mut layout = LayoutTree::new();
+        let mut nodes = row_scene(&[0]);
+        assert!(!sync_layout_structure(&mut layout, &mut nodes, 1, &mut Vec::new()));
+    }
 
     fn node_with_layout(parent: Option<u32>, children: &[u32], layout_id: u64) -> JsNode {
         let mut n = JsNode::new(NodeType::View, NodeProps::default());

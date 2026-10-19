@@ -508,7 +508,7 @@ Text nodes register a measure function with Taffy. When Taffy needs to know a te
 
 Glyx distinguishes two types of layout changes:
 
-1. **Structure change** (nodes added/removed, children reordered): full Taffy tree rebuild. `rebuild_layout_from_scene()` reconstructs all Taffy nodes from the current `js_nodes` map. This is the expensive path.
+1. **Structure change** (nodes added/removed, children reordered): the Taffy tree is brought in line with the scene by `sync_layout_structure()`: new nodes get a Taffy node, removed ones lose theirs, and a container's children are reset only where they differ from the JS children, so Taffy keeps its cache for every subtree that did not change (a virtualized list stepping by a few rows lays out the new rows and the path above them). `rebuild_layout_from_scene()`, which reconstructs every Taffy node from `js_nodes`, is the fallback: the first layout, a changed root, or a tree holding more than twice as many Taffy nodes as the scene.
 
 2. **Style change** (width/height/flex changed on an existing node): incremental update. `set_style(taffy_node, new_style)` + `mark_dirty(taffy_node)` on the changed node only. Taffy propagates dirtiness upward and recomputes only the affected subtree.
 

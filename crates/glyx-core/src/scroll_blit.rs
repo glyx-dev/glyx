@@ -5,13 +5,18 @@
 //! the rows the scroll exposed, and the scrollbar, are drawn, which makes a scroll step cost about the exposed strip rather than the
 //! viewport.
 //!
-//! That is only right when the scroll is the *only* thing that changed and the pixels of the viewport are nothing but the scroller's own
-//! background and its content. So this is deliberately strict, and every doubt means "repaint it all" as before:
+//! That is only right when the scroll is the *only* thing that moved the content and the pixels of the viewport are nothing but the scroller's
+//! content over a flat background. So this is deliberately strict, and every doubt means "repaint it all" as before:
 //!
-//! * the scroller is the only node marked dirty (a scroll marks just the scroller; a content change marks its own node), nothing is
-//!   animating, and it scrolled by a whole number of pixels since the last frame (scroll offsets are whole pixels: `render::child_scroll_of`);
-//! * it has an opaque background of its own, no border, radius, shadow, gradient, transform or opacity, none of its ancestors transform,
-//!   fade, scroll, or clip with a rounded corner, and its rectangle is whole pixels inside the window;
+//! * exactly one dirty node is a clipping scroller, nothing is animating, and the content moved by a whole number of pixels. The content moves
+//!   by the scroll offset the renderer passes on (`render::child_scroll_of`, whole pixels) *plus* what the layout moved it by: a virtualized list
+//!   keeps a window of rows laid out from the top, so its rows that stay move in layout the other way. Nodes dirty only for that (same size and
+//!   x, one common delta: `PerWindowState::layout_only_dirty`) count as content that moved with the shift;
+//! * every other dirty node is inside the scroller and gets its own rectangles repainted (where its pixels went and where it is now); a change
+//!   that covers most of the viewport is a repaint;
+//! * the scroller has an opaque background, or what lies under it is flat (ancestors without a gradient or image; a border it is flush with and
+//!   rounded corners are repaired as thin strips and squares); no radius, border, shadow, gradient, transform or opacity of its own; none of its
+//!   ancestors transform, fade or scroll, and a clip around it may cut only its right side (the list as wide as its table);
 //! * nothing outside it that draws anything overlaps it (a sibling on top, a popup), and nothing inside it is drawn by the OS
 //!   (3D, camera, video, web view);
 //! * no text cursor is blinking.
@@ -76,6 +81,31 @@ pub(crate) fn damage_strips(region: [i32; 4], dy: i32, vbar: Option<VBar>, hbar:
     out
 }
 
+/// The same area as `rects`, as rectangles that do not overlap.
+fn disjoint(rects: Vec<(f64, f64, f64, f64)>) -> Vec<(f64, f64, f64, f64)> {
+    let mut out: Vec<(f64, f64, f64, f64)> = Vec::new();
+    for r in rects {
+        let mut pieces = vec![r];
+        for e in &out {
+            let mut next = Vec::new();
+            for p in pieces {
+                let (pl, pt, pr, pb) = (p.0, p.1, p.0 + p.2, p.1 + p.3);
+                let (el, et, er, eb) = (e.0, e.1, e.0 + e.2, e.1 + e.3);
+                if er <= pl || el >= pr || eb <= pt || et >= pb { next.push(p); continue; }
+                // What of `p` lies above, below, left of and right of `e`.
+                if et > pt { next.push((pl, pt, p.2, et - pt)); }
+                if eb < pb { next.push((pl, eb, p.2, pb - eb)); }
+                let (mt, mb) = (pt.max(et), pb.min(eb));
+                if el > pl { next.push((pl, mt, el - pl, mb - mt)); }
+                if er < pr { next.push((er, mt, pr - er, mb - mt)); }
+            }
+            pieces = next;
+        }
+        out.extend(pieces);
+    }
+    out
+}
+
 fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("GLYX_SCROLL_BLIT").as_deref() != Ok("0"))
@@ -113,41 +143,78 @@ fn why(reason: &str) -> Option<ScrollBlit> {
 pub(crate) fn detect(s: &PerWindowState, cursor_blinking: bool) -> Option<ScrollBlit> {
     if !enabled() { return None; }
     if cursor_blinking || s.cursor_was_active { return why("a text cursor is active"); }
-    // Only the scroller is dirty (a scroll marks just it, and its descendants in the cascade set, which is for scene caches).
-    if s.dirty_nodes.len() != 1 { return why("not exactly one dirty node"); }
-    let id = *s.dirty_nodes.iter().next()?;
-    if !s.descendant_cascade_nodes.iter().all(|&c| c == id) { return why("another node is in the descendant cascade"); }
+    // The scroller is the one dirty node that is a clipping scroller; the others must turn out to be inside it (see below).
+    let mut scrollers = s.dirty_nodes.iter().copied().filter(|i| {
+        s.js_nodes.get(i).map_or(false, |n| matches!(n.node_type, NodeType::View) && is_clip(&n.props) && n.props.scroll_offset_y.is_some())
+    });
+    let Some(id) = scrollers.next() else { return why("no scroller among the dirty nodes") };
+    if scrollers.next().is_some() { return why("more than one scroller is dirty"); }
     // Nothing else moves by itself.
-    if !s.transitions.is_empty() || !s.canvas_tweens.is_empty() || s.animations.values().any(|a| !a.settled) { return why("something is animating"); }
+    if !s.transitions.is_empty() || !s.canvas_tweens.is_empty() || s.animations.values().any(|a| !a.settled) {
+        return why(&format!("something is animating (transitions {}, canvas tweens {}, animations {})", s.transitions.len(), s.canvas_tweens.len(), s.animations.values().filter(|a| !a.settled).count()));
+    }
 
     let node = s.js_nodes.get(&id)?;
     let p = &node.props;
     if !matches!(node.node_type, NodeType::View) || !is_clip(p) || p.hidden == Some(true) { return why("the dirty node is not a clipping view"); }
     let Some(own_y) = p.scroll_offset_y else { return why("the dirty node is not a scroller") };
     if node.transform.is_some() || node.box_shadow.is_some() || node.gradient.is_some() || !opaque(p) { return why("the scroller has a transform, shadow, gradient or opacity"); }
-    if !p.background_color.map_or(false, |c| c[3] == 255) { return why("the scroller has no opaque background"); }
+    let own_opaque = p.background_color.map_or(false, |c| c[3] == 255);
     if p.border_radius.unwrap_or(0.0) > 0.0 || p.border_width.unwrap_or(0.0) > 0.0 { return why("the scroller has a radius or border"); }
 
     // Its place: whole pixels, entirely in the window.
     let rl = s.resolved_rect(node.layout_id?)?;
-    let (Some(x), Some(y), Some(w), Some(h)) = (whole(rl.x), whole(rl.y), whole(rl.width), whole(rl.height)) else { return why("the scroller's rectangle is not whole pixels") };
+    // Its visible width: a list as wide as its table is cut off at the right by the pane around it (the renderer puts its scrollbar on that
+    // edge: `visible_w` in `render.rs`). Any other cut is beyond this.
+    let mut vis_right = rl.x + rl.width;
+    let mut up = node.parent;
+    while let Some(pid) = up {
+        let a = s.js_nodes.get(&pid)?;
+        if is_clip(&a.props) {
+            if let Some(r) = a.layout_id.and_then(|l| s.resolved_rect(l)) { vis_right = vis_right.min(r.x + r.width); }
+        }
+        up = a.parent;
+    }
+    let (Some(x), Some(y), Some(w), Some(h)) = (whole(rl.x), whole(rl.y), whole(vis_right - rl.x), whole(rl.height)) else { return why("the scroller's visible rectangle is not whole pixels") };
     let (win_w, win_h) = (s.gpu.width() as i32, s.gpu.height() as i32);
     if w < 8 || h < 8 || x < 0 || y < 0 || x + w > win_w || y + h > win_h { return why("the scroller is not wholly inside the window"); }
 
     // What is around it: no ancestor that moves, fades, scrolls, or clips it with a rounded corner.
     let mut ancestors = std::collections::HashSet::new();
+    let mut rounded: Vec<((f64, f64, f64, f64), f64)> = Vec::new();
+    let mut edge_rows = 0.0_f64;
     let mut cur = node.parent;
     while let Some(pid) = cur {
         let a = s.js_nodes.get(&pid)?;
         if a.transform.is_some() || !opaque(&a.props) { return why("an ancestor transforms or fades"); }
         if a.props.scroll_offset_y.unwrap_or(0.0) != 0.0 || a.props.scroll_offset_x.unwrap_or(0.0) != 0.0 { return why("an ancestor is scrolled"); }
-        if is_clip(&a.props) && a.props.border_radius.unwrap_or(0.0) > 0.0 { return why("an ancestor clips with a rounded corner"); }
+        if a.props.border_radius.unwrap_or(0.0) > 0.0 {
+            // Its rounded corners cut the viewport where it is flush with them: those few pixels are not the same after a shift (see below).
+            let Some(r) = a.layout_id.and_then(|l| s.resolved_rect(l)) else { return why("a rounded ancestor has no layout") };
+            rounded.push(((f64::from(r.x), f64::from(r.y), f64::from(r.width), f64::from(r.height)), f64::from(a.props.border_radius.unwrap_or(0.0))));
+        }
         if is_clip(&a.props) {
-            // A clip that cuts the scroller short moves its scrollbar to the clip's edge, and the rows past the clip are not its own.
+            // A clip may cut the scroller's right side (the visible width above) but not its top, left or bottom.
             let inside = a.layout_id.and_then(|l| s.resolved_rect(l)).map_or(false, |r| {
-                r.x <= rl.x + 0.5 && r.y <= rl.y + 0.5 && r.x + r.width >= rl.x + rl.width - 0.5 && r.y + r.height >= rl.y + rl.height - 0.5
+                r.x <= rl.x + 0.5 && r.y <= rl.y + 0.5 && r.y + r.height >= rl.y + rl.height - 0.5
             });
             if !inside { return why("an ancestor's clip cuts the scroller short"); }
+        }
+        // What shows through a scroller without an opaque background of its own is its ancestors' painting, which a shift would move: fine
+        // for a flat colour, not for a gradient, a border or rounded corner the viewport reaches, or a shadow under a see-through box.
+        if !own_opaque {
+            let ar = a.layout_id.and_then(|l| s.resolved_rect(l));
+            let inset = ar.map_or(0.0, |r| f64::from((rl.x - r.x).min(rl.y - r.y).min(r.x + r.width - vis_right).min(r.y + r.height - rl.y - rl.height)));
+            let bw = f64::from(a.props.border_width.unwrap_or(0.0));
+            let radius = f64::from(a.props.border_radius.unwrap_or(0.0));
+            let a_opaque = a.props.background_color.map_or(false, |c| c[3] == 255);
+            let _ = radius;
+            // A border the viewport is flush with shows through it: a column down each side is the same after a shift, but the rows along its
+            // top and bottom are not (see below).
+            if inset < bw { edge_rows = edge_rows.max(bw - inset.max(0.0)); }
+            if a.gradient.is_some() || matches!(a.node_type, NodeType::Image) || (a.box_shadow.is_some() && !a_opaque) {
+                return why(&format!("the scroller has no opaque background and an ancestor's painting is not the same all down the viewport (gradient {}, image {}, inset {inset} border {bw}, shadow {})", a.gradient.is_some(), matches!(a.node_type, NodeType::Image), a.box_shadow.is_some()));
+            }
         }
         ancestors.insert(pid);
         cur = a.parent;
@@ -157,6 +224,7 @@ pub(crate) fn detect(s: &PerWindowState, cursor_blinking: bool) -> Option<Scroll
     let Some(&(ox, oy, serial)) = s.scroll_drawn.get(&id) else { return why("no record of how the scroller was last drawn") };
     if serial != s.frame_serial { return why("the record of the scroller is not from the last frame"); }
     let rect = (f64::from(rl.x), f64::from(rl.y), f64::from(rl.width), f64::from(rl.height));
+    let vis_w = f64::from(w);
     let (mut max_bottom, mut max_right) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
     for &cid in &node.children {
         if let Some(c) = s.js_nodes.get(&cid).and_then(|c| c.layout_id).and_then(|l| s.resolved_rect(l)) {
@@ -169,11 +237,6 @@ pub(crate) fn detect(s: &PerWindowState, cursor_blinking: bool) -> Option<Scroll
     let (nx, ny) = crate::render::child_scroll_of(
         0.0, 0.0, own_x, Some(own_y), true, max_bottom, if own_x.is_some() { max_right } else { f64::NEG_INFINITY }, pad, rect,
     );
-    if nx != ox { return why("the horizontal scroll changed"); }
-    let dy = ny - oy;
-    if dy == 0.0 || dy.abs() >= f64::from(h) { return why("no scroll step to move (none, or past the viewport)"); }
-    let dy = dy as i32;
-
     // Its content: nothing the OS draws; and who is inside, to tell the rest from the foreign.
     let mut inside = std::collections::HashSet::new();
     let mut stack: Vec<u32> = node.children.iter().copied().collect();
@@ -183,6 +246,26 @@ pub(crate) fn detect(s: &PerWindowState, cursor_blinking: bool) -> Option<Scroll
         inside.insert(nid);
         stack.extend(n.children.iter().copied());
     }
+
+    if nx != ox { return why("the horizontal scroll changed"); }
+    // How far the content moved on screen. The scroll the renderer passes on is one part; the other is a layout that moves content itself: a
+    // virtualized list keeps only a window of rows, laid out from the top of the list, so when the window advances the rows that stay are
+    // *laid out* higher by what it advanced while the scroll offset is lower by the same, and the screen sees the sum. Rows that moved that way
+    // with nothing else changed (`layout_only_dirty`, same size and x) all have the same layout delta `lay`; any other mix is not a shift.
+    let mut lay: Option<f64> = None;
+    for &d in &s.layout_only_dirty {
+        let Some(dn) = s.js_nodes.get(&d) else { continue };
+        if d == id || !inside.contains(&d) || !paints(dn) { continue; }
+        let (Some(prev), Some(r)) = (s.prev_resolved.get(&d), dn.layout_id.and_then(|l| s.resolved_rect(l))) else { continue };
+        if prev.x != r.x || prev.width != r.width || prev.height != r.height { return why("a node moved sideways or changed size"); }
+        let delta = f64::from(r.y - prev.y);
+        match lay { None => lay = Some(delta), Some(v) if (v - delta).abs() < 0.01 => {}, _ => return why("nodes moved in layout by different amounts") }
+    }
+    let lay = lay.unwrap_or(0.0);
+    let dy = (ny - oy) - lay;
+    if dy == 0.0 || dy.abs() >= f64::from(h) { return why("no scroll step to move (none, or past the viewport)"); }
+    if (dy - dy.round()).abs() > 0.01 { return why("the content moved by a fraction of a pixel"); }
+    let dy = dy.round() as i32;
 
     // Anything else that draws over the viewport would be moved with it.
     let viewport = (f64::from(x), f64::from(y), f64::from(w), f64::from(h));
@@ -194,27 +277,134 @@ pub(crate) fn detect(s: &PerWindowState, cursor_blinking: bool) -> Option<Scroll
         let mut up = n.parent;
         while let Some(pid) = up {
             let Some(a) = s.js_nodes.get(&pid) else { break };
-            if a.props.scroll_offset_y.is_some() || a.props.scroll_offset_x.is_some() {
+            // A scroller that is not scrolled leaves what it holds where its layout puts it; a scrolled one could show it anywhere inside.
+            if a.props.scroll_offset_y.unwrap_or(0.0) != 0.0 || a.props.scroll_offset_x.unwrap_or(0.0) != 0.0 {
                 bound = a.layout_id.and_then(|l| s.resolved_rect(l)).map(|r| (f64::from(r.x), f64::from(r.y), f64::from(r.width), f64::from(r.height)));
             }
             up = a.parent;
         }
-        match bound { Some(b) if !hits(b) => {} _ => return why("another node draws over the viewport") }
+        // (No layout: not drawn at all.)
+        if let Some(b) = bound { if hits(b) { return why(&format!("another node draws over the viewport (node {nid}, {:?}, bound {b:?}, parent {:?})", n.node_type, n.parent)); } }
     }
+
+    // The other dirty nodes: new rows, a row whose content changed, rows that moved or went. Each must be inside the scroller, and what it
+    // needs repainted is its old and its new rectangle. In the shifted frame the old pixels sit where the node's layout rectangle puts them
+    // *now* (it was drawn at layout - old scroll, and moved by -dy: layout - new scroll), so both rectangles are layout rectangles minus
+    // the scroll the children get. Nodes that draw nothing of their own (spacers, plain wrappers) need nothing: what they hold is dirty on
+    // its own account.
+    let mut extra: Vec<(f64, f64, f64, f64)> = Vec::new();
+    let no_overrides = std::collections::HashMap::new();
+    let rect_of = |i: u32| -> Option<(f64, f64, f64, f64)> {
+        let r = s.resolved_rect(s.js_nodes.get(&i)?.layout_id?)?;
+        Some((f64::from(r.x), f64::from(r.y), f64::from(r.width), f64::from(r.height)))
+    };
+    // Where a node is drawn now (its layout rectangle less the scroll the children get), and where the pixels it was drawn with are after the
+    // shift: where it was drawn (layout less the old scroll), moved up by `dy`.
+    let shifted = |l: f64, t: f64, r: f64, b: f64| (l - nx - 4.0, t - ny - 4.0, r - l + 8.0, b - t + 8.0);
+    let ghost = |l: f64, t: f64, r: f64, b: f64| (l - ox - 4.0, t - oy - f64::from(dy) - 4.0, r - l + 8.0, b - t + 8.0);
+    for &d in &s.dirty_nodes {
+        if d == id { continue; }
+        let Some(dn) = s.js_nodes.get(&d) else {
+            // Gone this frame. Where it was drawn last: its own rectangle if it was inside the scroller, which is shifted, or if it
+            // was somewhere else, which is not; the damage covers both readings.
+            if let Some(&(l, t, r, b)) = s.prev_visual.get(&d) {
+                extra.push(ghost(l, t, r, b));
+                extra.push((l - 4.0, t - 4.0, r - l + 8.0, b - t + 8.0));
+            }
+            continue;
+        };
+        if !inside.contains(&d) { return why("a dirty node is outside the scroller"); }
+        // Anything between it and the scroller that moves or scrolls its drawing by itself is beyond this.
+        let mut up = dn.parent;
+        while let Some(pid) = up {
+            if pid == id { break; }
+            let Some(a) = s.js_nodes.get(&pid) else { break };
+            if a.transform.is_some() || a.props.scroll_offset_y.is_some() || a.props.scroll_offset_x.is_some() { return why("a dirty node is in a transformed or scrolled wrapper"); }
+            up = a.parent;
+        }
+        if dn.transform.is_some() { return why("a dirty node has a transform"); }
+        if !paints(dn) { continue; }
+        // Moved with the content, nothing else: its pixels are right where the shift put them.
+        if s.layout_only_dirty.contains(&d) { continue; }
+        match crate::scene::visual_bounds(&s.js_nodes, &rect_of, &no_overrides, d) {
+            Some((l, t, r, b)) => extra.push(shifted(l, t, r, b)),
+            None => return why("a dirty node has no layout yet"),
+        }
+        match (s.prev_visual.get(&d), s.prev_resolved.get(&d)) {
+            (Some(&(l, t, r, b)), _) => extra.push(ghost(l, t, r, b)),
+            (None, Some(p)) => extra.push(ghost(f64::from(p.x), f64::from(p.y), f64::from(p.x + p.width), f64::from(p.y + p.height))),
+            _ => {}
+        }
+    }
+    // What is left of the cascade set (descendants a scroll marked for scene caches, which the CPU renderer does not use) must be inside too.
+    if !s.descendant_cascade_nodes.iter().all(|c| *c == id || inside.contains(c) || !s.js_nodes.contains_key(c)) { return why("a node outside the scroller is in the descendant cascade"); }
 
     let show_bar = p.show_scrollbar.unwrap_or(true);
     let bar_w = f64::from(p.scrollbar_width.unwrap_or(8.0));
     // The thumb before and after, as the renderer places it (`render::compute_scrollbar_thumb` with the content height it uses).
     let content_h = max_bottom - rect.1;
-    let thumb = |scroll: f64| crate::render::compute_scrollbar_thumb(rect.0, rect.1, rect.2, rect.3, scroll, content_h, bar_w);
+    let thumb = |scroll: f64| crate::render::compute_scrollbar_thumb(rect.0, rect.1, vis_w, rect.3, scroll, content_h, bar_w);
     let vbar = (show_bar && max_bottom.is_finite()).then(|| VBar { width: bar_w, old_thumb: thumb(oy), new_thumb: thumb(ny) });
-    let damage = damage_strips([x, y, w, h], dy, vbar, (show_bar && own_x.is_some()).then_some(bar_w));
+    let mut damage = damage_strips([x, y, w, h], dy, vbar, (show_bar && own_x.is_some()).then_some(bar_w));
+    // The changed nodes' rectangles, cut to the viewport. When they cover most of it (a jump that replaced every row) a plain repaint is cheaper.
+    let (vx1, vy1) = (viewport.0 + viewport.2, viewport.1 + viewport.3);
+    let mut changed_area = 0.0;
+    for (ex, ey, ew, eh) in extra {
+        let (l, t, r, b) = (ex.max(viewport.0), ey.max(viewport.1), (ex + ew).min(vx1), (ey + eh).min(vy1));
+        if r > l && b > t { damage.push((l, t, r - l, b - t)); changed_area += (r - l) * (b - t); }
+    }
+    if changed_area > 0.5 * viewport.2 * viewport.3 { return why(&format!("most of the viewport changed besides the scroll ({} of {} px, {} dirty nodes, e.g. {:?})", changed_area as i64, (viewport.2 * viewport.3) as i64, s.dirty_nodes.len(), s.dirty_nodes.iter().take(5).map(|d| (*d, s.js_nodes.get(d).map(|n| format!("{:?}", n.node_type)), s.prev_resolved.get(d).map(|p| (p.x, p.y)), s.js_nodes.get(d).and_then(|n| n.layout_id).and_then(|l| s.resolved_rect(l)).map(|r| (r.x, r.y)))).collect::<Vec<_>>())); }
+    // The rows along the viewport's top and bottom that an ancestor's border shows through, where they were and where the shift put them.
+    if edge_rows > 0.0 {
+        let e = edge_rows.ceil() + 1.0;
+        for (t0, b0) in [(viewport.1, viewport.1 + e), (vy1 - e, vy1)] {
+            damage.push((viewport.0, t0, viewport.2, b0 - t0));
+            let (t2, b2) = ((t0 - f64::from(dy)).max(viewport.1), (b0 - f64::from(dy)).min(vy1));
+            if b2 > t2 { damage.push((viewport.0, t2, viewport.2, b2 - t2)); }
+        }
+    }
+    // The corners of rounded clips around the scroller: a square of the radius at each corner that touches the viewport, where the content
+    // was, and where the shift moved it to.
+    for ((ax, ay, aw, ah), r) in rounded {
+        for (cx, cy) in [(ax, ay), (ax + aw - r, ay), (ax, ay + ah - r), (ax + aw - r, ay + ah - r)] {
+            let (l, t, rr, b) = (cx.max(viewport.0), cy.max(viewport.1), (cx + r).min(vx1), (cy + r).min(vy1));
+            if rr <= l || b <= t { continue; }
+            damage.push((l, t, rr - l, b - t));
+            let (t2, b2) = ((t - f64::from(dy)).max(viewport.1), (b - f64::from(dy)).min(vy1));
+            if b2 > t2 { damage.push((l, t2, rr - l, b2 - t2)); }
+        }
+    }
+    // Most of the changed nodes' rectangles lie inside the exposed rows (the rows that came into view are new): drop what another rectangle
+    // already covers, or merging the rest would grow into one box around everything.
+    let covered = |a: &(f64, f64, f64, f64), b: &(f64, f64, f64, f64)| a.0 >= b.0 - 0.01 && a.1 >= b.1 - 0.01 && a.0 + a.2 <= b.0 + b.2 + 0.01 && a.1 + a.3 <= b.1 + b.3 + 0.01;
+    let all = damage.clone();
+    let mut damage: Vec<_> = damage.into_iter().enumerate().filter(|(i, a)| !all.iter().enumerate().any(|(j, b)| j != *i && covered(a, b) && (!covered(b, a) || j < *i))).map(|(_, a)| a).collect();
+    damage.dedup();
+    if std::env::var_os("GLYX_SCROLL_BLIT_TRACE").is_some() { eprintln!("[scroll-blit] before merging: {} rects, layout-only {}, lay {lay}: {:?}", damage.len(), s.layout_only_dirty.len(), damage.iter().take(14).collect::<Vec<_>>()); }
+    // `coalesce` joins rectangles that overlap into the box around them, so a scrollbar column crossing the exposed rows would drag them into
+    // one box the size of the viewport. Cut them into pieces that do not overlap first, and it only joins what is really close.
+    let damage = crate::damage_rects::coalesce(disjoint(damage));
+    if std::env::var_os("GLYX_SCROLL_BLIT_TRACE").is_some() { eprintln!("[scroll-blit] used: dy {dy}, {} dirty nodes, damage {:?}", s.dirty_nodes.len(), damage); }
     Some(ScrollBlit { region: [x, y, w, h], dy, damage })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlapping_rectangles_are_cut_into_pieces_that_cover_the_same_area_once() {
+        let rects = vec![(0.0, 0.0, 100.0, 20.0), (90.0, 0.0, 10.0, 100.0), (0.0, 50.0, 100.0, 2.0), (5.0, 5.0, 10.0, 10.0)];
+        let out = disjoint(rects.clone());
+        let area = |rs: &[(f64, f64, f64, f64)]| rs.iter().map(|r| r.2 * r.3).sum::<f64>();
+        // 100x20 + (10 wide column below the first rect: 80 rows, minus the 2-row strip crossing it) + the strip's 90 left of the column.
+        assert_eq!(area(&out), 100.0 * 20.0 + 10.0 * 80.0 + 90.0 * 2.0);
+        for (i, a) in out.iter().enumerate() {
+            for b in &out[i + 1..] {
+                assert!(a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1, "{a:?} overlaps {b:?}");
+            }
+        }
+    }
 
     #[test]
     fn the_exposed_rows_are_the_end_the_content_moved_away_from() {

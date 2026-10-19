@@ -454,8 +454,9 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
     { state.a11y_dirty = true; }
     let mut layout_changed   = false;
     // Tracks whether the Taffy tree structure itself changed (nodes added / removed /
-    // reparented).  When only style props changed we skip the full rebuild and rely
-    // on the incremental mark_dirty path already applied per-node below.
+    // reparented).  When only style props changed the layout tree is left as it is and the
+    // incremental mark_dirty path already applied per-node below does the work; a structure change
+    // is synced into it by `layout::sync_layout_structure`.
     let mut structure_changed = false;
     for cmd in commands {
         match cmd {
@@ -638,7 +639,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 if changed {
                     layout_changed = true;
                     // Incremental path: update Taffy style in-place + mark dirty.
-                    // No structure change — skip full rebuild in recompute_layout.
+                    // No structure change — nothing to sync in recompute_layout.
                     if let (Some(lid), Some(nt)) = (opt_lid, opt_nt) {
                         let new_style = layout::to_taffy_style(&nt, &props);
                         let _ = state.layout.set_style(lid, new_style);
@@ -719,6 +720,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     .get(&id)
                     .map(|n| (n.children.clone(), n.parent))
                     .unwrap_or_default();
+                if let Some(lid) = state.js_nodes.get(&id).and_then(|n| n.layout_id) { state.layout_removed.push(lid); }
                 state.js_nodes.remove(&id);
                 for cid in orphan_children {
                     if let Some(child) = state.js_nodes.get_mut(&cid) {
@@ -1396,7 +1398,7 @@ pub(crate) fn update_dirty_from_layout(state: &mut PerWindowState) -> bool {
             None => true, // new node — treat as dirty
         };
         if changed {
-            state.dirty_nodes.insert(js_id);
+            if state.dirty_nodes.insert(js_id) { state.layout_only_dirty.insert(js_id); }
             any_changed = true;
         }
     }
@@ -1480,6 +1482,16 @@ pub(crate) fn compute_frame_damage(
             }
         }
 
+        // A node inside scrollers that did not move since the last frame is where its layout, less the scroll those scrollers pass on,
+        // puts it: damage just that, not the whole scroller (see `scrolled_bounds`).
+        if outermost_scrolled_ancestor(&state.js_nodes, id).is_some() {
+            if let Some((now, before)) = scrolled_bounds(state, &rect_of, overrides, id) {
+                add(&mut rects, now.0, now.1, now.2 - now.0, now.3 - now.1);
+                if let Some(b) = before { add(&mut rects, b.0, b.1, b.2 - b.0, b.3 - b.1); }
+                continue;
+            }
+        }
+
         // Outermost scrolled ancestor bounds this node's visual position.
         // Walks the persistent `parent` pointers maintained by
         // `apply_scene_commands` — no per-frame child→parent map needed.
@@ -1500,6 +1512,45 @@ pub(crate) fn compute_frame_damage(
 
     let rects = crate::damage_rects::coalesce(rects);
     (!rects.is_empty()).then_some(rects)
+}
+
+/// Where a node inside scrollers is on screen now and where it was drawn last frame, in window pixels: `(now, before)`; `None` when that
+/// cannot be told (the caller then damages the outermost scroller whole, as it always did).
+///
+/// A scroller passes its children the scroll they are drawn with (`PerWindowState::scroll_drawn`, recorded as it was drawn, the scrolls of
+/// the scrollers around it included). While no scroller above the node is itself dirty (so none moved since that frame was drawn) the
+/// node's screen position is its layout rectangle less that scroll, both for where it is and where it was. A change in a page that is
+/// scrolled, a chart's hover on a long dashboard, then costs the chart and not the page. Any transform above the node, a scroller that
+/// was not drawn last frame, or a dirty scroller above it, and the answer is `None`.
+fn scrolled_bounds(
+    state:     &PerWindowState,
+    rect_of:   &dyn Fn(u32) -> Option<(f64, f64, f64, f64)>,
+    overrides: &std::collections::HashMap<u32, crate::motion::Overrides>,
+    id:        u32,
+) -> Option<((f64, f64, f64, f64), Option<(f64, f64, f64, f64)>)> {
+    let mut inner: Option<u32> = None;
+    let mut cur = state.js_nodes.get(&id)?.parent;
+    for _ in 0..state.js_nodes.len() {
+        let Some(pid) = cur else { break };
+        let a = state.js_nodes.get(&pid)?;
+        if a.transform.is_some() { return None; }
+        if a.props.scroll_offset_x.is_some() || a.props.scroll_offset_y.is_some() {
+            if state.dirty_nodes.contains(&pid) { return None; }
+            inner.get_or_insert(pid);
+        }
+        cur = a.parent;
+    }
+    let &(cx, cy, serial) = state.scroll_drawn.get(&inner?)?;
+    if serial != state.frame_serial { return None; }
+    let (l, t, r, b) = visual_bounds(&state.js_nodes, rect_of, overrides, id)?;
+    let now = (l - cx, t - cy, r - cx, b - cy);
+    // Where it was drawn: its bounds when last recorded or, failing that, its layout rectangle of the last frame.
+    let before = match (state.prev_visual.get(&id), state.prev_resolved.get(&id)) {
+        (Some(&(pl, pt, pr, pb)), _) => Some((pl - cx, pt - cy, pr - cx, pb - cy)),
+        (None, Some(p)) => Some((f64::from(p.x) - cx, f64::from(p.y) - cy, f64::from(p.x + p.width) - cx, f64::from(p.y + p.height) - cy)),
+        _ => None,
+    };
+    Some((now, before))
 }
 
 /// Screen-space bounds `(l, t, r, b)` of what node `id` draws: its layout

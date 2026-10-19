@@ -19,9 +19,13 @@ pub(crate) const MAX_RECTS: usize = 8;
 /// against.
 const MERGE_WASTE: f64 = 1.25;
 
-/// Rects this small always merge with a neighbour that is nearly as close: the
+/// Rects this small merge with a neighbour that is nearly as close: the
 /// per-rect overhead beats a few hundred pixels.
 const TINY_AREA: f64 = 1500.0;
+
+/// ... but only while the box around the two stays small (about 140 x 140): two tiny changes at opposite ends of the window (a blinking caret
+/// and a hover, a clock and a spinner) used to be joined into a box the size of the window, which is a full repaint.
+const TINY_UNION_MAX: f64 = 20_000.0;
 
 fn area(r: Rect) -> f64 { r.2.max(0.0) * r.3.max(0.0) }
 
@@ -73,7 +77,7 @@ pub(crate) fn coalesce(mut rects: Vec<Rect>) -> Vec<Rect> {
                 let (a, b) = (rects[i], rects[j]);
                 let u = union(a, b);
                 let together = area(a) + area(b);
-                let cheap = area(u) <= together * MERGE_WASTE || (area(a) < TINY_AREA && area(b) < TINY_AREA);
+                let cheap = area(u) <= together * MERGE_WASTE || (area(a) < TINY_AREA && area(b) < TINY_AREA && area(u) <= TINY_UNION_MAX);
                 if overlaps(a, b) || cheap {
                     merged = Some((i, j, u));
                     break 'search;
@@ -144,6 +148,14 @@ mod tests {
     fn tiny_neighbours_merge_even_when_the_box_is_mostly_empty() {
         let out = coalesce(vec![(0.0, 0.0, 10.0, 10.0), (200.0, 0.0, 10.0, 10.0)]);
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn tiny_rects_far_apart_do_not_become_a_window_sized_box() {
+        let (caret, hover) = ((20.0, 30.0, 2.0, 16.0), (1200.0, 700.0, 24.0, 24.0));
+        let out = coalesce(vec![caret, hover]);
+        assert_eq!(out.len(), 2);
+        assert!(total_area(&out) < 1000.0);
     }
 
     #[test]

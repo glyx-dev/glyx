@@ -141,6 +141,30 @@ impl LayoutTree {
         Ok(id)
     }
 
+    /// The children of `node`, in order.
+    pub fn children(&self, node: NodeId) -> Result<Vec<NodeId>, LayoutError> {
+        self.tree.children(node).map_err(LayoutError::Taffy)
+    }
+
+    /// Replace the children of `node` (marks it, and so its ancestors, for recomputing; the children keep what Taffy has cached for them).
+    pub fn set_children(&mut self, node: NodeId, children: &[NodeId]) -> Result<(), LayoutError> {
+        self.tree.set_children(node, children).map_err(LayoutError::Taffy)
+    }
+
+    /// Drop `node` from the tree and from the parent that held it, which is marked for recomputing. Its children are detached, not dropped.
+    pub fn remove(&mut self, node: NodeId) -> Result<(), LayoutError> {
+        let parent = self.tree.parent(node);
+        self.tree.remove(node).map_err(LayoutError::Taffy)?;
+        self.meta.remove(&node);
+        if let Some(p) = parent { self.tree.mark_dirty(p).map_err(LayoutError::Taffy)?; }
+        Ok(())
+    }
+
+    /// How many nodes the tree holds (including any detached ones).
+    pub fn node_count(&self) -> usize {
+        self.tree.total_node_count()
+    }
+
     /// Set the root node.  The root is what `compute_with_measure()` runs from.
     pub fn set_root(&mut self, node: NodeId) {
         self.root = Some(node);

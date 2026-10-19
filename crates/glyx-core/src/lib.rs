@@ -1625,6 +1625,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     runtime:      rt,
                     layout_dirty:           true,
                     layout_structure_dirty: true,
+                    layout_removed:         Vec::new(),
                     resolved:               Vec::new(),
                     resolved_by_id:         std::collections::HashMap::new(),
                     z_order:                std::collections::HashMap::new(),
@@ -1732,6 +1733,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     scrollbar_drag:  None,
                     dirty_nodes:              std::collections::HashSet::new(),
                     descendant_cascade_nodes: std::collections::HashSet::new(),
+                    layout_only_dirty:        std::collections::HashSet::new(),
                     dirty_subtrees:           std::collections::HashSet::new(),
                     prev_resolved:   std::collections::HashMap::new(),
                     prev_visual:     std::collections::HashMap::new(),
@@ -2586,8 +2588,14 @@ pub fn run(mut config: AppConfig) -> bool {
                 #[cfg(all(feature = "dev", not(target_os = "windows")))]
                 let direct2d_active = false;
 
+                // A 3D canvas is drawn onto the swapchain image after the scene, and the cached frame has none of it: re-blitting
+                // that frame on an overlay-timer tick made the 3D view vanish for that frame (it flickered in `glyx dev`).
+                #[cfg(all(feature = "dev", feature = "canvas3d"))]
+                let has_3d = !s.canvas3d_scenes.is_empty();
+                #[cfg(all(feature = "dev", not(feature = "canvas3d")))]
+                let has_3d = false;
                 #[cfg(feature = "dev")]
-                if !needs_full_render && !direct2d_active
+                if !needs_full_render && !direct2d_active && !has_3d
                     && (s.pipeline_cache_saved || !s.scene_cache.is_empty()) {
                     // Stamp last_frame_at so FPS reflects the visual refresh rate
                     // (~20fps from the overlay timer), not the full-render rate (~4fps).
@@ -3391,6 +3399,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 snapshot_resolved(s);
                 s.label_cache.end_frame();
                 s.dirty_nodes.clear();
+                s.layout_only_dirty.clear();
                 s.dirty_subtrees.clear();
 
                 // Rotate scene cache: scene_cache_new becomes the cache for the

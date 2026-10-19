@@ -228,6 +228,8 @@ pub(super) struct PerWindowState {
     pub(super) runtime:      Box<dyn JsRuntime>,
     pub(super) layout_dirty: bool,
     pub(super) layout_structure_dirty: bool,
+    /// Layout nodes of JS nodes removed since the layout tree was last brought in line with the scene (see `layout::sync_layout_structure`).
+    pub(super) layout_removed: Vec<taffy::NodeId>,
     pub(super) resolved:     Vec<(NodeId, ResolvedLayout)>,
     /// `layout_id → rect` overlay over `resolved`, rebuilt in the same layout
     /// pass — replaces the old `resolved.iter().find()` linear scan.
@@ -430,6 +432,9 @@ pub(super) struct PerWindowState {
     pub(super) scrollbar_drag: Option<ScrollbarDragState>,
     pub(super) dirty_nodes: std::collections::HashSet<u32>,
     pub(super) descendant_cascade_nodes: std::collections::HashSet<u32>,
+    /// The nodes in `dirty_nodes` only because their layout rectangle moved (nothing changed on the node itself): what a scroll that shifts
+    /// its content through layout, as a virtualized list's window does, leaves behind (see `scroll_blit`).
+    pub(super) layout_only_dirty: std::collections::HashSet<u32>,
     pub(super) dirty_subtrees: std::collections::HashSet<u32>,
     pub(super) prev_resolved: std::collections::HashMap<u32, ResolvedLayout>,
     /// Screen bounds `(l, t, r, b)` each node was last drawn at, transforms

@@ -1110,13 +1110,14 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
 
             // ── Video player ──────────────────────────────────────────────────
             SceneCommand::OpenVideo { handle_id, url } => {
-                let frame_buf      = Arc::new(Mutex::new(None::<(u32, u32, Vec<u8>)>));
+                let frame_buf      = Arc::new(Mutex::new(None::<(u32, u32, Arc<crate::state::FrameBytes>)>));
                 let stop_flag      = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let pause_flag     = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let audio_stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let video_volume   = Arc::new(Mutex::new(1.0_f32));
                 let (seek_tx, seek_rx) = std::sync::mpsc::sync_channel::<f64>(4);
                 let events = Arc::new(Mutex::new(std::collections::VecDeque::<String>::new()));
+                let target_size = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
                 // Audio is the master clock; the video thread follows it.
                 let clock = Arc::new(crate::av_clock::AvClock::default());
@@ -1129,6 +1130,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                 let stop_clone  = Arc::clone(&stop_flag);
                 let pause_clone = Arc::clone(&pause_flag);
                 let ev_clone    = Arc::clone(&events);
+                let target_clone = Arc::clone(&target_size);
                 let redraw      = Arc::clone(&state.request_redraw);
 
                 std::thread::spawn(move || {
@@ -1156,14 +1158,28 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     };
 
                     let (w, h, fps) = (dec.width, dec.height, dec.fps);
-                    let rgba_size   = (w * h * 4) as usize;
+                    // The size frames come out at: the source's until the video has been drawn and the decoder is asked for the drawn size.
+                    let (mut out_w, mut out_h) = (w, h);
+                    let mut size_changed_at: Option<std::time::Instant> = None;
                     let duration_secs = media.decoder_duration(&dec);
                     let meta_msg = format!(
                         r#"{{"type":"metadata","id":{handle_id},"width":{w},"height":{h},"fps":{fps:.3},"durationSecs":{duration_secs:.3}}}"#
                     );
                     ev_clone.lock().push_back(meta_msg);
 
-                    let mut rgba_buf = vec![0u8; rgba_size];
+                    // Decoded frames go straight into a buffer from this pool and are shared with the renderer instead of copied: a
+                    // buffer is free again once nothing but the pool holds it (the renderer let go of the image that showed it). Steady
+                    // state allocates nothing; at 1080p that is 8 MB a frame that was allocated, filled and freed 30 times a second.
+                    let mut pool: Vec<Arc<crate::state::FrameBytes>> = Vec::new();
+                    let next_free = |pool: &mut Vec<Arc<crate::state::FrameBytes>>, stop: &std::sync::atomic::AtomicBool, rgba_size: usize| -> usize {
+                        loop {
+                            if let Some(i) = pool.iter().position(|b| Arc::strong_count(b) == 1) { return i; }
+                            // Up to four frames: one being shown, one waiting to be taken, one being decoded, one spare.
+                            if pool.len() < 4 { pool.push(Arc::new(crate::state::FrameBytes(vec![0u8; rgba_size]))); return pool.len() - 1; }
+                            if stop.load(std::sync::atomic::Ordering::Relaxed) { return 0; }
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                        }
+                    };
 
                     let mut wall_start: Option<std::time::Instant> = None;
                     let mut pts_start  = 0f64;
@@ -1195,7 +1211,25 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                             seek_target = Some(secs);
                         }
 
-                        match media.decoder_next_frame(&dec, &mut rgba_buf) {
+                        // Frames at the size the video is drawn at, not the source's: scaling is the decoder's (a SIMD scaler) instead of
+                        // the renderer sampling a bigger picture pixel by pixel, a 4K frame is 3.7 MB at 720p instead of 33, and drawn 1:1
+                        // it is copied. Asked for once the size has held still for a moment (a layout that is moving would re-make the
+                        // scaler every frame), never above the source.
+                        {
+                            let want = target_clone.load(std::sync::atomic::Ordering::Relaxed);
+                            let (tw, th) = ((want >> 32) as u32, (want & 0xFFFF_FFFF) as u32);
+                            let (tw, th) = if tw == 0 || th == 0 { (w, h) } else { (tw.min(w), th.min(h)) };
+                            if (tw, th) != (out_w, out_h) && size_changed_at.map_or(true, |t| t.elapsed().as_millis() >= 250) {
+                                if media.decoder_set_output_size(&dec, tw, th) {
+                                    (out_w, out_h) = (tw, th);
+                                    pool.clear(); // the buffers still shown are dropped by whoever holds them; new ones are the new size
+                                }
+                                size_changed_at = Some(std::time::Instant::now());
+                            }
+                        }
+                        let cur = next_free(&mut pool, &stop_clone, (out_w * out_h * 4) as usize);
+                        let Some(target) = Arc::get_mut(&mut pool[cur]) else { continue };
+                        match media.decoder_next_frame(&dec, &mut target.0) {
                             Ok(Some(pts)) => {
                                 use crate::av_clock::{frame_timing, FrameTiming};
                                 // A jump arrived while this frame decoded: it's from before
@@ -1216,15 +1250,16 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                                     seek_target = None;
                                     last_shown = std::time::Instant::now();
                                 }
-                                let show = |buf: &[u8]| {
-                                    *buf_clone.lock() = Some((w, h, buf.to_vec()));
+                                let frame = Arc::clone(&pool[cur]);
+                                let show = || {
+                                    *buf_clone.lock() = Some((out_w, out_h, Arc::clone(&frame)));
                                     (redraw)(); // wake the event loop so this frame is painted immediately
                                 };
 
                                 // Audio still opening (after start or a seek): show this
                                 // frame as a poster and wait for it, up to 2 s.
                                 if clock_clone.is_pending() {
-                                    show(&rgba_buf);
+                                    show();
                                     last_shown = std::time::Instant::now();
                                     let t0 = std::time::Instant::now();
                                     while clock_clone.is_pending() && t0.elapsed().as_secs_f64() < 2.0
@@ -1241,7 +1276,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                                     wall_start = None;
                                     match frame_timing(pts, audio_pos, last_shown.elapsed().as_secs_f64()) {
                                         FrameTiming::Drop => { dropped += 1; continue; }
-                                        FrameTiming::ShowNow => { show(&rgba_buf); last_shown = std::time::Instant::now(); }
+                                        FrameTiming::ShowNow => { show(); last_shown = std::time::Instant::now(); }
                                         FrameTiming::ShowAfter(secs) => {
                                             // Wait in short steps so a jump isn't held up.
                                             let until = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs);
@@ -1251,7 +1286,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                                                 std::thread::sleep(left.min(std::time::Duration::from_millis(5)));
                                             }
                                             take_seek!();
-                                            show(&rgba_buf);
+                                            show();
                                             last_shown = std::time::Instant::now();
                                         }
                                     }
@@ -1270,7 +1305,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                                     }
                                 } else {
                                     // No audio: pace by the wall clock.
-                                    show(&rgba_buf);
+                                    show();
                                     last_shown = std::time::Instant::now();
                                     let ws = wall_start.get_or_insert_with(|| {
                                         pts_start = pts;
@@ -1316,6 +1351,7 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                     video_volume,
                     url: url_stored,
                     clock,
+                    target_size,
                 });
             }
 

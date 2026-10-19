@@ -37,6 +37,33 @@
         "typescript": "^5",
       },
     },
+    "examples/big-table": {
+      "name": "big-table",
+      "version": "0.1.0",
+      "dependencies": {
+        "@glyx-dev/design": "workspace:*",
+        "@glyx-dev/react": "workspace:*",
+        "@glyx-dev/router": "workspace:*",
+        "@glyx-dev/table": "workspace:*",
+        "react": "^18",
+      },
+      "devDependencies": {
+        "@glyx-dev/config": "workspace:*",
+      },
+    },
+    "examples/canvas-lab": {
+      "name": "canvas-lab",
+      "version": "0.1.0",
+      "dependencies": {
+        "@glyx-dev/design": "workspace:*",
+        "@glyx-dev/react": "workspace:*",
+        "@glyx-dev/router": "workspace:*",
+        "react": "^18",
+      },
+      "devDependencies": {
+        "@glyx-dev/config": "workspace:*",
+      },
+    },
     "examples/chart-gallery": {
       "name": "chart-gallery",
       "version": "0.1.0",
@@ -81,6 +108,17 @@
       "version": "0.1.0",
       "dependencies": {
         "@glyx-dev/design": "workspace:*",
+        "@glyx-dev/react": "workspace:*",
+        "react": "^18",
+      },
+      "devDependencies": {
+        "@glyx-dev/config": "workspace:*",
+      },
+    },
+    "examples/media-bench": {
+      "name": "media-bench",
+      "version": "0.1.0",
+      "dependencies": {
         "@glyx-dev/react": "workspace:*",
         "react": "^18",
       },
@@ -277,7 +315,7 @@
       "name": "@glyx-dev/table",
       "version": "0.2.0",
       "peerDependencies": {
-        "@glyx-dev/react": "0.1.0",
+        "@glyx-dev/react": "^0.2.0",
         "react": "^18.2.0",
       },
     },
@@ -365,6 +403,10 @@
 
     "@types/react-reconciler": ["@types/react-reconciler@0.28.9", "", { "peerDependencies": { "@types/react": "*" } }, "sha512-HHM3nxyUZ3zAylX8ZEyrDNd2XZOnQ0D5XfunJF5FLQnZbHHYq4UWvW1QfelQNXv1ICNkwYhfxjwfnqivYB6bFg=="],
 
+    "big-table": ["big-table@workspace:examples/big-table"],
+
+    "canvas-lab": ["canvas-lab@workspace:examples/canvas-lab"],
+
     "chart-gallery": ["chart-gallery@workspace:examples/chart-gallery"],
 
     "csstype": ["csstype@3.2.3", "", {}, "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ=="],
@@ -382,6 +424,8 @@
     "log-viewer": ["log-viewer@workspace:examples/log-viewer"],
 
     "loose-envify": ["loose-envify@1.4.0", "", { "dependencies": { "js-tokens": "^3.0.0 || ^4.0.0" }, "bin": { "loose-envify": "cli.js" } }, "sha512-lyuxPGr/Wfhrlem2CL/UcnUc1zcqKAImBDzukY7Y5F/yQiNdko6+fRLevlw1HgMySw7f611UIY408EtxRSoK3Q=="],
+
+    "media-bench": ["media-bench@workspace:examples/media-bench"],
 
     "media-player": ["media-player@workspace:examples/media-player"],
 

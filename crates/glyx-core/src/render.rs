@@ -723,6 +723,8 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
             // at the video's natural FPS via the glyx-media DLL decoder.
             if let Some(handle_id) = node.props.video_handle {
                 if let Some(stream) = ctx.video_streams.get(&handle_id) {
+                    // Tell the decoder what size this is shown at, so it hands over frames of that size (see `OpenVideo`).
+                    stream.target_size.store((u64::from(rw.round().max(1.0) as u32) << 32) | u64::from(rh.round().max(1.0) as u32), std::sync::atomic::Ordering::Relaxed);
                     if let Some(img) = &stream.latest_image {
                         let iw = img.width  as f64;
                         let ih = img.height as f64;

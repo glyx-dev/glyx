@@ -55,9 +55,16 @@ GLYX_EXPORT VmDecoder* vm_decoder_open(
 );
 
 /**
+ * Ask for frames at another size than the source's, scaled by the decoder (a SIMD scaler, far cheaper than scaling a full-size RGBA frame
+ * afterwards, and the frames are that much smaller to hold and pass on). Takes effect with the next vm_decoder_next_frame call, which then
+ * needs a buffer of (width * height * 4) bytes. Returns 0 on success, -1 on error (nothing changes). Optional: older libraries lack it.
+ */
+GLYX_EXPORT int vm_decoder_set_output_size(VmDecoder* dec, int width, int height);
+
+/**
  * Decode the next video frame into rgba_out.
  *
- * rgba_out must point to at least (width * height * 4) bytes.
+ * rgba_out must point to at least (out_width * out_height * 4) bytes: the source's size until vm_decoder_set_output_size is called.
  * pts_seconds is written with the presentation timestamp of the decoded frame.
  *
  * Returns:

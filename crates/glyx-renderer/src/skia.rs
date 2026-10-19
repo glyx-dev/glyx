@@ -1347,7 +1347,12 @@ impl TinySkiaFrame {
     fn draw_image_transformed_alpha(&mut self, image: &peniko::ImageData, transform: Affine, cache: bool, alpha: f32) {
         let (iw, ih) = (image.width, image.height);
         if iw == 0 || ih == 0 { return; }
-        let bytes = self.srgb_bytes(image, cache);
+        // A live camera or video frame (`cache` off, straight-alpha RGBA) comes from the decoder already sRGB-encoded and opaque: it is
+        // drawn as it is. The linear-to-sRGB pass below is for the images the loader made linear (`rgba_to_peniko`); run over a frame
+        // it lifted every tone (a mid gray, 128, came out 188) and cost a copy and a pass over every pixel of every frame.
+        let live = !cache && image.format == peniko::ImageFormat::Rgba8 && image.alpha_type == peniko::ImageAlphaType::Alpha;
+        let converted;
+        let bytes: &[u8] = if live { image.data.data() } else { converted = self.srgb_bytes(image, cache); &converted };
 
         // kurbo Affine [a,b,c,d,e,f]:  x'=ax+cy+e, y'=bx+dy+f
         // tiny-skia from_row(sx,ky,kx,sy,tx,ty): x'=sx*x+kx*y+tx, y'=ky*x+sy*y+ty
@@ -1355,6 +1360,31 @@ impl TinySkiaFrame {
         let ts = self.xf.pre_concat(tiny_skia::Transform::from_row(
             a as f32, b as f32, c as f32, d as f32, e as f32, f as f32,
         ));
+
+        // A live frame the decoder already made the size it is shown at, put at whole pixels with no clip edge crossing it, is copied row
+        // by row: the shader below samples every pixel through a pipeline, several times the cost of the copy (about 5 ms against 0.3 for
+        // a 1280 x 720 frame).
+        if live && alpha >= 1.0 && self.blend == tiny_skia::BlendMode::SourceOver
+            && (ts.sx - 1.0).abs() < 1e-4 && (ts.sy - 1.0).abs() < 1e-4 && ts.kx.abs() < 1e-4 && ts.ky.abs() < 1e-4
+            && (ts.tx - ts.tx.round()).abs() < 1e-3 && (ts.ty - ts.ty.round()).abs() < 1e-3
+            && !self.clip_needs_mask_with(ts.tx.round(), ts.ty.round(), ts.tx.round() + iw as f32, ts.ty.round() + ih as f32, 0.0)
+        {
+            let (x0, y0) = (ts.tx.round() as i64, ts.ty.round() as i64);
+            let (pw, ph) = (i64::from(self.pixmap.width()), i64::from(self.pixmap.height()));
+            let (cx0, cx1) = (x0.max(0), (x0 + i64::from(iw)).min(pw));
+            let (cy0, cy1) = (y0.max(0), (y0 + i64::from(ih)).min(ph));
+            if cx1 > cx0 && cy1 > cy0 {
+                let (stride_src, stride_dst) = (iw as usize * 4, pw as usize * 4);
+                let n = (cx1 - cx0) as usize * 4;
+                let dst = self.pixmap.data_mut();
+                for y in cy0..cy1 {
+                    let s0 = (y - y0) as usize * stride_src + (cx0 - x0) as usize * 4;
+                    let d0 = y as usize * stride_dst + cx0 as usize * 4;
+                    dst[d0..d0 + n].copy_from_slice(&bytes[s0..s0 + n]);
+                }
+            }
+            return;
+        }
 
         let blend = self.blend;
         let apply = |src: &[u8], pixmap: &mut tiny_skia::Pixmap,
@@ -1368,10 +1398,19 @@ impl TinySkiaFrame {
                     ts,
                 );
                 let paint = tiny_skia::Paint { shader, anti_alias: true, blend_mode: blend, ..Default::default() };
-                let pw = pixmap.width() as f32;
-                let ph = pixmap.height() as f32;
-                if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, pw, ph) {
-                    pixmap.fill_rect(r, &paint, tiny_skia::Transform::identity(), mask);
+                // Only where the image lands: the shader (a bilinear sample per pixel) runs over every pixel of the rectangle it fills,
+                // and with the whole window filled and a clip mask hiding all but the image that was the cost of the window, not the
+                // image (about 12 ms of a 1280 x 800 window per frame, whatever the picture's size).
+                let corners = [(0.0, 0.0), (iw as f32, 0.0), (0.0, ih as f32), (iw as f32, ih as f32)].map(|(x, y)| {
+                    (ts.sx * x + ts.kx * y + ts.tx, ts.ky * x + ts.sy * y + ts.ty)
+                });
+                let (mut l, mut t, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                for (x, y) in corners { l = l.min(x); t = t.min(y); r = r.max(x); b = b.max(y); }
+                let (pw, ph) = (pixmap.width() as f32, pixmap.height() as f32);
+                // A pixel of margin for the filtered edge.
+                let (l, t, r, b) = ((l - 1.0).max(0.0).floor(), (t - 1.0).max(0.0).floor(), (r + 1.0).min(pw).ceil(), (b + 1.0).min(ph).ceil());
+                if let Some(rect) = tiny_skia::Rect::from_ltrb(l, t, r, b) {
+                    pixmap.fill_rect(rect, &paint, tiny_skia::Transform::identity(), mask);
                 }
             }
         };
@@ -1381,7 +1420,7 @@ impl TinySkiaFrame {
         // would undo it.
         self.ensure_mask();
         let mask = self.current_mask.as_ref();
-        apply(&bytes, &mut self.pixmap, mask);
+        apply(bytes, &mut self.pixmap, mask);
     }
 
     /// Scale and blit `src` (RGBA, iw×ih) to fill the destination rect.
@@ -2314,6 +2353,79 @@ mod canvas_cost {
 
     /// Prints what a frame of two chart canvases costs on the CPU renderer,
     /// with the whole window repainted and with only the charts' region.
+    /// A live frame at whole pixels is copied, and the copy is what the sampling path gives (here: the same pixels, clipped the same way).
+    #[test]
+    fn a_live_frame_at_whole_pixels_is_copied_exactly_and_respects_its_clip() {
+        let (fw, fh) = (24u32, 16u32);
+        let data: Vec<u8> = (0..fw * fh).flat_map(|i| [(i * 7 % 256) as u8, (i * 13 % 256) as u8, (i * 29 % 256) as u8, 255]).collect();
+        let img = peniko::ImageData { data: peniko::Blob::from(data.clone()), format: peniko::ImageFormat::Rgba8, alpha_type: peniko::ImageAlphaType::Alpha, width: fw, height: fh };
+        let mut r = TinySkiaRenderer::new_cpu_only(64, 48);
+        let mut f = r.begin_frame();
+        // Clipped to a smaller box on one side, and partly off the window on the other.
+        f.push_layer(0.0, 0.0, 64.0, 48.0);
+        f.draw_frame_image(&img, Affine::translate((10.0, 8.0)));
+        f.pop_layer();
+        let mut out = Vec::new();
+        r.finish_frame_soft(f, |p, _, _, _| out = p.to_vec());
+        for y in 0..fh as usize {
+            for x in 0..fw as usize {
+                let (ox, oy) = (x + 10, y + 8);
+                assert_eq!(&out[(oy * 64 + ox) * 4..(oy * 64 + ox) * 4 + 3], &data[(y * fw as usize + x) * 4..(y * fw as usize + x) * 4 + 3], "pixel {x},{y}");
+            }
+        }
+        // Outside the frame nothing was drawn.
+        assert_ne!(&out[(8 * 64 + 9) * 4..(8 * 64 + 9) * 4 + 3], &data[0..3]);
+    }
+
+    /// A live frame is drawn as it is; the loader's linear images are turned back to sRGB.
+    #[test]
+    fn a_live_video_frame_keeps_its_tones_and_a_loaded_image_is_converted_back_to_srgb() {
+        let draw = |alpha_type: peniko::ImageAlphaType, value: u8, live: bool| -> u8 {
+            let mut r = TinySkiaRenderer::new_cpu_only(40, 30);
+            let mut f = r.begin_frame();
+            let data: Vec<u8> = (0..40 * 30).flat_map(|_| [value, value, value, 255]).collect();
+            let img = peniko::ImageData { data: peniko::Blob::from(data), format: peniko::ImageFormat::Rgba8, alpha_type, width: 40, height: 30 };
+            if live { f.draw_frame_image(&img, Affine::IDENTITY); } else { f.draw_image_with_transform(&img, Affine::IDENTITY); }
+            let mut px = 0u8;
+            r.finish_frame_soft(f, |p, _, _, _| px = p[(15 * 40 + 20) * 4]);
+            px
+        };
+        let live = draw(peniko::ImageAlphaType::Alpha, 128, true);
+        assert!((i32::from(live) - 128).abs() <= 1, "a mid gray frame came out {live}");
+        // The same bytes as a loaded image mean linear light: 128 linear is 188 in sRGB.
+        let loaded = draw(peniko::ImageAlphaType::AlphaPremultiplied, 128, false);
+        assert!((i32::from(loaded) - 188).abs() <= 2, "a loaded image came out {loaded}");
+    }
+
+    /// What drawing one decoded video frame costs: a frame of `fw x fh` shown in a `dw x dh` rectangle of a 1280 x 800 window, as a live frame
+    /// (drawn as it is) and as a loaded image (converted first).
+    /// `cargo test --release -p glyx-renderer video_frame_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "benchmark: prints timings"]
+    fn video_frame_cost() {
+        use std::time::Instant;
+        let mut r = TinySkiaRenderer::new_cpu_only(1280, 800);
+        let seed = r.begin_frame();
+        r.finish_frame_soft(seed, |_, _, _, _| {});
+        for (fw, fh, dw, dh) in [(1280u32, 720u32, 1280.0, 720.0), (1920, 1080, 1280.0, 720.0), (3840, 2160, 1280.0, 720.0), (1920, 1080, 640.0, 360.0)] {
+            let data: Vec<u8> = (0..fw * fh).flat_map(|i| [(i % 251) as u8, (i % 241) as u8, (i % 239) as u8, 255]).collect();
+            let img = peniko::ImageData { data: peniko::Blob::from(data), format: peniko::ImageFormat::Rgba8, alpha_type: peniko::ImageAlphaType::Alpha, width: fw, height: fh };
+            let tf = Affine::new([dw / f64::from(fw), 0.0, 0.0, dh / f64::from(fh), 0.0, 0.0]);
+            for (label, live) in [("live frame", true), ("converted image", false)] {
+                let frames = 30;
+                let t0 = Instant::now();
+                for _ in 0..frames {
+                    let mut f = r.begin_frame();
+                    f.push_layer(0.0, 0.0, dw, dh);
+                    if live { f.draw_frame_image(&img, tf); } else { f.draw_image_with_transform(&img, tf); }
+                    f.pop_layer();
+                    r.finish_frame_soft(f, |_, _, _, _| {});
+                }
+                println!("{fw}x{fh} into {dw}x{dh}: {label:<16} {:6.2} ms", t0.elapsed().as_secs_f64() * 1000.0 / f64::from(frames));
+            }
+        }
+    }
+
     #[test]
     fn narrowing_a_mask_to_a_rect_matches_the_in_place_version() {
         let mut parent = tiny_skia::Mask::new(300, 200).unwrap();

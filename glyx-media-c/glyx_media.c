@@ -60,14 +60,13 @@ struct VmDecoder {
     AVCodecContext*   codec_ctx;
     struct SwsContext* sws_ctx;
     AVFrame*          frame;
-    AVFrame*          rgba_frame;
     AVPacket*         packet;
     int               video_stream_idx;
-    int               width;
+    int               width;      /* the source's size */
     int               height;
+    int               out_width;  /* the size frames come out at (see vm_decoder_set_output_size) */
+    int               out_height;
     double            fps;
-    uint8_t*          rgba_buf;
-    int               rgba_buf_size;
 };
 
 VmDecoder* vm_decoder_open(const char* source_url,
@@ -115,10 +114,12 @@ VmDecoder* vm_decoder_open(const char* source_url,
     AVRational fr = stream->avg_frame_rate;
     dec->fps = (fr.den > 0) ? (double)fr.num / fr.den : 30.0;
 
-    /* Scaler: pixel format → RGBA */
+    /* Scaler: pixel format → RGBA, at the source's size until the caller asks for another. */
+    dec->out_width  = dec->width;
+    dec->out_height = dec->height;
     dec->sws_ctx = sws_getContext(
         dec->width, dec->height, dec->codec_ctx->pix_fmt,
-        dec->width, dec->height, AV_PIX_FMT_RGBA,
+        dec->out_width, dec->out_height, AV_PIX_FMT_RGBA,
         SWS_BILINEAR, NULL, NULL, NULL);
     if (!dec->sws_ctx) {
         avcodec_free_context(&dec->codec_ctx);
@@ -126,15 +127,7 @@ VmDecoder* vm_decoder_open(const char* source_url,
     }
 
     dec->frame      = av_frame_alloc();
-    dec->rgba_frame = av_frame_alloc();
     dec->packet     = av_packet_alloc();
-
-    dec->rgba_buf_size = av_image_get_buffer_size(
-        AV_PIX_FMT_RGBA, dec->width, dec->height, 1);
-    dec->rgba_buf = (uint8_t*)av_malloc(dec->rgba_buf_size);
-    av_image_fill_arrays(dec->rgba_frame->data, dec->rgba_frame->linesize,
-                         dec->rgba_buf, AV_PIX_FMT_RGBA,
-                         dec->width, dec->height, 1);
 
     *out_width  = dec->width;
     *out_height = dec->height;
@@ -147,12 +140,14 @@ int vm_decoder_next_frame(VmDecoder* dec, uint8_t* rgba_out, double* pts_seconds
         /* Try to receive a frame from the codec first */
         int ret = avcodec_receive_frame(dec->codec_ctx, dec->frame);
         if (ret == 0) {
-            /* Got a frame — convert to RGBA */
+            /* Got a frame — convert it to RGBA, at the output size, straight into the caller's buffer
+             * (it used to go through a buffer of ours and be copied again: 8 MB a frame at 1080p). */
+            uint8_t* dst[4]  = { rgba_out, NULL, NULL, NULL };
+            int      dst_ls[4] = { dec->out_width * 4, 0, 0, 0 };
             sws_scale(dec->sws_ctx,
                       (const uint8_t* const*)dec->frame->data, dec->frame->linesize,
                       0, dec->height,
-                      dec->rgba_frame->data, dec->rgba_frame->linesize);
-            memcpy(rgba_out, dec->rgba_buf, dec->rgba_buf_size);
+                      dst, dst_ls);
 
             AVStream* s = dec->fmt_ctx->streams[dec->video_stream_idx];
             *pts_seconds = dec->frame->best_effort_timestamp
@@ -189,13 +184,26 @@ double vm_decoder_duration(VmDecoder* dec) {
     return (double)dec->fmt_ctx->duration / (double)AV_TIME_BASE;
 }
 
+int vm_decoder_set_output_size(VmDecoder* dec, int width, int height) {
+    if (!dec || width < 1 || height < 1) return -1;
+    if (width == dec->out_width && height == dec->out_height) return 0;
+    struct SwsContext* ctx = sws_getContext(
+        dec->width, dec->height, dec->codec_ctx->pix_fmt,
+        width, height, AV_PIX_FMT_RGBA,
+        SWS_BILINEAR, NULL, NULL, NULL);
+    if (!ctx) return -1;
+    sws_freeContext(dec->sws_ctx);
+    dec->sws_ctx    = ctx;
+    dec->out_width  = width;
+    dec->out_height = height;
+    return 0;
+}
+
 void vm_decoder_close(VmDecoder* dec) {
     if (!dec) return;
     if (dec->sws_ctx)    sws_freeContext(dec->sws_ctx);
     if (dec->frame)      av_frame_free(&dec->frame);
-    if (dec->rgba_frame) av_frame_free(&dec->rgba_frame);
     if (dec->packet)     av_packet_free(&dec->packet);
-    if (dec->rgba_buf)   av_free(dec->rgba_buf);
     if (dec->codec_ctx)  avcodec_free_context(&dec->codec_ctx);
     if (dec->fmt_ctx)    avformat_close_input(&dec->fmt_ctx);
     free(dec);

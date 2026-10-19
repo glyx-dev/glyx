@@ -173,7 +173,7 @@ impl Direct2DImageCache {
         if let Some(bmp) = self.bitmaps.get(&key) {
             return Some(bmp.clone());
         }
-        let bmp = Self::create(rt, image)?;
+        let bmp = Self::create(rt, image, false)?;
         self.bitmaps.insert(key, bmp.clone());
         Some(bmp)
     }
@@ -181,9 +181,13 @@ impl Direct2DImageCache {
     /// Build a bitmap for `image` without caching it — for live camera/video
     /// frames, each shown once. Caching those grew this (unbounded) map by one
     /// GPU bitmap per frame.
-    fn create(rt: &ID2D1RenderTarget, image: &peniko::ImageData) -> Option<ID2D1Bitmap> {
+    ///
+    /// `live` is a camera or video frame: straight-alpha RGBA the decoder made sRGB-encoded and opaque, which is used as it is (the loader's
+    /// images are linear, and the pass below turns those back to sRGB; run over a frame it lifted every tone).
+    fn create(rt: &ID2D1RenderTarget, image: &peniko::ImageData, live: bool) -> Option<ID2D1Bitmap> {
         let bytes = image.data.data();
         let rgba: Vec<u8> = match image.format {
+            peniko::ImageFormat::Rgba8 if live && image.alpha_type == peniko::ImageAlphaType::Alpha => bytes.to_vec(),
             peniko::ImageFormat::Bgra8 => {
                 let mut b = bytes.to_vec();
                 for px in b.chunks_exact_mut(4) { px.swap(0, 2); }
@@ -743,7 +747,7 @@ impl Direct2DFrame {
     /// bitmap is built for this draw and dropped, not cached.
     pub fn draw_frame_image(&mut self, image: &peniko::ImageData, transform: kurbo::Affine) {
         if image.width == 0 || image.height == 0 { return; }
-        let Some(bitmap) = Direct2DImageCache::create(&self.rt, image) else { return };
+        let Some(bitmap) = Direct2DImageCache::create(&self.rt, image, true) else { return };
         self.draw_bitmap_transformed(&bitmap, image, transform);
     }
 

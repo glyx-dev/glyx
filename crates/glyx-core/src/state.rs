@@ -143,14 +143,22 @@ pub(super) struct CameraStream {
 }
 
 /// Live video playback stream. Owned by `PerWindowState`.
+/// One decoded video frame's RGBA bytes, held by the decode thread's pool and, while it is shown, by the image the renderer draws.
+pub(super) struct FrameBytes(pub(super) Vec<u8>);
+impl AsRef<[u8]> for FrameBytes { fn as_ref(&self) -> &[u8] { &self.0 } }
+
 pub(super) struct VideoStream {
-    pub(super) frame_buf:       Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>,
+    /// The newest decoded frame, not yet taken by the renderer: `(width, height, bytes)`.
+    pub(super) frame_buf:       Arc<Mutex<Option<(u32, u32, Arc<FrameBytes>)>>>,
     pub(super) stop_flag:       Arc<std::sync::atomic::AtomicBool>,
     pub(super) pause_flag:      Arc<std::sync::atomic::AtomicBool>,
     pub(super) audio_stop_flag: Arc<std::sync::atomic::AtomicBool>,
     pub(super) seek_tx:         std::sync::mpsc::SyncSender<f64>,
     pub(super) events:          Arc<Mutex<std::collections::VecDeque<String>>>,
     pub(super) latest_image:    Option<peniko::ImageData>,
+    /// The size the video is drawn at, in window pixels (`width << 32 | height`; 0 until it has been drawn): set by the renderer, read by
+    /// the decode thread, which asks the decoder for frames of that size.
+    pub(super) target_size:     Arc<std::sync::atomic::AtomicU64>,
     pub(super) video_volume:    Arc<Mutex<f32>>,
     pub(super) url:             String,
     /// Audio position the video follows (see `av_clock`).

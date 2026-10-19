@@ -51,6 +51,7 @@ type FnDecoderNextFrame      = unsafe extern "C" fn(*mut c_void, *mut u8, *mut f
 type FnDecoderSeek           = unsafe extern "C" fn(*mut c_void, f64);
 type FnDecoderDuration       = unsafe extern "C" fn(*mut c_void) -> f64;
 type FnDecoderClose          = unsafe extern "C" fn(*mut c_void);
+type FnDecoderSetOutputSize  = unsafe extern "C" fn(*mut c_void, c_int, c_int) -> c_int;
 type FnEncoderOpen           = unsafe extern "C" fn(*const c_char, c_int, c_int, c_int) -> *mut c_void;
 type FnEncoderWriteRgba      = unsafe extern "C" fn(*mut c_void, *const u8, c_int) -> c_int;
 type FnEncoderClose          = unsafe extern "C" fn(*mut c_void);
@@ -70,6 +71,7 @@ pub struct GlyxMedia {
     decoder_seek:             FnDecoderSeek,
     fn_decoder_duration:      Option<FnDecoderDuration>,  // optional — older DLLs won't have it
     decoder_close:            FnDecoderClose,
+    fn_decoder_set_output_size: Option<FnDecoderSetOutputSize>,  // optional — older DLLs decode at the source's size only
     encoder_open:             FnEncoderOpen,
     encoder_write_rgba:       FnEncoderWriteRgba,
     encoder_close:            FnEncoderClose,
@@ -135,6 +137,9 @@ impl GlyxMedia {
         let fn_decoder_duration = unsafe {
             lib.get::<FnDecoderDuration>(b"vm_decoder_duration\0").ok().map(|s| *s)
         };
+        let fn_decoder_set_output_size = unsafe {
+            lib.get::<FnDecoderSetOutputSize>(b"vm_decoder_set_output_size\0").ok().map(|s| *s)
+        };
         let fn_audio_decoder_seek = unsafe {
             lib.get::<FnAudioDecoderSeek>(b"vm_audio_decoder_seek\0").ok().map(|s| *s)
         };
@@ -146,6 +151,7 @@ impl GlyxMedia {
             decoder_seek:            sym!(lib, b"vm_decoder_seek\0",                 FnDecoderSeek),
             fn_decoder_duration,
             decoder_close:           sym!(lib, b"vm_decoder_close\0",                FnDecoderClose),
+            fn_decoder_set_output_size,
             encoder_open:            sym!(lib, b"vm_encoder_open\0",                 FnEncoderOpen),
             encoder_write_rgba:      sym!(lib, b"vm_encoder_write_rgba\0",           FnEncoderWriteRgba),
             encoder_close:           sym!(lib, b"vm_encoder_close\0",                FnEncoderClose),
@@ -208,6 +214,15 @@ impl GlyxMedia {
         match self.fn_decoder_duration {
             Some(f) => unsafe { f(dec.ptr) },
             None    => -1.0,
+        }
+    }
+
+    /// Ask the decoder for frames of `width` x `height` pixels (scaled by the library; `decoder_next_frame` then needs a buffer of
+    /// `width * height * 4` bytes). `false` when the loaded library is too old to scale, or refused: frames stay at the source's size.
+    pub fn decoder_set_output_size(&self, dec: &VmDecoder, width: u32, height: u32) -> bool {
+        match self.fn_decoder_set_output_size {
+            Some(f) => unsafe { f(dec.ptr, width as c_int, height as c_int) == 0 },
+            None    => false,
         }
     }
 

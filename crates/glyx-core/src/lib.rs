@@ -2373,8 +2373,9 @@ pub fn run(mut config: AppConfig) -> bool {
                 let mut updated_video_handles: Vec<u32> = Vec::new();
                 for (handle_id, stream) in s.video_streams.iter_mut() {
                     if let Some((w, h, data)) = stream.frame_buf.lock().take() {
+                        // The bytes are shared with the decode thread's pool, which reuses them once this image is replaced.
                         stream.latest_image = Some(peniko::ImageData {
-                            data: peniko::Blob::from(data),
+                            data: peniko::Blob::new(data),
                             format: peniko::ImageFormat::Rgba8,
                             alpha_type: peniko::ImageAlphaType::Alpha,
                             width: w, height: h,

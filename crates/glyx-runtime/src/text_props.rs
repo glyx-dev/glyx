@@ -28,6 +28,7 @@ pub fn text_style(props: &NodeProps) -> TextStyle {
         bold:        is_bold(props.font_weight.as_deref()),
         italic:      props.font_style.as_deref() == Some("italic"),
         line_height: props.line_height,
+        family:      props.font_family.as_deref().map_or(0, glyx_text::family_id),
     }
 }
 

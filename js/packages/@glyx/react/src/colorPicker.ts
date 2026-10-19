@@ -73,7 +73,7 @@ function DragArea({ width, height, onPos, onKey, label, valueText, disabled, chi
   }, []);
 
   return React.createElement(View, {
-    _glyxOnMount: onMount, pressable: true, width, height, role: 'slider', ariaLabel: label, ariaValueText: valueText,
+    _glyxOnMount: onMount, pressable: true, width, height, role: 'slider', ariaLabel: label, ariaValueText: valueText, cursor: disabled ? 'default' : 'crosshair',
     style: { borderRadius: 6, clip: true, borderWidth: focused ? 2 : 0, borderColor: '#7aa2f7' },
   }, children);
 }

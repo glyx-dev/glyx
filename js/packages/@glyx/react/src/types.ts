@@ -130,10 +130,19 @@ export interface GlyxStyle {
   textAlign?:        'left' | 'center' | 'right';
   textDecorationLine?: 'none' | 'underline';
 
-  /** @deprecated Not supported yet: the renderer has one font and ignores `fontFamily`. */
+  /**
+   * The font family, as a CSS-like list: `'Inter'`, `'Cascadia Mono, monospace'`, `'serif'`. A family is found among the fonts the app
+   * ships (`fonts` in the config) and the fonts installed on the machine, by the name inside the font; the first one that exists is
+   * used, then the default font (so text never disappears). `'monospace'` and `'serif'` mean the platform's own. Bold and italic come
+   * from `fontWeight` and `fontStyle` as before. `TextInput`'s caret is measured in the default font for now.
+   */
   fontFamily?:       string;
-  /** @deprecated Not a style: set the cursor with `glyxWindow.setCursor(name)`. The style key is ignored. */
-  cursor?:           string;
+  /**
+   * The mouse cursor while the pointer is over this element (or a child with no cursor of its own), as in CSS. Buttons (`Pressable`
+   * with `onPress`) show `'pointer'` and text fields `'text'` unless you say otherwise. `glyxWindow.setCursor(name)` still sets the
+   * window's cursor by hand.
+   */
+  cursor?:           'default' | 'pointer' | 'text' | 'move' | 'grab' | 'grabbing' | 'col-resize' | 'row-resize' | 'ew-resize' | 'ns-resize' | 'crosshair' | 'not-allowed' | 'wait';
 
   // Input
   pointerEvents?:    'auto' | 'none';

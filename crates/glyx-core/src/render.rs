@@ -467,12 +467,13 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
             let bold        = tstyle.bold;
             let italic      = tstyle.italic;
             let line_height = tstyle.line_height;
+            let family      = tstyle.family;
             let max_width   = tbox.wrap_width();
             let show_cursor     = node.props.show_cursor.unwrap_or(false);
             // numberOfLines={1} on display text: cut to the box with "…".
             // (Editors and single-line inputs scroll instead.)
             let ellipsized = if node.props.number_of_lines == Some(1) && !show_cursor && !tbox.single_line {
-                ctx.text_sys.ellipsize(text, font_size, bold, italic, rw as f32)
+                ctx.text_sys.ellipsize_in(text, font_size, bold, italic, rw as f32, family)
             } else { None };
             let text = ellipsized.as_deref().unwrap_or(text);
             let cursor_position = node.props.cursor_position.map(|p| p as usize);
@@ -483,11 +484,11 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
 
             // LabelKey::new() is allocation-free (hashes text, packs fields).
             // Derive it twice instead of cloning — cheaper than a String clone.
-            if ctx.label_cache.peek(&LabelKey::new(text, font_size, max_width, bold, italic, line_height)).is_none() {
-                let lbl = CachedLabel::new(ctx.text_sys, text, font_size, max_width, color, bold, italic, line_height);
-                ctx.label_cache.put(LabelKey::new(text, font_size, max_width, bold, italic, line_height), lbl);
+            if ctx.label_cache.peek(&LabelKey::new(text, font_size, max_width, bold, italic, line_height).in_family(family)).is_none() {
+                let lbl = CachedLabel::new_in(ctx.text_sys, text, font_size, max_width, color, bold, italic, line_height, family);
+                ctx.label_cache.put(LabelKey::new(text, font_size, max_width, bold, italic, line_height).in_family(family), lbl);
             }
-            let label = ctx.label_cache.get(&LabelKey::new(text, font_size, max_width, bold, italic, line_height)).unwrap();
+            let label = ctx.label_cache.get(&LabelKey::new(text, font_size, max_width, bold, italic, line_height).in_family(family)).unwrap();
 
             let (dx, dy) = tbox.origin(label.width as f32, label.text_height as f32);
             let tx = rx + dx as f64;

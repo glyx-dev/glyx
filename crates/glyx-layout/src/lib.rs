@@ -74,6 +74,9 @@ pub struct TextMeasureCtx {
     /// shared shaping cache differently and never share a hit for any node
     /// that sets an explicit line height.
     pub line_height: Option<f32>,
+    /// The `fontFamily` as a `glyx_text::family_id` (`0` = the default stack): part of the shared shaping cache's key, for the same
+    /// reason as the line height.
+    pub font_family: u16,
     /// A never-wrapping single line (`textScrollX` set: inputs, rich-text
     /// spans). Its width counts trailing whitespace, so a span ending in a
     /// space keeps that space before the next span.
@@ -361,7 +364,7 @@ mod tests {
     }
 
     fn ctx(text: &str) -> TextMeasureCtx {
-        TextMeasureCtx { text: text.into(), font_size: 16.0, max_height: None, bold: false, italic: false, line_height: None, single_line: false }
+        TextMeasureCtx { text: text.into(), font_size: 16.0, max_height: None, bold: false, italic: false, line_height: None, font_family: 0, single_line: false }
     }
 
     /// Regression test for a real bug: `add_text_node` stores a Text node's

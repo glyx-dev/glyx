@@ -93,6 +93,7 @@ pub(crate) fn parse_props_value(props: Value<'_>) -> NodeProps {
 
     out.text                  = get_str(&obj, "text");
     out.font_size             = get_num(&obj, "fontSize");
+    out.font_family           = get_str(&obj, "fontFamily");
     out.line_height           = get_num(&obj, "lineHeight");
     out.font_weight           = get_str(&obj, "fontWeight");
     out.font_style            = get_str(&obj, "fontStyle");

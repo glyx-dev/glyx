@@ -695,7 +695,7 @@ export function TextInput({
 
   return React.createElement(
     'view',
-    { _glyxOnMount: onMount, style: inputStyle, width: nodeWidth, height: resolvedHeight, role: 'textbox', ...props },
+    { _glyxOnMount: onMount, style: inputStyle, width: nodeWidth, height: resolvedHeight, role: 'textbox', cursor: 'text', ...props },
     React.createElement('text', {
       _glyxOnMount:   onTextMount,
       text:           displayText,
@@ -1074,6 +1074,7 @@ export function Slider({
   return React.createElement(View, {
     _glyxOnMount: onTrackMount,
     width: widthProp,
+    cursor: disabled ? 'default' : 'pointer',
     pressable: true, // mark interactive so clicks hit-test to this node
     style: { flexDirection: 'row', alignItems: 'center', ...flattenStyle(style) },
     role: 'slider',

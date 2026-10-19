@@ -865,6 +865,9 @@ pub struct NodeProps {
     // Text
     pub text:            Option<String>,
     pub font_size:       Option<f32>,
+    /// `fontFamily`: a CSS-like list (`"Inter"`, `"Cascadia Mono, monospace"`, `"serif"`). Resolved to a small id by
+    /// `glyx_text::family_id` where text is measured and drawn; absent = the default stack.
+    pub font_family:     Option<String>,
     /// Absolute line height in the same px units as `font_size`. Absent
     /// means Parley's own metrics-relative default (the font's own line
     /// gap) — this only overrides it when a caller explicitly sets it.
@@ -2629,6 +2632,7 @@ fn parse_props(
     props.width       = get_length_prop(scope, obj, "width");
     props.height      = get_length_prop(scope, obj, "height");
     props.font_size             = get_num_prop(scope, obj, "fontSize");
+    props.font_family           = get_str_prop(scope, obj, "fontFamily").map(|s| s.to_string());
     props.line_height           = get_num_prop(scope, obj, "lineHeight");
     props.font_weight           = get_str_prop(scope, obj, "fontWeight").map(|s| s.to_string());
     props.font_style            = get_str_prop(scope, obj, "fontStyle").map(|s| s.to_string());

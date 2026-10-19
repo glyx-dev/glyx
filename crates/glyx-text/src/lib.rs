@@ -129,6 +129,83 @@ impl TextAlign {
     }
 }
 
+/// The font stack text uses when a node names no family: the first of these that exists on the platform, then the emoji and symbol fonts
+/// as fallbacks, then the platform's own sans-serif.
+///   Windows → Segoe UI, macOS → Helvetica Neue (SF), Linux → DejaVu Sans.
+pub const DEFAULT_FONT_STACK: &str = "Segoe UI, Helvetica Neue, DejaVu Sans, Segoe UI Emoji, Segoe UI Symbol, sans-serif";
+
+fn app_fonts() -> &'static std::sync::Mutex<Vec<std::path::PathBuf>> {
+    static F: std::sync::OnceLock<std::sync::Mutex<Vec<std::path::PathBuf>>> = std::sync::OnceLock::new();
+    F.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// The font files the app ships, from the `fonts` list in its config. Call it before the first [`TextSystem`] is made (every one made
+/// after it registers them). A file that cannot be read is logged and skipped.
+pub fn set_app_fonts(paths: Vec<std::path::PathBuf>) {
+    *app_fonts().lock().unwrap() = paths;
+}
+
+/// A font family a node asked for with `fontFamily`, as a small number a text style can carry and a cache key can hash. `0` is the
+/// default stack. See [`family_id`].
+pub type FamilyId = u16;
+
+/// The most distinct `fontFamily` values an app can use (the rest fall back to the default stack): each costs a short string, so the
+/// bound is a guard against an app that builds family names from data, not a limit anyone should meet.
+const MAX_FAMILIES: usize = 64;
+
+struct Families {
+    /// css text → id, so a repeated `fontFamily` is one hash lookup.
+    by_css: std::collections::HashMap<String, FamilyId>,
+    /// id - 1 → the full stack: what was asked for, then the default stack. Leaked once each (bounded by `MAX_FAMILIES`) so shaping
+    /// can hold them without copying.
+    stacks: Vec<&'static str>,
+}
+
+fn families() -> &'static std::sync::Mutex<Families> {
+    static F: std::sync::OnceLock<std::sync::Mutex<Families>> = std::sync::OnceLock::new();
+    F.get_or_init(|| std::sync::Mutex::new(Families { by_css: std::collections::HashMap::new(), stacks: Vec::new() }))
+}
+
+/// The names a CSS-like `fontFamily` list asks for, with the generic names turned into the fonts each platform has for them.
+fn expand_family_list(css: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for raw in css.split(',') {
+        let name = raw.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+        if name.is_empty() { continue; }
+        match name.to_ascii_lowercase().as_str() {
+            "monospace" | "ui-monospace" => out.push("Cascadia Mono, Consolas, SF Mono, Menlo, DejaVu Sans Mono, Liberation Mono, monospace".into()),
+            "serif" | "ui-serif" => out.push("Georgia, Times New Roman, Cambria, Liberation Serif, serif".into()),
+            // The default stack is already sans-serif: nothing to add before it.
+            "sans-serif" | "system-ui" | "ui-sans-serif" | "-apple-system" => {}
+            _ => out.push(name.to_string()),
+        }
+    }
+    out.join(", ")
+}
+
+/// The id for a `fontFamily` value (`"Inter"`, `"Cascadia Mono, monospace"`, `"serif"`), `0` for none or for the default sans. The same text
+/// always gives the same id. Cheap enough to call when a node's props are set; not meant for every frame.
+pub fn family_id(css: &str) -> FamilyId {
+    let css = css.trim();
+    if css.is_empty() { return 0; }
+    let mut f = families().lock().unwrap();
+    if let Some(&id) = f.by_css.get(css) { return id; }
+    let asked = expand_family_list(css);
+    if asked.is_empty() { f.by_css.insert(css.to_string(), 0); return 0; }
+    if f.stacks.len() >= MAX_FAMILIES { return 0; }
+    let stack: &'static str = Box::leak(format!("{asked}, {DEFAULT_FONT_STACK}").into_boxed_str());
+    f.stacks.push(stack);
+    let id = f.stacks.len() as FamilyId;
+    f.by_css.insert(css.to_string(), id);
+    id
+}
+
+/// The font stack for an id from [`family_id`] (the default stack for `0` or an unknown id).
+pub fn family_stack(id: FamilyId) -> &'static str {
+    if id == 0 { return DEFAULT_FONT_STACK; }
+    families().lock().unwrap().stacks.get(id as usize - 1).copied().unwrap_or(DEFAULT_FONT_STACK)
+}
+
 /// Everything that affects how a string is SHAPED (glyph widths, wraps,
 /// line spacing). Two layouts shaped with equal `TextStyle` and wrap width
 /// are identical.
@@ -139,11 +216,13 @@ pub struct TextStyle {
     pub italic:      bool,
     /// Absolute line height in px; `None` = the font's own metrics.
     pub line_height: Option<f32>,
+    /// The `fontFamily` the node asked for ([`family_id`]); `0` = the default stack.
+    pub family:      FamilyId,
 }
 
 impl TextStyle {
     pub fn new(font_size: f32) -> Self {
-        Self { font_size, bold: false, italic: false, line_height: None }
+        Self { font_size, bold: false, italic: false, line_height: None, family: 0 }
     }
 }
 
@@ -223,7 +302,7 @@ pub struct TextSystem {
     layout_cx: LayoutContext<()>,
     /// `ellipsize` results by (text hash, size, width, bold, italic): the
     /// renderer asks every frame, the answer only changes with the inputs.
-    ellipsis_cache: std::collections::HashMap<(u64, u32, u32, bool, bool), Option<String>>,
+    ellipsis_cache: std::collections::HashMap<(u64, u32, u32, bool, bool, FamilyId), Option<String>>,
 }
 
 impl TextSystem {
@@ -332,6 +411,14 @@ impl TextSystem {
             log::info!("glyx-text: registered {} fonts from Linux font dirs", count);
         }
 
+        // The fonts the app ships (`fonts` in glyx.config): registered after the platform's, under the family names inside the files, so
+        // `fontFamily: 'Inter'` finds them. Mapped from the file, so only the pages that are drawn are read.
+        for path in app_fonts().lock().unwrap().iter() {
+            if !register_font_file(&mut font_cx, path) {
+                log::warn!("glyx-text: could not load the font file {}", path.display());
+            }
+        }
+
         Self {
             font_cx,
             layout_cx: LayoutContext::new(),
@@ -363,7 +450,7 @@ impl TextSystem {
         // The trailing "sans-serif" is a Parley generic that triggers its own
         // platform font-selection heuristic if none of the named fonts match.
         builder.push_default(StyleProperty::FontFamily(FontFamily::Source(
-            std::borrow::Cow::Borrowed("Segoe UI, Helvetica Neue, DejaVu Sans, Segoe UI Emoji, Segoe UI Symbol, sans-serif"),
+            std::borrow::Cow::Borrowed(DEFAULT_FONT_STACK),
         )));
 
         let mut layout = builder.build(text);
@@ -402,6 +489,21 @@ impl TextSystem {
         italic:      bool,
         line_height: Option<f32>,
     ) -> TextLayout {
+        self.styled_label_in(text, font_size, max_width, bold, italic, line_height, 0)
+    }
+
+    /// [`styled_label`](Self::styled_label) in a font family from [`family_id`] (`0` = the default stack).
+    #[allow(clippy::too_many_arguments)]
+    pub fn styled_label_in(
+        &mut self,
+        text:        &str,
+        font_size:   f32,
+        max_width:   f32,
+        bold:        bool,
+        italic:      bool,
+        line_height: Option<f32>,
+        family:      FamilyId,
+    ) -> TextLayout {
         use parley::style::{FontStyle, LineHeight};
         let weight = if bold { FontWeight::BOLD } else { FontWeight::NORMAL };
         let mut builder = self.layout_cx.ranged_builder(&mut self.font_cx, text, 1.0, false);
@@ -414,7 +516,7 @@ impl TextSystem {
             builder.push_default(StyleProperty::LineHeight(LineHeight::Absolute(lh)));
         }
         builder.push_default(StyleProperty::FontFamily(FontFamily::Source(
-            std::borrow::Cow::Borrowed("Segoe UI, Helvetica Neue, DejaVu Sans, Segoe UI Emoji, Segoe UI Symbol, sans-serif"),
+            std::borrow::Cow::Borrowed(family_stack(family)),
         )));
         let mut layout = builder.build(text);
         layout.break_all_lines(Some(max_width));
@@ -456,7 +558,7 @@ impl TextSystem {
     /// Shape `text` exactly as the renderer does for a node with this style
     /// in this box (same wrap width, weight, style, line height).
     pub fn shape_in_box(&mut self, text: &str, style: &TextStyle, bx: &TextBox) -> TextLayout {
-        self.styled_label(text, style.font_size, bx.wrap_width(), style.bold, style.italic, style.line_height)
+        self.styled_label_in(text, style.font_size, bx.wrap_width(), style.bold, style.italic, style.line_height, style.family)
     }
 
     /// Character position nearest to point `(x, y)`, where the point is
@@ -554,7 +656,12 @@ impl TextSystem {
     /// bold glyphs are wider than `measure`'s NORMAL-weight assumption, so
     /// layout must account for it or siblings laid out beside this node overlap.
     pub fn measure_styled(&mut self, text: &str, font_size: f32, max_width: f32, bold: bool, italic: bool) -> (f32, f32) {
-        let layout = self.styled_label(text, font_size, max_width.max(1.0), bold, italic, None);
+        self.measure_styled_in(text, font_size, max_width, bold, italic, 0)
+    }
+
+    /// [`measure_styled`](Self::measure_styled) in a font family from [`family_id`].
+    pub fn measure_styled_in(&mut self, text: &str, font_size: f32, max_width: f32, bold: bool, italic: bool, family: FamilyId) -> (f32, f32) {
+        let layout = self.styled_label_in(text, font_size, max_width.max(1.0), bold, italic, None, family);
         (layout.inner.width(), layout.inner.height())
     }
 
@@ -565,24 +672,29 @@ impl TextSystem {
     /// character boundary whose x leaves room for the ellipsis, so kerning
     /// and ligatures match what the untruncated text would draw.
     pub fn ellipsize(&mut self, text: &str, font_size: f32, bold: bool, italic: bool, max_width: f32) -> Option<String> {
+        self.ellipsize_in(text, font_size, bold, italic, max_width, 0)
+    }
+
+    /// [`ellipsize`](Self::ellipsize) in a font family from [`family_id`].
+    pub fn ellipsize_in(&mut self, text: &str, font_size: f32, bold: bool, italic: bool, max_width: f32, family: FamilyId) -> Option<String> {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut h);
-        let key = (h.finish(), font_size.to_bits(), max_width.round() as u32, bold, italic);
+        let key = (h.finish(), font_size.to_bits(), max_width.round() as u32, bold, italic, family);
         if let Some(hit) = self.ellipsis_cache.get(&key) { return hit.clone(); }
-        let out = self.ellipsize_uncached(text, font_size, bold, italic, max_width.round());
+        let out = self.ellipsize_uncached(text, font_size, bold, italic, max_width.round(), family);
         if self.ellipsis_cache.len() >= 1024 { self.ellipsis_cache.clear(); }
         self.ellipsis_cache.insert(key, out.clone());
         out
     }
 
-    fn ellipsize_uncached(&mut self, text: &str, font_size: f32, bold: bool, italic: bool, max_width: f32) -> Option<String> {
+    fn ellipsize_uncached(&mut self, text: &str, font_size: f32, bold: bool, italic: bool, max_width: f32, family: FamilyId) -> Option<String> {
         let line = text.split('\n').next().unwrap_or("");
         let multi = line.len() < text.len();
         if line.is_empty() && !multi { return None; }
-        let layout = self.styled_label(line, font_size, 1.0e6, bold, italic, None);
+        let layout = self.styled_label_in(line, font_size, 1.0e6, bold, italic, None, family);
         if !multi && layout.inner.width() <= max_width + 0.5 { return None; }
-        let (dots, _) = self.measure_styled("\u{2026}", font_size, 1.0e6, bold, italic);
+        let (dots, _) = self.measure_styled_in("\u{2026}", font_size, 1.0e6, bold, italic, family);
         let target = (max_width - dots).max(0.0);
         let mut cut = 0;
         for b in line.char_indices().map(|(i, _)| i).skip(1).chain(std::iter::once(line.len())) {
@@ -956,6 +1068,45 @@ mod tests {
 
     fn sys() -> TextSystem {
         TextSystem::new()
+    }
+
+    #[test]
+    fn family_ids_are_stable_and_generics_expand() {
+        assert_eq!(family_id(""), 0);
+        assert_eq!(family_id("  "), 0);
+        assert_eq!(family_id("sans-serif"), 0);          // the default is already sans-serif
+        let inter = family_id("Inter");
+        assert!(inter > 0);
+        assert_eq!(family_id("Inter"), inter);            // the same text is the same id
+        assert_ne!(family_id("Inter, serif"), inter);
+        assert!(family_stack(inter).starts_with("Inter, "));
+        assert!(family_stack(inter).ends_with(DEFAULT_FONT_STACK));
+        let mono = family_id("monospace");
+        assert!(family_stack(mono).contains("Consolas"), "monospace expands to the platform's mono fonts");
+        assert_eq!(family_stack(0), DEFAULT_FONT_STACK);
+        assert_eq!(family_stack(60000), DEFAULT_FONT_STACK, "an unknown id is the default");
+        // A quoted name is the name.
+        assert_eq!(family_stack(family_id("\"Segoe UI\"")).split(',').next().unwrap(), "Segoe UI");
+    }
+
+    #[test]
+    fn the_number_of_families_is_bounded() {
+        let mut zero_after = false;
+        for i in 0..(MAX_FAMILIES + 10) {
+            if family_id(&format!("Bounded Test Family {i}")) == 0 { zero_after = true; }
+        }
+        assert!(zero_after, "past the bound, a new family is the default stack, not a new allocation");
+    }
+
+    #[test]
+    fn a_requested_family_changes_the_shape_when_the_font_exists() {
+        let mut ts = TextSystem::new();
+        let plain = ts.styled_label_in("Hello world", 20.0, f32::MAX, false, false, None, 0);
+        let mono = ts.styled_label_in("Hello world", 20.0, f32::MAX, false, false, None, family_id("monospace"));
+        // A monospace face is a different width from Segoe UI / the default sans; if this machine has none the layouts may match.
+        let has_mono = ["C:/Windows/Fonts/consola.ttf", "/System/Library/Fonts/Menlo.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"]
+            .iter().any(|p| std::path::Path::new(p).exists());
+        if has_mono { assert_ne!(plain.width().round(), mono.width().round()); }
     }
 
     fn style(font_size: f32) -> TextStyle {

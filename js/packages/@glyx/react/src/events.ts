@@ -395,6 +395,30 @@ export function setNodeParent(childId: any, parentId: any) {
  */
 export function removeNodeFromTree(nodeId: any) {
   parentMap.delete(nodeId);
+  cursorRegistry.delete(nodeId);
+}
+
+// ── Cursor ────────────────────────────────────────────────────────────────────
+//
+// A node's `cursor` style (`'pointer'`, `'text'`, …) is the cursor shown while the pointer is over it, or over a descendant that has none of
+// its own, as in CSS. The host config records it here as nodes are created and updated; once per frame in which the pointer moved, the
+// nearest node up from the one under the pointer that has a cursor decides, and the window's cursor is set only when that changes. Nothing
+// runs on a frame the pointer did not move, and while a button is held the cursor stays as it is (a drag keeps its cursor).
+const cursorRegistry = new Map<number, string>();
+let appliedCursor = 'default';
+
+/** Set (or, with no name, clear) the cursor of a node. Called by the host config. */
+export function setNodeCursor(nodeId: number, name: string | undefined) {
+  if (name) cursorRegistry.set(nodeId, name); else cursorRegistry.delete(nodeId);
+}
+
+/** The cursor for the node under the pointer: its own, or the nearest ancestor's; `default` when none has one. */
+function cursorAt(target: any): string {
+  for (let id = target; id !== undefined && id !== null; id = parentMap.get(id)) {
+    const name = cursorRegistry.get(id);
+    if (name) return isDisabled(id) && name === 'pointer' ? 'default' : name;
+  }
+  return 'default';
 }
 
 /**
@@ -1117,6 +1141,10 @@ export function dispatchEvents() {
   // node never receive hover effects, and plain Views (not in
   // pressableRegistry) are treated as hover-opaque (no effect fires on them).
   if (cursorMovedThisFrame) {
+    if (buttonsHeld === 0 && cursorRegistry.size > 0 && typeof __glyx_setCursor !== 'undefined') {
+      const name = cursorAt(cursorTarget);
+      if (name !== appliedCursor) { appliedCursor = name; __glyx_setCursor(name); }
+    }
     const topSolid = cursorTarget;
     // Walk up to find the nearest pressable ancestor (same bubbling logic as click).
     let hoverId = topSolid;

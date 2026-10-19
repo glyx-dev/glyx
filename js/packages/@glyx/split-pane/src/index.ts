@@ -7,7 +7,7 @@
 //   </SplitPane>
 
 import React from 'react';
-import { View, Pressable, useDraggable, glyxWindow } from '@glyx-dev/react';
+import { View, Pressable, useDraggable } from '@glyx-dev/react';
 
 const { useState, useRef } = React;
 
@@ -46,20 +46,17 @@ export function SplitPane({
   // Read inside handlers that outlive a render (drag end, hover out).
   const live = useRef({ hovering: false, dragging: false });
 
+  // The divider's `cursor` style does the rest: the resize cursor while the pointer is over it, and it stays through a drag.
   const resizeCursor = horizontal ? 'col-resize' : 'row-resize';
-  const setCursor = (c: Parameters<typeof glyxWindow.setCursor>[0]) => glyxWindow.setCursor(c);
 
   const onDivider = useDraggable({
     onDragStart: () => {
       live.current.dragging = true;
       setDragging(true);
-      setCursor(resizeCursor);
     },
     onDragEnd: () => {
       live.current.dragging = false;
       setDragging(false);
-      // Released over the divider: keep the resize cursor; elsewhere: reset.
-      if (!live.current.hovering) setCursor('default');
     },
     onDragMove: ({ dx, dy }: Record<string, any>) => {
       const delta = horizontal ? dx : dy;
@@ -102,16 +99,13 @@ export function SplitPane({
       onHoverIn: () => {
         live.current.hovering = true;
         setHovering(true);
-        setCursor(resizeCursor);
       },
       onHoverOut: () => {
         live.current.hovering = false;
         setHovering(false);
-        // Mid-drag the pointer often runs ahead of the divider; keep the
-        // resize cursor until the drag ends.
-        if (!live.current.dragging) setCursor('default');
       },
       style: {
+        cursor: resizeCursor,
         width:  horizontal ? dividerSize : width,
         height: horizontal ? height : dividerSize,
         alignItems: 'center', justifyContent: 'center',

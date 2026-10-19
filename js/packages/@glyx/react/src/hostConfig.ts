@@ -8,7 +8,7 @@
 // Only `supportsMutation: true` is enabled — no persistence, no hydration.
 
 import { DefaultEventPriority } from 'react-reconciler/constants';
-import { setNodeParent, removeNodeFromTree } from './events.js';
+import { setNodeParent, removeNodeFromTree, setNodeCursor } from './events.js';
 import { computeIds } from './devIds.js';
 import { isRecording, recordCommit, startRecording, stopRecording } from './devProfile.js';
 import { flattenStyle } from './style.js';
@@ -318,7 +318,10 @@ function createInstance(type: any, props: { [x: string]: any; children: any; sty
   if (glyxDraggable) nodeProps.draggable = true;
   applyTransition(nodeProps, transition);
   applyAnimation(nodeProps, animation);
+  const cursor = nodeProps.cursor;
+  delete nodeProps.cursor;                       // the cursor is the window's, set from events.ts: the native node has no use for it
   const id = __glyx_createNode(type, nodeProps);
+  if (cursor) setNodeCursor(id, cursor);
   if (devFibers) devFibers.set(id, fiber);
   // Fire the mount callback immediately so the component can register its ID
   // before any useEffect / useLayoutEffect runs.
@@ -465,6 +468,9 @@ function commitUpdate(instance: { id: any; }, updatePayload: { [x: string]: any;
   if (glyxDraggable) nodeProps.draggable = true;
   applyTransition(nodeProps, transition);
   applyAnimation(nodeProps, animation);
+  // The payload is the whole new props (style flattened in), so a `cursor` that is gone from them clears the node's.
+  setNodeCursor(instance.id, nodeProps.cursor);
+  delete nodeProps.cursor;
   queueOp(OP_UPDATE, instance.id, nodeProps);
 }
 

@@ -333,7 +333,7 @@ pub(super) fn build_tree(state: &mut PerWindowState) -> Option<TreeUpdate> {
             // shaping only on a miss (e.g. the empty value behind a shown
             // placeholder, which the renderer never shaped).
             let wrap = ft.bx.wrap_width();
-            let key = LabelKey::new(&ft.text, ft.style.font_size, wrap, ft.style.bold, ft.style.italic, ft.style.line_height);
+            let key = LabelKey::new(&ft.text, ft.style.font_size, wrap, ft.style.bold, ft.style.italic, ft.style.line_height).in_family(ft.style.family);
             let shaped;
             let layout = match state.label_cache.peek(&key) {
                 Some(cached) => &cached.layout,

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- `fonts`: the font files the app ships (`['assets/fonts/Inter.ttf']`), so a style's `fontFamily` can name them. `glyx build` copies them next to the binary.
 - `window.canvasCacheMb`: the memory budget (0 to 256 MB, default 16) of the pixel cache for canvases that are repainted unchanged; 0 turns it off. The `GLYX_CANVAS_CACHE_MB` environment variable overrides it.
 - `window.labelCacheEntries`: pin the shaped-text cache to a number of entries (16 to 1,000,000, about 2 KB each). Without it the cache sizes itself: it starts at 256, grows while a view shows more distinct strings than it holds (up to an 8 MB budget) and shrinks back when quiet. The `GLYX_LABEL_CACHE` environment variable overrides it.
 

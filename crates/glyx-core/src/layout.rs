@@ -332,6 +332,7 @@ pub(crate) fn rebuild_layout_from_scene(
                         bold:   glyx_runtime::text_props::is_bold(props.font_weight.as_deref()),
                         italic: props.font_style.as_deref()  == Some("italic"),
                         line_height: props.line_height,
+                        font_family: props.font_family.as_deref().map_or(0, glyx_text::family_id),
                         single_line: props.text_scroll_x.is_some(),
                     };
                     layout.add_text_node(style, ctx, Some(format!("js-{}", id))).ok()?
@@ -414,6 +415,7 @@ pub(crate) fn sync_layout_structure(
                     bold:   glyx_runtime::text_props::is_bold(props.font_weight.as_deref()),
                     italic: props.font_style.as_deref() == Some("italic"),
                     line_height: props.line_height,
+                    font_family: props.font_family.as_deref().map_or(0, glyx_text::family_id),
                     single_line: props.text_scroll_x.is_some(),
                 };
                 layout.add_text_node(style, ctx, tag)
@@ -557,16 +559,16 @@ pub(crate) fn recompute_layout(state: &mut PerWindowState) {
         // `TextMeasureCtx` carries it now — otherwise a node with an
         // explicit line height would key differently here than in
         // render.rs and the two paths would never share a hit.
-        let key = LabelKey::new(&ctx.text, ctx.font_size, max_w, ctx.bold, ctx.italic, ctx.line_height);
+        let key = LabelKey::new(&ctx.text, ctx.font_size, max_w, ctx.bold, ctx.italic, ctx.line_height).in_family(ctx.font_family);
         if label_cache.peek(&key).is_none() {
-            let lbl = CachedLabel::new(
+            let lbl = CachedLabel::new_in(
                 text_sys, &ctx.text, ctx.font_size, max_w,
                 [0, 0, 0, 255], // color is unused at measure time — draw-time only, not part of the key
-                ctx.bold, ctx.italic, ctx.line_height,
+                ctx.bold, ctx.italic, ctx.line_height, ctx.font_family,
             );
             label_cache.put(key, lbl);
         }
-        let label = label_cache.get(&LabelKey::new(&ctx.text, ctx.font_size, max_w, ctx.bold, ctx.italic, ctx.line_height)).unwrap();
+        let label = label_cache.get(&LabelKey::new(&ctx.text, ctx.font_size, max_w, ctx.bold, ctx.italic, ctx.line_height).in_family(ctx.font_family)).unwrap();
         // A single-line span keeps its trailing space ("Hello " + bold "world").
         let tw = if ctx.single_line { label.full_width } else { label.width } as f32;
         let th = label.text_height as f32;

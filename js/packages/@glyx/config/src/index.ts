@@ -266,6 +266,14 @@ export interface GlyxConfig {
    *  Defaults to `['en']`. Glyx trims the bundled ICU data to just these
    *  locales at build time, keeping packaged apps light. */
   locales?: string[];
+  /**
+   * Font files the app ships, so `fontFamily` can name them: `['assets/fonts/Inter.ttf']`, or objects with a `src`. Paths are
+   * relative to the project; `glyx build` copies the files next to the binary. A file (`.ttf`, `.otf`, `.ttc`) is mapped, not read
+   * whole, and registered under the family name inside it (the name your OS font viewer shows), so `fontFamily: 'Inter'` finds it;
+   * list a family's bold and italic files too. Fonts installed on the machine need no entry: `fontFamily: 'Cascadia Mono'` finds
+   * them by name.
+   */
+  fonts?: (string | { src: string })[];
 }
 
 /**

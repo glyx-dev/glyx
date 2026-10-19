@@ -257,7 +257,8 @@ export function Pressable({ children, onPress, onRightPress, onPressIn, onPressO
     'view',
     // pressable:true tells the Rust drag-check that this node is interactive,
     // so glyxDraggable regions skip the window drag when this is under cursor.
-    { _glyxOnMount: onMount, style: mergedStyle, pressable: true, transition, ...props },
+    // A button shows the hand, as on the web; `style.cursor` (or a `cursor` prop) overrides it. Not when nothing handles a press.
+    { _glyxOnMount: onMount, style: mergedStyle, pressable: true, transition, cursor: (onPress && !disabled) ? 'pointer' : undefined, ...props },
     children
   );
 }

@@ -39,6 +39,13 @@ pub(super) fn cmd_build(
         }
     }
 
+    // The font files the app declares in `fonts`, next to the binary where the runtime looks for them.
+    if let Some(dir) = bin_path.as_deref().and_then(|b| b.parent()) {
+        if let Err(e) = copy_app_fonts(dir) {
+            log::warn!("fonts not copied: {e}");
+        }
+    }
+
     if check_performance {
         if let Some(bin) = &bin_path {
             run_perf_check(bin, perf_budget, perf_duration)?;
@@ -47,6 +54,29 @@ pub(super) fn cmd_build(
         }
     }
 
+    Ok(())
+}
+
+/// Copy the files named in the config's `fonts` list into `dir`, keeping their relative paths (the runtime looks beside the binary first).
+/// A file that is missing stops the build with its name: a font that silently fell back would only show as wrong text later.
+fn copy_app_fonts(dir: &Path) -> Result<()> {
+    let json = resolve_config_json().unwrap_or_default();
+    let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&json) else { return Ok(()) };
+    let Some(fonts) = cfg.get("fonts").and_then(|f| f.as_array()) else { return Ok(()) };
+    for entry in fonts {
+        let src = match entry {
+            serde_json::Value::String(s) => s.as_str(),
+            other => other.get("src").and_then(|s| s.as_str()).unwrap_or(""),
+        };
+        if src.is_empty() { continue; }
+        let from = Path::new(src);
+        if from.is_absolute() { continue; }      // installed elsewhere: the app uses it where it is
+        if !from.exists() { bail!("the font file `{src}` in `fonts` does not exist"); }
+        let to = dir.join(from);
+        if let Some(parent) = to.parent() { std::fs::create_dir_all(parent)?; }
+        std::fs::copy(from, &to).with_context(|| format!("copy {src}"))?;
+        println!("  ✓ font {src}");
+    }
     Ok(())
 }
 

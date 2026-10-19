@@ -278,6 +278,8 @@ struct LabelKey {
     bold:            bool,
     italic:          bool,
     line_height_bits: Option<u32>,
+    /// `glyx_text::family_id` of the node's `fontFamily` (`0` = the default stack).
+    family:          u16,
     // Color is intentionally NOT part of the key: CachedLabel stores only the
     // shaped layout, not color.  Color is applied at draw time via frame.draw_text,
     // so the same shaped result can be reused across all color variants of a string.
@@ -295,7 +297,14 @@ impl LabelKey {
             bold,
             italic,
             line_height_bits: line_height.map(f32::to_bits),
+            family: 0,
         }
+    }
+
+    /// The same key for text in a font family from `glyx_text::family_id`.
+    fn in_family(mut self, family: u16) -> Self {
+        self.family = family;
+        self
     }
 }
 
@@ -457,7 +466,13 @@ struct CachedLabel {
 
 impl CachedLabel {
     fn new(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4], bold: bool, italic: bool, line_height: Option<f32>) -> Self {
-        let layout      = ts.styled_label(text, font_size, max_width, bold, italic, line_height);
+        Self::new_in(ts, text, font_size, max_width, color, bold, italic, line_height, 0)
+    }
+
+    /// `new` in a font family from `glyx_text::family_id`.
+    #[allow(clippy::too_many_arguments)]
+    fn new_in(ts: &mut TextSystem, text: &str, font_size: f32, max_width: f32, color: [u8; 4], bold: bool, italic: bool, line_height: Option<f32>, family: u16) -> Self {
+        let layout      = ts.styled_label_in(text, font_size, max_width, bold, italic, line_height, family);
         let width       = layout.width() as f64;
         let full_width  = layout.full_width() as f64;
         let text_height = layout.height() as f64;

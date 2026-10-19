@@ -59,6 +59,28 @@ pub(super) struct GlyxConfigFile {
     #[serde(default)]
     pub(super) locales:      Option<Vec<String>>,
     pub(super) updater:      Option<UpdaterCfgJson>,
+    /// Font files the app ships: `"assets/fonts/Inter.ttf"` or `{ "src": "assets/fonts/Inter.ttf" }`.
+    #[serde(default)]
+    pub(super) fonts:        Vec<FontCfgJson>,
+}
+
+/// One entry of the `fonts` list: a path, or an object with a `src` path.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+pub(super) enum FontCfgJson {
+    Path(String),
+    Object { src: String },
+}
+
+/// Where a font file named in the config is: as given when absolute; otherwise beside the running binary (a packaged app, where
+/// `glyx build` puts the files), else relative to the working directory (`glyx dev`, run from the project).
+pub(super) fn resolve_font_path(p: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(p);
+    if path.is_absolute() { return path; }
+    if let Some(beside) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(&path))) {
+        if beside.exists() { return beside; }
+    }
+    path
 }
 
 /// Canvas2D transport settings from `glyx.config.json`.
@@ -294,6 +316,11 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
     let file: Option<GlyxConfigFile> = serde_json::from_str::<GlyxConfigFile>(json)
         .map_err(|e| { log::error!("glyx config parse error: {e}"); e })
         .ok();
+
+    // Shipped fonts, before any text system is made (each registers them when it starts).
+    if let Some(f) = file.as_ref().filter(|f| !f.fonts.is_empty()) {
+        glyx_text::set_app_fonts(f.fonts.iter().map(|e| resolve_font_path(match e { FontCfgJson::Path(p) => p, FontCfgJson::Object { src } => src })).collect());
+    }
 
     if let Some(w) = file.as_ref().and_then(|f| f.window.as_ref()) {
         if let Some(t) = &w.title { cfg.title = t.clone(); }

@@ -1285,6 +1285,7 @@ export function RichTextEditor({
       <Pressable
         onPress={onPress}
         _glyxOnMount={onMount}
+        cursor="text"
         style={{
           width,
           height,

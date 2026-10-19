@@ -53,7 +53,8 @@ fn to_d2d_color(c: peniko::Color) -> D2D1_COLOR_F {
 struct Direct2DFontCache {
     dwrite_factory: IDWriteFactory5,
     mem_loader:     IDWriteInMemoryFontFileLoader,
-    faces:          HashMap<(usize, u32), IDWriteFontFace>,
+    /// Each face with whether it has colour glyphs (an emoji font), asked of DirectWrite once.
+    faces:          HashMap<(usize, u32), (IDWriteFontFace, bool)>,
 }
 
 impl Direct2DFontCache {
@@ -71,10 +72,10 @@ impl Direct2DFontCache {
     /// TinySkia's `GlyphKey` already uses (`skia.rs`'s `data_ptr: usize`),
     /// valid because Parley/Vello's `FontData` blob is a stable,
     /// reference-counted allocation for the lifetime it's referenced.
-    fn get_or_create(&mut self, font_bytes: &[u8], font_index: u32) -> Option<IDWriteFontFace> {
+    fn get_or_create(&mut self, font_bytes: &[u8], font_index: u32) -> Option<(IDWriteFontFace, bool)> {
         let key = (font_bytes.as_ptr() as usize, font_index);
-        if let Some(face) = self.faces.get(&key) {
-            return Some(face.clone());
+        if let Some(entry) = self.faces.get(&key) {
+            return Some(entry.clone());
         }
         unsafe {
             let font_file = self
@@ -105,8 +106,9 @@ impl Direct2DFontCache {
                     DWRITE_FONT_SIMULATIONS_NONE,
                 ))
                 .ok()?;
-            self.faces.insert(key, face.clone());
-            Some(face)
+            let is_color = face.cast::<IDWriteFontFace2>().map(|f| f.IsColorFont().as_bool()).unwrap_or(false);
+            self.faces.insert(key, (face.clone(), is_color));
+            Some((face, is_color))
         }
     }
 }
@@ -618,6 +620,9 @@ impl Direct2DFrame {
             Ok(b) => b,
             Err(_) => return,
         };
+        // For colour glyphs (emoji): the device context that can draw bitmap glyph runs. Only asked for when colour is on.
+        let color_emoji = crate::skia::color_emoji_enabled();
+        let dc4: Option<ID2D1DeviceContext4> = if color_emoji { self.rt.cast().ok() } else { None };
 
         for line in layout.inner.lines() {
             for item in line.items() {
@@ -630,7 +635,7 @@ impl Direct2DFrame {
 
                 let font_bytes = font.data.data();
                 let font_index = font.index;
-                let Some(face) = cache.get_or_create(font_bytes, font_index) else { continue };
+                let Some((face, is_color)) = cache.get_or_create(font_bytes, font_index) else { continue };
 
                 let mut pen_x = run_off;
                 let mut indices  = Vec::new();
@@ -663,6 +668,11 @@ impl Direct2DFrame {
                     bidiLevel: 0,
                 };
                 let baseline_origin = windows_numerics::Vector2 { X: (x + run_off) as f32, Y: (y + baseline) as f32 };
+                // A colour font (an emoji): its glyphs come as coloured layers or as bitmaps, each drawn in its own colours. Anything
+                // DirectWrite cannot split into colour pieces (and every ordinary font) is the plain run below.
+                if is_color && color_emoji && Self::draw_color_run(&self.rt, dc4.as_ref(), &cache.dwrite_factory, baseline_origin, &glyph_run, &brush) {
+                    continue;
+                }
                 unsafe {
                     self.rt.DrawGlyphRun(
                         baseline_origin,
@@ -672,6 +682,48 @@ impl Direct2DFrame {
                     );
                 }
             }
+        }
+    }
+
+    /// Draw one glyph run of a colour font in colour: layered colour glyphs (COLR) layer by layer, each in its palette colour (the text
+    /// brush where a layer uses the foreground), and embedded colour bitmaps (PNG, JPEG, TIFF, premultiplied BGRA) through the device
+    /// context. False when DirectWrite has no colour form of this run, so the caller draws it plainly.
+    fn draw_color_run(rt: &ID2D1RenderTarget, dc4: Option<&ID2D1DeviceContext4>, factory: &IDWriteFactory5,
+                      origin: windows_numerics::Vector2, run: &DWRITE_GLYPH_RUN, foreground: &ID2D1Brush) -> bool {
+        let formats = DWRITE_GLYPH_IMAGE_FORMATS_COLR
+            | DWRITE_GLYPH_IMAGE_FORMATS_PNG
+            | DWRITE_GLYPH_IMAGE_FORMATS_JPEG
+            | DWRITE_GLYPH_IMAGE_FORMATS_TIFF
+            | DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8;
+        unsafe {
+            let Ok(layers) = factory.TranslateColorGlyphRun(origin, run, None, formats, DWRITE_MEASURING_MODE_NATURAL, None, 0) else {
+                return false;
+            };
+            let mut drew = false;
+            while layers.MoveNext().map(|b| b.as_bool()).unwrap_or(false) {
+                let Ok(current) = layers.GetCurrentRun() else { break };
+                if current.is_null() { break; }
+                let cur = &*current;
+                let layer_origin = windows_numerics::Vector2 { X: cur.Base.baselineOriginX, Y: cur.Base.baselineOriginY };
+                let bitmap_formats = DWRITE_GLYPH_IMAGE_FORMATS_PNG | DWRITE_GLYPH_IMAGE_FORMATS_JPEG
+                    | DWRITE_GLYPH_IMAGE_FORMATS_TIFF | DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8;
+                if (cur.glyphImageFormat & bitmap_formats).0 != 0 {
+                    if let Some(dc) = dc4 {
+                        dc.DrawColorBitmapGlyphRun(cur.glyphImageFormat, layer_origin, &cur.Base.glyphRun,
+                            cur.measuringMode, D2D1_COLOR_BITMAP_GLYPH_SNAP_OPTION_DEFAULT);
+                        drew = true;
+                    }
+                    continue;
+                }
+                // A layer: its palette colour, or the text colour when the font says "foreground" (palette index 0xFFFF).
+                if cur.Base.paletteIndex == 0xFFFF {
+                    rt.DrawGlyphRun(layer_origin, &cur.Base.glyphRun, foreground, cur.measuringMode);
+                } else if let Ok(layer_brush) = rt.CreateSolidColorBrush(&cur.Base.runColor as *const _ as *const D2D1_COLOR_F, None) {
+                    rt.DrawGlyphRun(layer_origin, &cur.Base.glyphRun, &layer_brush, cur.measuringMode);
+                }
+                drew = true;
+            }
+            drew
         }
     }
 

@@ -283,6 +283,12 @@ export interface TextInputProps {
   keyboardType?:    'default' | 'numeric' | 'decimal';
   textAlign?:       'left' | 'center' | 'right';
   autoFocus?:       boolean;
+  /**
+   * Ctrl+Z undoes and Ctrl+Y (or Ctrl+Shift+Z) redoes, as in a browser: typing is undone a run at a time, cut, paste, Enter and
+   * deleting a selection each on their own, and the caret and selection come back. The history is a capped list of small diffs
+   * (200 steps or 256 KB) that goes away with the field, and it is dropped when the app sets `value` itself. Default true; false turns it off.
+   */
+  undoHistory?:     boolean;
   style?:           StyleProp;
   [key: string]: any;
 }
@@ -569,10 +575,10 @@ export interface MenuItem {
   enabled?:     boolean;
   /**
    * A ready-made editing item acting on the focused text field: `{ role: 'copy' }` is "Copy" with
-   * Ctrl+C shown. It needs no `id` or `label` (the id is `'role:copy'`). Undo and redo are not
-   * offered because text fields have no undo yet.
+   * Ctrl+C shown. It needs no `id` or `label` (the id is `'role:copy'`). `undo` and `redo` act on the
+   * focused text field's history.
    */
-  role?:        'copy' | 'cut' | 'paste' | 'selectAll';
+  role?:        'copy' | 'cut' | 'paste' | 'selectAll' | 'undo' | 'redo';
   /** Present (true or false) makes the item checkable. */
   checked?:     boolean;
   /** A key combination such as `'Ctrl+N'` or `'CmdOrCtrl+Shift+S'`. Shown in the menu and triggered by Glyx, with Ctrl, Shift, Alt and Super. */

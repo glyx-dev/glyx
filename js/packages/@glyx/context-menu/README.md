@@ -46,7 +46,7 @@ Uses the native `onRightPress` event and opens the menu in the app's root popove
 
 ## Native menus
 
-`<ContextMenu native ...>` shows the operating system's own popup menu where there is one (Windows today), with submenus, check marks and accelerator labels in the system's look; elsewhere, or if it cannot be shown, the drawn menu opens instead. Choose per menu: the drawn one is the same everywhere and can have icons; the native one matches the system.
+`<ContextMenu native ...>` shows the operating system's own popup menu where there is one (Windows, and macOS, which has not been run on a Mac yet), with submenus, check marks and accelerator labels in the system's look; elsewhere (Linux), or if it cannot be shown, the drawn menu opens instead. Choose per menu: the drawn one is the same everywhere and can have icons; the native one matches the system.
 
 Keyboard (drawn menu): Up / Down move, Right opens a submenu, Left closes it, Enter chooses, Escape closes a submenu and then the menu.
 

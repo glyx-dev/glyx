@@ -214,9 +214,10 @@ mod imp {
         Ok(())
     }
 
-    /// Show `items` as a native popup menu at the cursor, on the window `hwnd`, and wait for it to close. `None` when it was dismissed.
-    #[cfg(target_os = "windows")]
-    pub(super) fn popup(hwnd: isize, items: &[MenuBarItem]) -> Result<Option<MenuBarEvent>, String> {
+    /// Show `items` as a native popup menu on the window `hwnd` (Windows: the HWND; macOS: the window's NSView), at `at` or the cursor, and
+    /// wait for it to close. `None` when it was dismissed.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pub(super) fn popup(hwnd: isize, items: &[MenuBarItem], at: Option<(f64, f64)>) -> Result<Option<MenuBarEvent>, String> {
         use muda::ContextMenu;
         crate::ensure_event_handler();
         let root = Submenu::new("", true);
@@ -230,20 +231,18 @@ mod imp {
             for id in entries.keys() { popup.insert(id.clone(), checks.get(id).copied()); }
         }
         *POPUP_CHOSEN.lock().unwrap() = None;
-        // SAFETY: `hwnd` is this window's own handle, and this runs on the window's thread.
-        let _ = unsafe { root.show_context_menu_for_hwnd(hwnd, None) };
+        // At the given place in the window's client area (physical pixels, which is what the app's pointer events carry), else at the
+        // cursor. Placing it is what lets an injected click, a touch, a pen or the keyboard open it where the app means it to be.
+        let position = at.map(|(x, y)| muda::dpi::Position::Physical(muda::dpi::PhysicalPosition::new(x.round() as i32, y.round() as i32)));
+        // SAFETY: `hwnd` is this window's own handle (on macOS its NSView), and this runs on the window's thread.
+        #[cfg(target_os = "windows")]
+        let _ = unsafe { root.show_context_menu_for_hwnd(hwnd, position) };
+        // `muda` turns a physical position into points with the window's backing scale and flips it to AppKit's bottom-left origin itself.
+        #[cfg(target_os = "macos")]
+        let _ = unsafe { root.show_context_menu_for_nsview(hwnd as *const std::ffi::c_void, position) };
         POPUP_IDS.lock().unwrap().clear();
         Ok(POPUP_CHOSEN.lock().unwrap().take())
     }
-
-    #[cfg(target_os = "macos")]
-    pub(super) fn popup(_hwnd: isize, _items: &[MenuBarItem]) -> Result<Option<MenuBarEvent>, String> {
-        Err(NO_POPUP.into())
-    }
-
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    #[allow(dead_code)]
-    const NO_POPUP: &str = "a native popup menu is not available on macOS yet: use the drawn menu";
 
     /// Windows: the menu belongs to one window. macOS: there is one app menu, so the key is always 0.
     pub(super) fn install(key: isize, items: &[MenuBarItem]) -> Result<(), String> {
@@ -354,8 +353,8 @@ mod imp {
 mod imp {
     use super::*;
     const NOT_YET: &str = "a native menu bar is only available on Windows and macOS: use <MenuBar> here";
-    pub(super) fn popup(_hwnd: isize, _items: &[MenuBarItem]) -> Result<Option<MenuBarEvent>, String> {
-        Err("a native popup menu is only available on Windows: use the drawn menu".into())
+    pub(super) fn popup(_hwnd: isize, _items: &[MenuBarItem], _at: Option<(f64, f64)>) -> Result<Option<MenuBarEvent>, String> {
+        Err("a native popup menu is only available on Windows and macOS: use the drawn menu".into())
     }
     pub(super) fn install(_hwnd: isize, _items: &[MenuBarItem]) -> Result<(), String> { Err(NOT_YET.into()) }
     pub(super) fn remove(_hwnd: isize) -> bool { false }
@@ -369,17 +368,17 @@ pub fn set_menu_bar(hwnd: isize, items: &[MenuBarItem]) -> Result<(), String> {
     imp::install(hwnd, items)
 }
 
-/// Show a native popup (context) menu at the cursor over the window with this native handle (HWND), and wait for it to close: the item
-/// that was chosen, or `None` when it was dismissed. Unlike the menu bar the entries need not be submenus, and ids need only be unique
-/// inside this one menu. Windows only for now (`context_menu_supported`).
-pub fn show_context_menu(hwnd: isize, items: &[MenuBarItem]) -> Result<Option<MenuBarEvent>, String> {
+/// Show a native popup (context) menu over the window with this native handle (HWND), at `at` (x, y in the window's client area, physical
+/// pixels) or, with `None`, at the cursor, and wait for it to close: the item that was chosen, or `None` when it was dismissed. Unlike the menu bar the entries need not be submenus, and ids need only be unique
+/// inside this one menu. Windows and macOS (`context_menu_supported`); the macOS path is written against `muda` but has not been run on a Mac.
+pub fn show_context_menu(hwnd: isize, items: &[MenuBarItem], at: Option<(f64, f64)>) -> Result<Option<MenuBarEvent>, String> {
     if items.is_empty() { return Err("a context menu needs at least one item".into()); }
     validate_children("context menu", items, &mut HashSet::new())?;
-    imp::popup(hwnd, items)
+    imp::popup(hwnd, items, at)
 }
 
 /// Whether `show_context_menu` can show a native popup on this platform.
-pub fn context_menu_supported() -> bool { cfg!(target_os = "windows") }
+pub fn context_menu_supported() -> bool { cfg!(any(target_os = "windows", target_os = "macos")) }
 
 /// Remove a window's menu bar. False when it had none.
 pub fn clear_menu_bar(hwnd: isize) -> bool { imp::remove(hwnd) }

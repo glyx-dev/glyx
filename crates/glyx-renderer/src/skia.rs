@@ -11,6 +11,8 @@
 //! Each unique (font, size, glyph_id) alpha mask is rasterized via swash once
 //! and cached in `TinySkiaShared::glyph_cache`.  On subsequent frames the
 //! cached alpha bytes are colorized and blitted directly — no swash re-work.
+//! A colour glyph (an emoji) is cached as its own premultiplied RGBA and drawn untinted; the cache is
+//! limited by bytes as well as by count (`GLYPH_CACHE_BUDGET_BYTES`).
 //!
 //! ## Limitations (experiment branch)
 //! - `supports_caching()` returns `false` — Vello scene-fragment caching is disabled.
@@ -318,8 +320,10 @@ struct GlyphKey {
 }
 
 struct CachedAlphaGlyph {
-    /// Raw swash alpha coverage — one byte per pixel.
+    /// Raw swash alpha coverage — one byte per pixel; for a colour glyph (`color`), premultiplied RGBA — four bytes per pixel.
     alpha:  Vec<u8>,
+    /// A colour glyph (an emoji): `alpha` already holds its colours, so it is drawn as it is and not tinted with the text colour.
+    color:  bool,
     width:  u32,
     height: u32,
     left:   i32,   // placement.left
@@ -336,6 +340,9 @@ struct TinySkiaShared {
     /// or emoji sets) can't grow CPU memory without limit. UIs with a small set
     /// of text sizes never hit the cap.
     glyph_cache: lru::LruCache<GlyphKey, CachedAlphaGlyph>,
+    /// Bytes held by `glyph_cache`. A colour glyph is four bytes a pixel (a 128 px emoji is 64 KB), so the count limit alone says nothing
+    /// about memory; `GLYPH_CACHE_BUDGET_BYTES` does.
+    glyph_bytes: usize,
     /// Reusable pixel buffer — avoids a fresh 8 MB allocation every frame.
     pixmap:      Option<tiny_skia::Pixmap>,
     /// sRGB-converted copies of `peniko::ImageData` bytes, keyed by the source
@@ -350,6 +357,16 @@ struct TinySkiaShared {
     /// a camera stop reappearing after restart). `Blob::id` comes from a global
     /// counter and is never reused.
     image_cache: ByteBudgetCache,
+}
+
+/// Memory the glyph cache may hold, in bytes. Plain text is far under it (about 1 MB); it is there for colour emoji at large sizes.
+const GLYPH_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
+
+/// Whether colour glyphs (emoji) are drawn in colour. On unless `GLYX_COLOR_EMOJI` is `0`, `false` or `off`; off draws them as one-colour
+/// shapes in the text colour (or nothing, where a font has only a bitmap for them) and keeps the colour tables unread.
+pub(crate) fn color_emoji_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("GLYX_COLOR_EMOJI").ok().as_deref().map(str::trim), Some("0" | "false" | "off")))
 }
 
 /// Memory the converted-image cache may hold, in bytes. Each entry is a full sRGB RGBA copy of an image, so a count
@@ -1173,7 +1190,8 @@ impl TinySkiaFrame {
 
     /// Rasterize a Parley text layout at `(x, y)` using swash glyph outlines.
     ///
-    /// Alpha masks are cached in `shared.glyph_cache` (color-independent).
+    /// Alpha masks are cached in `shared.glyph_cache` (color-independent); a colour glyph (an emoji) is cached as its own RGBA and drawn
+    /// untinted.
     /// On a cache hit the mask is colorized in ~O(pixels) arithmetic and blitted
     /// directly — no swash rasterization at all.
     pub fn draw_text(&mut self, layout: &glyx_text::TextLayout, x: f64, y: f64,
@@ -1186,6 +1204,7 @@ impl TinySkiaFrame {
 
         let q   = color.to_rgba8();
         let (cr, cg, cb) = (q.r, q.g, q.b);
+        let color_emoji = color_emoji_enabled();
         let xf  = self.xf;
         // Same slack as the cull above.
         let text_mask_needed = self.mask_needed(x - 2.0, y - 2.0,
@@ -1231,22 +1250,54 @@ impl TinySkiaFrame {
                         let glyph_id: swash::GlyphId = g.id as u16;
                         let key = glyph_key(glyph_id);
                         if self.shared.glyph_cache.contains(&key) { continue; }
-                        let rendered = Render::new(&[Source::Outline])
+                        // Colour sources first (layered colour outlines, then embedded colour bitmaps scaled to the size), so an emoji
+                        // comes out in its own colours; a font with neither gives its plain outline as before.
+                        let sources: &[Source] = if color_emoji {
+                            &[Source::ColorOutline(0), Source::ColorBitmap(swash::scale::StrikeWith::BestFit), Source::Outline]
+                        } else {
+                            &[Source::Outline]
+                        };
+                        let rendered = Render::new(sources)
                             .format(Format::Alpha)
                             .render(&mut scaler, glyph_id)
                             .filter(|img| img.placement.width > 0 && img.placement.height > 0);
                         let entry = match rendered {
+                            // A colour glyph: swash gives straight-alpha RGBA; kept premultiplied, ready to draw.
+                            Some(image) if image.content == swash::scale::image::Content::Color
+                                && image.data.len() == image.placement.width as usize * image.placement.height as usize * 4 => {
+                                let mut px = image.data.to_vec();
+                                for p in px.chunks_exact_mut(4) {
+                                    let a = p[3] as u32;
+                                    p[0] = ((p[0] as u32 * a + 127) / 255) as u8;
+                                    p[1] = ((p[1] as u32 * a + 127) / 255) as u8;
+                                    p[2] = ((p[2] as u32 * a + 127) / 255) as u8;
+                                }
+                                CachedAlphaGlyph {
+                                    alpha: px, color: true,
+                                    width: image.placement.width, height: image.placement.height,
+                                    left: image.placement.left, top: image.placement.top,
+                                }
+                            }
                             // Raw alpha, color-independent: colorized at draw time.
                             Some(image) => CachedAlphaGlyph {
                                 alpha:  image.data.to_vec(),
+                                color:  false,
                                 width:  image.placement.width,
                                 height: image.placement.height,
                                 left:   image.placement.left,
                                 top:    image.placement.top,
                             },
-                            None => CachedAlphaGlyph { alpha: Vec::new(), width: 0, height: 0, left: 0, top: 0 },
+                            None => CachedAlphaGlyph { alpha: Vec::new(), color: false, width: 0, height: 0, left: 0, top: 0 },
                         };
-                        self.shared.glyph_cache.put(key, entry);
+                        self.shared.glyph_bytes += entry.alpha.len();
+                        if let Some((_, old)) = self.shared.glyph_cache.push(key, entry) { self.shared.glyph_bytes -= old.alpha.len(); }
+                        // Over the byte budget: drop the least recently used, but never the glyph just added.
+                        while self.shared.glyph_bytes > GLYPH_CACHE_BUDGET_BYTES && self.shared.glyph_cache.len() > 1 {
+                            match self.shared.glyph_cache.pop_lru() {
+                                Some((_, old)) => self.shared.glyph_bytes -= old.alpha.len(),
+                                None => break,
+                            }
+                        }
                     }
                 }
 
@@ -1268,14 +1319,18 @@ impl TinySkiaFrame {
                     if cached.width == 0 || cached.height == 0 { continue; } // a space
                     let draw_x = bx + cached.left;
                     let draw_y = by - cached.top;
-                    // Colorize cached alpha into premultiplied RGBA.
+                    // Colorize cached alpha into premultiplied RGBA (a colour glyph already is, and keeps its own colours).
                     let mut rgba = Vec::with_capacity((cached.width * cached.height * 4) as usize);
-                    for &alpha in &cached.alpha {
-                        let a = alpha as u32;
-                        rgba.push((cr as u32 * a / 255) as u8);
-                        rgba.push((cg as u32 * a / 255) as u8);
-                        rgba.push((cb as u32 * a / 255) as u8);
-                        rgba.push(alpha);
+                    if cached.color {
+                        rgba.extend_from_slice(&cached.alpha);
+                    } else {
+                        for &alpha in &cached.alpha {
+                            let a = alpha as u32;
+                            rgba.push((cr as u32 * a / 255) as u8);
+                            rgba.push((cg as u32 * a / 255) as u8);
+                            rgba.push((cb as u32 * a / 255) as u8);
+                            rgba.push(alpha);
+                        }
                     }
                     if let Some(glyph_pm) = tiny_skia::PixmapRef::from_bytes(
                         &rgba, cached.width, cached.height,
@@ -1752,6 +1807,7 @@ impl TinySkiaRenderer {
             // 2048 entries ≈ ~1 MB for typical UI text; ample headroom for
             // several font sizes' worth of Latin glyphs without thrashing.
             glyph_cache: lru::LruCache::new(std::num::NonZeroUsize::new(2048).unwrap()),
+            glyph_bytes: 0,
             pixmap:      None,
             image_cache: ByteBudgetCache::new(CONVERTED_IMAGE_BUDGET_BYTES),
         })
@@ -2012,6 +2068,7 @@ impl TinySkiaRenderer {
     pub fn trim_resources(&mut self) {
         if let Some(shared) = self.shared.as_mut() {
             shared.glyph_cache.clear();
+            shared.glyph_bytes = 0;
             shared.image_cache.clear();
         }
     }
@@ -2339,6 +2396,33 @@ mod text_cost {
         assert_eq!(ink(&frame), with_space, "cached glyphs draw identically to freshly rasterized ones");
         r.finish_frame_soft(frame, |_, _, _, _| {});
         assert_eq!(r.shared.as_ref().unwrap().glyph_cache.len(), cached);
+    }
+
+    /// An emoji is drawn in its own colours, not in the text colour. Needs a system font with colour glyphs (Segoe UI Emoji, Apple Color
+    /// Emoji, Noto Color Emoji), so it checks nothing on a machine that has none.
+    #[test]
+    fn an_emoji_is_drawn_in_colour_not_in_the_text_colour() {
+        let mut ts = glyx_text::TextSystem::new();
+        let label = ts.label("\u{1F600}\u{2764}\u{FE0F}\u{1F34E}", 32.0);
+        let mut r = TinySkiaRenderer::new_cpu_only(160, 48);
+        let mut frame = r.begin_frame();
+        frame.draw_text(&label, 4.0, 4.0, WHITE);
+        // Pixels that are clearly not white or gray: red, yellow, green, ...
+        let colourful = frame.pixmap.pixels().iter().filter(|p| {
+            let (r, g, b) = (p.red() as i32, p.green() as i32, p.blue() as i32);
+            p.alpha() > 200 && (r.max(g).max(b) - r.min(g).min(b)) > 60
+        }).count();
+        let has_font = std::path::Path::new("C:/Windows/Fonts/seguiemj.ttf").exists()
+            || std::path::Path::new("/System/Library/Fonts/Apple Color Emoji.ttc").exists()
+            || std::path::Path::new("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf").exists();
+        if has_font && color_emoji_enabled() {
+            assert!(colourful > 100, "an emoji shows its own colours: {colourful} coloured pixels");
+        }
+        r.finish_frame_soft(frame, |_, _, _, _| {});
+        if has_font && color_emoji_enabled() {
+            let bytes = r.shared.as_ref().unwrap().glyph_bytes;
+            assert!(bytes > 0 && bytes <= GLYPH_CACHE_BUDGET_BYTES, "the cache is counted in bytes: {bytes}");
+        }
     }
 
     /// What drawing already-shaped text costs per call once its glyphs are

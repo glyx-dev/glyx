@@ -958,7 +958,7 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
             crate::menubar_api::set(hwnd, &json, crate::menubar_api::sink(Arc::clone(&events), redraw.clone()))
         })?)?;
         globals.set("__glyx_menubar_clear", Function::new(ctx.clone(), move || crate::menubar_api::clear(hwnd))?)?;
-        globals.set("__glyx_contextmenu_show", Function::new(ctx.clone(), move |json: String| crate::menubar_api::popup(hwnd, &json))?)?;
+        globals.set("__glyx_contextmenu_show", Function::new(ctx.clone(), move |json: String, x: Option<f64>, y: Option<f64>| crate::menubar_api::popup(hwnd, &json, x.zip(y)))?)?;
     }
 
     // `__glyx_battery_getStatus() -> Promise<JSON | null>` — real

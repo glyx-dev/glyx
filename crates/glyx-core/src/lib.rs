@@ -792,7 +792,7 @@ fn build_window_controller(
 ) -> WindowController {
     use winit::window::Fullscreen;
 
-    // Extract the raw platform HWND (Windows) so dialogs can be parented to
+    // Extract the raw platform handle (Windows HWND, macOS NSView) so dialogs can be parented to
     // the Glyx window and appear in front of it rather than behind it.
     let hwnd: Option<isize> = {
         #[cfg(target_os = "windows")]
@@ -805,7 +805,18 @@ fn build_window_controller(
                 }
             })
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        {
+            // The window's NSView: what a native popup menu is shown on (dialogs ignore this handle off Windows).
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            window.window_handle().ok().and_then(|h| {
+                match h.as_raw() {
+                    RawWindowHandle::AppKit(w) => Some(w.ns_view.as_ptr() as isize),
+                    _ => None,
+                }
+            })
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         { None }
     };
 

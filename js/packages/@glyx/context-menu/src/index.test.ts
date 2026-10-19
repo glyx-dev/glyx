@@ -168,7 +168,8 @@ test('with native, the system menu is used when there is one, and its answer run
   const g = globalThis as any;
   const calls: any[] = [];
   g.__glyx_contextmenu_supported = () => true;
-  g.__glyx_contextmenu_show = (json: string) => { calls.push(JSON.parse(json)); return JSON.stringify({ ok: true, id: '2.0', checked: null }); };
+  const places: any[] = [];
+  g.__glyx_contextmenu_show = (json: string, x: number, y: number) => { calls.push(JSON.parse(json)); places.push([x, y]); return JSON.stringify({ ok: true, id: '2.0', checked: null }); };
   try {
     const seen: string[] = [];
     const Native = () => React.createElement('view', null,
@@ -182,8 +183,9 @@ test('with native, the system menu is used when there is one, and its answer run
       React.createElement(PopoverHost, null));
     current = await render(React.createElement(Native));
     await act(() => {});
-    await rightClick();
+    await rightClick(120, 90);
     expect(seen).toEqual(['link']);
+    expect(places).toEqual([[120, 90]]);      // where the card was clicked, not at the cursor
     expect(_popoverStore.current).toBeNull();      // nothing was drawn
     expect(calls[0]).toEqual([
       { id: '0', label: 'Open', enabled: true, accelerator: 'Ctrl+O' },

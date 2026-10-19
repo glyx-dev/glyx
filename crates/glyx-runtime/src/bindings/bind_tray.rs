@@ -189,7 +189,7 @@ pub fn menubar_set_callback(
     rv.set(s.into());
 }
 
-/// `__glyx_contextmenu_show(items_json: string) -> string` (JSON: see `menubar_api::popup`). Blocks while the native menu is open.
+/// `__glyx_contextmenu_show(items_json: string, x?: number, y?: number) -> string` (JSON: see `menubar_api::popup`). Blocks while the native menu is open.
 pub fn contextmenu_show_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,
     args: v8::FunctionCallbackArguments,
@@ -199,7 +199,12 @@ pub fn contextmenu_show_callback(
     let scope = &mut v8::ContextScope::new(scope, ctx);
     let hwnd = window_state(&args).window.as_ref().and_then(|w| w.hwnd);
     let json = v8_arg_to_string(scope, &args, 0);
-    let reply = crate::menubar_api::popup(hwnd, &json);
+    // Where the menu goes: both numbers, or neither (then at the cursor).
+    let at = match (args.get(1).number_value(scope), args.get(2).number_value(scope)) {
+        (Some(x), Some(y)) if args.get(1).is_number() && args.get(2).is_number() => Some((x, y)),
+        _ => None,
+    };
+    let reply = crate::menubar_api::popup(hwnd, &json, at);
     let s = v8::String::new(scope, &reply).unwrap();
     rv.set(s.into());
 }

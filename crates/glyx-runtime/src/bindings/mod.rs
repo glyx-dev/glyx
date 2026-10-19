@@ -392,8 +392,8 @@ pub struct WindowController {
     /// Set the mouse cursor icon by CSS-like name ("default", "pointer",
     /// "col-resize", ...).  Unknown names fall back to the default arrow.
     pub set_cursor:        Arc<dyn Fn(String) + Send + Sync>,
-    /// Raw platform window handle (HWND on Windows) as a plain integer.
-    /// Used to parent native dialogs so they appear in front of the Glyx window.
+    /// Raw platform window handle (HWND on Windows, the NSView on macOS) as a plain integer.
+    /// Used to parent native dialogs so they appear in front of the Glyx window, and to show native popup menus.
     pub hwnd:              Option<isize>,
     /// Create a secondary window with the given pre-assigned id, title, and size.
     /// Called by the `__glyx_window_create` binding.

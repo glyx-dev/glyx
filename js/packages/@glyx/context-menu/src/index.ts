@@ -262,9 +262,10 @@ function byPath(items: ContextMenuItem[], id: string): ContextMenuItem | undefin
 }
 
 /** Shows the native menu and runs the chosen item. False when it could not be shown (the caller draws its own). */
-function showNative(items: ContextMenuItem[]): boolean {
+function showNative(items: ContextMenuItem[], at: { x: number; y: number }): boolean {
   let reply: any;
-  try { reply = JSON.parse(g.__glyx_contextmenu_show(JSON.stringify(toNative(items)))); } catch { return false; }
+  // At the place the app was clicked, not wherever the cursor happens to be.
+  try { reply = JSON.parse(g.__glyx_contextmenu_show(JSON.stringify(toNative(items)), at.x, at.y)); } catch { return false; }
   if (!reply || reply.ok !== true) return false;
   if (reply.id != null) {
     const it = byPath(items, String(reply.id));
@@ -283,7 +284,7 @@ export function ContextMenu({ children, items = [], width = 220, native = false 
 
   const show = (e: { x: number; y: number }) => {
     if (!anyChoice(items)) return;
-    if (native && nativeSupported() && showNative(items)) return;
+    if (native && nativeSupported() && showNative(items, e)) return;
     const contentH = listHeight(items);
     // Where the popover layer will put the root panel (it keeps it in the window and flips it above near the bottom): the same arithmetic,
     // so submenus can be placed and kept inside the window too.

@@ -80,11 +80,11 @@ test('a role fills in its id, label and accelerator and needs none of them', () 
   const full = normalizeMenu(bar);
   expect(full[0].children[0]).toMatchObject({ role: 'copy', id: 'role:copy', label: 'Copy', accelerator: 'Ctrl+C' });
   expect(full[0].children[1]).toMatchObject({ id: 'role:selectAll', label: 'Everything', accelerator: 'Ctrl+A' });
-  expect(Object.keys(EDIT_ROLES).sort()).toEqual(['copy', 'cut', 'paste', 'selectAll']);
+  expect(Object.keys(EDIT_ROLES).sort()).toEqual(['copy', 'cut', 'paste', 'redo', 'selectAll', 'undo']);
 });
 
 test('an unknown role is an error, and a repeated role is a repeated id', () => {
-  expect(validateMenu([{ label: 'Edit', children: [{ role: 'undo' }] }])).toMatch(/unknown role "undo"/);
+  expect(validateMenu([{ label: 'Edit', children: [{ role: 'bold' }] }])).toMatch(/unknown role "bold"/);
   expect(validateMenu([{ label: 'Edit', children: [{ role: 'copy' }, { role: 'copy' }] }])).toMatch(/used more than once/);
 });
 

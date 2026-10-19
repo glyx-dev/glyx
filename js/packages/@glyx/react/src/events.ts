@@ -439,13 +439,13 @@ export function removeKeyListener(fn: (ev: any) => any) {
   if (idx >= 0) keyListeners.splice(idx, 1);
 }
 
-const EDIT_CHORDS = { copy: 'KeyC', cut: 'KeyX', paste: 'KeyV', selectAll: 'KeyA' };
+const EDIT_CHORDS = { undo: 'KeyZ', redo: 'KeyY', copy: 'KeyC', cut: 'KeyX', paste: 'KeyV', selectAll: 'KeyA' };
 
 /**
- * Run an editing command (`copy`, `cut`, `paste`, `selectAll`) on the focused text field, by replaying
+ * Run an editing command (`undo`, `redo`, `copy`, `cut`, `paste`, `selectAll`) on the focused text field, by replaying
  * its Ctrl chord through the same dispatcher real keys use, so the field handles it exactly as typed.
  * Returns false for an unknown command or without a runtime.
- * @param {'copy'|'cut'|'paste'|'selectAll'} role
+ * @param {'undo'|'redo'|'copy'|'cut'|'paste'|'selectAll'} role
  */
 export function runEditCommand(role: string | number) {
   const key = (EDIT_CHORDS as any)[role];

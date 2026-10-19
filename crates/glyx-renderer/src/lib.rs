@@ -12,6 +12,7 @@
 //! Zero extra allocation — Scene's internal Vec buffers survive the move.
 
 mod blit;
+mod color_glyphs;
 mod text_outline;
 pub(crate) use blit::CachedBlit;
 mod skia;
@@ -98,6 +99,8 @@ pub struct GlyxRenderer {
     /// Swapped into FrameBuilder each frame and back on render_frame.
     /// Kept here so its Vec allocations survive across frames.
     scene:    Scene,
+    /// Colour glyphs (emoji) rasterized so far; moved into the FrameBuilder with the scene and back.
+    color_glyphs: color_glyphs::ColorGlyphCache,
     /// Window background color — clears the surface each frame.
     /// Set from `window.background` in glyx.config.json; defaults to
     /// the Glyx dark background so the window is never a blank white flash.
@@ -176,6 +179,7 @@ impl GlyxRenderer {
         Ok(Self {
             renderer, blit, target,
             scene: Scene::new(),
+            color_glyphs: color_glyphs::ColorGlyphCache::new(),
             background_color: colors::BACKGROUND,
             pipeline_cache,
         })
@@ -233,7 +237,7 @@ impl GlyxRenderer {
         self.scene.reset();
         // Move scene out; render_frame puts it back.
         let scene = std::mem::replace(&mut self.scene, Scene::new());
-        FrameBuilder { scene, blend_open: false }
+        FrameBuilder { scene, color_glyphs: std::mem::replace(&mut self.color_glyphs, color_glyphs::ColorGlyphCache::new()), blend_open: false }
     }
 
     /// Submit the frame to the GPU.
@@ -247,6 +251,7 @@ impl GlyxRenderer {
     ) -> Result<(), RendererError> {
         // Reclaim the scene the caller drew into.
         self.scene = frame.scene;
+        self.color_glyphs = frame.color_glyphs;
 
         let w = gpu.width().max(1);
         let h = gpu.height().max(1);
@@ -319,6 +324,7 @@ impl GlyxRenderer {
 /// renderer without a double-borrow error.
 pub struct FrameBuilder {
     pub(crate) scene: Scene,
+    color_glyphs: color_glyphs::ColorGlyphCache,
     /// A blend layer opened by `set_blend` and not yet closed.
     blend_open: bool,
 }
@@ -432,6 +438,22 @@ impl FrameBuilder {
                             cursor += adv.max(0.0);
                         }
                     }
+                }
+
+                // A colour font (an emoji): its colour glyphs are drawn as images, in their own colours, and left out of the glyph run.
+                if skia::color_emoji_enabled() && self.color_glyphs.font_has_color(&font, size) {
+                    let mut kept = Vec::with_capacity(glyphs.len());
+                    for (g, adv) in glyphs.drain(..) {
+                        match self.color_glyphs.glyph(&font, size, g.id as u16) {
+                            Some(cg) => {
+                                let at = transform * Affine::translate(vello::kurbo::Vec2::new(g.x as f64 + cg.left as f64, g.y as f64 - cg.top as f64));
+                                self.scene.draw_image(ImageBrushRef::from(&cg.image).with_quality(ImageQuality::High), at);
+                            }
+                            None => kept.push((g, adv)),
+                        }
+                    }
+                    glyphs = kept;
+                    if glyphs.is_empty() { continue; }
                 }
 
                 self.scene

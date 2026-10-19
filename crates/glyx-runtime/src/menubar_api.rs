@@ -46,17 +46,18 @@ pub(crate) fn set_checked(id: &str, checked: bool) -> bool {
     glyx_security::get().menubar && glyx_tray::set_menu_item_checked(id, checked)
 }
 
-/// `__glyx_contextmenu_show(items_json)`: show a native popup menu at the cursor and wait for it to close. The reply is JSON:
+/// `__glyx_contextmenu_show(items_json, x?, y?)`: show a native popup menu at `x, y` in the window (physical pixels; the cursor when they are
+/// left out) and wait for it to close. The reply is JSON:
 /// `{"ok":true,"id":"..","checked":..}` for a chosen item, `{"ok":true}` when it was dismissed, `{"ok":false,"error":".."}` when it could not be
 /// shown (the caller then draws the menu itself). Needs no capability: a menu only shows the app's own choices.
-pub(crate) fn popup(hwnd: Option<isize>, items_json: &str) -> String {
+pub(crate) fn popup(hwnd: Option<isize>, items_json: &str, at: Option<(f64, f64)>) -> String {
     let reply = |v: serde_json::Value| v.to_string();
     let Some(hwnd) = hwnd else { return reply(serde_json::json!({ "ok": false, "error": "this window has no native handle to show a menu on" })) };
     let items: Vec<glyx_tray::MenuBarItem> = match serde_json::from_str(items_json) {
         Ok(items) => items,
         Err(e) => return reply(serde_json::json!({ "ok": false, "error": format!("the menu description is not valid: {e}") })),
     };
-    match glyx_tray::show_context_menu(hwnd, &items) {
+    match glyx_tray::show_context_menu(hwnd, &items, at.filter(|(x, y)| x.is_finite() && y.is_finite())) {
         Ok(Some(ev)) => reply(serde_json::json!({ "ok": true, "id": ev.id, "checked": ev.checked })),
         Ok(None) => reply(serde_json::json!({ "ok": true })),
         Err(e) => reply(serde_json::json!({ "ok": false, "error": e })),

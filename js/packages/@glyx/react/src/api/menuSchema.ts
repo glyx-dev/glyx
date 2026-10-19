@@ -13,12 +13,14 @@
 // Ids are unique across the whole bar.
 //
 // `role` makes a ready-made editing item: `{ role: 'copy' }` is "Copy" (Ctrl+C)
-// and acts on the focused text field. Roles: copy, cut, paste, selectAll. An item
+// and acts on the focused text field. Roles: undo, redo, copy, cut, paste, selectAll. An item
 // with a role needs no id or label, and its accelerator is shown but never matched
 // here, because the text field already handles the keys itself.
 
 /** Ready-made editing items: label and the accelerator shown beside it. */
 export const EDIT_ROLES = {
+  undo:      { label: 'Undo',       accelerator: 'Ctrl+Z' },
+  redo:      { label: 'Redo',       accelerator: 'Ctrl+Y' },
   copy:      { label: 'Copy',       accelerator: 'Ctrl+C' },
   cut:       { label: 'Cut',        accelerator: 'Ctrl+X' },
   paste:     { label: 'Paste',      accelerator: 'Ctrl+V' },
@@ -58,7 +60,7 @@ function validateChildren(path: string, items: any, seen: Set<unknown>): any {
     if (!item) return `${path}: an entry is empty`;
     if (item.separator) continue;
     if (item.role !== undefined && !(EDIT_ROLES as any)[item.role]) {
-      return `${path}: unknown role "${item.role}" (use copy, cut, paste or selectAll)`;
+      return `${path}: unknown role "${item.role}" (use undo, redo, copy, cut, paste or selectAll)`;
     }
     const def = item.role ? (EDIT_ROLES as any)[item.role] : null;
     const label = item.label ?? def?.label;

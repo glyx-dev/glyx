@@ -14,6 +14,7 @@
 import React, { useState, useEffect, useRef, useCallback, useContext, useMemo, createContext } from 'react';
 import { View, Text, Pressable, addGlobalClickListener, removeGlobalClickListener, clipboard, registerInput, unregisterInput, registerScrollView, unregisterScrollView, registerDraggable, unregisterDraggable } from '@glyx-dev/react';
 import type { GlyxStyle } from '@glyx-dev/react';
+import { DocHistory, type EditKind } from './history.js';
 
 // ── The document model ───────────────────────────────
 
@@ -79,6 +80,8 @@ export interface RichTextEditorProps {
   autoFocus?:   boolean;
   /** `true` (default) wraps long paragraphs to `width`; `false` keeps each paragraph on one line and scrolls sideways. */
   wrap?:        boolean;
+  /** Ctrl+Z undoes and Ctrl+Y (or Ctrl+Shift+Z) redoes, as in a browser (default true; false turns the history off). */
+  undoHistory?: boolean;
   style?:       GlyxStyle;
   /** Rendered inside the editor's context, so a {@link RichTextToolbar} can sit here or next to it. */
   children?:    React.ReactNode;
@@ -91,7 +94,7 @@ export interface RichTextToolbarProps {
 /** What {@link useEditorContext} returns, inside a {@link RichTextEditor}. */
 export interface EditorContextValue {
   doc:                RichTextDocument;
-  setDoc:             (doc: RichTextDocument) => void;
+  setDoc:             (doc: RichTextDocument, kind?: 'type' | 'backspace' | 'delete' | 'other') => void;
   cursor:             Cursor;
   setCursor:          (cursor: Cursor) => void;
   sel:                Selection;
@@ -628,6 +631,7 @@ export function RichTextEditor({
                          // parent opens/creates a document programmatically
                          // (e.g. a "New file" action), since there's no ref/
                          // imperative API to focus an already-mounted editor.
+  undoHistory  = true,
   wrap         = true,   // true: long paragraphs soft-wrap to fit `width` (a
                          // normal editor/notes surface). false: paragraphs
                          // stay on one line and overflow horizontally instead
@@ -680,25 +684,48 @@ export function RichTextEditor({
   cursorRef.current = cursor;
   selRef.current    = sel;
 
-  // Sync controlled value
-  useEffect(() => { if (value) setDoc_(value); }, [value]);
+  // Undo / redo: references to the documents before each edit (they share every untouched paragraph), capped, freed with the editor.
+  const historyRef = useRef<DocHistory<any, any, any> | null>(null);
+  const history = () => (historyRef.current ??= new DocHistory());
 
-  const setDoc = useCallback((d: any) => {
+  // Sync controlled value. A document the editor did not make (the app set it) ends the old history.
+  useEffect(() => {
+    if (!value) return;
+    if (value !== docRef.current) historyRef.current?.clear();
+    setDoc_(value);
+  }, [value]);
+
+  // Every change to the document goes through here, so the state before it can be kept for undo.
+  const setDoc = useCallback((d: any, kind: EditKind = 'other') => {
+    if (undoHistory) history().push({ doc: docRef.current, cursor: cursorRef.current, sel: selRef.current }, kind);
     setDoc_(d);
     onChange?.(d);
-  }, [onChange]);
+  }, [onChange, undoHistory]);
 
   const setCursor = useCallback((c: { para: number; offset: number }) => {
+    historyRef.current?.breakRun();
     setCursor_(c);
     setSel_({ anchor: c, focus: c });
   }, []);
 
-  const applyEdit = useCallback((fn: (arg0: any, arg1: { para: number; offset: number; }) => any) => {
+  const applyEdit = useCallback((fn: (arg0: any, arg1: { para: number; offset: number; }) => any, kind: EditKind = 'other') => {
     const result = fn(docRef.current, cursorRef.current);
-    setDoc(result.doc);
+    setDoc(result.doc, kind);
     setCursor_(result.cursor);
     setSel_({ anchor: result.cursor, focus: result.cursor });
   }, [setDoc]);
+
+  // Ctrl+Z / Ctrl+Y: show the document, caret and selection from before the last edit (or the one an undo took back).
+  const stepHistory = useCallback((redo: boolean) => {
+    if (!undoHistory) return;
+    const now = { doc: docRef.current, cursor: cursorRef.current, sel: selRef.current };
+    const s = redo ? history().redo(now) : history().undo(now);
+    if (!s) return;
+    setDoc_(s.doc);
+    onChange?.(s.doc);
+    setCursor_(s.cursor);
+    setSel_(s.sel);
+  }, [onChange, undoHistory]);
 
   // Cursor blink — only while focused
   useEffect(() => {
@@ -729,8 +756,13 @@ export function RichTextEditor({
     const sel    = selRef.current;
     const hasSel = hasSelection(sel);
 
+    // Anything but typing and deleting (arrows, Home, a chord) ends a run of typing.
+    if (ctrl || !(key === 'Backspace' || key === 'Delete' || text)) history().breakRun();
+
     // ── Ctrl shortcuts ───────────────────────────────────────────────────────
     if (ctrl) {
+      if (key === 'KeyZ') { stepHistory(shift); return; }
+      if (key === 'KeyY') { stepHistory(true); return; }
       if (key === 'KeyA') {
         const last = doc.paragraphs.length - 1;
         setSel_({ anchor: { para: 0, offset: 0 }, focus: { para: last, offset: paraText(doc.paragraphs[last]).length } });
@@ -839,7 +871,7 @@ export function RichTextEditor({
         const r = deleteSelection(doc, sel);
         setDoc(r.doc); setCursor_(r.cursor); setSel_({ anchor: r.cursor, focus: r.cursor });
       } else {
-        applyEdit((d: any, c: any) => deleteChar(d, c, key === 'Backspace'));
+        applyEdit((d: any, c: any) => deleteChar(d, c, key === 'Backspace'), key === 'Backspace' ? 'backspace' : 'delete');
       }
       return;
     }
@@ -859,11 +891,11 @@ export function RichTextEditor({
         const r2 = insertText(r.doc, r.cursor, ch);
         setDoc(r2.doc); setCursor_(r2.cursor); setSel_({ anchor: r2.cursor, focus: r2.cursor });
       } else {
-        applyEdit((d: any, c: any) => insertText(d, c, ch));
+        applyEdit((d: any, c: any) => insertText(d, c, ch), 'type');
       }
       return;
     }
-  }, [applyEdit, setDoc, setCursor, fontSize]);
+  }, [applyEdit, setDoc, setCursor, stepHistory, fontSize]);
 
   // Click outside → blur
   const onGlobalClick = useCallback((ev: { x: number; y: number; }) => {
@@ -1026,6 +1058,7 @@ export function RichTextEditor({
   const onDragAt = useCallback((x: any, y: any) => {
     if (textDragSuppressedRef.current) return;
     const c = posFromXY(x, y);
+    historyRef.current?.breakRun();
     setCursor_(c);
     setSel_({ anchor: dragAnchorRef.current, focus: c });
   }, [posFromXY]);
@@ -1051,6 +1084,7 @@ export function RichTextEditor({
     const { start, end } = wordRangeAt(paraText(item.para), charIdx);
     const anchor = { para: pi, offset: start };
     const focus  = { para: pi, offset: end };
+    historyRef.current?.breakRun();
     setCursor_(focus);
     setSel_({ anchor, focus });
   }, [hitTestY, fontSize, outerPadLeft]);

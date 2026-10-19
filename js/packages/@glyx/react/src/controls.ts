@@ -12,6 +12,7 @@ import { View, Text, Image, ScrollView, Pressable, measureText, useWindowSize } 
 import { openPopover, closePopover } from './popover.js';
 import { clipboard, dialog } from './api.js';
 import { flattenStyle } from './style.js';
+import { TextHistory, type EditKind } from './textHistory.js';
 import type { TextInputProps, CheckboxProps, SwitchProps, RadioGroupProps, RadioProps, SliderProps, SelectProps, FileInputProps, DatePickerProps, TimePickerProps, DateTimePickerProps } from './types.js';
 
 // ── Control width resolution ──────────────────────────────────────────────────
@@ -130,6 +131,7 @@ export function TextInput({
   secureTextEntry = false,   // mask characters (password fields)
   keyboardType = 'default',  // 'default' | 'numeric' | 'decimal'
   textAlign = 'left',        // passed to the inner Text; hit-testing respects it too
+  undoHistory = true,        // Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z) undo and redo; false turns the history off
   style: styleProp,
   ...props
 }: TextInputProps) {
@@ -163,6 +165,10 @@ export function TextInput({
   const scrollYRef = useRef(0);
   const setScrollYBoth = (y: number) => { scrollYRef.current = y; setScrollY(y); };
 
+  // Undo / redo history of this field (see textHistory.ts): small diffs, capped, freed with the field.
+  const historyRef = useRef<TextHistory | null>(null);
+  const history = () => (historyRef.current ??= new TextHistory());
+
   // Derived selection range (always ordered).
   const selStart = Math.min(anchor, focus_);
   const selEnd   = Math.max(anchor, focus_);
@@ -173,6 +179,7 @@ export function TextInput({
 
   // Collapse cursor to `pos`, clamped to [0, value.length].
   const moveCursor = (pos: number) => {
+    historyRef.current?.breakRun();
     const clamped = Math.max(0, Math.min(pos, value.length));
     setAnchor(clamped);
     setFocus_(clamped);
@@ -180,21 +187,36 @@ export function TextInput({
 
   // Extend only the moving focus end (shift-selection).
   const extendTo = (pos: number) => {
+    historyRef.current?.breakRun();
     setFocus_(Math.max(0, Math.min(pos, value.length)));
   };
 
   // Central commit point for every text mutation: applies the keyboardType
   // filter and maxLength cap, then emits + positions the cursor.
-  const commit = (next: string, newPos: number) => {
+  // `kind` says what edit it was, which decides whether undo takes it back with the one before.
+  const commit = (next: string, newPos: number, kind: EditKind = 'other') => {
     if (keyboardType === 'numeric' && !/^-?\d*$/.test(next)) return;
     if (keyboardType === 'decimal' && !/^-?\d*\.?\d*$/.test(next)) return;
     if (maxLength != null && next.length > maxLength) {
       next = next.slice(0, maxLength);
     }
-    onChangeText?.(next);
     const pos = Math.max(0, Math.min(newPos, next.length));
+    if (undoHistory) history().record(value, next, { anchor, focus: focus_ }, { anchor: pos, focus: pos }, kind);
+    onChangeText?.(next);
     setAnchor(pos);
     setFocus_(pos);
+  };
+
+  // Ctrl+Z / Ctrl+Y: step back or forward through this field's edits, restoring the text and the selection.
+  const stepHistory = (redo: boolean) => {
+    if (!undoHistory || preedit) return;
+    const h = history();
+    const r = redo ? h.redo(value) : h.undo(value);
+    if (!r) return;
+    onChangeText?.(r.text);
+    const len = r.text.length;
+    setAnchor(Math.min(r.selection.anchor, len));
+    setFocus_(Math.min(r.selection.focus, len));
   };
 
   // Measure the field's real layout width — runs after every render with an
@@ -347,7 +369,7 @@ export function TextInput({
       if (!text) { setPreedit(''); return; }
       const ss = Math.min(anchor, focus_);
       const se = Math.max(anchor, focus_);
-      commit(value.slice(0, ss) + text + value.slice(se), ss + text.length);
+      commit(value.slice(0, ss) + text + value.slice(se), ss + text.length, 'other');
       setPreedit('');
     },
     onKeyPress: async ({ key, text, ctrl, shift }: Record<string, any>) => {
@@ -355,9 +377,17 @@ export function TextInput({
       const se     = Math.max(anchor, focus_);
       const hasSel = ss < se;
 
+      // A change to `value` the field did not make itself (the app set it) ends the old history.
+      if (undoHistory) history().sync(value);
+
       // ── Ctrl shortcuts ──────────────────────────────────────────────────
       if (ctrl) {
-        if (key === 'KeyA') {
+        if (key === 'KeyZ') {
+          stepHistory(shift);
+        } else if (key === 'KeyY') {
+          stepHistory(true);
+        } else if (key === 'KeyA') {
+          historyRef.current?.breakRun();
           setAnchor(0);
           setFocus_(value.length);
         } else if (key === 'KeyC') {
@@ -367,13 +397,13 @@ export function TextInput({
         } else if (key === 'KeyX') {
           if (hasSel) {
             try { await clipboard.writeText(value.slice(ss, se)); } catch (_) {}
-            commit(value.slice(0, ss) + value.slice(se), ss);
+            commit(value.slice(0, ss) + value.slice(se), ss, 'cut');
           }
         } else if (key === 'KeyV') {
           try {
             const pasted = await clipboard.readText();
             if (pasted) {
-              commit(value.slice(0, ss) + pasted + value.slice(se), ss + pasted.length);
+              commit(value.slice(0, ss) + pasted + value.slice(se), ss + pasted.length, 'paste');
             }
           } catch (_) {}
         }
@@ -470,7 +500,7 @@ export function TextInput({
           // Spread to handle multi-byte Unicode correctly.
           const chars = [...value];
           chars.splice(anchor - 1, 1);
-          commit(chars.join(''), anchor - 1);
+          commit(chars.join(''), anchor - 1, 'backspace');
         }
         return;
       }
@@ -480,7 +510,7 @@ export function TextInput({
         } else if (anchor < value.length) {
           const chars = [...value];
           chars.splice(anchor, 1);
-          commit(chars.join(''), anchor);   // cursor stays put
+          commit(chars.join(''), anchor, 'delete');   // cursor stays put
         }
         return;
       }
@@ -488,7 +518,7 @@ export function TextInput({
       // ── Enter (multiline only) ──────────────────────────────────────────
       if (key === 'Enter') {
         if (multiline) {
-          commit(value.slice(0, ss) + '\n' + value.slice(se), ss + 1);
+          commit(value.slice(0, ss) + '\n' + value.slice(se), ss + 1, 'enter');
         } else {
           onSubmitEditing?.(value);
         }
@@ -499,7 +529,7 @@ export function TextInput({
       if (text) {
         // commit() clamps the cursor to the NEW value's length, so typing the
         // first character into an empty field positions correctly.
-        commit(value.slice(0, ss) + text + value.slice(se), ss + text.length);
+        commit(value.slice(0, ss) + text + value.slice(se), ss + text.length, hasSel ? 'other' : 'type');
       }
     },
     // Character position under a pointer coordinate (shared by click + drag).
@@ -539,6 +569,7 @@ export function TextInput({
     onDoubleClickAt: (relX: any, relY: any) => {
       const offset = handlersRef.current.posAt(relX, relY);
       const { start, end } = wordRangeAt(renderValue, offset);
+      historyRef.current?.breakRun();
       setAnchor(start);
       setFocus_(end);
     },
@@ -550,6 +581,7 @@ export function TextInput({
     // mapped natively from AccessKit's run positions). Same effect as a
     // mouse drag from `anchor` to `focus`.
     onSetSelection: (a: number, f: number) => {
+      historyRef.current?.breakRun();
       const len = value.length;
       setAnchor(Math.max(0, Math.min(a, len)));
       setFocus_(Math.max(0, Math.min(f, len)));

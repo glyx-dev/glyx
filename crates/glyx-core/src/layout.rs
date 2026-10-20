@@ -332,7 +332,7 @@ pub(crate) fn rebuild_layout_from_scene(
                         bold:   glyx_runtime::text_props::is_bold(props.font_weight.as_deref()),
                         italic: props.font_style.as_deref()  == Some("italic"),
                         line_height: props.line_height,
-                        font_family: props.font_family.as_deref().map_or(0, glyx_text::family_id),
+                        font_family: glyx_runtime::text_props::font_id(&props),
                         single_line: props.text_scroll_x.is_some(),
                     };
                     layout.add_text_node(style, ctx, Some(format!("js-{}", id))).ok()?
@@ -415,7 +415,7 @@ pub(crate) fn sync_layout_structure(
                     bold:   glyx_runtime::text_props::is_bold(props.font_weight.as_deref()),
                     italic: props.font_style.as_deref() == Some("italic"),
                     line_height: props.line_height,
-                    font_family: props.font_family.as_deref().map_or(0, glyx_text::family_id),
+                    font_family: glyx_runtime::text_props::font_id(props),
                     single_line: props.text_scroll_x.is_some(),
                 };
                 layout.add_text_node(style, ctx, tag)

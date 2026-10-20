@@ -354,6 +354,21 @@ pub fn get_layout_callback(
     }
 }
 
+/// The optional font argument at `index` as a `glyx_text::font_id`: a `fontFamily` string, or an object with `family` and `variations`
+/// (`fontVariationSettings`); `0` (the default font) when it is absent or neither.
+fn family_arg(scope: &mut v8::ContextScope<'_, '_, v8::HandleScope<'_>>, args: &v8::FunctionCallbackArguments, index: i32) -> glyx_text::FamilyId {
+    let v = args.get(index);
+    if v.is_string() {
+        return v.to_string(scope).map_or(0, |s| glyx_text::family_id(&s.to_rust_string_lossy(scope.as_ref())));
+    }
+    if !v.is_object() { return 0; }
+    let Some(o) = v.to_object(scope) else { return 0 };
+    let family = get_str_prop(scope, o, "family").map(|s| s.to_string());
+    let variations = get_str_prop(scope, o, "variations").map(|s| s.to_string());
+    if family.is_none() && variations.is_none() { return 0; }
+    glyx_text::font_id(family.as_deref(), variations.as_deref(), None)
+}
+
 // __glyx_measure_text
 //
 // Returns `{ width, height }` (logical px) for `text` shaped at `fontSize`,
@@ -382,9 +397,11 @@ pub fn measure_text_callback(
     // Optional 5th arg: absolute line height override (same units as fontSize).
     let lh = args.get(4).number_value(scope).unwrap_or(f64::NAN);
     let line_height = if lh.is_finite() && lh > 0.0 { Some(lh as f32) } else { None };
+    // Optional 6th arg: the font text is shaped in (a `fontFamily` string, or `{ family, variations }`).
+    let family = family_arg(scope, &args, 5);
 
-    let (w, h) = if bold || italic || line_height.is_some() {
-        let layout = state.text_measure.borrow_mut().styled_label(&text, font_size, max_width, bold, italic, line_height);
+    let (w, h) = if bold || italic || line_height.is_some() || family != 0 {
+        let layout = state.text_measure.borrow_mut().styled_label_in(&text, font_size, max_width, bold, italic, line_height, family);
         (layout.width(), layout.height())
     } else {
         state.text_measure.borrow_mut().measure(&text, font_size, max_width)
@@ -428,7 +445,8 @@ pub fn text_char_at_x_callback(
     let bold   = style_str.contains("bold");
     let italic = style_str.contains("italic");
 
-    let idx = state.text_measure.borrow_mut().char_at_x_styled(&text, font_size, max_width, target_x, bold, italic);
+    let family = family_arg(scope, &args, 5);
+    let idx = state.text_measure.borrow_mut().char_at_x_styled_in(&text, font_size, max_width, target_x, bold, italic, family);
     rv.set(v8::Number::new(scope, idx as f64).into());
 }
 
@@ -464,7 +482,8 @@ pub fn text_cursor_x_callback(
     let bold   = style_str.contains("bold");
     let italic = style_str.contains("italic");
 
-    let x = state.text_measure.borrow_mut().cursor_x_at_styled(&text, font_size, max_width, char_idx, bold, italic);
+    let family = family_arg(scope, &args, 5);
+    let x = state.text_measure.borrow_mut().cursor_x_at_styled_in(&text, font_size, max_width, char_idx, bold, italic, family);
     rv.set(v8::Number::new(scope, x as f64).into());
 }
 

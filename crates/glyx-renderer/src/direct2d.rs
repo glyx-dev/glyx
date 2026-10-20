@@ -55,6 +55,8 @@ struct Direct2DFontCache {
     mem_loader:     IDWriteInMemoryFontFileLoader,
     /// Each face with whether it has colour glyphs (an emoji font), asked of DirectWrite once.
     faces:          HashMap<(usize, u32), (IDWriteFontFace, bool)>,
+    /// A variable font's face with axis values applied, by (font, index, the axes text's address): the text is a leaked constant per font id.
+    axis_faces:     HashMap<(usize, u32, usize), IDWriteFontFace>,
 }
 
 impl Direct2DFontCache {
@@ -64,7 +66,7 @@ impl Direct2DFontCache {
                 DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
             let mem_loader = dwrite_factory.CreateInMemoryFontFileLoader().ok()?;
             dwrite_factory.RegisterFontFileLoader(&mem_loader).ok()?;
-            Some(Self { dwrite_factory, mem_loader, faces: HashMap::new() })
+            Some(Self { dwrite_factory, mem_loader, faces: HashMap::new(), axis_faces: HashMap::new() })
         }
     }
 
@@ -72,6 +74,25 @@ impl Direct2DFontCache {
     /// TinySkia's `GlyphKey` already uses (`skia.rs`'s `data_ptr: usize`),
     /// valid because Parley/Vello's `FontData` blob is a stable,
     /// reference-counted allocation for the lifetime it's referenced.
+    /// The face for a variable font with `axes` applied (`"'wght' 650"`); `base` itself when the font has no axes or they cannot be set.
+    fn with_axes(&mut self, font_bytes: &[u8], font_index: u32, base: &IDWriteFontFace, axes: &'static str) -> IDWriteFontFace {
+        let key = (font_bytes.as_ptr() as usize, font_index, axes.as_ptr() as usize);
+        if let Some(f) = self.axis_faces.get(&key) { return f.clone(); }
+        let made = (|| unsafe {
+            let f5: IDWriteFontFace5 = base.cast().ok()?;
+            if !f5.HasVariations().as_bool() { return None; }
+            let values: Vec<DWRITE_FONT_AXIS_VALUE> = glyx_text::parse_axes(axes).into_iter()
+                .map(|(t, v)| DWRITE_FONT_AXIS_VALUE { axisTag: DWRITE_FONT_AXIS_TAG(u32::from_le_bytes(t)), value: v })
+                .collect();
+            if values.is_empty() { return None; }
+            let face5 = f5.GetFontResource().ok()?.CreateFontFace(DWRITE_FONT_SIMULATIONS_NONE, &values).ok()?;
+            face5.cast::<IDWriteFontFace>().ok()
+        })();
+        let face = made.unwrap_or_else(|| base.clone());
+        self.axis_faces.insert(key, face.clone());
+        face
+    }
+
     fn get_or_create(&mut self, font_bytes: &[u8], font_index: u32) -> Option<(IDWriteFontFace, bool)> {
         let key = (font_bytes.as_ptr() as usize, font_index);
         if let Some(entry) = self.faces.get(&key) {
@@ -635,7 +656,9 @@ impl Direct2DFrame {
 
                 let font_bytes = font.data.data();
                 let font_index = font.index;
-                let Some((face, is_color)) = cache.get_or_create(font_bytes, font_index) else { continue };
+                let Some((mut face, is_color)) = cache.get_or_create(font_bytes, font_index) else { continue };
+                // A variable font drawn with axes (`fontVariationSettings`, a numeric weight): the face with those values applied.
+                if let Some(axes) = layout.variations { face = cache.with_axes(font_bytes, font_index, &face, axes); }
 
                 let mut pen_x = run_off;
                 let mut indices  = Vec::new();

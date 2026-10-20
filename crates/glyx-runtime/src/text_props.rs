@@ -28,8 +28,15 @@ pub fn text_style(props: &NodeProps) -> TextStyle {
         bold:        is_bold(props.font_weight.as_deref()),
         italic:      props.font_style.as_deref() == Some("italic"),
         line_height: props.line_height,
-        family:      props.font_family.as_deref().map_or(0, glyx_text::family_id),
+        family:      font_id(props),
     }
+}
+
+/// The `glyx_text::font_id` of a node's `fontFamily`, `fontVariationSettings` and numeric `fontWeight` (`0` when it asks for none of them).
+/// Layout, drawing, accessibility and the hit-test calls all key their shaping by it, so they agree.
+pub fn font_id(props: &NodeProps) -> glyx_text::FamilyId {
+    if props.font_family.is_none() && props.font_variation_settings.is_none() && props.font_weight.is_none() { return 0; }
+    glyx_text::font_id(props.font_family.as_deref(), props.font_variation_settings.as_deref(), props.font_weight.as_deref())
 }
 
 /// How the shaped text is placed inside a `width` × `height` layout box.

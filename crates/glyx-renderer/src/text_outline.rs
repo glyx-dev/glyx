@@ -30,7 +30,7 @@ pub(crate) fn contours(layout: &glyx_text::TextLayout, transform: Affine) -> Vec
                 let run = gr.run();
                 let font = run.font();
                 let Some(font_ref) = swash::FontRef::from_index(font.data.data(), font.index as usize) else { continue };
-                let mut scaler = ctx.builder(font_ref).size(run.font_size()).hint(false).build();
+                let mut scaler = ctx.builder(font_ref).size(run.font_size()).hint(false).normalized_coords(run.normalized_coords()).build();
                 let baseline = gr.baseline() as f64;
                 // Parley's glyph x / y are adjustments from the pen, which advances by each glyph's advance (the
                 // same rule the CPU renderer's text drawing uses).

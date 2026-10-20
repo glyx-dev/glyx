@@ -317,6 +317,8 @@ struct GlyphKey {
     font_index: u32,
     glyph_id:   u16,
     size_class: u16,    // (font_size * 4.0) as u16 — quarter-pixel precision
+    /// Hash of the run's variable-font axis values (0 for a font used as it is), so each setting has its own glyphs.
+    coords:     u64,
 }
 
 struct CachedAlphaGlyph {
@@ -1223,12 +1225,20 @@ impl TinySkiaFrame {
                 let font_index = font.index;
                 let data_ptr   = font_data.as_ptr() as usize;
                 let size_class = (size * 4.0) as u16;
+                // The axes of a variable font (`fontVariationSettings`, a numeric weight): part of the glyph's identity.
+                let coords = run.normalized_coords();
+                let coords_hash = if coords.iter().all(|c| *c == 0) { 0 } else {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    coords.hash(&mut h);
+                    h.finish() | 1
+                };
 
                 let Some(font_ref) = FontRef::from_index(font_data, font_index as usize)
                     else { continue };
 
                 let glyph_key = |glyph_id: swash::GlyphId| GlyphKey {
-                    data_ptr, font_index, glyph_id, size_class,
+                    data_ptr, font_index, glyph_id, size_class, coords: coords_hash,
                 };
 
                 // Pass 1: rasterize whatever this run is missing, in one go with
@@ -1245,6 +1255,7 @@ impl TinySkiaFrame {
                         .builder(font_ref)
                         .size(size)
                         .hint(true)
+                        .normalized_coords(coords)
                         .build();
                     for g in gr.glyphs() {
                         let glyph_id: swash::GlyphId = g.id as u16;

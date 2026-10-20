@@ -59,17 +59,17 @@ pub(super) struct GlyxConfigFile {
     #[serde(default)]
     pub(super) locales:      Option<Vec<String>>,
     pub(super) updater:      Option<UpdaterCfgJson>,
-    /// Font files the app ships: `"assets/fonts/Inter.ttf"` or `{ "src": "assets/fonts/Inter.ttf" }`.
+    /// Font files the app ships: `"assets/fonts/Inter.ttf"` or `{ "src": "assets/fonts/Inter.ttf", "family": "Brand" }`.
     #[serde(default)]
     pub(super) fonts:        Vec<FontCfgJson>,
 }
 
-/// One entry of the `fonts` list: a path, or an object with a `src` path.
+/// One entry of the `fonts` list: a path, or an object with a `src` path and an optional `family` name to register it under.
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 pub(super) enum FontCfgJson {
     Path(String),
-    Object { src: String },
+    Object { src: String, family: Option<String> },
 }
 
 /// Where a font file named in the config is: as given when absolute; otherwise beside the running binary (a packaged app, where
@@ -319,7 +319,10 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
 
     // Shipped fonts, before any text system is made (each registers them when it starts).
     if let Some(f) = file.as_ref().filter(|f| !f.fonts.is_empty()) {
-        glyx_text::set_app_fonts(f.fonts.iter().map(|e| resolve_font_path(match e { FontCfgJson::Path(p) => p, FontCfgJson::Object { src } => src })).collect());
+        glyx_text::set_app_fonts(f.fonts.iter().map(|e| match e {
+            FontCfgJson::Path(p) => (resolve_font_path(p), None),
+            FontCfgJson::Object { src, family } => (resolve_font_path(src), family.clone().filter(|f| !f.trim().is_empty())),
+        }).collect());
     }
 
     if let Some(w) = file.as_ref().and_then(|f| f.window.as_ref()) {

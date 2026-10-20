@@ -375,3 +375,13 @@ test('a span ending in a space keeps that space when hit-testing the next span',
     delete globalThis.__glyx_text_cursor_x;
   }
 });
+
+test('mergeSpans does not merge runs in different fonts, and does merge equal ones', () => {
+  const merged = mergeSpans([
+    { text: 'a', fontFamily: 'Inter' }, { text: 'b', fontFamily: 'Inter' },
+    { text: 'c', fontFamily: 'Georgia' },
+    { text: 'd', fontFamily: 'Georgia', fontVariationSettings: "'wght' 300" },
+    { text: 'e', fontFamily: 'Georgia', fontVariationSettings: "'wght' 300" },
+  ]);
+  expect(merged.map((s: any) => s.text)).toEqual(['ab', 'c', 'de']);
+});

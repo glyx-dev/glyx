@@ -97,10 +97,10 @@ function _charClass(ch: string) {
 // caused overlapping rows whenever a font's real line height was smaller
 // than 1.4×. Only falls back further to the guess if the native binding
 // isn't available at all (e.g. very early in startup).
-function realLineHeight(fontSize: number, lineHeight: any) {
+function realLineHeight(fontSize: number, lineHeight: any, family?: any) {
   if (lineHeight) return lineHeight;
   if (typeof __glyx_measure_text !== 'undefined') {
-    return __glyx_measure_text('M', fontSize, 1e6).height;
+    return __glyx_measure_text('M', fontSize, 1e6, undefined, undefined, family).height;
   }
   return fontSize * 1.4;
 }
@@ -131,11 +131,17 @@ export function TextInput({
   secureTextEntry = false,   // mask characters (password fields)
   keyboardType = 'default',  // 'default' | 'numeric' | 'decimal'
   textAlign = 'left',        // passed to the inner Text; hit-testing respects it too
+  fontFamily: fontFamilyProp, // or `style.fontFamily`: the caret and hit-tests are measured in it
+  fontVariationSettings: fontVariationProp, // or `style.fontVariationSettings`: the axes of a variable font
   undoHistory = true,        // Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z) undo and redo; false turns the history off
   style: styleProp,
   ...props
 }: TextInputProps) {
   const style = flattenStyle(styleProp);
+  const fontFamily: string | undefined = fontFamilyProp ?? style?.fontFamily;
+  const fontVariationSettings: string | undefined = fontVariationProp ?? style?.fontVariationSettings;
+  // What the native measuring calls take for the font: the family, or the family with its variation axes.
+  const font: any = fontVariationSettings ? { family: fontFamily, variations: fontVariationSettings } : fontFamily;
   const nodeIdRef   = useRef<any>(null);
   // Inner `text` node — hit-tests measure from ITS box (see textBoxInView).
   const textNodeIdRef = useRef<any>(null);
@@ -256,9 +262,9 @@ export function TextInput({
     // the latter can drift from the real rendered position since shaping
     // isn't purely per-character additive (kerning/clustering).
     const caretX     = (typeof __glyx_text_cursor_x !== 'undefined')
-      ? __glyx_text_cursor_x(renderValue, fontSize, 1e6, focus_)
-      : __glyx_measure_text(renderValue.slice(0, focus_), fontSize, 1e6).width;
-    const textW      = __glyx_measure_text(renderValue, fontSize, 1e6).width;
+      ? __glyx_text_cursor_x(renderValue, fontSize, 1e6, focus_, undefined, font)
+      : __glyx_measure_text(renderValue.slice(0, focus_), fontSize, 1e6, undefined, undefined, font).width;
+    const textW      = __glyx_measure_text(renderValue, fontSize, 1e6, undefined, undefined, font).width;
     let sx = scrollXRef.current;
     if (caretX - sx > visibleW) sx = caretX - visibleW;
     if (caretX - sx < 0)        sx = caretX;
@@ -270,7 +276,7 @@ export function TextInput({
       scrollXRef.current = sx;
       setScrollX(sx);
     }
-  }, [focus_, renderValue, fontSize, innerW, multiline]);
+  }, [focus_, renderValue, fontSize, innerW, multiline, fontFamily, fontVariationSettings]);
 
   // Multiline auto-height: count rendered lines (explicit '\n' plus soft
   // wraps at the real field width) and size the box between minLines and
@@ -280,7 +286,7 @@ export function TextInput({
   // (even ones triggered by unrelated parent/context changes), re-measuring
   // every line of text each time with no way to skip the work. Now it only
   // recomputes when something it actually depends on changes.
-  const lineH = realLineHeight(fontSize, lineHeight);
+  const lineH = realLineHeight(fontSize, lineHeight, font);
   const autoHeight = useMemo(() => {
     if (!(multiline && height == null)) return undefined;
     const lo = Math.max(1, minLines ?? 3);
@@ -288,7 +294,7 @@ export function TextInput({
     let lineCount = 0;
     if (typeof __glyx_measure_text !== 'undefined' && innerW > 1) {
       for (const line of renderValue.split('\n')) {
-        const w = line ? __glyx_measure_text(line, fontSize, 1e6).width : 0;
+        const w = line ? __glyx_measure_text(line, fontSize, 1e6, undefined, undefined, font).width : 0;
         lineCount += Math.max(1, Math.ceil(w / innerW));
       }
     } else {
@@ -296,7 +302,7 @@ export function TextInput({
     }
     const lines = Math.max(lo, Math.min(hi, Math.max(1, lineCount)));
     return Math.ceil(lines * lineH) + innerPadding * 2 + 4;
-  }, [multiline, height, renderValue, fontSize, innerW, minLines, maxLines, lineH, innerPadding]);
+  }, [multiline, height, renderValue, fontSize, innerW, minLines, maxLines, lineH, innerPadding, fontFamily, fontVariationSettings]);
   const resolvedHeight = (height ?? (multiline ? autoHeight : 44)) as number;
 
   // The inner Text node's shaping/placement props — spread into the `text`
@@ -308,6 +314,8 @@ export function TextInput({
     fontSize,
     lineHeight,
     textAlign,
+    fontFamily,
+    fontVariationSettings,
     textScrollX: multiline ? undefined : scrollX,
     showCursor:  focused,
   };
@@ -475,7 +483,7 @@ export function TextInput({
         // the caret-follow effect then scrolls the view along with it.
         const id = nodeIdRef.current;
         const l = (id != null && typeof __glyx_getLayout !== 'undefined') ? __glyx_getLayout(id) : null;
-        const lineH = realLineHeight(fontSize, lineHeight);
+        const lineH = realLineHeight(fontSize, lineHeight, font);
         const pageLines = Math.max(1, Math.floor(((l ? l.height : 300) - innerPadding * 2) / lineH) - 1);
         if (typeof __glyx_text_caret_at !== 'undefined' && typeof __glyx_text_pos_at !== 'undefined') {
           // Caret → point → caret, all through the same native layout: keeps
@@ -546,11 +554,11 @@ export function TextInput({
       }
       // Fallbacks for runtimes without the native hit-test (approximate).
       if (multiline) {
-        const rowH    = realLineHeight(fontSize, lineHeight);
+        const rowH    = realLineHeight(fontSize, lineHeight, font);
         const lines   = renderValue.split('\n');
         const lineIdx = Math.min(Math.max(0, Math.floor(ty / rowH)), lines.length - 1);
         const col = (typeof __glyx_text_char_at_x !== 'undefined')
-          ? __glyx_text_char_at_x(lines[lineIdx], fontSize, 1e6, Math.max(0, tx))
+          ? __glyx_text_char_at_x(lines[lineIdx], fontSize, 1e6, Math.max(0, tx), undefined, font)
           : Math.max(0, Math.min(Math.round(Math.max(0, tx) / (fontSize * 0.55)), lines[lineIdx].length));
         let pos = 0;
         for (let i = 0; i < lineIdx; i++) pos += lines[i].length + 1;
@@ -558,7 +566,7 @@ export function TextInput({
       }
       const localX = Math.max(0, tx) + scrollXRef.current;
       return (typeof __glyx_text_char_at_x !== 'undefined')
-        ? __glyx_text_char_at_x(renderValue, fontSize, 1e6, localX)
+        ? __glyx_text_char_at_x(renderValue, fontSize, 1e6, localX, undefined, font)
         : Math.max(0, Math.min(Math.round(localX / (fontSize * 0.55)), renderValue.length));
     },
     onClickAt: (relX: any, relY: any) => {
@@ -650,9 +658,9 @@ export function TextInput({
     if (id == null || typeof __glyx_getLayout === 'undefined') return;
     const l = __glyx_getLayout(id);
     if (!l) return;
-    const lineH = Math.ceil(realLineHeight(fontSize, lineHeight));
+    const lineH = Math.ceil(realLineHeight(fontSize, lineHeight, font));
     // Caret bottom y within the content = height of the text up to the caret.
-    const caretBottom = __glyx_measure_text(renderValue.slice(0, focus_) || ' ', fontSize, innerW).height + innerPadding;
+    const caretBottom = __glyx_measure_text(renderValue.slice(0, focus_) || ' ', fontSize, innerW, undefined, undefined, font).height + innerPadding;
     const viewH = l.height;
     let sy = scrollYRef.current;
     if (caretBottom - sy > viewH - innerPadding) sy = caretBottom - viewH + innerPadding;

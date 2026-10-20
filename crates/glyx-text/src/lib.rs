@@ -134,36 +134,54 @@ impl TextAlign {
 ///   Windows → Segoe UI, macOS → Helvetica Neue (SF), Linux → DejaVu Sans.
 pub const DEFAULT_FONT_STACK: &str = "Segoe UI, Helvetica Neue, DejaVu Sans, Segoe UI Emoji, Segoe UI Symbol, sans-serif";
 
-fn app_fonts() -> &'static std::sync::Mutex<Vec<std::path::PathBuf>> {
-    static F: std::sync::OnceLock<std::sync::Mutex<Vec<std::path::PathBuf>>> = std::sync::OnceLock::new();
+/// A font file the app ships and the family name it asked for, if it gave one.
+type AppFont = (std::path::PathBuf, Option<String>);
+
+fn app_fonts() -> &'static std::sync::Mutex<Vec<AppFont>> {
+    static F: std::sync::OnceLock<std::sync::Mutex<Vec<AppFont>>> = std::sync::OnceLock::new();
     F.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
 
-/// The font files the app ships, from the `fonts` list in its config. Call it before the first [`TextSystem`] is made (every one made
-/// after it registers them). A file that cannot be read is logged and skipped.
-pub fn set_app_fonts(paths: Vec<std::path::PathBuf>) {
-    *app_fonts().lock().unwrap() = paths;
+/// The font files the app ships, from the `fonts` list in its config, each with an optional family name to register it under (instead of
+/// the name inside the file, so `fontFamily: 'Brand'` can name `Inter-Regular.ttf`). Call it before the first [`TextSystem`] is made
+/// (every one made after it registers them). A file that cannot be read is logged and skipped.
+pub fn set_app_fonts(fonts: Vec<(std::path::PathBuf, Option<String>)>) {
+    *app_fonts().lock().unwrap() = fonts;
 }
 
-/// A font family a node asked for with `fontFamily`, as a small number a text style can carry and a cache key can hash. `0` is the
-/// default stack. See [`family_id`].
+/// The font a node asked for with `fontFamily`, `fontVariationSettings` and a numeric `fontWeight`, as one small number a text style can
+/// carry and a cache key can hash. `0` is the default stack with nothing else asked. See [`font_id`] and [`family_id`].
 pub type FamilyId = u16;
 
-/// The most distinct `fontFamily` values an app can use (the rest fall back to the default stack): each costs a short string, so the
-/// bound is a guard against an app that builds family names from data, not a limit anyone should meet.
+/// The most distinct fonts (family, variation settings and weight together) an app can use; the rest fall back to the default stack.
+/// Each costs a short string, so the bound is a guard against an app that builds them from data, not a limit anyone should meet.
 const MAX_FAMILIES: usize = 64;
 
+/// What one id stands for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FontSpec {
+    /// The full family stack: what was asked for, then the default stack. Leaked once each (bounded by `MAX_FAMILIES`) so shaping can
+    /// hold them without copying.
+    stack:      &'static str,
+    /// `font-variation-settings` source (`"'wght' 650, 'wdth' 80"`), when asked for.
+    variations: Option<&'static str>,
+    /// A weight other than regular and bold (those keep the `bold` flag): 100 to 1000.
+    weight:     Option<f32>,
+    /// The variable-font axes this font asks for as `'tag' value` pairs, later ones overriding earlier: the weight (as `'wght'`) then the
+    /// variation settings. For a backend that sets axes itself (Direct2D) rather than from the layout's normalized coordinates.
+    axes:       Option<&'static str>,
+}
+
 struct Families {
-    /// css text → id, so a repeated `fontFamily` is one hash lookup.
-    by_css: std::collections::HashMap<String, FamilyId>,
-    /// id - 1 → the full stack: what was asked for, then the default stack. Leaked once each (bounded by `MAX_FAMILIES`) so shaping
-    /// can hold them without copying.
-    stacks: Vec<&'static str>,
+    /// (family css, variation css, weight) → id, so a repeated request is one hash lookup.
+    by_key: std::collections::HashMap<(String, String, u16), FamilyId>,
+    /// id - 1 → the spec.
+    specs: Vec<FontSpec>,
 }
 
 fn families() -> &'static std::sync::Mutex<Families> {
     static F: std::sync::OnceLock<std::sync::Mutex<Families>> = std::sync::OnceLock::new();
-    F.get_or_init(|| std::sync::Mutex::new(Families { by_css: std::collections::HashMap::new(), stacks: Vec::new() }))
+    F.get_or_init(|| std::sync::Mutex::new(Families { by_key: std::collections::HashMap::new(), specs: Vec::new() }))
 }
 
 /// The names a CSS-like `fontFamily` list asks for, with the generic names turned into the fonts each platform has for them.
@@ -186,24 +204,59 @@ fn expand_family_list(css: &str) -> String {
 /// The id for a `fontFamily` value (`"Inter"`, `"Cascadia Mono, monospace"`, `"serif"`), `0` for none or for the default sans. The same text
 /// always gives the same id. Cheap enough to call when a node's props are set; not meant for every frame.
 pub fn family_id(css: &str) -> FamilyId {
-    let css = css.trim();
-    if css.is_empty() { return 0; }
+    font_id(Some(css), None, None)
+}
+
+/// A numeric `fontWeight` that is neither regular nor bold (which the `bold` flag already says): `300`, `"500"`, `"850"`. `None` for the rest.
+pub fn weight_override(weight: Option<&str>) -> Option<u16> {
+    let n: f32 = weight?.trim().parse().ok()?;
+    let n = n.round();
+    if !(1.0..=1000.0).contains(&n) || n == 400.0 || n == 700.0 { return None; }
+    Some(n as u16)
+}
+
+/// The id for a font: a `fontFamily` list, `fontVariationSettings` (CSS source, such as `"'wght' 650, 'wdth' 80"`: the axes of a variable
+/// font) and a numeric `fontWeight` (see [`weight_override`]). `0` when none of them asks for anything. The same inputs always give the same
+/// id. Cheap enough to call when a node's props are set; not meant for every frame.
+pub fn font_id(family: Option<&str>, variations: Option<&str>, weight: Option<&str>) -> FamilyId {
+    let family = family.map(str::trim).unwrap_or("");
+    let variations = variations.map(str::trim).filter(|v| !v.is_empty() && *v != "normal").unwrap_or("");
+    let weight = weight_override(weight);
+    if family.is_empty() && variations.is_empty() && weight.is_none() { return 0; }
+    let key = (family.to_string(), variations.to_string(), weight.unwrap_or(0));
     let mut f = families().lock().unwrap();
-    if let Some(&id) = f.by_css.get(css) { return id; }
-    let asked = expand_family_list(css);
-    if asked.is_empty() { f.by_css.insert(css.to_string(), 0); return 0; }
-    if f.stacks.len() >= MAX_FAMILIES { return 0; }
-    let stack: &'static str = Box::leak(format!("{asked}, {DEFAULT_FONT_STACK}").into_boxed_str());
-    f.stacks.push(stack);
-    let id = f.stacks.len() as FamilyId;
-    f.by_css.insert(css.to_string(), id);
+    if let Some(&id) = f.by_key.get(&key) { return id; }
+    if f.specs.len() >= MAX_FAMILIES { return 0; }
+    let asked = expand_family_list(family);
+    let stack: &'static str = if asked.is_empty() { DEFAULT_FONT_STACK } else { Box::leak(format!("{asked}, {DEFAULT_FONT_STACK}").into_boxed_str()) };
+    let axes = match (weight, variations.is_empty()) {
+        (None, true) => None,
+        (None, false) => Some(variations.to_string()),
+        (Some(w), true) => Some(format!("'wght' {w}")),
+        (Some(w), false) => Some(format!("'wght' {w}, {variations}")),
+    };
+    let spec = FontSpec {
+        stack,
+        variations: (!variations.is_empty()).then(|| &*Box::leak(variations.to_string().into_boxed_str())),
+        weight: weight.map(f32::from),
+        axes: axes.map(|a| &*Box::leak(a.into_boxed_str())),
+    };
+    // Only a plain default-sans request is the default font; anything else gets its own id.
+    if asked.is_empty() && spec.variations.is_none() && spec.weight.is_none() { f.by_key.insert(key, 0); return 0; }
+    f.specs.push(spec);
+    let id = f.specs.len() as FamilyId;
+    f.by_key.insert(key, id);
     id
 }
 
-/// The font stack for an id from [`family_id`] (the default stack for `0` or an unknown id).
+fn font_spec(id: FamilyId) -> Option<FontSpec> {
+    if id == 0 { return None; }
+    families().lock().unwrap().specs.get(id as usize - 1).copied()
+}
+
+/// The font stack for an id from [`font_id`] (the default stack for `0` or an unknown id).
 pub fn family_stack(id: FamilyId) -> &'static str {
-    if id == 0 { return DEFAULT_FONT_STACK; }
-    families().lock().unwrap().stacks.get(id as usize - 1).copied().unwrap_or(DEFAULT_FONT_STACK)
+    font_spec(id).map_or(DEFAULT_FONT_STACK, |s| s.stack)
 }
 
 /// Everything that affects how a string is SHAPED (glyph widths, wraps,
@@ -413,8 +466,8 @@ impl TextSystem {
 
         // The fonts the app ships (`fonts` in glyx.config): registered after the platform's, under the family names inside the files, so
         // `fontFamily: 'Inter'` finds them. Mapped from the file, so only the pages that are drawn are read.
-        for path in app_fonts().lock().unwrap().iter() {
-            if !register_font_file(&mut font_cx, path) {
+        for (path, alias) in app_fonts().lock().unwrap().iter() {
+            if !register_font_file_as(&mut font_cx, path, alias.as_deref()) {
                 log::warn!("glyx-text: could not load the font file {}", path.display());
             }
         }
@@ -457,7 +510,7 @@ impl TextSystem {
         layout.break_all_lines(Some(max_width));
         layout.align(alignment, AlignmentOptions::default());
 
-        TextLayout { inner: layout }
+        TextLayout { inner: layout, variations: None }
     }
 
     /// Shape a single-line label at the given size.  No wrapping.
@@ -505,10 +558,19 @@ impl TextSystem {
         family:      FamilyId,
     ) -> TextLayout {
         use parley::style::{FontStyle, LineHeight};
-        let weight = if bold { FontWeight::BOLD } else { FontWeight::NORMAL };
+        let spec = font_spec(family);
+        let weight = match spec.and_then(|s| s.weight) {
+            Some(w) => FontWeight::new(w),
+            None if bold => FontWeight::BOLD,
+            None => FontWeight::NORMAL,
+        };
         let mut builder = self.layout_cx.ranged_builder(&mut self.font_cx, text, 1.0, false);
         builder.push_default(StyleProperty::FontSize(font_size));
         builder.push_default(StyleProperty::FontWeight(weight));
+        // The axes of a variable font, as asked (a font without such an axis ignores it).
+        if let Some(v) = spec.and_then(|s| s.variations) {
+            builder.push_default(StyleProperty::FontVariations(parley::style::FontVariations::Source(std::borrow::Cow::Borrowed(v))));
+        }
         if italic {
             builder.push_default(StyleProperty::FontStyle(FontStyle::Italic));
         }
@@ -521,7 +583,7 @@ impl TextSystem {
         let mut layout = builder.build(text);
         layout.break_all_lines(Some(max_width));
         layout.align(Alignment::Start, AlignmentOptions::default());
-        TextLayout { inner: layout }
+        TextLayout { inner: layout, variations: spec.and_then(|s| s.axes) }
     }
 
     /// Deprecated alias kept for back-compat with early call sites.
@@ -535,6 +597,13 @@ impl TextSystem {
     /// Used to position the blinking cursor and selection highlight at the correct
     /// pixel offset for a given character index.  Handles multi-byte Unicode correctly.
     pub fn measure_to_cursor(&mut self, text: &str, font_size: f32, max_width: f32, cursor_char: usize) -> f32 {
+        self.measure_to_cursor_styled(text, font_size, max_width, cursor_char, false, false, 0)
+    }
+
+    /// [`measure_to_cursor`](Self::measure_to_cursor) shaped as the text is drawn: bold, italic and the font family from [`font_id`]. The
+    /// caret, the selection and the IME underline sit at these positions, so they must come from the layout that is on screen.
+    #[allow(clippy::too_many_arguments)]
+    pub fn measure_to_cursor_styled(&mut self, text: &str, font_size: f32, max_width: f32, cursor_char: usize, bold: bool, italic: bool, family: FamilyId) -> f32 {
         let byte_idx = text
             .char_indices()
             .nth(cursor_char)
@@ -546,11 +615,11 @@ impl TextSystem {
         // placed after a space would render at the same X as before the space.
         // Fix: append a non-whitespace sentinel, measure both strings, subtract.
         if slice.ends_with(|c: char| c.is_whitespace()) {
-            let (w_with, _) = self.measure(&format!("{slice}x"), font_size, max_width);
-            let (w_x,    _) = self.measure("x",                  font_size, max_width);
+            let (w_with, _) = self.measure_styled_in(&format!("{slice}x"), font_size, max_width, bold, italic, family);
+            let (w_x,    _) = self.measure_styled_in("x",                  font_size, max_width, bold, italic, family);
             (w_with - w_x).max(0.0)
         } else {
-            let (w, _) = self.measure(slice, font_size, max_width);
+            let (w, _) = self.measure_styled_in(slice, font_size, max_width, bold, italic, family);
             w
         }
     }
@@ -615,8 +684,14 @@ impl TextSystem {
     /// styled span (rich-text bold/italic runs) shapes with the same
     /// weight/style as what was actually rendered for it.
     pub fn char_at_x_styled(&mut self, text: &str, font_size: f32, max_width: f32, target_x: f32, bold: bool, italic: bool) -> usize {
+        self.char_at_x_styled_in(text, font_size, max_width, target_x, bold, italic, 0)
+    }
+
+    /// [`char_at_x_styled`](Self::char_at_x_styled) in a font family from [`family_id`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn char_at_x_styled_in(&mut self, text: &str, font_size: f32, max_width: f32, target_x: f32, bold: bool, italic: bool, family: FamilyId) -> usize {
         if text.is_empty() { return 0; }
-        let layout = self.styled_label(text, font_size, max_width, bold, italic, None);
+        let layout = self.styled_label_in(text, font_size, max_width, bold, italic, None, family);
         // Same boundary rule as `hit_test` — see `position_at_point`.
         position_at_point(&layout.inner, text, target_x, 0.0).offset
     }
@@ -634,8 +709,14 @@ impl TextSystem {
 
     /// Bold/italic-aware variant of `cursor_x_at` — see `char_at_x_styled`.
     pub fn cursor_x_at_styled(&mut self, text: &str, font_size: f32, max_width: f32, char_idx: usize, bold: bool, italic: bool) -> f32 {
+        self.cursor_x_at_styled_in(text, font_size, max_width, char_idx, bold, italic, 0)
+    }
+
+    /// [`cursor_x_at_styled`](Self::cursor_x_at_styled) in a font family from [`family_id`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn cursor_x_at_styled_in(&mut self, text: &str, font_size: f32, max_width: f32, char_idx: usize, bold: bool, italic: bool, family: FamilyId) -> f32 {
         if text.is_empty() { return 0.0; }
-        let layout = self.styled_label(text, font_size, max_width, bold, italic, None);
+        let layout = self.styled_label_in(text, font_size, max_width, bold, italic, None, family);
         let byte = text.char_indices().nth(char_idx).map(|(i, _)| i).unwrap_or(text.len());
         let cursor = Cursor::from_byte_index(&layout.inner, byte, Affinity::Downstream);
         cursor.geometry(&layout.inner, 0.0).x0 as f32
@@ -802,6 +883,31 @@ fn byte_to_char(text: &str, byte: usize) -> usize {
 
 pub struct TextLayout {
     pub inner: parley::Layout<()>,
+    /// The variable-font axes the text was shaped with (`"'wght' 650, 'wdth' 80"`), for a renderer that has to set them itself;
+    /// `None` for a font used as it is. The other renderers read the runs' normalized coordinates.
+    pub variations: Option<&'static str>,
+}
+
+/// The axes in a layout's variation source, `'tag' value` pairs separated by commas, as four-byte tags and values; a later pair for the same
+/// tag replaces the earlier one. Anything that does not parse is skipped.
+pub fn parse_axes(source: &str) -> Vec<([u8; 4], f32)> {
+    let mut out: Vec<([u8; 4], f32)> = Vec::new();
+    for part in source.split(',') {
+        let part = part.trim();
+        let Some(q) = part.find(|c| c == '\'' || c == '"') else { continue };
+        let quote = part.as_bytes()[q] as char;
+        let rest = &part[q + 1..];
+        let Some(end) = rest.find(quote) else { continue };
+        let tag = rest[..end].as_bytes();
+        let Ok(value) = rest[end + 1..].trim().parse::<f32>() else { continue };
+        if tag.len() != 4 { continue; }
+        let tag = [tag[0], tag[1], tag[2], tag[3]];
+        match out.iter_mut().find(|(t, _)| *t == tag) {
+            Some(slot) => slot.1 = value,
+            None => out.push((tag, value)),
+        }
+    }
+    out
 }
 
 impl TextLayout {
@@ -942,6 +1048,12 @@ impl TextLayout {
 /// ~25 MB emoji font costs near-zero committed memory (only the glyph tables
 /// actually shaped get touched).
 fn register_font_file(font_cx: &mut FontContext, path: &std::path::Path) -> bool {
+    register_font_file_as(font_cx, path, None)
+}
+
+/// Register a font file, under `family` instead of the name inside the file when one is given.
+fn register_font_file_as(font_cx: &mut FontContext, path: &std::path::Path, family: Option<&str>) -> bool {
+    let over = family.map(|f| parley::fontique::FontInfoOverride { family_name: Some(f), ..Default::default() });
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -953,13 +1065,13 @@ fn register_font_file(font_cx: &mut FontContext, path: &std::path::Path) -> bool
             // them registered; a torn read would at worst fail font parsing.
             if let Ok(mmap) = unsafe { memmap2::Mmap::map(&file) } {
                 let blob = parley::fontique::Blob::new(std::sync::Arc::new(mmap));
-                font_cx.collection.register_fonts(blob, None);
+                font_cx.collection.register_fonts(blob, over);
                 return true;
             }
         }
         // Fallback: plain read (e.g. mmap refused on a network drive).
         if let Ok(data) = std::fs::read(path) {
-            font_cx.collection.register_fonts(parley::fontique::Blob::from(data), None);
+            font_cx.collection.register_fonts(parley::fontique::Blob::from(data), over);
             return true;
         }
     }
@@ -1085,8 +1197,35 @@ mod tests {
         assert!(family_stack(mono).contains("Consolas"), "monospace expands to the platform's mono fonts");
         assert_eq!(family_stack(0), DEFAULT_FONT_STACK);
         assert_eq!(family_stack(60000), DEFAULT_FONT_STACK, "an unknown id is the default");
+
+        // Variable-font axes and numeric weights give their own ids, the same inputs the same id.
+        assert_eq!(font_id(None, None, None), 0);
+        assert_eq!(font_id(None, None, Some("400")), 0, "regular and bold keep the flag");
+        assert_eq!(font_id(None, None, Some("700")), 0);
+        assert_eq!(font_id(None, None, Some("bold")), 0);
+        let w300 = font_id(None, None, Some("300"));
+        assert!(w300 > 0);
+        assert_eq!(font_id(None, None, Some("300")), w300);
+        assert_ne!(font_id(None, None, Some("500")), w300);
+        let wide = font_id(Some("Inter"), Some("'wght' 650, 'wdth' 80"), None);
+        assert!(wide > 0 && wide != inter);
+        assert_eq!(font_id(Some("Inter"), Some("'wght' 650, 'wdth' 80"), None), wide);
+        assert_eq!(font_id(None, Some("normal"), None), 0);
+        assert_eq!(weight_override(Some("1200")), None);
+        assert_eq!(weight_override(Some("abc")), None);
         // A quoted name is the name.
         assert_eq!(family_stack(family_id("\"Segoe UI\"")).split(',').next().unwrap(), "Segoe UI");
+    }
+
+    #[test]
+    fn axes_parse_and_later_pairs_win() {
+        assert_eq!(parse_axes("'wght' 650, 'wdth' 80"), vec![(*b"wght", 650.0), (*b"wdth", 80.0)]);
+        assert_eq!(parse_axes("'wght' 300, \"wght\" 700"), vec![(*b"wght", 700.0)]);
+        assert!(parse_axes("'toolong' 1, 'wght' abc, nonsense").is_empty());
+        // The weight a numeric fontWeight asks for comes first, so a variation setting overrides it.
+        let id = font_id(None, Some("'wght' 900"), Some("300"));
+        let axes = font_spec(id).and_then(|s| s.axes).unwrap();
+        assert_eq!(parse_axes(axes), vec![(*b"wght", 900.0)]);
     }
 
     #[test]

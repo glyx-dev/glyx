@@ -134,9 +134,16 @@ export interface GlyxStyle {
    * The font family, as a CSS-like list: `'Inter'`, `'Cascadia Mono, monospace'`, `'serif'`. A family is found among the fonts the app
    * ships (`fonts` in the config) and the fonts installed on the machine, by the name inside the font; the first one that exists is
    * used, then the default font (so text never disappears). `'monospace'` and `'serif'` mean the platform's own. Bold and italic come
-   * from `fontWeight` and `fontStyle` as before. `TextInput`'s caret is measured in the default font for now.
+   * from `fontWeight` and `fontStyle` as before. `TextInput` and the rich-text editor measure their caret in the family too.
    */
   fontFamily?:       string;
+  /**
+   * The axes of a variable font, as CSS source: `"'wght' 650"`, `"'wght' 300, 'wdth' 80"`. Each name is a four-letter axis tag the font
+   * defines (`wght` weight, `wdth` width, `opsz` optical size, `slnt` slant, or the font's own); a font without that axis ignores it. Used
+   * with `fontFamily` naming a variable font. `fontWeight` as a number other than 400 and 700 (`'300'`, `'550'`) sets the weight the same
+   * way, for a font with a `wght` axis or several weight files.
+   */
+  fontVariationSettings?: string;
   /**
    * The mouse cursor while the pointer is over this element (or a child with no cursor of its own), as in CSS. Buttons (`Pressable`
    * with `onPress`) show `'pointer'` and text fields `'text'` unless you say otherwise. `glyxWindow.setCursor(name)` still sets the
@@ -291,6 +298,10 @@ export interface TextInputProps {
   /** Input filter: 'numeric' = integers, 'decimal' = numbers with one dot. */
   keyboardType?:    'default' | 'numeric' | 'decimal';
   textAlign?:       'left' | 'center' | 'right';
+  /** The font family (also `style.fontFamily`); the caret and hit-tests are measured in it. */
+  fontFamily?:      string;
+  /** The axes of a variable font (also `style.fontVariationSettings`), measured the same way. */
+  fontVariationSettings?: string;
   autoFocus?:       boolean;
   /**
    * Ctrl+Z undoes and Ctrl+Y (or Ctrl+Shift+Z) redoes, as in a browser: typing is undone a run at a time, cut, paste, Enter and

@@ -460,6 +460,7 @@ impl FrameBuilder {
                     .draw_glyphs(&font)
                     .font_size(size)
                     .transform(transform)
+                    .normalized_coords(run.normalized_coords())
                     .brush(&Brush::Solid(color))
                     .draw(Fill::NonZero, glyphs.into_iter().map(|(g, _)| g));
             }

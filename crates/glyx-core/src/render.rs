@@ -516,8 +516,8 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
                         let a = sb.max(ls);
                         let b = eb.min(le);
                         let cp_a = text[ls..a].chars().count();
-                        let x0 = ctx.text_sys.measure_to_cursor(
-                            &text[ls..], font_size, max_width, cp_a) as f64;
+                        let x0 = ctx.text_sys.measure_to_cursor_styled(
+                            &text[ls..], font_size, max_width, cp_a, bold, italic, family) as f64;
                         // Selection reaching THIS line's end (newline or soft
                         // wrap): use the line's right edge — measuring a cursor
                         // at the boundary lands on the next line (x = 0).
@@ -526,8 +526,8 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
                             l_right as f64
                         } else {
                             let cp_b = text[ls..b].chars().count();
-                            ctx.text_sys.measure_to_cursor(
-                                &text[ls..], font_size, max_width, cp_b) as f64
+                            ctx.text_sys.measure_to_cursor_styled(
+                                &text[ls..], font_size, max_width, cp_b, bold, italic, family) as f64
                         };
                         // Fully-selected empty lines still get a visible sliver
                         // so line coverage reads clearly.
@@ -573,15 +573,15 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
                         let a = pb.max(ls);
                         let b = eb.min(le);
                         let cp_a = text[ls..a].chars().count();
-                        let x0 = ctx.text_sys.measure_to_cursor(
-                            &text[ls..], font_size, max_width, cp_a) as f64;
+                        let x0 = ctx.text_sys.measure_to_cursor_styled(
+                            &text[ls..], font_size, max_width, cp_a, bold, italic, family) as f64;
                         let to_line_end = b >= le || text[b..le].starts_with('\n');
                         let x1 = if to_line_end {
                             l_right as f64
                         } else {
                             let cp_b = text[ls..b].chars().count();
-                            ctx.text_sys.measure_to_cursor(
-                                &text[ls..], font_size, max_width, cp_b) as f64
+                            ctx.text_sys.measure_to_cursor_styled(
+                                &text[ls..], font_size, max_width, cp_b, bold, italic, family) as f64
                         };
                         let w = x1 - x0;
                         if w > 0.0 {
@@ -613,8 +613,8 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
                         let (line_top, line_start) = label.layout.caret_line(byte_idx);
                         let first_top = label.layout.caret_line(0).0;
                         let cp_in_line = text[line_start..byte_idx].chars().count();
-                        let cx = ctx.text_sys.measure_to_cursor(
-                            &text[line_start..], font_size, max_width, cp_in_line,
+                        let cx = ctx.text_sys.measure_to_cursor_styled(
+                            &text[line_start..], font_size, max_width, cp_in_line, bold, italic, family,
                         ) as f64;
                         (cx, cur_top + (line_top - first_top) as f64)
                     } else {

@@ -714,13 +714,14 @@ export function getEnv(name: any) {
 /**
  * Measure shaped text. Returns `{ width, height }` in logical pixels.
  * `maxWidth` wraps the text; omit (or pass Infinity) for single-line width.
- * Used for table column auto-sizing, rich-text layout, truncation, etc.
+ * Used for table column auto-sizing, rich-text layout, truncation, etc. `fontFamily` measures in that family (a `fontFamily` style value).
  */
-export function measureText(text: any, fontSize = 14, maxWidth = Infinity) {
+export function measureText(text: any, fontSize = 14, maxWidth = Infinity, fontFamily?: string, fontVariationSettings?: string) {
   if (typeof __glyx_measure_text === 'undefined') {
     return { width: String(text).length * fontSize * 0.55, height: fontSize * 1.3 };
   }
-  return __glyx_measure_text(String(text), fontSize, Number.isFinite(maxWidth) ? maxWidth : 1e6);
+  return __glyx_measure_text(String(text), fontSize, Number.isFinite(maxWidth) ? maxWidth : 1e6, undefined, undefined,
+    fontVariationSettings ? { family: fontFamily, variations: fontVariationSettings } : fontFamily);
 }
 
 // ── SelectableText ────────────────────────────────────────────────────────────
@@ -767,7 +768,10 @@ export function SelectableText({
   // The inner Text node's shaping/placement props — spread into the Text
   // element below AND passed to the native hit-test, so a click resolves
   // with exactly what was rendered (see glyx-runtime's `text_props`).
-  const textHitProps = { fontSize, textAlign };
+  const fontFamily = flattenStyle(style)?.fontFamily ?? rest.fontFamily;
+  const fontVariationSettings = flattenStyle(style)?.fontVariationSettings ?? rest.fontVariationSettings;
+  const fontWeight = flattenStyle(style)?.fontWeight ?? rest.fontWeight;
+  const textHitProps = { fontSize, textAlign, fontFamily, fontVariationSettings, fontWeight };
 
   // Stale-closure refs so event callbacks always see current values.
   const isSelectableRef = useRef(isSelectable);

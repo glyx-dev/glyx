@@ -3,7 +3,7 @@
 // Architecture:
 //   Document  = array of paragraphs
 //   Paragraph = array of styled spans
-//   Span      = { text, bold?, italic?, underline?, color?, fontSize? }
+//   Span      = { text, bold?, italic?, underline?, color?, fontSize?, fontFamily?, fontVariationSettings? }
 //   Cursor    = { para, offset }  (offset = char index in flat paragraph text)
 //   Selection = { anchor: Cursor, focus: Cursor }
 //
@@ -26,6 +26,10 @@ export interface Span {
   underline?: boolean;
   color?:     string;
   fontSize?:  number;
+  /** This run's font family (a `fontFamily` value); the editor's `fontFamily` when absent. */
+  fontFamily?: string;
+  /** This run's variable-font axes (a `fontVariationSettings` value); the editor's when absent. */
+  fontVariationSettings?: string;
 }
 
 export type ListType = 'bullet' | 'number';
@@ -78,6 +82,10 @@ export interface RichTextEditorProps {
   placeholder?: string;
   /** Focus as soon as it mounts, with no click first. Use it when a parent opens or creates a document in code. */
   autoFocus?:   boolean;
+  /** The font family of the text (a `fontFamily` value: `'Inter'`, `'Cascadia Mono, monospace'`); the caret and clicks are measured in it. */
+  fontFamily?:  string;
+  /** The variable-font axes of the text (a `fontVariationSettings` value); a span can set its own. */
+  fontVariationSettings?: string;
   /** `true` (default) wraps long paragraphs to `width`; `false` keeps each paragraph on one line and scrolls sideways. */
   wrap?:        boolean;
   /** Ctrl+Z undoes and Ctrl+Y (or Ctrl+Shift+Z) redoes, as in a browser (default true; false turns the history off). */
@@ -141,7 +149,8 @@ export function mergeSpans(spans: Span[]): Span[] {
     if (!s.text) continue;
     const p = out[out.length - 1];
     if (p && p.bold === s.bold && p.italic === s.italic && p.underline === s.underline &&
-        p.color === s.color && p.fontSize === s.fontSize) {
+        p.color === s.color && p.fontSize === s.fontSize && p.fontFamily === s.fontFamily &&
+        p.fontVariationSettings === s.fontVariationSettings) {
       out[out.length - 1] = { ...p, text: p.text + s.text };
     } else {
       out.push({ ...s });
@@ -335,9 +344,21 @@ export function selectedText(doc: RichTextDocument, sel: Selection) {
 // line spacing, causing overlapping rows whenever a font's real line height
 // was smaller than 1.5×. Mirrors the equivalent fix in @glyx-dev/react's
 // TextInput (controls.ts's `realLineHeight`).
+// The editor's `fontFamily`, which the measuring helpers below shape in. The editor sets it at the start of its render and of every handler
+// (each entry point), so two editors with different families never see each other's.
+let _family: string | undefined;
+let _variations: string | undefined;
+
+/** What the native measuring calls take for a span's font: its own `fontFamily` / `fontVariationSettings`, else the editor's. */
+function spanFont(span?: any): any {
+  const family = span?.fontFamily ?? _family;
+  const variations = span?.fontVariationSettings ?? _variations;
+  return variations ? { family, variations } : family;
+}
+
 function richTextLineHeight(fontSize: number) {
   if (typeof __glyx_measure_text !== 'undefined') {
-    return __glyx_measure_text('M', fontSize, 1e6).height;
+    return __glyx_measure_text('M', fontSize, 1e6, undefined, undefined, spanFont()).height;
   }
   return fontSize * 1.5;
 }
@@ -366,11 +387,11 @@ function measureSpan(text: string, span: any, defaultFontSize: number) {
   // Same for a span that merely ENDS in whitespace ("Hello " before a bold
   // span): its trailing space is drawn, so clicks past it must count it.
   if (/\s$/.test(text)) {
-    const withSentinel = __glyx_measure_text(text + 'x', fs, 999999, style).width;
-    const sentinelOnly = __glyx_measure_text('x', fs, 999999, style).width;
+    const withSentinel = __glyx_measure_text(text + 'x', fs, 999999, style, undefined, spanFont(span)).width;
+    const sentinelOnly = __glyx_measure_text('x', fs, 999999, style, undefined, spanFont(span)).width;
     return Math.max(0, withSentinel - sentinelOnly);
   }
-  return __glyx_measure_text(text, fs, 999999, style).width;
+  return __glyx_measure_text(text, fs, 999999, style, undefined, spanFont(span)).width;
 }
 
 // Cursor X for character index `charIdx` *within one span's full text*.
@@ -382,7 +403,7 @@ function measureSpan(text: string, span: any, defaultFontSize: number) {
 function cursorXInSpan(span: any, charIdx: number, defaultFontSize: any) {
   const fs = span.fontSize ?? defaultFontSize;
   if (typeof __glyx_text_cursor_x !== 'undefined') {
-    return __glyx_text_cursor_x(span.text, fs, 999999, charIdx, spanStyle(span));
+    return __glyx_text_cursor_x(span.text, fs, 999999, charIdx, spanStyle(span), spanFont(span));
   }
   return charIdx * fs * 0.55; // fallback estimate
 }
@@ -393,7 +414,7 @@ function cursorXInSpan(span: any, charIdx: number, defaultFontSize: any) {
 function charAtXInSpan(span: any, localX: number, defaultFontSize: any) {
   const fs = span.fontSize ?? defaultFontSize;
   if (typeof __glyx_text_char_at_x !== 'undefined') {
-    return __glyx_text_char_at_x(span.text, fs, 999999, localX, spanStyle(span));
+    return __glyx_text_char_at_x(span.text, fs, 999999, localX, spanStyle(span), spanFont(span));
   }
   return Math.round(localX / (fs * 0.55)); // fallback estimate
 }
@@ -632,6 +653,8 @@ export function RichTextEditor({
                          // (e.g. a "New file" action), since there's no ref/
                          // imperative API to focus an already-mounted editor.
   undoHistory  = true,
+  fontFamily,
+  fontVariationSettings,
   wrap         = true,   // true: long paragraphs soft-wrap to fit `width` (a
                          // normal editor/notes surface). false: paragraphs
                          // stay on one line and overflow horizontally instead
@@ -641,6 +664,9 @@ export function RichTextEditor({
   style,
   children,    // optional: render toolbar etc. using context
 }: RichTextEditorProps) {
+  // The measuring helpers shape in the editor's family: set it here for this render and at the start of each handler (see `_family`).
+  _family = fontFamily; _variations = fontVariationSettings;
+  const familyRef = useRef({ fontFamily, fontVariationSettings }); familyRef.current = { fontFamily, fontVariationSettings };
   const [doc, setDoc_]   = useState(() => value ?? emptyDoc());
   const [cursor, setCursor_] = useState({ para: 0, offset: 0 });
   const [sel, setSel_]   = useState({ anchor: { para: 0, offset: 0 }, focus: { para: 0, offset: 0 } });
@@ -749,6 +775,7 @@ export function RichTextEditor({
   // own `focusedNodeId`/`inputRegistry`), so no extra focus check is needed
   // here — this only gets called when this editor is genuinely focused.
   const onKey = useCallback(({ key, text, ctrl, shift }: Record<string, any>) => {
+    _family = familyRef.current.fontFamily; _variations = familyRef.current.fontVariationSettings;
     setBlinkOn(true); // reset blink on any key
 
     const doc    = docRef.current;
@@ -1040,6 +1067,7 @@ export function RichTextEditor({
   // stale anchor was last recorded.
   const textDragSuppressedRef = useRef(false);
   const onPress = useCallback((ev: { locationY: number; locationX: any; }) => {
+    _family = familyRef.current.fontFamily; _variations = familyRef.current.fontVariationSettings;
     const suppressed = hScrollbarBoundRef.current !== null && ev.locationY >= hScrollbarBoundRef.current;
     textDragSuppressedRef.current = suppressed;
     if (suppressed) return;
@@ -1057,6 +1085,7 @@ export function RichTextEditor({
   // release, with no drag/move callback of its own.
   const onDragAt = useCallback((x: any, y: any) => {
     if (textDragSuppressedRef.current) return;
+    _family = familyRef.current.fontFamily; _variations = familyRef.current.fontVariationSettings;
     const c = posFromXY(x, y);
     historyRef.current?.breakRun();
     setCursor_(c);
@@ -1069,6 +1098,7 @@ export function RichTextEditor({
   // word-boundary logic rather than sharing that one.
   const onDoubleClickAt = useCallback((x: number, y: number) => {
     if (hScrollbarBoundRef.current !== null && y >= hScrollbarBoundRef.current) return;
+    _family = familyRef.current.fontFamily; _variations = familyRef.current.fontVariationSettings;
     _focusedEditor = nodeIdRef.current;
     setFocused(true);
     setBlinkOn(true);
@@ -1396,13 +1426,15 @@ function LineSpans({ mw, markerText, fontSize, color, pieces }: Record<string, a
           exactly what should fit, so the native Text itself must never
           re-wrap them on its own (which, mid-relayout while typing, could
           use a stale/squeezed width and visibly wrap+snap-back). */}
-      {pieces.map((p: { text: string | number | boolean | React.ReactElement<any, string | React.JSXElementConstructor<any>> | Iterable<React.ReactNode> | React.ReactPortal | null | undefined; span: { fontSize: any; color: any; bold: any; italic: any; underline: any; }; }, si: React.Key | null | undefined) => (
+      {pieces.map((p: { text: string | number | boolean | React.ReactElement<any, string | React.JSXElementConstructor<any>> | Iterable<React.ReactNode> | React.ReactPortal | null | undefined; span: { fontSize: any; color: any; bold: any; italic: any; underline: any; fontFamily?: string; fontVariationSettings?: string; }; }, si: React.Key | null | undefined) => (
         p.text ? (
           <Text
             key={si}
             textScrollX={0}
             style={{
               fontSize: p.span.fontSize ?? fontSize,
+              ...((p.span.fontFamily ?? _family) ? { fontFamily: p.span.fontFamily ?? _family } : null),
+              ...((p.span.fontVariationSettings ?? _variations) ? { fontVariationSettings: p.span.fontVariationSettings ?? _variations } : null),
               color: p.span.color ?? color,
               fontWeight: p.span.bold ? 'bold' : 'normal',
               fontStyle: p.span.italic ? 'italic' : 'normal',

@@ -133,6 +133,7 @@ export function TextInput({
   textAlign = 'left',        // passed to the inner Text; hit-testing respects it too
   fontFamily: fontFamilyProp, // or `style.fontFamily`: the caret and hit-tests are measured in it
   fontVariationSettings: fontVariationProp, // or `style.fontVariationSettings`: the axes of a variable font
+  fontFeatureSettings: fontFeatureProp,     // or `style.fontFeatureSettings`: OpenType features (figures, ligatures, caps)
   undoHistory = true,        // Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z) undo and redo; false turns the history off
   style: styleProp,
   ...props
@@ -140,8 +141,11 @@ export function TextInput({
   const style = flattenStyle(styleProp);
   const fontFamily: string | undefined = fontFamilyProp ?? style?.fontFamily;
   const fontVariationSettings: string | undefined = fontVariationProp ?? style?.fontVariationSettings;
-  // What the native measuring calls take for the font: the family, or the family with its variation axes.
-  const font: any = fontVariationSettings ? { family: fontFamily, variations: fontVariationSettings } : fontFamily;
+  const fontFeatureSettings: string | undefined = fontFeatureProp ?? style?.fontFeatureSettings;
+  // What the native measuring calls take for the font: the family, or the family with its axes and features.
+  const font: any = (fontVariationSettings || fontFeatureSettings)
+    ? { family: fontFamily, variations: fontVariationSettings, features: fontFeatureSettings }
+    : fontFamily;
   const nodeIdRef   = useRef<any>(null);
   // Inner `text` node — hit-tests measure from ITS box (see textBoxInView).
   const textNodeIdRef = useRef<any>(null);
@@ -302,7 +306,7 @@ export function TextInput({
     }
     const lines = Math.max(lo, Math.min(hi, Math.max(1, lineCount)));
     return Math.ceil(lines * lineH) + innerPadding * 2 + 4;
-  }, [multiline, height, renderValue, fontSize, innerW, minLines, maxLines, lineH, innerPadding, fontFamily, fontVariationSettings]);
+  }, [multiline, height, renderValue, fontSize, innerW, minLines, maxLines, lineH, innerPadding, fontFamily, fontVariationSettings, fontFeatureSettings]);
   const resolvedHeight = (height ?? (multiline ? autoHeight : 44)) as number;
 
   // The inner Text node's shaping/placement props — spread into the `text`
@@ -316,6 +320,7 @@ export function TextInput({
     textAlign,
     fontFamily,
     fontVariationSettings,
+    fontFeatureSettings,
     textScrollX: multiline ? undefined : scrollX,
     showCursor:  focused,
   };

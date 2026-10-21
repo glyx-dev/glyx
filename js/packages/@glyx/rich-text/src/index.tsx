@@ -3,7 +3,7 @@
 // Architecture:
 //   Document  = array of paragraphs
 //   Paragraph = array of styled spans
-//   Span      = { text, bold?, italic?, underline?, color?, fontSize?, fontFamily?, fontVariationSettings? }
+//   Span      = { text, bold?, italic?, underline?, color?, fontSize?, fontFamily?, fontVariationSettings?, fontFeatureSettings? }
 //   Cursor    = { para, offset }  (offset = char index in flat paragraph text)
 //   Selection = { anchor: Cursor, focus: Cursor }
 //
@@ -14,6 +14,7 @@
 import React, { useState, useEffect, useRef, useCallback, useContext, useMemo, createContext } from 'react';
 import { View, Text, Pressable, addGlobalClickListener, removeGlobalClickListener, clipboard, registerInput, unregisterInput, registerScrollView, unregisterScrollView, registerDraggable, unregisterDraggable } from '@glyx-dev/react';
 import type { GlyxStyle } from '@glyx-dev/react';
+import { Icon } from '@glyx-dev/icons';
 import { DocHistory, type EditKind } from './history.js';
 
 // ── The document model ───────────────────────────────
@@ -30,6 +31,8 @@ export interface Span {
   fontFamily?: string;
   /** This run's variable-font axes (a `fontVariationSettings` value); the editor's when absent. */
   fontVariationSettings?: string;
+  /** This run's OpenType features (a `fontFeatureSettings` value); the editor's when absent. */
+  fontFeatureSettings?: string;
 }
 
 export type ListType = 'bullet' | 'number';
@@ -57,8 +60,19 @@ export interface Selection {
   focus:  Cursor;
 }
 
-/** The character formats that can be toggled. */
+/** The character formats that can be toggled on and off. */
 export type FormatKey = 'bold' | 'italic' | 'underline';
+
+/** The per-run formats that take a value instead of on/off: the font family, its axes and features, the size, and the colour. */
+export type ValueFormatKey =
+  | 'fontFamily'
+  | 'fontVariationSettings'
+  | 'fontFeatureSettings'
+  | 'fontSize'
+  | 'color';
+
+/** A value a {@link ValueFormatKey} can take; `undefined` removes the run's own value (the editor's default applies again). */
+export type FormatValue = string | number | undefined;
 
 /** The result of an edit: the new document and where the cursor ends up. */
 export interface EditResult {
@@ -86,17 +100,25 @@ export interface RichTextEditorProps {
   fontFamily?:  string;
   /** The variable-font axes of the text (a `fontVariationSettings` value); a span can set its own. */
   fontVariationSettings?: string;
+  /** The OpenType features of the text (a `fontFeatureSettings` value); a span can set its own. */
+  fontFeatureSettings?: string;
   /** `true` (default) wraps long paragraphs to `width`; `false` keeps each paragraph on one line and scrolls sideways. */
   wrap?:        boolean;
   /** Ctrl+Z undoes and Ctrl+Y (or Ctrl+Shift+Z) redoes, as in a browser (default true; false turns the history off). */
   undoHistory?: boolean;
   style?:       GlyxStyle;
-  /** Rendered inside the editor's context, so a {@link RichTextToolbar} can sit here or next to it. */
+  /** Rendered inside the editor's context, so a {@link RichTextToolbar} can sit above the text. */
   children?:    React.ReactNode;
 }
 
 export interface RichTextToolbarProps {
   style?: GlyxStyle;
+  /**
+   * The families the font menu offers, as `fontFamily` values. Defaults to a short list of fonts that ship with Windows, macOS
+   * or the app (`Segoe UI`, `Georgia`, `Cascadia Mono`, ...); pass the families from the app's `fonts` config and any installed
+   * fonts you want to offer.
+   */
+  fontFamilies?: string[];
 }
 
 /** What {@link useEditorContext} returns, inside a {@link RichTextEditor}. */
@@ -111,11 +133,17 @@ export interface EditorContextValue {
   applyEdit:          (fn: (doc: RichTextDocument, cursor: Cursor) => EditResult) => void;
   selectionHasFormat: (key: FormatKey) => boolean;
   toggleFormat:       (key: FormatKey) => void;
+  /** The value every selected run shares for a value format, or the run at the caret's when the selection is empty. */
+  formatValue:        (key: ValueFormatKey) => FormatValue;
+  /** Sets a value format on the selection, or, with an empty selection, on the text typed next (the format is kept until the caret moves). */
+  setFormat:          (key: ValueFormatKey, value: FormatValue) => void;
   toggleList:         (listType: ListType) => void;
   /** Changes the nesting level of the list items in the selection by `delta`. */
   indent:             (delta: number) => void;
   isListActive:       (listType: ListType) => boolean;
   fontSize:           number;
+  /** Restores this editor's caret/focus after a custom control is pressed; give that control `keepFocus` too. */
+  refocus:            () => void;
 }
 
 // ── Document helpers ──────────────────────────────────────────────────────────
@@ -150,7 +178,7 @@ export function mergeSpans(spans: Span[]): Span[] {
     const p = out[out.length - 1];
     if (p && p.bold === s.bold && p.italic === s.italic && p.underline === s.underline &&
         p.color === s.color && p.fontSize === s.fontSize && p.fontFamily === s.fontFamily &&
-        p.fontVariationSettings === s.fontVariationSettings) {
+        p.fontVariationSettings === s.fontVariationSettings && p.fontFeatureSettings === s.fontFeatureSettings) {
       out[out.length - 1] = { ...p, text: p.text + s.text };
     } else {
       out.push({ ...s });
@@ -191,41 +219,51 @@ export function moveCursorBy(doc: RichTextDocument, cursor: Cursor, delta: numbe
 // to several visual lines or (when `wrap` is off) always exactly one — a
 // non-wrapping paragraph is just the degenerate `lines.length === 1` case
 // of the same math, so no separate code path is needed for it.
-function moveCursorVertical(layoutInfo: any, cursor: Cursor, dir: number, lineHeight: number, fontSize: number) {
+function moveCursorVertical(layoutInfo: any, cursor: Cursor, dir: number, fontSize: number) {
   const items = layoutInfo.items;
   const item = items[cursor.para];
+  if (!item) return cursor;
   let li = 0;
   for (; li < item.lines.length; li++) {
     const line = item.lines[li];
     if (cursor.offset >= line.start && (cursor.offset < line.end || li === item.lines.length - 1)) break;
   }
-  const line = item.lines[Math.min(li, item.lines.length - 1)];
+  li = Math.min(li, item.lines.length - 1);
+  const line = item.lines[li];
   const x = measureCursorX(lineAsParagraph(line), cursor.offset - line.start, fontSize);
-  const targetY = item.y + li * lineHeight + dir * lineHeight;
 
-  if (targetY < 0) return { para: 0, offset: 0 };
-  const lastItem = items[items.length - 1];
-  if (targetY >= lastItem.y + lastItem.height) {
+  // Paragraphs can have different line heights (a heading run, a 24 px run),
+  // so walk the visual lines instead of assuming one global line height.
+  const visualLines: Array<{ it: any; li: number }> = [];
+  for (const it of items) {
+    for (let i = 0; i < it.lines.length; i++) visualLines.push({ it, li: i });
+  }
+  let at = visualLines.findIndex((v) => v.it === item && v.li === li);
+  if (at < 0) at = 0;
+  const target = at + dir;
+  if (target < 0) return { para: 0, offset: 0 };
+  if (target >= visualLines.length) {
+    const lastItem = items[items.length - 1];
     return { para: lastItem.pi, offset: paraText(lastItem.para).length };
   }
-  for (const it of items) {
-    if (targetY < it.y + it.height || it === lastItem) {
-      const targetLi = Math.max(0, Math.min(it.lines.length - 1, Math.floor((targetY - it.y) / lineHeight)));
-      const targetLine = it.lines[targetLi];
-      const offset = clickToOffset(lineAsParagraph(targetLine), x, fontSize);
-      return { para: it.pi, offset: targetLine.start + offset };
-    }
-  }
-  return cursor;
+  const { it, li: targetLi } = visualLines[target];
+  const targetLine = it.lines[targetLi];
+  const offset = clickToOffset(lineAsParagraph(targetLine), x, fontSize);
+  return { para: it.pi, offset: targetLine.start + offset };
 }
 
 // ── Edit operations ───────────────────────────────────────────────────────────
 
-export function insertText(doc: RichTextDocument, cursor: Cursor, text: string): EditResult {
+export function insertText(
+  doc: RichTextDocument,
+  cursor: Cursor,
+  text: string,
+  format?: Partial<Span>,
+): EditResult {
   const paras = [...doc.paragraphs];
   const para = paras[cursor.para];
   const [before, after] = splitSpansAt(para.spans, cursor.offset);
-  const fmt = before[before.length - 1] ?? after[0] ?? {};
+  const fmt = { ...(before[before.length - 1] ?? after[0] ?? {}), ...format };
   paras[cursor.para] = { spans: mergeSpans([...before, { ...fmt, text }, ...after]) };
   return { doc: { ...doc, paragraphs: paras }, cursor: { para: cursor.para, offset: cursor.offset + text.length } };
 }
@@ -295,7 +333,13 @@ export function deleteSelection(doc: RichTextDocument, sel: Selection) {
   return { doc: { ...doc, paragraphs: paras }, cursor: anchor };
 }
 
-export function applyFormat(doc: RichTextDocument, sel: Selection, key: FormatKey, value: boolean) {
+/**
+ * Applies a format to every run the selection touches. `key` is a span field: the on/off formats (`bold`, `italic`, `underline`)
+ * and the value formats (`fontFamily`, `fontVariationSettings`, `fontFeatureSettings`, `fontSize`, `color`). `undefined` removes the
+ * run's own value, so it falls back to the editor's default. An empty selection changes nothing here; the editor keeps that format
+ * for the text typed next (see `setFormat` in {@link EditorContextValue}).
+ */
+export function applyFormat(doc: RichTextDocument, sel: Selection, key: keyof Span, value: any) {
   const { anchor, focus } = normSel(sel);
   const paras = [...doc.paragraphs];
   for (let pi = anchor.para; pi <= focus.para; pi++) {
@@ -304,9 +348,60 @@ export function applyFormat(doc: RichTextDocument, sel: Selection, key: FormatKe
     if (s === e) continue;
     const [pre, rest] = splitSpansAt(paras[pi].spans, s);
     const [mid, post] = splitSpansAt(rest, e - s);
-    paras[pi] = { spans: mergeSpans([...pre, ...mid.map(sp => ({ ...sp, [key]: value })), ...post]) };
+    paras[pi] = {
+      spans: mergeSpans([
+        ...pre,
+        ...mid.map((sp) => {
+          const next: any = { ...sp };
+          if (value === undefined) delete next[key];
+          else next[key] = value;
+          return next;
+        }),
+        ...post,
+      ]),
+    };
   }
   return { ...doc, paragraphs: paras };
+}
+
+/** The span a caret sits in: the run before it (the one typing inherits), else the run after it, else none. */
+export function spanAtCursor(doc: RichTextDocument, cursor: Cursor): Span | undefined {
+  const spans = doc.paragraphs[cursor.para]?.spans ?? [];
+  let offset = 0;
+  let next: Span | undefined;
+  for (const span of spans) {
+    if (cursor.offset <= offset + span.text.length) {
+      if (cursor.offset > offset) return span;
+      next = span;
+      break;
+    }
+    offset += span.text.length;
+    next = span;
+  }
+  return next ?? spans[spans.length - 1];
+}
+
+/**
+ * The one value every selected run shares for `key`, or `undefined` when they differ (or nothing is selected).
+ * With an empty selection it reads the run at the caret, which is what a toolbar shows for the next typed text.
+ */
+export function selectionFormatValue(doc: RichTextDocument, sel: Selection, key: keyof Span): any {
+  if (!hasSelection(sel)) return spanAtCursor(doc, sel.focus)?.[key];
+  const { anchor, focus } = normSel(sel);
+  let value: any;
+  let seen = false;
+  for (let pi = anchor.para; pi <= focus.para; pi++) {
+    const s = pi === anchor.para ? anchor.offset : 0;
+    const e = pi === focus.para  ? focus.offset  : paraText(doc.paragraphs[pi]).length;
+    if (s === e) continue;
+    const [, rest] = splitSpansAt(doc.paragraphs[pi].spans, s);
+    const [mid]    = splitSpansAt(rest, e - s);
+    for (const span of mid) {
+      if (!seen) { value = span[key]; seen = true; }
+      else if (span[key] !== value) return undefined;
+    }
+  }
+  return seen ? value : undefined;
 }
 
 export function selectionHasFormat(doc: RichTextDocument, sel: Selection, key: FormatKey): boolean {
@@ -348,12 +443,14 @@ export function selectedText(doc: RichTextDocument, sel: Selection) {
 // (each entry point), so two editors with different families never see each other's.
 let _family: string | undefined;
 let _variations: string | undefined;
+let _features: string | undefined;
 
-/** What the native measuring calls take for a span's font: its own `fontFamily` / `fontVariationSettings`, else the editor's. */
+/** What the native measuring calls take for a span's font: its own font props, else the editor's. */
 function spanFont(span?: any): any {
   const family = span?.fontFamily ?? _family;
   const variations = span?.fontVariationSettings ?? _variations;
-  return variations ? { family, variations } : family;
+  const features = span?.fontFeatureSettings ?? _features;
+  return (variations || features) ? { family, variations, features } : family;
 }
 
 function richTextLineHeight(fontSize: number) {
@@ -361,6 +458,16 @@ function richTextLineHeight(fontSize: number) {
     return __glyx_measure_text('M', fontSize, 1e6, undefined, undefined, spanFont()).height;
   }
   return fontSize * 1.5;
+}
+
+// A paragraph's row must fit its largest run: without this a 26 px heading
+// in a 14 px editor paints over the paragraph below it.
+function paragraphLineHeight(para: Paragraph, defaultFontSize: number) {
+  let size = defaultFontSize;
+  for (const span of para.spans) {
+    if (typeof span.fontSize === 'number' && span.fontSize > size) size = span.fontSize;
+  }
+  return richTextLineHeight(size);
 }
 
 function spanStyle(span: any) {
@@ -655,6 +762,7 @@ export function RichTextEditor({
   undoHistory  = true,
   fontFamily,
   fontVariationSettings,
+  fontFeatureSettings,
   wrap         = true,   // true: long paragraphs soft-wrap to fit `width` (a
                          // normal editor/notes surface). false: paragraphs
                          // stay on one line and overflow horizontally instead
@@ -665,8 +773,9 @@ export function RichTextEditor({
   children,    // optional: render toolbar etc. using context
 }: RichTextEditorProps) {
   // The measuring helpers shape in the editor's family: set it here for this render and at the start of each handler (see `_family`).
-  _family = fontFamily; _variations = fontVariationSettings;
-  const familyRef = useRef({ fontFamily, fontVariationSettings }); familyRef.current = { fontFamily, fontVariationSettings };
+  _family = fontFamily; _variations = fontVariationSettings; _features = fontFeatureSettings;
+  const familyRef = useRef({ fontFamily, fontVariationSettings, fontFeatureSettings });
+  familyRef.current = { fontFamily, fontVariationSettings, fontFeatureSettings };
   const [doc, setDoc_]   = useState(() => value ?? emptyDoc());
   const [cursor, setCursor_] = useState({ para: 0, offset: 0 });
   const [sel, setSel_]   = useState({ anchor: { para: 0, offset: 0 }, focus: { para: 0, offset: 0 } });
@@ -713,6 +822,17 @@ export function RichTextEditor({
   // Undo / redo: references to the documents before each edit (they share every untouched paragraph), capped, freed with the editor.
   const historyRef = useRef<DocHistory<any, any, any> | null>(null);
   const history = () => (historyRef.current ??= new DocHistory());
+  // Format values chosen while the selection is empty (or after formatting a selection): they are applied to the text typed next,
+  // and cleared when the caret moves, so the format follows the typing run rather than sticking to the whole editor.
+  const typingFormatRef = useRef<Partial<Span>>({});
+  const [, setFormatEpoch] = useState(0);
+  const rememberFormat = useCallback((key: keyof Span, value: any) => {
+    const next: any = { ...typingFormatRef.current };
+    if (value === undefined) delete next[key];
+    else next[key] = value;
+    typingFormatRef.current = next;
+    setFormatEpoch((n) => n + 1);
+  }, []);
 
   // Sync controlled value. A document the editor did not make (the app set it) ends the old history.
   useEffect(() => {
@@ -730,6 +850,7 @@ export function RichTextEditor({
 
   const setCursor = useCallback((c: { para: number; offset: number }) => {
     historyRef.current?.breakRun();
+    typingFormatRef.current = {};
     setCursor_(c);
     setSel_({ anchor: c, focus: c });
   }, []);
@@ -747,6 +868,7 @@ export function RichTextEditor({
     const now = { doc: docRef.current, cursor: cursorRef.current, sel: selRef.current };
     const s = redo ? history().redo(now) : history().undo(now);
     if (!s) return;
+    typingFormatRef.current = {};
     setDoc_(s.doc);
     onChange?.(s.doc);
     setCursor_(s.cursor);
@@ -776,6 +898,7 @@ export function RichTextEditor({
   // here — this only gets called when this editor is genuinely focused.
   const onKey = useCallback(({ key, text, ctrl, shift }: Record<string, any>) => {
     _family = familyRef.current.fontFamily; _variations = familyRef.current.fontVariationSettings;
+    _features = familyRef.current.fontFeatureSettings;
     setBlinkOn(true); // reset blink on any key
 
     const doc    = docRef.current;
@@ -785,6 +908,8 @@ export function RichTextEditor({
 
     // Anything but typing and deleting (arrows, Home, a chord) ends a run of typing.
     if (ctrl || !(key === 'Backspace' || key === 'Delete' || text)) history().breakRun();
+    // Moving the caret ends a pending format too: the new position's own run decides what typing looks like.
+    if (!text && key !== 'Backspace' && key !== 'Delete') typingFormatRef.current = {};
 
     // ── Ctrl shortcuts ───────────────────────────────────────────────────────
     if (ctrl) {
@@ -814,7 +939,7 @@ export function RichTextEditor({
           let result = { doc: d, cursor: c };
           for (let i = 0; i < lines.length; i++) {
             if (i > 0) result = insertBreak(result.doc, result.cursor);
-            if (lines[i]) result = insertText(result.doc, result.cursor, lines[i]);
+            if (lines[i]) result = insertText(result.doc, result.cursor, lines[i], typingFormatRef.current);
           }
           setDoc(result.doc); setCursor_(result.cursor); setSel_({ anchor: result.cursor, focus: result.cursor });
         }).catch(() => {});
@@ -860,8 +985,7 @@ export function RichTextEditor({
     }
     if (key === 'ArrowUp' || key === 'ArrowDown') {
       const dir = key === 'ArrowUp' ? -1 : 1;
-      const LINE_H = richTextLineHeight(fontSize);
-      const newPos = moveCursorVertical(layoutInfoRef.current, shift ? sel.focus : cursor, dir, LINE_H, fontSize);
+      const newPos = moveCursorVertical(layoutInfoRef.current, shift ? sel.focus : cursor, dir, fontSize);
       if (shift) { setSel_(s => ({ ...s, focus: newPos })); setCursor_(newPos); }
       else { setCursor(newPos); }
       return;
@@ -915,10 +1039,10 @@ export function RichTextEditor({
       const ch = text;
       if (hasSel) {
         const r = deleteSelection(doc, sel);
-        const r2 = insertText(r.doc, r.cursor, ch);
+        const r2 = insertText(r.doc, r.cursor, ch, typingFormatRef.current);
         setDoc(r2.doc); setCursor_(r2.cursor); setSel_({ anchor: r2.cursor, focus: r2.cursor });
       } else {
-        applyEdit((d: any, c: any) => insertText(d, c, ch), 'type');
+        applyEdit((d: any, c: any) => insertText(d, c, ch, typingFormatRef.current), 'type');
       }
       return;
     }
@@ -975,12 +1099,13 @@ export function RichTextEditor({
         const lineW = mw + lines[0].pieces.reduce((sum: any, p: { text: any; span: any; }) => sum + measureSpan(p.text, p.span, fontSize), 0);
         if (lineW > maxContentWidth) maxContentWidth = lineW;
       }
-      const item = { pi, para, mw, number, lines, y, height: lines.length * LINE_H };
+      const lineHeight = paragraphLineHeight(para, fontSize);
+      const item = { pi, para, mw, number, lines, y, lineHeight, height: lines.length * lineHeight };
       y += item.height;
       return item;
     });
     return { items, totalHeight: y, contentWidth, maxContentWidth };
-  }, [doc, fontSize, wrap, width, outerPadLeft, LINE_H]);
+  }, [doc, fontSize, wrap, width, outerPadLeft, fontFamily, fontVariationSettings, fontFeatureSettings]);
   layoutInfoRef.current = layoutInfo;
 
   const showHScrollbar = !wrap && layoutInfo.maxContentWidth > layoutInfo.contentWidth + 0.5;
@@ -1035,7 +1160,7 @@ export function RichTextEditor({
     const adjY = y - EDITOR_PADDING - outerPadTop - HIT_BIAS + scrollYRef.current;
     for (const item of items) {
       if (adjY < item.y + item.height || item === items[items.length - 1]) {
-        const lineIdx = Math.max(0, Math.min(item.lines.length - 1, Math.floor((adjY - item.y) / LINE_H)));
+        const lineIdx = Math.max(0, Math.min(item.lines.length - 1, Math.floor((adjY - item.y) / item.lineHeight)));
         return { pi: item.pi, lineIdx };
       }
     }
@@ -1068,6 +1193,7 @@ export function RichTextEditor({
   const textDragSuppressedRef = useRef(false);
   const onPress = useCallback((ev: { locationY: number; locationX: any; }) => {
     _family = familyRef.current.fontFamily; _variations = familyRef.current.fontVariationSettings;
+    _features = familyRef.current.fontFeatureSettings;
     const suppressed = hScrollbarBoundRef.current !== null && ev.locationY >= hScrollbarBoundRef.current;
     textDragSuppressedRef.current = suppressed;
     if (suppressed) return;
@@ -1086,7 +1212,9 @@ export function RichTextEditor({
   const onDragAt = useCallback((x: any, y: any) => {
     if (textDragSuppressedRef.current) return;
     _family = familyRef.current.fontFamily; _variations = familyRef.current.fontVariationSettings;
+    _features = familyRef.current.fontFeatureSettings;
     const c = posFromXY(x, y);
+    typingFormatRef.current = {};
     historyRef.current?.breakRun();
     setCursor_(c);
     setSel_({ anchor: dragAnchorRef.current, focus: c });
@@ -1099,6 +1227,7 @@ export function RichTextEditor({
   const onDoubleClickAt = useCallback((x: number, y: number) => {
     if (hScrollbarBoundRef.current !== null && y >= hScrollbarBoundRef.current) return;
     _family = familyRef.current.fontFamily; _variations = familyRef.current.fontVariationSettings;
+    _features = familyRef.current.fontFeatureSettings;
     _focusedEditor = nodeIdRef.current;
     setFocused(true);
     setBlinkOn(true);
@@ -1174,8 +1303,8 @@ export function RichTextEditor({
       const line = item.lines[li];
       if (cursor.offset >= line.start && (cursor.offset < line.end || li === item.lines.length - 1)) break;
     }
-    const caretTop    = item.y + Math.min(li, item.lines.length - 1) * LINE_H;
-    const caretBottom = caretTop + LINE_H;
+    const caretTop    = item.y + Math.min(li, item.lines.length - 1) * item.lineHeight;
+    const caretBottom = caretTop + item.lineHeight;
     const viewH = l.boxHeight ?? l.height; // own viewport, not the clipped part
     let sy = scrollYRef.current;
     if (caretBottom - sy > viewH) sy = caretBottom - viewH;
@@ -1248,6 +1377,7 @@ export function RichTextEditor({
       onDoubleClickAt,
       onDragAt,
       onKeyPress:      (ev) => onKey(ev),
+      onFocus: () => { _focusedEditor = id; setFocused(true); setBlinkOn(true); },
       onBlur: () => { if (_focusedEditor === id) { _focusedEditor = null; setFocused(false); } },
     });
     if (autoFocus) {
@@ -1271,11 +1401,26 @@ export function RichTextEditor({
 
   const ctxValue = {
     doc, setDoc, cursor, setCursor, sel, setSel: setSel_, applyEdit,
-    selectionHasFormat: (key: any) => selectionHasFormat(doc, sel, key),
-    toggleFormat: (key: any) => {
-      if (!hasSelection(sel)) return;
-      const on = selectionHasFormat(doc, sel, key);
-      setDoc(applyFormat(doc, sel, key, !on));
+    selectionHasFormat: (key: FormatKey) => {
+      if (hasSelection(sel)) return selectionHasFormat(doc, sel, key);
+      const pending = typingFormatRef.current[key];
+      if (pending !== undefined) return Boolean(pending);
+      return Boolean(spanAtCursor(doc, cursor)?.[key]);
+    },
+    toggleFormat: (key: FormatKey) => {
+      const on = hasSelection(sel)
+        ? selectionHasFormat(doc, sel, key)
+        : Boolean(typingFormatRef.current[key] ?? spanAtCursor(doc, cursor)?.[key]);
+      if (hasSelection(sel)) setDoc(applyFormat(doc, sel, key, !on));
+      rememberFormat(key, !on);
+    },
+    formatValue: (key: ValueFormatKey): FormatValue => {
+      if (!hasSelection(sel) && key in typingFormatRef.current) return typingFormatRef.current[key] as FormatValue;
+      return selectionFormatValue(doc, sel, key as keyof Span) as FormatValue;
+    },
+    setFormat: (key: ValueFormatKey, value: FormatValue) => {
+      if (hasSelection(sel)) setDoc(applyFormat(doc, sel, key as keyof Span, value));
+      rememberFormat(key as keyof Span, value);
     },
     // Applies to the current line (or every line touched by the selection).
     // Toggling the SAME list type off exits the list; toggling a DIFFERENT
@@ -1305,6 +1450,15 @@ export function RichTextEditor({
     },
     isListActive: (listType: any) => doc.paragraphs[cursor.para]?.listType === listType,
     fontSize,
+    // Toolbar Pressables use `keepFocus`, so the event layer keeps routing
+    // keys here; this also reverses the editor's own outside-click blur.
+    refocus: () => {
+      const id = nodeIdRef.current;
+      if (id == null) return;
+      _focusedEditor = id;
+      setFocused(true);
+      setBlinkOn(true);
+    },
   };
 
   const isEmpty = doc.paragraphs.length === 1 && paraText(doc.paragraphs[0]) === '';
@@ -1360,7 +1514,7 @@ export function RichTextEditor({
                 blinkOn={blinkOn}
                 fontSize={fontSize}
                 color={color}
-                lineHeight={LINE_H}
+                lineHeight={item.lineHeight}
               />
             ))}
           </View>
@@ -1426,7 +1580,7 @@ function LineSpans({ mw, markerText, fontSize, color, pieces }: Record<string, a
           exactly what should fit, so the native Text itself must never
           re-wrap them on its own (which, mid-relayout while typing, could
           use a stale/squeezed width and visibly wrap+snap-back). */}
-      {pieces.map((p: { text: string | number | boolean | React.ReactElement<any, string | React.JSXElementConstructor<any>> | Iterable<React.ReactNode> | React.ReactPortal | null | undefined; span: { fontSize: any; color: any; bold: any; italic: any; underline: any; fontFamily?: string; fontVariationSettings?: string; }; }, si: React.Key | null | undefined) => (
+      {pieces.map((p: { text: string | number | boolean | React.ReactElement<any, string | React.JSXElementConstructor<any>> | Iterable<React.ReactNode> | React.ReactPortal | null | undefined; span: { fontSize: any; color: any; bold: any; italic: any; underline: any; fontFamily?: string; fontVariationSettings?: string; fontFeatureSettings?: string; }; }, si: React.Key | null | undefined) => (
         p.text ? (
           <Text
             key={si}
@@ -1435,6 +1589,7 @@ function LineSpans({ mw, markerText, fontSize, color, pieces }: Record<string, a
               fontSize: p.span.fontSize ?? fontSize,
               ...((p.span.fontFamily ?? _family) ? { fontFamily: p.span.fontFamily ?? _family } : null),
               ...((p.span.fontVariationSettings ?? _variations) ? { fontVariationSettings: p.span.fontVariationSettings ?? _variations } : null),
+              ...((p.span.fontFeatureSettings ?? _features) ? { fontFeatureSettings: p.span.fontFeatureSettings ?? _features } : null),
               color: p.span.color ?? color,
               fontWeight: p.span.bold ? 'bold' : 'normal',
               fontStyle: p.span.italic ? 'italic' : 'normal',
@@ -1515,54 +1670,245 @@ function ParagraphRow({ para, paraIdx, mw, lines, cursor, sel, focused, blinkOn,
 
 // ── RichTextToolbar ───────────────────────────────────────────────────────────
 
-export function RichTextToolbar({ style }: RichTextToolbarProps) {
+/** Families a plain toolbar offers before the app passes its own: common on Windows, macOS and Linux, then the generic stacks. */
+const DEFAULT_FONT_FAMILIES = [
+  'system-ui', 'Segoe UI', 'Arial', 'Georgia', 'Times New Roman',
+  'Cascadia Mono', 'Consolas', 'Courier New', 'serif', 'monospace',
+];
+
+const FONT_SIZES = [10, 11, 12, 13, 14, 16, 18, 20, 24, 28, 32, 40];
+
+const TOOLBAR_BG = '#1b1b28';
+const TOOLBAR_BORDER = '#2c2c40';
+const TOOLBAR_HOVER = '#28283a';
+const TOOLBAR_ACTIVE = '#3541a3';
+const TOOLBAR_ICON = '#b8b8ce';
+
+export function RichTextToolbar({ style, fontFamilies = DEFAULT_FONT_FAMILIES }: RichTextToolbarProps) {
   const ctx = useContext(EditorCtx);
+  const [open, setOpen] = useState<'font' | 'size' | null>(null);
   if (!ctx) return null;
-  const { toggleFormat, selectionHasFormat, toggleList, indent, isListActive } = ctx;
+  const { toggleFormat, selectionHasFormat, formatValue, setFormat, toggleList, indent, isListActive, fontSize, refocus } = ctx;
+
+  const currentFamily = (formatValue('fontFamily') as string | undefined) ?? 'system-ui';
+  const currentSize = Math.round(Number(formatValue('fontSize') ?? fontSize));
+  const families = Array.from(new Set([currentFamily, ...fontFamilies]));
+  const familyLabel = currentFamily === 'system-ui' ? 'Default' : currentFamily;
+  const shownFamily = familyLabel.length > 18 ? `${familyLabel.slice(0, 17)}…` : familyLabel;
 
   return (
-    <View style={{
-      flexDirection: 'row',
-      gap: 4,
-      padding: 6,
-      backgroundColor: '#1e1e2e',
-      borderRadius: 6,
-      borderWidth: 1,
-      borderColor: '#2a2a3a',
-      marginBottom: 6,
-      ...style,
-    }}>
-      <ToolBtn label="B" active={selectionHasFormat('bold')}      onPress={() => toggleFormat('bold')}
-        style={{ fontWeight: 'bold' }} />
-      <ToolBtn label="I" active={selectionHasFormat('italic')}    onPress={() => toggleFormat('italic')}
-        style={{ fontStyle: 'italic' }} />
-      <ToolBtn label="U" active={selectionHasFormat('underline')} onPress={() => toggleFormat('underline')}
-        style={{ textDecorationLine: 'underline' }} />
-      <ToolBtn label="•"    active={isListActive('bullet')} onPress={() => toggleList('bullet')} />
-      <ToolBtn label="1."   active={isListActive('number')} onPress={() => toggleList('number')} />
-      <ToolBtn label="→|"   onPress={() => indent(1)} />
-      <ToolBtn label="|←"   onPress={() => indent(-1)} />
-    </View>
+    <Pressable
+      keepFocus
+      feedback={false}
+      onPress={() => { refocus(); setOpen(null); }}
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        padding: 5,
+        backgroundColor: TOOLBAR_BG,
+        borderRadius: 7,
+        borderWidth: 1,
+        borderColor: TOOLBAR_BORDER,
+        marginBottom: 8,
+        // The toolbar must outrank the status/feature rows that follow it in
+        // the editor's children, or an open menu is painted underneath them.
+        zIndex: open ? 80 : undefined,
+        ...style,
+      }}
+    >
+      {open ? (
+        <Pressable
+          keepFocus
+          feedback={false}
+          onPress={() => { refocus(); setOpen(null); }}
+          style={{ position: 'absolute', left: -2000, top: -2000, width: 4000, height: 4000, zIndex: 0 }}
+        />
+      ) : null}
+
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, flex: 1, zIndex: 1 }}>
+        <ToolButton icon="bold" label="Bold" active={selectionHasFormat('bold')}
+          onPress={() => { refocus(); setOpen(null); toggleFormat('bold'); }} />
+        <ToolButton icon="italic" label="Italic" active={selectionHasFormat('italic')}
+          onPress={() => { refocus(); setOpen(null); toggleFormat('italic'); }} />
+        <ToolButton icon="underline" label="Underline" active={selectionHasFormat('underline')}
+          onPress={() => { refocus(); setOpen(null); toggleFormat('underline'); }} />
+
+        <ToolbarSeparator />
+
+        <ToolButton icon="list" label="Bullet list" active={isListActive('bullet')}
+          onPress={() => { refocus(); setOpen(null); toggleList('bullet'); }} />
+        <ToolButton icon="list-ordered" label="Numbered list" active={isListActive('number')}
+          onPress={() => { refocus(); setOpen(null); toggleList('number'); }} />
+
+        <ToolbarSeparator />
+
+        <ToolButton icon="indent-increase" label="Increase indent"
+          onPress={() => { refocus(); setOpen(null); indent(1); }} />
+        <ToolButton icon="indent-decrease" label="Decrease indent"
+          onPress={() => { refocus(); setOpen(null); indent(-1); }} />
+
+        <ToolbarSeparator />
+
+        {/* Font family: the trigger shows the name in its own font; the menu
+            previews each family the same way. */}
+        <View style={{ position: 'relative', zIndex: 55 }}>
+          <MenuTrigger
+            width={150}
+            open={open === 'font'}
+            onPress={() => { refocus(); setOpen((o) => o === 'font' ? null : 'font'); }}
+          >
+            <Icon name="type" size={14} color={open === 'font' ? '#fff' : TOOLBAR_ICON} />
+            <Text style={{
+              fontSize: 12,
+              fontFamily: currentFamily === 'system-ui' ? undefined : currentFamily,
+              color: open === 'font' ? '#fff' : '#d0d0e2',
+              flex: 1,
+            }}>{shownFamily}</Text>
+          </MenuTrigger>
+          {open === 'font' ? (
+            <View style={{
+              position: 'absolute', top: 35, left: 0, width: 232,
+              backgroundColor: '#1c1c29', borderRadius: 9, borderWidth: 1, borderColor: '#36364e',
+              padding: 4, zIndex: 60, boxShadow: '0 14 36 #00000088',
+            }}>
+              <Text style={{ fontSize: 10, color: '#74748f', paddingHorizontal: 8, paddingTop: 5, paddingBottom: 4 }}>
+                FONT FAMILY
+              </Text>
+              {families.map((family) => {
+                const selected = family === currentFamily;
+                return (
+                  <MenuRow
+                    key={family}
+                    label={family === 'system-ui' ? 'Default' : family}
+                    selected={selected}
+                    fontFamily={family === 'system-ui' ? undefined : family}
+                    onPress={() => {
+                      refocus();
+                      setFormat('fontFamily', family === 'system-ui' ? undefined : family);
+                      setOpen(null);
+                    }}
+                  />
+                );
+              })}
+            </View>
+          ) : null}
+        </View>
+
+        {/* Font size: same menu behaviour, sized to the numbers it carries. */}
+        <View style={{ position: 'relative', zIndex: 55 }}>
+          <MenuTrigger
+            width={68}
+            open={open === 'size'}
+            onPress={() => { refocus(); setOpen((o) => o === 'size' ? null : 'size'); }}
+          >
+            <Text style={{ fontSize: 12, color: open === 'size' ? '#fff' : '#d0d0e2', flex: 1 }}>
+              {currentSize}
+            </Text>
+          </MenuTrigger>
+          {open === 'size' ? (
+            <View style={{
+              position: 'absolute', top: 35, left: 0, width: 84,
+              backgroundColor: '#1c1c29', borderRadius: 9, borderWidth: 1, borderColor: '#36364e',
+              padding: 4, zIndex: 60, boxShadow: '0 14 36 #00000088',
+            }}>
+              <Text style={{ fontSize: 10, color: '#74748f', paddingHorizontal: 8, paddingTop: 5, paddingBottom: 4 }}>
+                SIZE
+              </Text>
+              {FONT_SIZES.map((size) => (
+                <MenuRow
+                  key={size}
+                  label={String(size)}
+                  selected={size === currentSize}
+                  onPress={() => { refocus(); setFormat('fontSize', size); setOpen(null); }}
+                />
+              ))}
+            </View>
+          ) : null}
+        </View>
+      </View>
+    </Pressable>
   );
 }
 
-function ToolBtn({ label, active, onPress, style: textStyle }: Record<string, any>) {
+function ToolbarSeparator() {
+  return <View style={{ width: 1, height: 18, backgroundColor: '#323248', marginHorizontal: 3 }} />;
+}
+
+function ToolButton({ icon, label, active, onPress }: Record<string, any>) {
   const [hover, setHover] = useState(false);
   return (
     <Pressable
+      keepFocus
+      feedback={false}
+      ariaLabel={label}
       onPress={onPress}
       onHoverIn={() => setHover(true)}
       onHoverOut={() => setHover(false)}
       style={{
-        width: 30, height: 28,
+        width: 30, height: 30,
         alignItems: 'center', justifyContent: 'center',
-        backgroundColor: active ? '#3949ab' : hover ? '#2a2a3a' : 'transparent',
-        borderRadius: 4,
+        backgroundColor: active ? TOOLBAR_ACTIVE : hover ? TOOLBAR_HOVER : 'transparent',
+        borderRadius: 5,
         borderWidth: 1,
-        borderColor: active ? '#5c6bc0' : 'transparent',
+        borderColor: active ? '#5968d8' : 'transparent',
       }}
     >
-      <Text style={{ fontSize: 13, color: active ? '#fff' : '#aaa', ...textStyle }}>{label}</Text>
+      <Icon
+        name={icon}
+        size={16}
+        strokeWidth={2}
+        color={active ? '#ffffff' : hover ? '#e4e4f2' : TOOLBAR_ICON}
+      />
+    </Pressable>
+  );
+}
+
+function MenuTrigger({ width, open, onPress, children }: Record<string, any>) {
+  const [hover, setHover] = useState(false);
+  return (
+    <Pressable
+      keepFocus
+      feedback={false}
+      onPress={onPress}
+      onHoverIn={() => setHover(true)}
+      onHoverOut={() => setHover(false)}
+      style={{
+        width, height: 30,
+        flexDirection: 'row', alignItems: 'center', gap: 6,
+        paddingHorizontal: 8,
+        backgroundColor: open ? '#2d2d42' : hover ? TOOLBAR_HOVER : 'transparent',
+        borderRadius: 5,
+        borderWidth: 1,
+        borderColor: open ? '#484866' : 'transparent',
+      }}
+    >
+      {children}
+      <Icon name="chevron-down" size={12} color="#8585a0" />
+    </Pressable>
+  );
+}
+
+function MenuRow({ label, selected, fontFamily, onPress }: Record<string, any>) {
+  const [hover, setHover] = useState(false);
+  return (
+    <Pressable
+      keepFocus
+      feedback={false}
+      onPress={onPress}
+      onHoverIn={() => setHover(true)}
+      onHoverOut={() => setHover(false)}
+      style={{
+        height: 32,
+        paddingHorizontal: 8,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        borderRadius: 5,
+        backgroundColor: selected ? '#343fa8' : hover ? '#2a2a3d' : 'transparent',
+      }}
+    >
+      <Text style={{ flex: 1, fontSize: 13, color: selected ? '#fff' : '#d0d0e2', fontFamily }}>{label}</Text>
+      {selected ? <Icon name="check" size={14} color="#ffffff" /> : null}
     </Pressable>
   );
 }

@@ -770,8 +770,12 @@ pub(crate) fn apply_scene_commands(state: &mut PerWindowState, commands: Vec<Sce
                         reveal_focus_if_needed(state, new_focus);
                     }
                 }
-                // Clean up all per-node state for the removed node.
-                state.dirty_nodes.remove(&id);
+                // Keep the removed id in dirty_nodes until this frame's damage is
+                // computed. compute_frame_damage erases where it was last drawn
+                // (prev_visual); the parent's own bounds miss an overflowing child
+                // such as a dropdown, tooltip or shadow. record_visual_bounds then
+                // drops the dead entry after the frame.
+                state.dirty_nodes.insert(id);
                 state.dirty_subtrees.remove(&id);
                 state.prev_resolved.remove(&id);
                 state.scene_cache.remove(&id);

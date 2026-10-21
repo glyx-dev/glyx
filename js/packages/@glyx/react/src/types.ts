@@ -92,31 +92,31 @@ export interface GlyxStyle {
   backgroundGradient?: string;
   opacity?:          number;
   borderRadius?:     number;
-  /** @deprecated Per-corner radii are not drawn yet: the renderer ignores them. Use `borderRadius`. */
+  /** Overrides `borderRadius` for the top-left corner. */
   borderTopLeftRadius?:     number;
-  /** @deprecated See `borderTopLeftRadius`. */
+  /** Overrides `borderRadius` for the top-right corner. */
   borderTopRightRadius?:    number;
-  /** @deprecated See `borderTopLeftRadius`. */
+  /** Overrides `borderRadius` for the bottom-left corner. */
   borderBottomLeftRadius?:  number;
-  /** @deprecated See `borderTopLeftRadius`. */
+  /** Overrides `borderRadius` for the bottom-right corner. */
   borderBottomRightRadius?: number;
   borderWidth?:      number;
   borderColor?:      string;
-  /** @deprecated Per-side borders are not drawn yet: the renderer ignores them. Use `borderWidth`/`borderColor`, or a 1px `View` as a divider. */
+  /** Per-side border width. Overrides `borderWidth` for this side; borders paint only and take no layout space. */
   borderTopWidth?:    number;
-  /** @deprecated See `borderTopWidth`. */
+  /** Per-side border width. Overrides `borderWidth` for this side. */
   borderRightWidth?:  number;
-  /** @deprecated See `borderTopWidth`. */
+  /** Per-side border width. Overrides `borderWidth` for this side. */
   borderBottomWidth?: number;
-  /** @deprecated See `borderTopWidth`. */
+  /** Per-side border width. Overrides `borderWidth` for this side. */
   borderLeftWidth?:   number;
-  /** @deprecated See `borderTopWidth`. */
+  /** Per-side border colour. Overrides `borderColor` for this side. */
   borderTopColor?:    string;
-  /** @deprecated See `borderTopWidth`. */
+  /** Per-side border colour. Overrides `borderColor` for this side. */
   borderRightColor?:  string;
-  /** @deprecated See `borderTopWidth`. */
+  /** Per-side border colour. Overrides `borderColor` for this side. */
   borderBottomColor?: string;
-  /** @deprecated See `borderTopWidth`. */
+  /** Per-side border colour. Overrides `borderColor` for this side. */
   borderLeftColor?:   string;
   boxShadow?:        string;   // 'x y blur colour', e.g. '0 2 4 #00000044'
   transform?:        string;
@@ -144,6 +144,13 @@ export interface GlyxStyle {
    * way, for a font with a `wght` axis or several weight files.
    */
   fontVariationSettings?: string;
+  /**
+   * OpenType features, as CSS source: `"'tnum' 1"` for tabular figures, `"'liga' 0"` to turn ligatures off, `"'smcp' 1"` for small
+   * caps, `"'ss01' 1"` for a stylistic set. Each name is a four-letter feature tag the font defines; a font without it ignores it.
+   * Applied when the text is shaped, so measuring, drawing, wrapping and hit-testing all see the same glyphs. `TextInput` and the
+   * rich-text editor measure their caret with it too.
+   */
+  fontFeatureSettings?: string;
   /**
    * The mouse cursor while the pointer is over this element (or a child with no cursor of its own), as in CSS. Buttons (`Pressable`
    * with `onPress`) show `'pointer'` and text fields `'text'` unless you say otherwise. `glyxWindow.setCursor(name)` still sets the
@@ -302,6 +309,8 @@ export interface TextInputProps {
   fontFamily?:      string;
   /** The axes of a variable font (also `style.fontVariationSettings`), measured the same way. */
   fontVariationSettings?: string;
+  /** OpenType features (also `style.fontFeatureSettings`), e.g. `"'tnum' 1, 'smcp' 1"`, measured the same way. */
+  fontFeatureSettings?: string;
   autoFocus?:       boolean;
   /**
    * Ctrl+Z undoes and Ctrl+Y (or Ctrl+Shift+Z) redoes, as in a browser: typing is undone a run at a time, cut, paste, Enter and

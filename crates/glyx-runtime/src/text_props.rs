@@ -32,11 +32,20 @@ pub fn text_style(props: &NodeProps) -> TextStyle {
     }
 }
 
-/// The `glyx_text::font_id` of a node's `fontFamily`, `fontVariationSettings` and numeric `fontWeight` (`0` when it asks for none of them).
-/// Layout, drawing, accessibility and the hit-test calls all key their shaping by it, so they agree.
+/// The `glyx_text::font_id` of a node's `fontFamily`, `fontVariationSettings`, `fontFeatureSettings` and numeric `fontWeight` (`0` when
+/// it asks for none of them). Layout, drawing, accessibility and the hit-test calls all key their shaping by it, so they agree.
 pub fn font_id(props: &NodeProps) -> glyx_text::FamilyId {
-    if props.font_family.is_none() && props.font_variation_settings.is_none() && props.font_weight.is_none() { return 0; }
-    glyx_text::font_id(props.font_family.as_deref(), props.font_variation_settings.as_deref(), props.font_weight.as_deref())
+    if props.font_family.is_none() && props.font_variation_settings.is_none()
+        && props.font_feature_settings.is_none() && props.font_weight.is_none()
+    {
+        return 0;
+    }
+    glyx_text::font_id_with_features(
+        props.font_family.as_deref(),
+        props.font_variation_settings.as_deref(),
+        props.font_weight.as_deref(),
+        props.font_feature_settings.as_deref(),
+    )
 }
 
 /// How the shaped text is placed inside a `width` × `height` layout box.
@@ -80,6 +89,22 @@ mod tests {
         for w in ["bold", "bolder", "600", "700", "900"] { assert!(is_bold(Some(w)), "{w}"); }
         for w in ["normal", "400", "500", "lighter", "abc"] { assert!(!is_bold(Some(w)), "{w}"); }
         assert!(!is_bold(None));
+    }
+
+    #[test]
+    fn font_features_join_the_font_id() {
+        let plain = NodeProps { font_family: Some("Inter".to_string()), ..NodeProps::default() };
+        let featured = NodeProps {
+            font_family: Some("Inter".to_string()),
+            font_feature_settings: Some("'tnum' 1".to_string()),
+            ..NodeProps::default()
+        };
+        assert_ne!(font_id(&plain), font_id(&featured));
+        assert_eq!(font_id(&featured), font_id(&featured));
+        // Features alone are still a font request (the default stack with features), not font 0.
+        let only_features = NodeProps { font_feature_settings: Some("'smcp' 1".to_string()), ..NodeProps::default() };
+        assert_ne!(font_id(&only_features), 0);
+        assert_eq!(font_id(&NodeProps::default()), 0);
     }
 
     #[test]

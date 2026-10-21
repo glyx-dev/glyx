@@ -870,6 +870,8 @@ pub struct NodeProps {
     pub font_family:     Option<String>,
     /// `fontVariationSettings`: the axes of a variable font, CSS source (`"'wght' 650, 'wdth' 80"`).
     pub font_variation_settings: Option<String>,
+    /// `fontFeatureSettings`: OpenType features, CSS source (`"'liga' 0, 'tnum' 1, 'smcp' 1, 'ss01' 1"`).
+    pub font_feature_settings: Option<String>,
     /// Absolute line height in the same px units as `font_size`. Absent
     /// means Parley's own metrics-relative default (the font's own line
     /// gap) — this only overrides it when a caller explicitly sets it.
@@ -889,6 +891,11 @@ pub struct NodeProps {
     /// Background fill colour as RGBA [r, g, b, a] 0€“255.
     pub background_color: Option<[u8; 4]>,
     pub border_radius:    Option<f32>,
+    /// Per-corner radii; each overrides `border_radius` for its corner.
+    pub border_top_left_radius:     Option<f32>,
+    pub border_top_right_radius:    Option<f32>,
+    pub border_bottom_left_radius:  Option<f32>,
+    pub border_bottom_right_radius: Option<f32>,
 
     //  Flex layout 
     /// `flex` shorthand  like CSS `flex: 1`.
@@ -972,6 +979,16 @@ pub struct NodeProps {
     pub border_width: Option<f32>,
     /// Border stroke colour as RGBA [r, g, b, a] 0€“255.
     pub border_color: Option<[u8; 4]>,
+    /// Per-side border widths; each overrides `border_width` for its side.
+    pub border_top_width:    Option<f32>,
+    pub border_right_width:  Option<f32>,
+    pub border_bottom_width: Option<f32>,
+    pub border_left_width:   Option<f32>,
+    /// Per-side border colours; each overrides `border_color` for its side.
+    pub border_top_color:    Option<[u8; 4]>,
+    pub border_right_color:  Option<[u8; 4]>,
+    pub border_bottom_color: Option<[u8; 4]>,
+    pub border_left_color:   Option<[u8; 4]>,
 
     //  Scroll / clip / overflow €€
     /// When true, clip children rendering to this node's layout bounds.
@@ -1194,6 +1211,61 @@ pub struct NodeProps {
     /// value instead of jumping. Set by `ScrollView` (opt out with
     /// `smoothScroll={false}`); other scrolling nodes snap as before.
     pub smooth_scroll: Option<bool>,
+}
+
+impl NodeProps {
+    /// The colour a border side falls back to when neither a per-side colour
+    /// nor `borderColor` is set. Kept in sync with `render.rs`'s historical
+    /// default so existing uniform borders keep their exact look.
+    pub const DEFAULT_BORDER_COLOR: [u8; 4] = [80, 80, 120, 255];
+
+    fn clean_width(w: Option<f32>) -> f32 {
+        match w {
+            Some(v) if v.is_finite() => v.max(0.0),
+            _ => 0.0,
+        }
+    }
+
+    /// Effective widths in CSS order: top, right, bottom, left.
+    /// `borderTopWidth` etc. override `borderWidth` per side.
+    pub fn effective_border_widths(&self) -> [f32; 4] {
+        let uniform = Self::clean_width(self.border_width);
+        [
+            self.border_top_width.map_or(uniform, |v| Self::clean_width(Some(v))),
+            self.border_right_width.map_or(uniform, |v| Self::clean_width(Some(v))),
+            self.border_bottom_width.map_or(uniform, |v| Self::clean_width(Some(v))),
+            self.border_left_width.map_or(uniform, |v| Self::clean_width(Some(v))),
+        ]
+    }
+
+    /// Effective colours in CSS order: top, right, bottom, left.
+    pub fn effective_border_colors(&self) -> [[u8; 4]; 4] {
+        let uniform = self.border_color.unwrap_or(Self::DEFAULT_BORDER_COLOR);
+        [
+            self.border_top_color.unwrap_or(uniform),
+            self.border_right_color.unwrap_or(uniform),
+            self.border_bottom_color.unwrap_or(uniform),
+            self.border_left_color.unwrap_or(uniform),
+        ]
+    }
+
+    /// Effective radii in CSS order: top-left, top-right, bottom-right,
+    /// bottom-left. Per-corner values override `borderRadius`.
+    pub fn effective_border_radii(&self) -> [f32; 4] {
+        let uniform = Self::clean_width(self.border_radius);
+        [
+            self.border_top_left_radius.map_or(uniform, |v| Self::clean_width(Some(v))),
+            self.border_top_right_radius.map_or(uniform, |v| Self::clean_width(Some(v))),
+            self.border_bottom_right_radius.map_or(uniform, |v| Self::clean_width(Some(v))),
+            self.border_bottom_left_radius.map_or(uniform, |v| Self::clean_width(Some(v))),
+        ]
+    }
+
+    /// Whether any side would draw something. A colour without a width is
+    /// not a border, matching the old `borderWidth > 0` test.
+    pub fn has_border(&self) -> bool {
+        self.effective_border_widths().iter().any(|w| *w > 0.0)
+    }
 }
 
 //  Canvas 2D draw commands
@@ -2636,11 +2708,16 @@ fn parse_props(
     props.font_size             = get_num_prop(scope, obj, "fontSize");
     props.font_family           = get_str_prop(scope, obj, "fontFamily").map(|s| s.to_string());
     props.font_variation_settings = get_str_prop(scope, obj, "fontVariationSettings").map(|s| s.to_string());
+    props.font_feature_settings   = get_str_prop(scope, obj, "fontFeatureSettings").map(|s| s.to_string());
     props.line_height           = get_num_prop(scope, obj, "lineHeight");
     props.font_weight           = get_str_prop(scope, obj, "fontWeight").map(|s| s.to_string());
     props.font_style            = get_str_prop(scope, obj, "fontStyle").map(|s| s.to_string());
     props.text_decoration_line  = get_str_prop(scope, obj, "textDecorationLine").map(|s| s.to_string());
     props.border_radius = get_num_prop(scope, obj, "borderRadius");
+    props.border_top_left_radius     = get_num_prop(scope, obj, "borderTopLeftRadius");
+    props.border_top_right_radius    = get_num_prop(scope, obj, "borderTopRightRadius");
+    props.border_bottom_left_radius  = get_num_prop(scope, obj, "borderBottomLeftRadius");
+    props.border_bottom_right_radius = get_num_prop(scope, obj, "borderBottomRightRadius");
     props.padding     = get_length_prop(scope, obj, "padding");
     props.gap         = get_length_prop(scope, obj, "gap");
     props.flex        = get_num_prop(scope, obj, "flex");
@@ -2690,6 +2767,14 @@ fn parse_props(
     props.text_align    = get_str_prop(scope, obj, "textAlign");
     props.border_width  = get_num_prop(scope, obj, "borderWidth");
     props.border_color  = get_color_prop(scope, obj, "borderColor");
+    props.border_top_width    = get_num_prop(scope, obj, "borderTopWidth");
+    props.border_right_width  = get_num_prop(scope, obj, "borderRightWidth");
+    props.border_bottom_width = get_num_prop(scope, obj, "borderBottomWidth");
+    props.border_left_width   = get_num_prop(scope, obj, "borderLeftWidth");
+    props.border_top_color    = get_color_prop(scope, obj, "borderTopColor");
+    props.border_right_color  = get_color_prop(scope, obj, "borderRightColor");
+    props.border_bottom_color = get_color_prop(scope, obj, "borderBottomColor");
+    props.border_left_color   = get_color_prop(scope, obj, "borderLeftColor");
 
     props.clip            = get_bool_prop(scope, obj, "clip");
     props.scroll_offset_y = get_num_prop(scope, obj, "scrollOffsetY");
@@ -2864,6 +2949,34 @@ fn throw_js_error(scope: &mut v8::PinScope<'_, '_, v8::Context>, msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_side_and_per_corner_values_fall_back_to_the_uniform_props() {
+        let p = NodeProps {
+            border_width: Some(2.0),
+            border_left_width: Some(3.0),
+            border_color: Some([1, 2, 3, 255]),
+            border_top_color: Some([9, 9, 9, 255]),
+            border_radius: Some(4.0),
+            border_top_left_radius: Some(9.0),
+            ..Default::default()
+        };
+        assert_eq!(p.effective_border_widths(), [2.0, 2.0, 2.0, 3.0]);
+        assert_eq!(p.effective_border_colors(), [
+            [9, 9, 9, 255], [1, 2, 3, 255], [1, 2, 3, 255], [1, 2, 3, 255],
+        ]);
+        assert_eq!(p.effective_border_radii(), [9.0, 4.0, 4.0, 4.0]);
+        assert!(p.has_border());
+
+        let p = NodeProps {
+            border_width: Some(-2.0),
+            border_right_width: Some(f32::NAN),
+            ..Default::default()
+        };
+        assert_eq!(p.effective_border_widths(), [0.0, 0.0, 0.0, 0.0]);
+        assert!(!p.has_border());
+        assert_eq!(p.effective_border_colors()[0], NodeProps::DEFAULT_BORDER_COLOR);
+    }
 
     //  Canvas binary protocol 
     //

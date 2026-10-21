@@ -6,6 +6,8 @@
 - **A right click outside an open popover now dismisses it** (only a left click did), which a context menu needs.
 
 ### Added
+- **`style.fontFeatureSettings`.** OpenType features as CSS source (`"'liga' 0, 'tnum' 1, 'smcp' 1, 'ss01' 1"`): ligatures, tabular figures, small caps, stylistic sets. Features are part of the font id, so layout, drawing, wrapping, ellipsis, hit-testing and `measureText` all shape the same glyphs. `TextInput`, `SelectableText` and the rich-text editor measure their caret with them, and a rich-text span can set its own. `measureText` takes them as a sixth argument.
+- **Per-side borders and per-corner radii.** `borderTopWidth` / `borderRightWidth` / `borderBottomWidth` / `borderLeftWidth` and the matching `borderTopColor` / ... keys override `borderWidth` / `borderColor` per side; `borderTopLeftRadius` / `borderTopRightRadius` / `borderBottomLeftRadius` / `borderBottomRightRadius` override `borderRadius` per corner. The keys are no longer `@deprecated`. A uniform border keeps the old centred stroke and looks exactly as before; mixed widths or colours draw four inside bands joined on the corner diagonal, so they still take no layout space. Per-corner radii also apply to backgrounds, shadows, image clipping and overflow clips.
 - **`style.fontVariationSettings` and numeric `fontWeight`.** The axes of a variable font, as CSS source (`"'wght' 650, 'wdth' 80"`), and a weight other than 400 and 700 (`300`, `'550'`), now reach the font. `TextInput`, `SelectableText` and `measureText` measure caret, clicks and sizes in them.
 - **`style.cursor`.** The mouse cursor while the pointer is over an element (or a child with none of its own), as in CSS: `pointer`, `text`, `move`, `grab`, `grabbing`, `col-resize`, `row-resize`, `ew-resize`, `ns-resize`, `crosshair`, `not-allowed`, `wait`, `default`. A `Pressable` with `onPress` shows the hand (not when disabled), text fields and the rich-text editor the text cursor, a `Slider` the hand, and the split pane's divider its resize cursor, now declaratively. Resolved once per frame in which the pointer moved, set only when it changes, and left alone while a button is held. `glyxWindow.setCursor` still works. The `cursor` key is no longer `@deprecated`, and the table's resize handles now work.
 - **`style.fontFamily`.** A CSS-like list (`'Inter'`, `'Cascadia Mono, monospace'`, `'serif'`) naming a font the app ships (`fonts` in the config) or one installed on the machine, first match wins, then the default font. It is no longer `@deprecated`; the markdown package's code spans and `SelectableText` with `fontFamily: 'monospace'` now use a monospace font. `TextInput` (a `fontFamily` prop, or `style.fontFamily`), `SelectableText` and `RichTextEditor` (a `fontFamily` prop) measure their caret and clicks in the family, and `measureText` takes it as a fourth argument.
@@ -35,9 +37,6 @@
 
 ### Fixed
 - The webview message poll parsed `"[]"` on every frame; it now skips an empty queue like the other pollers.
-
-### Deprecated
-- Style keys the renderer ignores are still accepted, typed `@deprecated`, so TypeScript shows a strike-through: per-side border widths and colours (`borderTopWidth`, `borderTopColor`, ...), `fontFamily`, `cursor`.
 
 ## [0.2.0] - 2026-10-05
 

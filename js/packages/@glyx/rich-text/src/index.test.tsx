@@ -2,7 +2,7 @@ import { test, expect } from 'bun:test';
 import {
   emptyDoc, paraText, splitSpansAt, mergeSpans, cursorEq, hasSelection, normSel,
   clampCursor, moveCursorBy, insertText, insertBreak, deleteChar, deleteSelection,
-  applyFormat, selectionHasFormat, selectedText, docToPlainText, docFromPlainText,
+  applyFormat, selectionHasFormat, selectionFormatValue, spanAtCursor, selectedText, docToPlainText, docFromPlainText,
   computeListNumber, wordRangeAt, charIndexAtPoint,
 } from './index.js';
 
@@ -104,6 +104,15 @@ test('insertText inherits formatting from the preceding span', () => {
   expect(r.doc.paragraphs[0].spans[0].bold).toBe(true);
 });
 
+test('insertText applies a pending format over the run it inherits', () => {
+  const d = { paragraphs: [{ spans: [{ text: 'foo', bold: true }] }] };
+  const r = insertText(d, { para: 0, offset: 3 }, 'bar', { fontFamily: 'Georgia', fontFeatureSettings: "'tnum' 1" });
+  expect(paraText(r.doc.paragraphs[0])).toBe('foobar');
+  expect(r.doc.paragraphs[0].spans[1]).toMatchObject({
+    text: 'bar', bold: true, fontFamily: 'Georgia', fontFeatureSettings: "'tnum' 1",
+  });
+});
+
 test('insertBreak splits a paragraph into two at the cursor', () => {
   const d = doc('helloworld');
   const r = insertBreak(d, { para: 0, offset: 5 });
@@ -190,6 +199,39 @@ test('selectionHasFormat is false for a collapsed (empty) selection', () => {
   const d = doc('hello');
   const collapsed = { anchor: { para: 0, offset: 2 }, focus: { para: 0, offset: 2 } };
   expect(selectionHasFormat(d, collapsed, 'bold')).toBe(false);
+});
+
+test('applyFormat sets and clears value formats on just the selection', () => {
+  const d = doc('hello world');
+  const sel = { anchor: { para: 0, offset: 0 }, focus: { para: 0, offset: 5 } };
+  let result = applyFormat(d, sel, 'fontFamily', 'Georgia');
+  result = applyFormat(result, sel, 'fontFeatureSettings', "'smcp' 1");
+  result = applyFormat(result, sel, 'fontSize', 22);
+  expect(selectionFormatValue(result, sel, 'fontFamily')).toBe('Georgia');
+  expect(selectionFormatValue(result, sel, 'fontFeatureSettings')).toBe("'smcp' 1");
+  expect(selectionFormatValue(result, sel, 'fontSize')).toBe(22);
+  // The rest of the paragraph keeps the editor's defaults.
+  const restSel = { anchor: { para: 0, offset: 6 }, focus: { para: 0, offset: 11 } };
+  expect(selectionFormatValue(result, restSel, 'fontFamily')).toBeUndefined();
+  result = applyFormat(result, sel, 'fontFamily', undefined);
+  expect(selectionFormatValue(result, sel, 'fontFamily')).toBeUndefined();
+});
+
+test('selectionFormatValue is undefined when the selected runs disagree', () => {
+  const d = { paragraphs: [{ spans: [
+    { text: 'one ', fontFamily: 'Georgia' },
+    { text: 'two', fontFamily: 'Consolas' },
+  ] }] };
+  const sel = { anchor: { para: 0, offset: 0 }, focus: { para: 0, offset: 7 } };
+  expect(selectionFormatValue(d, sel, 'fontFamily')).toBeUndefined();
+});
+
+test('spanAtCursor finds the run before the caret, and the first run at the start', () => {
+  const d = { paragraphs: [{ spans: [{ text: 'ab', fontFamily: 'Georgia' }, { text: 'cd', fontFamily: 'Consolas' }] }] };
+  expect(spanAtCursor(d, { para: 0, offset: 0 })?.fontFamily).toBe('Georgia');
+  expect(spanAtCursor(d, { para: 0, offset: 2 })?.fontFamily).toBe('Georgia');
+  expect(spanAtCursor(d, { para: 0, offset: 3 })?.fontFamily).toBe('Consolas');
+  expect(spanAtCursor(d, { para: 0, offset: 4 })?.fontFamily).toBe('Consolas');
 });
 
 test('selectedText spans multiple paragraphs with newline separators', () => {
@@ -384,4 +426,13 @@ test('mergeSpans does not merge runs in different fonts, and does merge equal on
     { text: 'e', fontFamily: 'Georgia', fontVariationSettings: "'wght' 300" },
   ]);
   expect(merged.map((s: any) => s.text)).toEqual(['ab', 'c', 'de']);
+});
+
+test('mergeSpans does not merge runs in different OpenType features', () => {
+  const merged = mergeSpans([
+    { text: '1', fontFeatureSettings: "'tnum' 1" },
+    { text: '2', fontFeatureSettings: "'tnum' 1" },
+    { text: '3', fontFeatureSettings: "'smcp' 1" },
+  ]);
+  expect(merged.map((s: any) => s.text)).toEqual(['12', '3']);
 });

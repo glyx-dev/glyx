@@ -95,6 +95,7 @@ pub(crate) fn parse_props_value(props: Value<'_>) -> NodeProps {
     out.font_size             = get_num(&obj, "fontSize");
     out.font_family           = get_str(&obj, "fontFamily");
     out.font_variation_settings = get_str(&obj, "fontVariationSettings");
+    out.font_feature_settings   = get_str(&obj, "fontFeatureSettings");
     out.line_height           = get_num(&obj, "lineHeight");
     out.font_weight           = get_str(&obj, "fontWeight");
     out.font_style            = get_str(&obj, "fontStyle");
@@ -104,6 +105,10 @@ pub(crate) fn parse_props_value(props: Value<'_>) -> NodeProps {
 
     out.background_color = get_color(&obj, "backgroundColor");
     out.border_radius    = get_num(&obj, "borderRadius");
+    out.border_top_left_radius     = get_num(&obj, "borderTopLeftRadius");
+    out.border_top_right_radius    = get_num(&obj, "borderTopRightRadius");
+    out.border_bottom_left_radius  = get_num(&obj, "borderBottomLeftRadius");
+    out.border_bottom_right_radius = get_num(&obj, "borderBottomRightRadius");
 
     out.flex            = get_num(&obj, "flex");
     out.flex_direction   = get_str(&obj, "flexDirection");
@@ -148,6 +153,14 @@ pub(crate) fn parse_props_value(props: Value<'_>) -> NodeProps {
     out.text_align    = get_str(&obj, "textAlign");
     out.border_width  = get_num(&obj, "borderWidth");
     out.border_color  = get_color(&obj, "borderColor");
+    out.border_top_width    = get_num(&obj, "borderTopWidth");
+    out.border_right_width  = get_num(&obj, "borderRightWidth");
+    out.border_bottom_width = get_num(&obj, "borderBottomWidth");
+    out.border_left_width   = get_num(&obj, "borderLeftWidth");
+    out.border_top_color    = get_color(&obj, "borderTopColor");
+    out.border_right_color  = get_color(&obj, "borderRightColor");
+    out.border_bottom_color = get_color(&obj, "borderBottomColor");
+    out.border_left_color   = get_color(&obj, "borderLeftColor");
 
     out.clip              = get_bool(&obj, "clip");
     out.scroll_offset_y   = get_num(&obj, "scrollOffsetY");
@@ -298,9 +311,12 @@ mod tests {
         let props = parse("({
             width: 100, height: '50%',
             fontSize: 16, lineHeight: 22, fontWeight: 'bold', fontStyle: 'italic',
+            fontFamily: 'Inter', fontVariationSettings: \"'wght' 650\", fontFeatureSettings: \"'tnum' 1, 'ss01' 1\",
             textDecorationLine: 'underline', text: 'Hello',
             numberOfLines: 2, color: '#00ff00ff',
             backgroundColor: '#ff0000', borderRadius: 4,
+            borderTopLeftRadius: 5, borderTopRightRadius: 6,
+            borderBottomLeftRadius: 7, borderBottomRightRadius: 8,
             flex: 1, flexDirection: 'row', justifyContent: 'center', alignItems: 'stretch',
             padding: 8, gap: '12', flexGrow: 0.5, flexShrink: 1, flexBasis: '200',
             flexWrap: 'wrap',
@@ -318,6 +334,9 @@ mod tests {
             accessibilityRoleDescription: 'line chart',
             placeholder: 'Search notes',
             textAlign: 'center', borderWidth: 2, borderColor: '#0000ff',
+            borderTopWidth: 1, borderRightWidth: 2, borderBottomWidth: 3, borderLeftWidth: 4,
+            borderTopColor: '#112233', borderRightColor: '#445566',
+            borderBottomColor: '#778899', borderLeftColor: '#aabbcc',
             clip: true, scrollOffsetY: 100, scrollOffsetX: 30, imageId: 42, resizeMode: 'cover',
             zIndex: -3, draggable: true, pressable: true, testID: 'submit-btn',
             textScrollX: 12.5, cameraHandle: 7, mirror: false, videoHandle: 8,
@@ -348,12 +367,19 @@ mod tests {
             line_height: Some(22.0),
             font_weight: Some("bold".to_string()),
             font_style: Some("italic".to_string()),
+            font_family: Some("Inter".to_string()),
+            font_variation_settings: Some("'wght' 650".to_string()),
+            font_feature_settings: Some("'tnum' 1, 'ss01' 1".to_string()),
             text_decoration_line: Some("underline".to_string()),
             text: Some("Hello".to_string()),
             number_of_lines: Some(2),
             color: Some([0, 255, 0, 255]),
             background_color: Some([255, 0, 0, 255]),
             border_radius: Some(4.0),
+            border_top_left_radius: Some(5.0),
+            border_top_right_radius: Some(6.0),
+            border_bottom_left_radius: Some(7.0),
+            border_bottom_right_radius: Some(8.0),
             flex: Some(1.0),
             flex_direction: Some("row".to_string()),
             justify_content: Some("center".to_string()),
@@ -394,6 +420,14 @@ mod tests {
             text_align: Some("center".to_string()),
             border_width: Some(2.0),
             border_color: Some([0, 0, 255, 255]),
+            border_top_width: Some(1.0),
+            border_right_width: Some(2.0),
+            border_bottom_width: Some(3.0),
+            border_left_width: Some(4.0),
+            border_top_color: Some([17, 34, 51, 255]),
+            border_right_color: Some([68, 85, 102, 255]),
+            border_bottom_color: Some([119, 136, 153, 255]),
+            border_left_color: Some([170, 187, 204, 255]),
             clip: Some(true),
             scroll_offset_y: Some(100.0),
             scroll_offset_x: Some(30.0),

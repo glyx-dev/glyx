@@ -128,6 +128,7 @@ mod scene;
 mod canvas_damage;
 mod damage_rects;
 mod layout;
+mod border;
 mod render;
 mod render_props;
 mod motion;

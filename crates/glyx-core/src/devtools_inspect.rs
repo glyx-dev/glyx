@@ -78,6 +78,18 @@ pub(crate) fn props_json(p: &NodeProps) -> Value {
     put!("borderColor", p.border_color.map(hex));
     put!("borderWidth", p.border_width);
     put!("borderRadius", p.border_radius);
+    put!("borderTopWidth", p.border_top_width);
+    put!("borderRightWidth", p.border_right_width);
+    put!("borderBottomWidth", p.border_bottom_width);
+    put!("borderLeftWidth", p.border_left_width);
+    put!("borderTopColor", p.border_top_color.map(hex));
+    put!("borderRightColor", p.border_right_color.map(hex));
+    put!("borderBottomColor", p.border_bottom_color.map(hex));
+    put!("borderLeftColor", p.border_left_color.map(hex));
+    put!("borderTopLeftRadius", p.border_top_left_radius);
+    put!("borderTopRightRadius", p.border_top_right_radius);
+    put!("borderBottomLeftRadius", p.border_bottom_left_radius);
+    put!("borderBottomRightRadius", p.border_bottom_right_radius);
     put!("fontSize", p.font_size);
     put!("fontWeight", p.font_weight.clone());
     put!("fontStyle", p.font_style.clone());
@@ -500,6 +512,9 @@ fn one_of(v: &Value, allowed: &[&str]) -> Result<Option<String>, String> {
 /// Props `Inspector.setNodeProp` can change, camelCase like JSX.
 pub(crate) const EDITABLE_PROPS: &[&str] = &[
     "text", "testID", "backgroundColor", "color", "borderColor", "borderWidth", "borderRadius",
+    "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+    "borderTopColor", "borderRightColor", "borderBottomColor", "borderLeftColor",
+    "borderTopLeftRadius", "borderTopRightRadius", "borderBottomLeftRadius", "borderBottomRightRadius",
     "opacity", "fontSize", "fontWeight", "width", "height", "padding", "margin", "gap", "flex", "zIndex",
     "flexDirection", "justifyContent", "alignItems",
 ];
@@ -519,6 +534,18 @@ pub(crate) fn set_prop(p: &mut NodeProps, name: &str, v: &Value) -> Result<(), S
         "borderColor" => p.border_color = color(v)?,
         "borderWidth" => p.border_width = num(v)?,
         "borderRadius" => p.border_radius = num(v)?,
+        "borderTopWidth" => p.border_top_width = num(v)?,
+        "borderRightWidth" => p.border_right_width = num(v)?,
+        "borderBottomWidth" => p.border_bottom_width = num(v)?,
+        "borderLeftWidth" => p.border_left_width = num(v)?,
+        "borderTopColor" => p.border_top_color = color(v)?,
+        "borderRightColor" => p.border_right_color = color(v)?,
+        "borderBottomColor" => p.border_bottom_color = color(v)?,
+        "borderLeftColor" => p.border_left_color = color(v)?,
+        "borderTopLeftRadius" => p.border_top_left_radius = num(v)?,
+        "borderTopRightRadius" => p.border_top_right_radius = num(v)?,
+        "borderBottomLeftRadius" => p.border_bottom_left_radius = num(v)?,
+        "borderBottomRightRadius" => p.border_bottom_right_radius = num(v)?,
         "opacity" => p.opacity = num(v)?,
         "fontSize" => p.font_size = num(v)?,
         "flex" => p.flex = num(v)?,

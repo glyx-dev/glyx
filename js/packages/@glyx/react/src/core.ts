@@ -714,14 +714,17 @@ export function getEnv(name: any) {
 /**
  * Measure shaped text. Returns `{ width, height }` in logical pixels.
  * `maxWidth` wraps the text; omit (or pass Infinity) for single-line width.
- * Used for table column auto-sizing, rich-text layout, truncation, etc. `fontFamily` measures in that family (a `fontFamily` style value).
+ * Used for table column auto-sizing, rich-text layout, truncation, etc. `fontFamily` measures in that family (a `fontFamily` style value);
+ * `fontVariationSettings` and `fontFeatureSettings` measure with those axes and OpenType features too.
  */
-export function measureText(text: any, fontSize = 14, maxWidth = Infinity, fontFamily?: string, fontVariationSettings?: string) {
+export function measureText(text: any, fontSize = 14, maxWidth = Infinity, fontFamily?: string, fontVariationSettings?: string, fontFeatureSettings?: string) {
   if (typeof __glyx_measure_text === 'undefined') {
     return { width: String(text).length * fontSize * 0.55, height: fontSize * 1.3 };
   }
   return __glyx_measure_text(String(text), fontSize, Number.isFinite(maxWidth) ? maxWidth : 1e6, undefined, undefined,
-    fontVariationSettings ? { family: fontFamily, variations: fontVariationSettings } : fontFamily);
+    (fontVariationSettings || fontFeatureSettings)
+      ? { family: fontFamily, variations: fontVariationSettings, features: fontFeatureSettings }
+      : fontFamily);
 }
 
 // ── SelectableText ────────────────────────────────────────────────────────────
@@ -770,8 +773,9 @@ export function SelectableText({
   // with exactly what was rendered (see glyx-runtime's `text_props`).
   const fontFamily = flattenStyle(style)?.fontFamily ?? rest.fontFamily;
   const fontVariationSettings = flattenStyle(style)?.fontVariationSettings ?? rest.fontVariationSettings;
+  const fontFeatureSettings = flattenStyle(style)?.fontFeatureSettings ?? rest.fontFeatureSettings;
   const fontWeight = flattenStyle(style)?.fontWeight ?? rest.fontWeight;
-  const textHitProps = { fontSize, textAlign, fontFamily, fontVariationSettings, fontWeight };
+  const textHitProps = { fontSize, textAlign, fontFamily, fontVariationSettings, fontFeatureSettings, fontWeight };
 
   // Stale-closure refs so event callbacks always see current values.
   const isSelectableRef = useRef(isSelectable);

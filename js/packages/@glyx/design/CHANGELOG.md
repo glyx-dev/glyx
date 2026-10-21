@@ -8,7 +8,7 @@
 
 ### Fixed
 - `NumberInput` without a `value` starts at 0 instead of computing with `undefined` (NaN) when a button was pressed.
-- `Sheet` asked for rounded top corners with `borderTopLeftRadius`/`borderTopRightRadius`, which the renderer ignores, so the corners are square. The keys are now typed `@deprecated` in `@glyx-dev/react`; per-corner radii are not drawn yet.
+- `Sheet`'s rounded top corners now draw: `@glyx-dev/react` no longer marks `borderTopLeftRadius`/`borderTopRightRadius` deprecated, and the renderer applies per-corner radii.
 - **The declarations now come from the TypeScript source** instead of being kept by hand, which had drifted from the code: `useTheme()` is typed as the design tokens (`colors`, `space`, `radius`, ...) it really returns (it was typed `{ tokens, colorScheme, toggle }`), and `Label` accepts every size (`xs` to `xl`) and `bold`.
 
 ## [0.2.0] - 2026-10-05

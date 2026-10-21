@@ -11,6 +11,9 @@
     "!src/**/*.test.tsx"
   ],
   "description": "Rich text editor for Glyx apps",
+  "dependencies": {
+    "@glyx-dev/icons": "^0.2.0"
+  },
   "peerDependencies": {
     "@glyx-dev/react": "^0.2.0",
     "react": "*"

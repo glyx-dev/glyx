@@ -149,11 +149,12 @@ pub fn set_app_fonts(fonts: Vec<(std::path::PathBuf, Option<String>)>) {
     *app_fonts().lock().unwrap() = fonts;
 }
 
-/// The font a node asked for with `fontFamily`, `fontVariationSettings` and a numeric `fontWeight`, as one small number a text style can
-/// carry and a cache key can hash. `0` is the default stack with nothing else asked. See [`font_id`] and [`family_id`].
+/// The font a node asked for with `fontFamily`, `fontVariationSettings`, `fontFeatureSettings` and a numeric `fontWeight`, as one small
+/// number a text style can carry and a cache key can hash. `0` is the default stack with nothing else asked. See [`font_id`] and
+/// [`family_id`].
 pub type FamilyId = u16;
 
-/// The most distinct fonts (family, variation settings and weight together) an app can use; the rest fall back to the default stack.
+/// The most distinct fonts (family, variation settings, feature settings and weight together) an app can use; the rest fall back to the default stack.
 /// Each costs a short string, so the bound is a guard against an app that builds them from data, not a limit anyone should meet.
 const MAX_FAMILIES: usize = 64;
 
@@ -165,6 +166,8 @@ struct FontSpec {
     stack:      &'static str,
     /// `font-variation-settings` source (`"'wght' 650, 'wdth' 80"`), when asked for.
     variations: Option<&'static str>,
+    /// `font-feature-settings` source (`"'liga' 0, 'tnum' 1"`), when asked for.
+    features:   Option<&'static str>,
     /// A weight other than regular and bold (those keep the `bold` flag): 100 to 1000.
     weight:     Option<f32>,
     /// The variable-font axes this font asks for as `'tag' value` pairs, later ones overriding earlier: the weight (as `'wght'`) then the
@@ -173,8 +176,8 @@ struct FontSpec {
 }
 
 struct Families {
-    /// (family css, variation css, weight) → id, so a repeated request is one hash lookup.
-    by_key: std::collections::HashMap<(String, String, u16), FamilyId>,
+    /// (family css, variation css, weight, feature css) → id, so a repeated request is one hash lookup.
+    by_key: std::collections::HashMap<(String, String, u16, String), FamilyId>,
     /// id - 1 → the spec.
     specs: Vec<FontSpec>,
 }
@@ -219,11 +222,24 @@ pub fn weight_override(weight: Option<&str>) -> Option<u16> {
 /// font) and a numeric `fontWeight` (see [`weight_override`]). `0` when none of them asks for anything. The same inputs always give the same
 /// id. Cheap enough to call when a node's props are set; not meant for every frame.
 pub fn font_id(family: Option<&str>, variations: Option<&str>, weight: Option<&str>) -> FamilyId {
+    font_id_with_features(family, variations, weight, None)
+}
+
+/// [`font_id`] with `fontFeatureSettings` too: CSS source such as `"'liga' 0, 'tnum' 1, 'smcp' 1, 'ss01' 1"` (ligatures, tabular
+/// figures, small caps, stylistic sets). Features are applied by the shaper, so they must be part of the id: measure, draw and hit-test
+/// then shape with the same font, as they already do for the family, the axes and the weight.
+pub fn font_id_with_features(
+    family: Option<&str>,
+    variations: Option<&str>,
+    weight: Option<&str>,
+    features: Option<&str>,
+) -> FamilyId {
     let family = family.map(str::trim).unwrap_or("");
     let variations = variations.map(str::trim).filter(|v| !v.is_empty() && *v != "normal").unwrap_or("");
+    let features = features.map(str::trim).filter(|v| !v.is_empty() && *v != "normal").unwrap_or("");
     let weight = weight_override(weight);
-    if family.is_empty() && variations.is_empty() && weight.is_none() { return 0; }
-    let key = (family.to_string(), variations.to_string(), weight.unwrap_or(0));
+    if family.is_empty() && variations.is_empty() && features.is_empty() && weight.is_none() { return 0; }
+    let key = (family.to_string(), variations.to_string(), weight.unwrap_or(0), features.to_string());
     let mut f = families().lock().unwrap();
     if let Some(&id) = f.by_key.get(&key) { return id; }
     if f.specs.len() >= MAX_FAMILIES { return 0; }
@@ -238,11 +254,15 @@ pub fn font_id(family: Option<&str>, variations: Option<&str>, weight: Option<&s
     let spec = FontSpec {
         stack,
         variations: (!variations.is_empty()).then(|| &*Box::leak(variations.to_string().into_boxed_str())),
+        features: (!features.is_empty()).then(|| &*Box::leak(features.to_string().into_boxed_str())),
         weight: weight.map(f32::from),
         axes: axes.map(|a| &*Box::leak(a.into_boxed_str())),
     };
     // Only a plain default-sans request is the default font; anything else gets its own id.
-    if asked.is_empty() && spec.variations.is_none() && spec.weight.is_none() { f.by_key.insert(key, 0); return 0; }
+    if asked.is_empty() && spec.variations.is_none() && spec.features.is_none() && spec.weight.is_none() {
+        f.by_key.insert(key, 0);
+        return 0;
+    }
     f.specs.push(spec);
     let id = f.specs.len() as FamilyId;
     f.by_key.insert(key, id);
@@ -570,6 +590,10 @@ impl TextSystem {
         // The axes of a variable font, as asked (a font without such an axis ignores it).
         if let Some(v) = spec.and_then(|s| s.variations) {
             builder.push_default(StyleProperty::FontVariations(parley::style::FontVariations::Source(std::borrow::Cow::Borrowed(v))));
+        }
+        // OpenType features (ligatures, figures, caps, stylistic sets), as asked. A font without a feature ignores it.
+        if let Some(v) = spec.and_then(|s| s.features) {
+            builder.push_default(StyleProperty::FontFeatures(parley::style::FontFeatures::Source(std::borrow::Cow::Borrowed(v))));
         }
         if italic {
             builder.push_default(StyleProperty::FontStyle(FontStyle::Italic));
@@ -1215,6 +1239,27 @@ mod tests {
         assert_eq!(weight_override(Some("abc")), None);
         // A quoted name is the name.
         assert_eq!(family_stack(family_id("\"Segoe UI\"")).split(',').next().unwrap(), "Segoe UI");
+    }
+
+    #[test]
+    fn font_features_are_part_of_the_font_id() {
+        assert_eq!(font_id_with_features(None, None, None, None), 0);
+        assert_eq!(font_id_with_features(None, None, None, Some("normal")), 0);
+        let tnum = font_id_with_features(None, None, None, Some("'tnum' 1"));
+        assert!(tnum > 0, "features alone still name a font");
+        assert_eq!(tnum, font_id_with_features(None, None, None, Some("'tnum' 1")));
+        assert_ne!(tnum, font_id_with_features(None, None, None, Some("'smcp' 1")));
+        assert_ne!(tnum, font_id(None, None, None));
+        // Features join the family, the axes and the weight, not replace them.
+        let both = font_id_with_features(Some("Inter"), Some("'wght' 650"), None, Some("'tnum' 1"));
+        assert_ne!(both, family_id("Inter"));
+        assert_eq!(font_spec(tnum).and_then(|s| s.features), Some("'tnum' 1"));
+        assert_eq!(family_stack(tnum), DEFAULT_FONT_STACK);
+        // Feature-only text shapes as one font (the id is in the style), not silently as the default.
+        let mut ts = TextSystem::new();
+        let plain = ts.styled_label_in("0000", 20.0, f32::MAX, false, false, None, 0);
+        let tabular = ts.styled_label_in("0000", 20.0, f32::MAX, false, false, None, tnum);
+        assert!(plain.width() > 0.0 && tabular.width() > 0.0);
     }
 
     #[test]

@@ -91,6 +91,59 @@ fn apply_opacity(c: peniko::Color, opacity: f32) -> peniko::Color {
     if opacity >= 1.0 { c } else { c.multiply_alpha(opacity) }
 }
 
+/// Draw a border on one node. Uniform widths + colours + radii keep the old
+/// single centred stroke; per-corner radii use the same centred stroke on a
+/// flattened contour; per-side widths/colours draw four inside bands with a
+/// diagonal join at each corner.
+fn draw_border(
+    frame: &mut AnyFrame,
+    x: f64, y: f64, w: f64, h: f64,
+    widths: [f64; 4],
+    colors: [[u8; 4]; 4],
+    radii: [f64; 4],
+    contour: Option<&[f32]>,
+    opacity: f32,
+) {
+    if !widths.iter().any(|v| *v > 0.0) {
+        return;
+    }
+    let uniform_widths = crate::border::widths_are_uniform(widths);
+    let uniform_radii = crate::border::radii_are_uniform(radii);
+    let uniform_colors = colors.iter().all(|c| *c == colors[0]);
+    let color = |c: [u8; 4]| apply_opacity(rgba_to_vello(c), opacity);
+
+    if uniform_widths && uniform_colors && uniform_radii {
+        frame.stroke_rounded_rect(x, y, w, h, radii[0], widths[0], color(colors[0]));
+        return;
+    }
+    if uniform_widths && uniform_colors {
+        // Same centred stroke as the uniform border, but with four corner
+        // radii: stroke the flattened outline.
+        let owned;
+        let pts = match contour {
+            Some(c) => c,
+            None => {
+                owned = crate::border::rounded_rect_contour(x, y, w, h, radii);
+                &owned
+            }
+        };
+        if pts.len() >= 6 {
+            frame.stroke_path(pts, widths[0], true, color(colors[0]));
+        }
+        return;
+    }
+    for side in crate::border::BorderSide::ALL {
+        let idx = side.index();
+        if widths[idx] <= 0.0 {
+            continue;
+        }
+        let pts = crate::border::side_contour(side, x, y, w, h, widths, radii);
+        if pts.len() >= 6 {
+            frame.fill_path(&pts, color(colors[idx]));
+        }
+    }
+}
+
 
 /// The scroll offsets a clipping node passes on to its children: what it inherits from the scrollers around it, plus its own offset clamped to
 /// what its content allows, in whole pixels (so scrolling is a shift of whole pixels, which `scroll_blit` can do by moving the last frame's
@@ -189,8 +242,19 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
     let own_opacity = ov.and_then(|o| o.opacity)
         .unwrap_or_else(|| node.props.opacity.unwrap_or(1.0));
     let eff_radius    = ov.and_then(|o| o.radius).or(node.props.border_radius).unwrap_or(0.0) as f64;
+    let eff_radii = if let Some(r) = ov.and_then(|o| o.radius) {
+        let r = if r.is_finite() { r.max(0.0) as f64 } else { 0.0 };
+        [r; 4]
+    } else {
+        node.props.effective_border_radii().map(|r| r as f64)
+    };
+    let eff_widths = node.props.effective_border_widths().map(|w| w as f64);
+    let eff_colors = if let Some(c) = ov.and_then(|o| o.border_color) {
+        [c; 4]
+    } else {
+        node.props.effective_border_colors()
+    };
     let eff_bg        = ov.and_then(|o| o.background).or(node.props.background_color);
-    let eff_border    = ov.and_then(|o| o.border_color).or(node.props.border_color);
     let eff_shadow    = ov.and_then(|o| o.shadow).or(node.box_shadow);
     let eff_transform = ov.and_then(|o| o.transform).or(node.transform);
     let child_opacity = opacity * own_opacity;
@@ -274,14 +338,23 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
 
     match node.node_type {
         NodeType::View => {
-            let radius = eff_radius;
+            let radii = eff_radii;
+            let radii_uniform = crate::border::radii_are_uniform(radii);
+            let contour = if radii_uniform {
+                None
+            } else {
+                Some(crate::border::rounded_rect_contour(rx, ry, rw, rh, radii))
+            };
 
             // ── Box shadow ────────────────────────────────────────────────
             if let Some((sx, sy, sc)) = eff_shadow {
-                ctx.frame.fill_rounded_rect(
-                    rx + sx, ry + sy, rw, rh, radius,
-                    apply_opacity(sc, child_opacity),
-                );
+                let sc = apply_opacity(sc, child_opacity);
+                if radii_uniform {
+                    ctx.frame.fill_rounded_rect(rx + sx, ry + sy, rw, rh, radii[0], sc);
+                } else {
+                    let c = crate::border::rounded_rect_contour(rx + sx, ry + sy, rw, rh, radii);
+                    ctx.frame.fill_path(&c, sc);
+                }
             }
 
             // ── Background (gradient takes precedence over solid) ─────────
@@ -295,16 +368,23 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
                     (1.0_f32, apply_opacity(c2, child_opacity)),
                 ]);
                 let brush = peniko::Brush::Gradient(gradient);
-                ctx.frame.fill_rounded_rect_with_brush(rx, ry, rw, rh, radius, &brush);
+                if radii_uniform {
+                    ctx.frame.fill_rounded_rect_with_brush(rx, ry, rw, rh, radii[0], &brush);
+                } else {
+                    let c = contour.as_ref().expect("per-corner radii have a contour");
+                    ctx.frame.fill_path_with_brush(c, &brush);
+                }
             } else if let Some(bg) = eff_bg.map(|c| apply_opacity(rgba_to_vello(c), child_opacity)) {
-                ctx.frame.fill_rounded_rect(rx, ry, rw, rh, radius, bg);
+                if radii_uniform {
+                    ctx.frame.fill_rounded_rect(rx, ry, rw, rh, radii[0], bg);
+                } else {
+                    let c = contour.as_ref().expect("per-corner radii have a contour");
+                    ctx.frame.fill_path(c, bg);
+                }
             }
 
             // ── Border ────────────────────────────────────────────────────
-            if let Some(bw) = node.props.border_width.filter(|w| *w > 0.0) {
-                let bc = eff_border.unwrap_or([80, 80, 120, 255]);
-                ctx.frame.stroke_rounded_rect(rx, ry, rw, rh, radius, bw as f64, apply_opacity(rgba_to_vello(bc), child_opacity));
-            }
+            draw_border(ctx.frame, rx, ry, rw, rh, eff_widths, eff_colors, radii, contour.as_deref(), child_opacity);
 
             let overflows = matches!(node.props.overflow.as_deref(), Some("hidden" | "scroll"));
             let is_clip = node.props.clip.unwrap_or(false) || overflows;
@@ -351,10 +431,15 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
             // The clipping ancestor's visible rect, before this node's own joins the stack.
             let outer_clip = ctx.clips.last().copied();
             if is_clip {
-                if radius > 0.0 {
-                    ctx.frame.push_rounded_layer(rx, ry, rw, rh, radius);
-                } else {
-                    ctx.frame.push_layer(rx, ry, rw, rh);
+                if radii_uniform {
+                    if radii[0] > 0.0 {
+                        ctx.frame.push_rounded_layer(rx, ry, rw, rh, radii[0]);
+                    } else {
+                        ctx.frame.push_layer(rx, ry, rw, rh);
+                    }
+                } else if let Some(c) = &contour {
+                    let contours = [c.to_vec()];
+                    ctx.frame.push_clip_contours(&contours, false);
                 }
                 let (x0, y0) = outer_clip.map_or((rx, ry), |c| (rx.max(c[0]), ry.max(c[1])));
                 let (x1, y1) = outer_clip.map_or((rx + rw, ry + rh), |c| ((rx + rw).min(c[0] + c[2]), (ry + rh).min(c[1] + c[3])));
@@ -398,7 +483,13 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
         }
 
         NodeType::Image => {
-            let radius = eff_radius;
+            let radii = eff_radii;
+            let radii_uniform = crate::border::radii_are_uniform(radii);
+            let contour = if radii_uniform {
+                None
+            } else {
+                Some(crate::border::rounded_rect_contour(rx, ry, rw, rh, radii))
+            };
             let resize_mode = node.props.image_resize_mode.as_deref().unwrap_or("stretch");
             if let Some(image_id) = node.props.image_id {
                 if let Some(image) = ctx.images.get(&image_id) {
@@ -424,12 +515,15 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
                         _ => (rx, ry, rw, rh),
                     };
 
-                    let needs_clip = resize_mode == "cover" || radius > 0.0;
+                    let needs_clip = resize_mode == "cover" || radii.iter().any(|r| *r > 0.0);
                     if needs_clip {
-                        if radius > 0.0 {
-                            ctx.frame.push_rounded_layer(rx, ry, rw, rh, radius);
-                        } else {
+                        if radii.iter().all(|r| *r <= 0.0) {
                             ctx.frame.push_layer(rx, ry, rw, rh);
+                        } else if radii_uniform {
+                            ctx.frame.push_rounded_layer(rx, ry, rw, rh, radii[0]);
+                        } else if let Some(c) = &contour {
+                            let contours = [c.to_vec()];
+                            ctx.frame.push_clip_contours(&contours, false);
                         }
                     }
 
@@ -439,15 +533,20 @@ pub(crate) fn render_subtree(id: u32, scroll_x: f64, scroll_y: f64, opacity: f32
                         ctx.frame.pop_layer();
                     }
 
-                    if let Some(bw) = node.props.border_width.filter(|w| *w > 0.0) {
-                        let bc = eff_border.unwrap_or([80, 80, 120, 255]);
-                        ctx.frame.stroke_rounded_rect(rx, ry, rw, rh, radius, bw as f64, apply_opacity(rgba_to_vello(bc), child_opacity));
-                    }
+                    draw_border(ctx.frame, rx, ry, rw, rh, eff_widths, eff_colors, radii, contour.as_deref(), child_opacity);
                 } else {
-                    ctx.frame.fill_rounded_rect(rx, ry, rw, rh, 0.0, apply_opacity(colors::TEXT_MUTED, child_opacity));
+                    if radii_uniform {
+                        ctx.frame.fill_rounded_rect(rx, ry, rw, rh, radii[0], apply_opacity(colors::TEXT_MUTED, child_opacity));
+                    } else if let Some(c) = &contour {
+                        ctx.frame.fill_path(c, apply_opacity(colors::TEXT_MUTED, child_opacity));
+                    }
                 }
             } else {
-                ctx.frame.fill_rounded_rect(rx, ry, rw, rh, 0.0, apply_opacity(colors::TEXT_MUTED, child_opacity));
+                if radii_uniform {
+                    ctx.frame.fill_rounded_rect(rx, ry, rw, rh, radii[0], apply_opacity(colors::TEXT_MUTED, child_opacity));
+                } else if let Some(c) = &contour {
+                    ctx.frame.fill_path(c, apply_opacity(colors::TEXT_MUTED, child_opacity));
+                }
             }
         }
 

@@ -354,8 +354,8 @@ pub fn get_layout_callback(
     }
 }
 
-/// The optional font argument at `index` as a `glyx_text::font_id`: a `fontFamily` string, or an object with `family` and `variations`
-/// (`fontVariationSettings`); `0` (the default font) when it is absent or neither.
+/// The optional font argument at `index` as a `glyx_text::font_id`: a `fontFamily` string, or an object with `family`, `variations`
+/// (`fontVariationSettings`) and `features` (`fontFeatureSettings`); `0` (the default font) when it is absent or asks for nothing.
 fn family_arg(scope: &mut v8::ContextScope<'_, '_, v8::HandleScope<'_>>, args: &v8::FunctionCallbackArguments, index: i32) -> glyx_text::FamilyId {
     let v = args.get(index);
     if v.is_string() {
@@ -365,8 +365,9 @@ fn family_arg(scope: &mut v8::ContextScope<'_, '_, v8::HandleScope<'_>>, args: &
     let Some(o) = v.to_object(scope) else { return 0 };
     let family = get_str_prop(scope, o, "family").map(|s| s.to_string());
     let variations = get_str_prop(scope, o, "variations").map(|s| s.to_string());
-    if family.is_none() && variations.is_none() { return 0; }
-    glyx_text::font_id(family.as_deref(), variations.as_deref(), None)
+    let features = get_str_prop(scope, o, "features").map(|s| s.to_string());
+    if family.is_none() && variations.is_none() && features.is_none() { return 0; }
+    glyx_text::font_id_with_features(family.as_deref(), variations.as_deref(), None, features.as_deref())
 }
 
 // __glyx_measure_text
@@ -397,7 +398,7 @@ pub fn measure_text_callback(
     // Optional 5th arg: absolute line height override (same units as fontSize).
     let lh = args.get(4).number_value(scope).unwrap_or(f64::NAN);
     let line_height = if lh.is_finite() && lh > 0.0 { Some(lh as f32) } else { None };
-    // Optional 6th arg: the font text is shaped in (a `fontFamily` string, or `{ family, variations }`).
+    // Optional 6th arg: the font text is shaped in (a `fontFamily` string, or `{ family, variations, features }`).
     let family = family_arg(scope, &args, 5);
 
     let (w, h) = if bold || italic || line_height.is_some() || family != 0 {

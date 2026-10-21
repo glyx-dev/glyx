@@ -1772,8 +1772,8 @@ fn props_from_value(v: rquickjs::Value) -> NodeProps {
     parse_props_value(v)
 }
 
-/// The `glyx_text::font_id` for the optional last argument of the measuring calls: a `fontFamily` string, or an object with `family` and
-/// `variations` (`fontVariationSettings`); `0` (the default font) for neither.
+/// The `glyx_text::font_id` for the optional last argument of the measuring calls: a `fontFamily` string, or an object with `family`,
+/// `variations` (`fontVariationSettings`) and `features` (`fontFeatureSettings`); `0` (the default font) when it asks for nothing.
 fn font_id_of(font: Option<rquickjs::Value<'_>>) -> glyx_text::FamilyId {
     let Some(v) = font else { return 0 };
     if let Some(s) = v.as_string().and_then(|s| s.to_string().ok()) {
@@ -1782,8 +1782,9 @@ fn font_id_of(font: Option<rquickjs::Value<'_>>) -> glyx_text::FamilyId {
     if let Some(o) = v.as_object() {
         let family: Option<String> = o.get("family").ok().flatten();
         let variations: Option<String> = o.get("variations").ok().flatten();
-        if family.is_some() || variations.is_some() {
-            return glyx_text::font_id(family.as_deref(), variations.as_deref(), None);
+        let features: Option<String> = o.get("features").ok().flatten();
+        if family.is_some() || variations.is_some() || features.is_some() {
+            return glyx_text::font_id_with_features(family.as_deref(), variations.as_deref(), None, features.as_deref());
         }
     }
     0

@@ -122,7 +122,7 @@ fn paints(n: &crate::state::JsNode) -> bool {
     if n.props.hidden == Some(true) { return false; }
     !matches!(n.node_type, NodeType::View)
         || n.props.background_color.map_or(false, |c| c[3] > 0)
-        || n.props.border_width.unwrap_or(0.0) > 0.0
+        || n.props.has_border()
         || n.box_shadow.is_some()
         || n.gradient.is_some()
 }
@@ -160,7 +160,7 @@ pub(crate) fn detect(s: &PerWindowState, cursor_blinking: bool) -> Option<Scroll
     let Some(own_y) = p.scroll_offset_y else { return why("the dirty node is not a scroller") };
     if node.transform.is_some() || node.box_shadow.is_some() || node.gradient.is_some() || !opaque(p) { return why("the scroller has a transform, shadow, gradient or opacity"); }
     let own_opaque = p.background_color.map_or(false, |c| c[3] == 255);
-    if p.border_radius.unwrap_or(0.0) > 0.0 || p.border_width.unwrap_or(0.0) > 0.0 { return why("the scroller has a radius or border"); }
+    if p.effective_border_radii().iter().any(|r| *r > 0.0) || p.has_border() { return why("the scroller has a radius or border"); }
 
     // Its place: whole pixels, entirely in the window.
     let rl = s.resolved_rect(node.layout_id?)?;
@@ -188,10 +188,13 @@ pub(crate) fn detect(s: &PerWindowState, cursor_blinking: bool) -> Option<Scroll
         let a = s.js_nodes.get(&pid)?;
         if a.transform.is_some() || !opaque(&a.props) { return why("an ancestor transforms or fades"); }
         if a.props.scroll_offset_y.unwrap_or(0.0) != 0.0 || a.props.scroll_offset_x.unwrap_or(0.0) != 0.0 { return why("an ancestor is scrolled"); }
-        if a.props.border_radius.unwrap_or(0.0) > 0.0 {
+        if a.props.effective_border_radii().iter().any(|r| *r > 0.0) {
             // Its rounded corners cut the viewport where it is flush with them: those few pixels are not the same after a shift (see below).
+            // Per-corner radii are conservatively not blit; extending the corner repair to four radii is out of scope.
+            let radii = a.props.effective_border_radii().map(f64::from);
+            if !crate::border::radii_are_uniform(radii) { return why("a rounded ancestor has per-corner radii"); }
             let Some(r) = a.layout_id.and_then(|l| s.resolved_rect(l)) else { return why("a rounded ancestor has no layout") };
-            rounded.push(((f64::from(r.x), f64::from(r.y), f64::from(r.width), f64::from(r.height)), f64::from(a.props.border_radius.unwrap_or(0.0))));
+            rounded.push(((f64::from(r.x), f64::from(r.y), f64::from(r.width), f64::from(r.height)), radii[0]));
         }
         if is_clip(&a.props) {
             // A clip may cut the scroller's right side (the visible width above) but not its top, left or bottom.
@@ -205,10 +208,8 @@ pub(crate) fn detect(s: &PerWindowState, cursor_blinking: bool) -> Option<Scroll
         if !own_opaque {
             let ar = a.layout_id.and_then(|l| s.resolved_rect(l));
             let inset = ar.map_or(0.0, |r| f64::from((rl.x - r.x).min(rl.y - r.y).min(r.x + r.width - vis_right).min(r.y + r.height - rl.y - rl.height)));
-            let bw = f64::from(a.props.border_width.unwrap_or(0.0));
-            let radius = f64::from(a.props.border_radius.unwrap_or(0.0));
+            let bw = a.props.effective_border_widths().iter().copied().fold(0.0_f64, |m, w| m.max(f64::from(w)));
             let a_opaque = a.props.background_color.map_or(false, |c| c[3] == 255);
-            let _ = radius;
             // A border the viewport is flush with shows through it: a column down each side is the same after a shift, but the rows along its
             // top and bottom are not (see below).
             if inset < bw { edge_rows = edge_rows.max(bw - inset.max(0.0)); }
@@ -520,6 +521,8 @@ mod tests {
         assert!(paints(&view(NodeProps { background_color: Some([1, 2, 3, 255]), ..Default::default() })));
         assert!(!paints(&view(NodeProps { background_color: Some([1, 2, 3, 0]), ..Default::default() })), "a transparent fill");
         assert!(paints(&view(NodeProps { border_width: Some(1.0), ..Default::default() })));
+        assert!(paints(&view(NodeProps { border_left_width: Some(1.0), ..Default::default() })));
+        assert!(!paints(&view(NodeProps { border_left_width: Some(0.0), ..Default::default() })));
         assert!(!paints(&view(NodeProps { background_color: Some([1, 2, 3, 255]), hidden: Some(true), ..Default::default() })));
         assert!(paints(&JsNode::new(NodeType::Text, NodeProps::default())));
         assert!(paints(&JsNode::new(NodeType::Image, NodeProps::default())));

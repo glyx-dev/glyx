@@ -154,9 +154,10 @@ pub fn set_app_fonts(fonts: Vec<(std::path::PathBuf, Option<String>)>) {
 /// [`family_id`].
 pub type FamilyId = u16;
 
-/// The most distinct fonts (family, variation settings, feature settings and weight together) an app can use; the rest fall back to the default stack.
-/// Each costs a short string, so the bound is a guard against an app that builds them from data, not a limit anyone should meet.
-const MAX_FAMILIES: usize = 64;
+/// The most distinct fonts (family, variation settings, feature settings and weight together) an app can use; the rest fall back to the default stack
+/// (and a warning is logged once). Each costs a few short strings, about 300 bytes, so the bound is a guard against an app that builds them from
+/// data. It was 64, which family x axes x features x weight can reach by combination in an app with a font menu and feature presets.
+const MAX_FAMILIES: usize = 256;
 
 /// What one id stands for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -175,16 +176,31 @@ struct FontSpec {
     axes:       Option<&'static str>,
 }
 
+type FontKey = (String, String, u16, String);
+
 struct Families {
-    /// (family css, variation css, weight, feature css) → id, so a repeated request is one hash lookup.
-    by_key: std::collections::HashMap<(String, String, u16, String), FamilyId>,
+    /// (family css, variation css, weight, feature css) → id.
+    by_key: std::collections::HashMap<FontKey, FamilyId>,
+    /// The same answers by a hash of the request, checked against the stored key: a repeat is found without building the key (four
+    /// strings) first. Text nodes ask on every frame, so the repeat is the case that has to be free.
+    hot: std::collections::HashMap<u64, (FamilyId, Box<FontKey>)>,
     /// id - 1 → the spec.
     specs: Vec<FontSpec>,
 }
 
 fn families() -> &'static std::sync::Mutex<Families> {
     static F: std::sync::OnceLock<std::sync::Mutex<Families>> = std::sync::OnceLock::new();
-    F.get_or_init(|| std::sync::Mutex::new(Families { by_key: std::collections::HashMap::new(), specs: Vec::new() }))
+    F.get_or_init(|| std::sync::Mutex::new(Families { by_key: std::collections::HashMap::new(), hot: std::collections::HashMap::new(), specs: Vec::new() }))
+}
+
+fn key_hash(family: &str, variations: &str, weight: u16, features: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    family.hash(&mut h);
+    variations.hash(&mut h);
+    weight.hash(&mut h);
+    features.hash(&mut h);
+    h.finish()
 }
 
 /// The names a CSS-like `fontFamily` list asks for, with the generic names turned into the fonts each platform has for them.
@@ -239,10 +255,25 @@ pub fn font_id_with_features(
     let features = features.map(str::trim).filter(|v| !v.is_empty() && *v != "normal").unwrap_or("");
     let weight = weight_override(weight);
     if family.is_empty() && variations.is_empty() && features.is_empty() && weight.is_none() { return 0; }
-    let key = (family.to_string(), variations.to_string(), weight.unwrap_or(0), features.to_string());
+    let w = weight.unwrap_or(0);
+    let hash = key_hash(family, variations, w, features);
     let mut f = families().lock().unwrap();
-    if let Some(&id) = f.by_key.get(&key) { return id; }
-    if f.specs.len() >= MAX_FAMILIES { return 0; }
+    if let Some((id, k)) = f.hot.get(&hash) {
+        if k.0 == family && k.1 == variations && k.2 == w && k.3 == features { return *id; }
+    }
+    let key = (family.to_string(), variations.to_string(), w, features.to_string());
+    if let Some(&id) = f.by_key.get(&key) {
+        f.hot.entry(hash).or_insert_with(|| (id, Box::new(key)));
+        return id;
+    }
+    if f.specs.len() >= MAX_FAMILIES {
+        // Not silent: a text node that gets the default font here would otherwise look like a font that failed to load.
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!("glyx-text: more than {MAX_FAMILIES} different fonts (family, axes, features and weight together) are in use; the rest draw in the default font");
+        }
+        return 0;
+    }
     let asked = expand_family_list(family);
     let stack: &'static str = if asked.is_empty() { DEFAULT_FONT_STACK } else { Box::leak(format!("{asked}, {DEFAULT_FONT_STACK}").into_boxed_str()) };
     let axes = match (weight, variations.is_empty()) {
@@ -260,11 +291,13 @@ pub fn font_id_with_features(
     };
     // Only a plain default-sans request is the default font; anything else gets its own id.
     if asked.is_empty() && spec.variations.is_none() && spec.features.is_none() && spec.weight.is_none() {
+        f.hot.entry(hash).or_insert_with(|| (0, Box::new(key.clone())));
         f.by_key.insert(key, 0);
         return 0;
     }
     f.specs.push(spec);
     let id = f.specs.len() as FamilyId;
+    f.hot.entry(hash).or_insert_with(|| (id, Box::new(key.clone())));
     f.by_key.insert(key, id);
     id
 }

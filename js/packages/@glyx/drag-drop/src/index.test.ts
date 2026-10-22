@@ -2,7 +2,7 @@ import { test, expect } from 'bun:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
-  Draggable, DropZone, SortableList, Board, insertionIndex, dropIndex, moveItem,
+  Draggable, DropZone, SortableList, Board, insertionIndex, insertionIndexLazy, dropIndex, moveItem,
 } from './index.js';
 
 test('Draggable renders its children', () => {
@@ -118,4 +118,20 @@ test('Board renders column titles, counts and cards', () => {
   expect(html).toContain('Done');
   expect(html).toContain('Write tests');
   expect(html).toContain('EMPTY-COLUMN');
+});
+
+test('insertionIndexLazy agrees with insertionIndex and asks for only a few rectangles', () => {
+  const rects = Array.from({ length: 200 }, (_, i) => ({ boxX: 0, boxY: i * 44, boxWidth: 100, boxHeight: 40 }));
+  for (const y of [-10, 0, 19, 21, 43, 500, 4400, 8799, 9000]) {
+    let asked = 0;
+    const lazy = insertionIndexLazy(rects.length, (i) => { asked++; return rects[i]; }, 50, y);
+    expect(lazy).toBe(insertionIndex(rects, 50, y));
+    expect(asked).toBeLessThanOrEqual(9);          // about log2(200), not 200
+  }
+  // an item that is not on screen: the answer is still the one the plain scan gives
+  const gappy = (i: number) => (i % 7 === 3 ? null : rects[i]);
+  expect(insertionIndexLazy(rects.length, gappy, 50, 1000)).toBe(insertionIndex(rects.filter((_, i) => i % 7 !== 3), 50, 1000));
+  expect(insertionIndexLazy(0, () => null, 0, 0)).toBe(0);
+  expect(insertionIndexLazy(3, (i) => ({ boxX: i * 110, boxY: 0, boxWidth: 100, boxHeight: 10 }), 120, 0, 'horizontal')).toBe(
+    insertionIndex([0, 1, 2].map((i) => ({ boxX: i * 110, boxY: 0, boxWidth: 100, boxHeight: 10 })), 120, 0, 'horizontal'));
 });

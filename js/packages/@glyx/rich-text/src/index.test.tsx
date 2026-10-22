@@ -5,7 +5,7 @@ import {
   applyFormat, selectionHasFormat, selectionFormatValue, spanAtCursor, spanAtOffset, selectedText, docToPlainText, docFromPlainText,
   linkRangeAtOffset,
   computeListNumber, wordRangeAt, charIndexAtPoint, paragraphAlign, setParagraphAlign, sliceDocument, insertDocument,
-  docToMarkdown, docToHTML,
+  docToMarkdown, docToHTML, wrapParagraph, safeLinkUrl,
 } from './index.js';
 
 function doc(...paraTexts) {
@@ -559,4 +559,62 @@ test('docToHTML escapes text and serializes paragraphs, alignment and lists', ()
     { spans: [{ text: 'one' }], listType: 'number' as const },
   ] };
   expect(docToHTML(d)).toBe('<p style="text-align:center"><strong>&lt;hello&gt;</strong><em> &amp; </em></p><ol><li>one</li></ol>');
+});
+
+test('wrapping measures a repeated word once, not every time it is laid out', () => {
+  const g: any = globalThis;
+  const saved = g.__glyx_measure_text;
+  let calls = 0;
+  g.__glyx_measure_text = (t: string, fs: number) => { calls++; return { width: t.length * fs * 0.5, height: fs * 1.3 }; };
+  try {
+    const words = 'alpha beta gamma delta epsilon'.split(' ');
+    const para = { spans: [{ text: Array.from({ length: 80 }, (_, i) => words[i % words.length]).join(' ') }] };
+    const first = wrapParagraph(para, 300, 14);
+    const afterFirst = calls;
+    expect(afterFirst).toBeLessThan(20);                 // 5 words and a space, not 80 words and 79 spaces
+    const second = wrapParagraph(para, 300, 14);
+    expect(calls).toBe(afterFirst);                      // nothing new to measure
+    expect(second.map((l: any) => [l.start, l.end])).toEqual(first.map((l: any) => [l.start, l.end]));
+    // a different size is a different width, so it is measured, not answered from the other size
+    wrapParagraph(para, 300, 20);
+    expect(calls).toBeGreaterThan(afterFirst);
+  } finally {
+    g.__glyx_measure_text = saved;
+  }
+});
+
+test('exported HTML and Markdown never carry a script link or a style injection', () => {
+  const d = {
+    paragraphs: [{
+      spans: [
+        { text: 'bad', link: 'javascript:alert(1)' },
+        { text: 'tab', link: 'java\tscript:alert(1)' },
+        { text: 'data', link: 'data:text/html,<script>1</script>' },
+        { text: 'file', link: 'file:///C:/secret.txt' },
+        { text: 'ok', link: 'https://example.com/a b)c' },
+        { text: 'mail', link: 'mailto:a@b.co' },
+        { text: 'rel', link: '/docs/page' },
+        { text: 'hl', highlight: 'red;background:url(//evil)' },
+        { text: 'good', highlight: '#f6e05e66' },
+      ],
+    }],
+  };
+  const html = docToHTML(d as any);
+  expect(html).not.toMatch(/javascript:|java\tscript|data:|file:/i);
+  expect(html).toContain('<a href="https://example.com/a b)c">ok</a>');
+  expect(html).toContain('<a href="mailto:a@b.co">mail</a>');
+  expect(html).toContain('<a href="/docs/page">rel</a>');
+  expect(html).not.toContain('evil');
+  expect(html).toContain('background-color:#f6e05e66');
+  const md = docToMarkdown(d as any);
+  expect(md).not.toMatch(/javascript:|data:|file:/i);
+  expect(md).toContain('[ok](<https://example.com/a b)c>)');
+  expect(md).not.toContain('evil');
+  expect(safeLinkUrl('  HTTPS://x.dev ')).toBe('HTTPS://x.dev');
+  expect(safeLinkUrl('vbscript:x')).toBe('');
+});
+
+test('a code span with backticks in it is fenced, not backslash-escaped', () => {
+  const md = docToMarkdown({ paragraphs: [{ spans: [{ text: 'a`b', code: true }, { text: ' and ' }, { text: '``x', code: true }] }] } as any);
+  expect(md).toBe('``a`b`` and ``` ``x ```');
 });

@@ -646,9 +646,19 @@ function spanFont(span?: any): any {
   return (variations || features) ? { family, variations, features } : family;
 }
 
+// Line heights by size and font: every paragraph asks for one, and they are the same few numbers.
+const lineHeightCache = new Map<string, number>();
+
 function richTextLineHeight(fontSize: number) {
   if (typeof __glyx_measure_text !== 'undefined') {
-    return __glyx_measure_text('M', fontSize, 1e6, undefined, undefined, spanFont()).height;
+    const font = spanFont();
+    const key = `${fontSize}${typeof font === 'string' || font == null ? (font ?? '') : `${font.family ?? ''}\u0002${font.variations ?? ''}\u0002${font.features ?? ''}`}`;
+    const hit = lineHeightCache.get(key);
+    if (hit !== undefined) return hit;
+    const height = __glyx_measure_text('M', fontSize, 1e6, undefined, undefined, font).height;
+    if (lineHeightCache.size >= 256) lineHeightCache.clear();
+    lineHeightCache.set(key, height);
+    return height;
   }
   return fontSize * 1.5;
 }
@@ -667,6 +677,13 @@ function spanStyle(span: any) {
   return [span.bold && 'bold', span.italic && 'italic'].filter(Boolean).join(' ') || undefined;
 }
 
+// Widths already measured, by font, size, style and text. Laying out a document measures every word and every space of every paragraph
+// (53,000 native shaping calls for 300 paragraphs of 60 words), and a document repeats its words far more than it invents them, so a
+// repeated one is answered from here instead of shaping it again. Cleared whole when it grows past `WIDTH_CACHE_MAX` (about 2 MB), which
+// keeps the bookkeeping free and the memory bounded; the next layout simply re-measures what it needs.
+const WIDTH_CACHE_MAX = 20000;
+const widthCache = new Map<string, number>();
+
 function measureSpan(text: string, span: any, defaultFontSize: number) {
   if (!text) return 0;
   const fs = span.fontSize ?? defaultFontSize;
@@ -674,6 +691,17 @@ function measureSpan(text: string, span: any, defaultFontSize: number) {
     return text.length * fs * 0.55; // fallback estimate
   }
   const style = spanStyle(span);
+  const font = spanFont(span);
+  const key = `${fs}\u0001${style ?? ''}\u0001${typeof font === 'string' || font == null ? (font ?? '') : `${font.family ?? ''}\u0002${font.variations ?? ''}\u0002${font.features ?? ''}`}\u0001${text}`;
+  const cached = widthCache.get(key);
+  if (cached !== undefined) return cached;
+  const width = measureSpanUncached(text, fs, style, font);
+  if (widthCache.size >= WIDTH_CACHE_MAX) widthCache.clear();
+  widthCache.set(key, width);
+  return width;
+}
+
+function measureSpanUncached(text: string, fs: number, style: string | undefined, font: any) {
   // Parley's `Layout::width()` deliberately EXCLUDES trailing whitespace
   // from the reported width (correct for line-box sizing). A string that
   // is ENTIRELY whitespace has no non-whitespace content to anchor to, so
@@ -687,11 +715,11 @@ function measureSpan(text: string, span: any, defaultFontSize: number) {
   // Same for a span that merely ENDS in whitespace ("Hello " before a bold
   // span): its trailing space is drawn, so clicks past it must count it.
   if (/\s$/.test(text)) {
-    const withSentinel = __glyx_measure_text(text + 'x', fs, 999999, style, undefined, spanFont(span)).width;
-    const sentinelOnly = __glyx_measure_text('x', fs, 999999, style, undefined, spanFont(span)).width;
+    const withSentinel = __glyx_measure_text(text + 'x', fs, 999999, style, undefined, font).width;
+    const sentinelOnly = __glyx_measure_text('x', fs, 999999, style, undefined, font).width;
     return Math.max(0, withSentinel - sentinelOnly);
   }
-  return __glyx_measure_text(text, fs, 999999, style, undefined, spanFont(span)).width;
+  return __glyx_measure_text(text, fs, 999999, style, undefined, font).width;
 }
 
 // Cursor X for character index `charIdx` *within one span's full text*.
@@ -1010,6 +1038,8 @@ export function RichTextEditor({
   const docRef    = useRef(doc);
   const cursorRef = useRef(cursor);
   const selRef    = useRef(sel);
+  // Wrapped lines per paragraph object (see `layoutInfo`); a WeakMap, so a paragraph that leaves the document frees its entry.
+  const paraLayoutRef = useRef<WeakMap<object, { sig: string; lines: any[] }> | null>(null);
   const layoutInfoRef = useRef<any>(null); // set below, after `layoutInfo` is computed
   docRef.current    = doc;
   cursorRef.current = cursor;
@@ -1303,23 +1333,34 @@ export function RichTextEditor({
     const contentWidth = Math.max(20, (typeof width === 'number' ? width : 600) - 2 * (EDITOR_PADDING + outerPadLeft));
     let y = 0;
     let maxContentWidth = contentWidth;
+    // A paragraph is immutable (an edit makes a new one and shares the rest), so its wrapped lines depend only on the paragraph itself and
+    // on the numbers below. Typing in one paragraph of a long document then lays out that paragraph, not all of them.
+    const cache = (paraLayoutRef.current ??= new WeakMap());
     const items = paras.map((para: Paragraph, pi: number) => {
       const number = para.listType === 'number' ? computeListNumber(paras, pi) : null;
       const mw = markerWidth(para, fontSize, number);
-      const lines = wrap
-        ? wrapParagraph(para, Math.max(20, contentWidth - mw), fontSize)
-        : [{ start: 0, end: paraText(para).length, pieces: para.spans.map((s: { text: any; }) => ({ span: s, text: s.text, start: 0 })) }];
-      // Alignment is applied per visual line, inside the content width. Each
-      // line remembers its own offset so the click/caret math can subtract the
-      // same amount the renderer adds.
-      for (const line of lines) {
-        const textW = line.pieces.reduce((sum: number, p: { text: any; span: any }) => sum + measureSpan(p.text, p.span, fontSize), 0);
-        const lineW = mw + textW;
-        const free = Math.max(0, contentWidth - lineW);
-        (line as any).width = lineW;
-        (line as any).alignOffset = para.align === 'center' ? free / 2 : para.align === 'right' ? free : 0;
-        if (!wrap && lineW > maxContentWidth) maxContentWidth = lineW;
+      const sig = `${contentWidth}|${mw}|${fontSize}|${wrap}|${_family ?? ''}|${_variations ?? ''}|${_features ?? ''}`;
+      let lines: any[];
+      const hit = cache.get(para);
+      if (hit && hit.sig === sig) {
+        lines = hit.lines;
+      } else {
+        lines = wrap
+          ? wrapParagraph(para, Math.max(20, contentWidth - mw), fontSize)
+          : [{ start: 0, end: paraText(para).length, pieces: para.spans.map((s: { text: any; }) => ({ span: s, text: s.text, start: 0 })) }];
+        // Alignment is applied per visual line, inside the content width. Each
+        // line remembers its own offset so the click/caret math can subtract the
+        // same amount the renderer adds.
+        for (const line of lines) {
+          const textW = line.pieces.reduce((sum: number, p: { text: any; span: any }) => sum + measureSpan(p.text, p.span, fontSize), 0);
+          const lineW = mw + textW;
+          const free = Math.max(0, contentWidth - lineW);
+          (line as any).width = lineW;
+          (line as any).alignOffset = para.align === 'center' ? free / 2 : para.align === 'right' ? free : 0;
+        }
+        cache.set(para, { sig, lines });
       }
+      if (!wrap) for (const line of lines) if (line.width > maxContentWidth) maxContentWidth = line.width;
       const lineHeight = paragraphLineHeight(para, fontSize);
       const item = { pi, para, mw, number, lines, y, lineHeight, height: lines.length * lineHeight };
       y += item.height;
@@ -2120,10 +2161,34 @@ const ALIGN_ICON: Record<TextAlign, string> = {
 };
 const ALIGN_LABEL: Record<TextAlign, string> = { left: 'Left', center: 'Center', right: 'Right' };
 
+/** Schemes that run or embed something instead of naming a place: never kept as a link. */
+const UNSAFE_LINK_SCHEME = /^\s*(javascript|data|vbscript)\s*:/i;
+
 function normalizeLink(value: string) {
   const url = value.trim();
-  if (!url) return '';
+  if (!url || UNSAFE_LINK_SCHEME.test(url)) return '';
   return /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}`;
+}
+
+/**
+ * A link target that is safe to write into exported HTML or Markdown: `http`, `https`, `mailto` or `tel`, or a relative or `#` target.
+ * Anything else (`javascript:`, `data:`, `file:` and so on, which a pasted or imported document can carry) is dropped, so an exported
+ * page never runs script when the link is followed. Returns `''` for an unsafe target.
+ */
+export function safeLinkUrl(url: string | undefined): string {
+  const value = (url ?? '').trim();
+  if (!value) return '';
+  // Control characters hide a scheme from a naive check (`java<tab>script:`).
+  if (/[\u0000-\u001f\u007f]/.test(value)) return '';
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(value);
+  if (scheme) return /^(https?|mailto|tel)$/i.test(scheme[1]) ? value : '';
+  return value;
+}
+
+/** A highlight colour that is safe to put in a `style` attribute: a hex colour or `rgb()` / `rgba()` / `hsl()` / `hsla()`; else `''`. */
+function safeCssColor(value: string | undefined): string {
+  const v = (value ?? '').trim();
+  return /^(#[0-9a-f]{3,8}|(rgb|hsl)a?\([0-9a-z\s.,%/-]{1,60}\))$/i.test(v) ? v : '';
 }
 
 export function RichTextToolbar({ style, fontFamilies = DEFAULT_FONT_FAMILIES }: RichTextToolbarProps) {
@@ -2609,13 +2674,22 @@ function escapeMarkdown(text: string) {
 }
 
 function spanToMarkdown(span: Span) {
-  if (span.code) return `\`${span.text.replace(/`/g, '\\`')}\``;
+  if (span.code) {
+    // A code span cannot hold a backslash escape: fence it with one more backtick than its longest run, padded when it touches one.
+    const longest = Math.max(0, ...(span.text.match(/`+/g) ?? []).map((m) => m.length));
+    const fence = '`'.repeat(longest + 1);
+    const pad = span.text.startsWith('`') || span.text.endsWith('`') ? ' ' : '';
+    return `${fence}${pad}${span.text}${pad}${fence}`;
+  }
   let text = escapeMarkdown(span.text);
-  if (span.highlight) text = `<mark style="background-color:${span.highlight}">${text}</mark>`;
+  const highlight = safeCssColor(span.highlight);
+  if (highlight) text = `<mark style="background-color:${highlight}">${text}</mark>`;
   if (span.underline) text = `<u>${text}</u>`;
   if (span.italic) text = `*${text}*`;
   if (span.bold) text = `**${text}**`;
-  if (span.link) text = `[${text}](${span.link})`;
+  const link = safeLinkUrl(span.link);
+  // A target with a space or a parenthesis goes in angle brackets, so it cannot end the link early; a plain one stays as it was.
+  if (link) text = /[\s()<>]/.test(link) ? `[${text}](<${link.replace(/[<>]/g, encodeURIComponent)}>)` : `[${text}](${link})`;
   return text;
 }
 
@@ -2655,11 +2729,13 @@ function escapeHTML(text: string) {
 function spanToHTML(span: Span) {
   let text = escapeHTML(span.text);
   if (span.code) text = `<code>${text}</code>`;
-  if (span.highlight) text = `<mark style="background-color:${escapeHTML(span.highlight)}">${text}</mark>`;
+  const highlight = safeCssColor(span.highlight);
+  if (highlight) text = `<mark style="background-color:${escapeHTML(highlight)}">${text}</mark>`;
   if (span.underline) text = `<u>${text}</u>`;
   if (span.italic) text = `<em>${text}</em>`;
   if (span.bold) text = `<strong>${text}</strong>`;
-  if (span.link) text = `<a href="${escapeHTML(span.link)}">${text}</a>`;
+  const link = safeLinkUrl(span.link);
+  if (link) text = `<a href="${escapeHTML(link)}">${text}</a>`;
   return text;
 }
 

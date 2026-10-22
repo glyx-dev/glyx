@@ -345,6 +345,37 @@ export function insertionIndex(
   return rects.length;
 }
 
+/**
+ * `insertionIndex` for a long list without measuring every item: the items are in order, so the boundary is found by bisection, asking for
+ * `log2(count)` rectangles (each one a native call) instead of all of them. `rectAt` returns null for an item that is not on screen; as soon
+ * as one is met the search falls back to the plain scan, which skips such items as `rects()` always did.
+ */
+export function insertionIndexLazy(
+  count: number,
+  rectAt: (index: number) => { boxX: number; boxY: number; boxWidth: number; boxHeight: number } | null,
+  x: number,
+  y: number,
+  direction: 'vertical' | 'horizontal' = 'vertical',
+): number {
+  const pointer = direction === 'horizontal' ? x : y;
+  const mid = (r: { boxX: number; boxY: number; boxWidth: number; boxHeight: number }) =>
+    direction === 'horizontal' ? r.boxX + r.boxWidth / 2 : r.boxY + r.boxHeight / 2;
+  // The first index whose midpoint is below the pointer, among 0..count (count meaning "after the last").
+  let lo = 0;
+  let hi = count;
+  while (lo < hi) {
+    const m = (lo + hi) >> 1;
+    const r = rectAt(m);
+    if (!r) {
+      const rects: { boxX: number; boxY: number; boxWidth: number; boxHeight: number }[] = [];
+      for (let i = 0; i < count; i++) { const ri = rectAt(i); if (ri) rects.push(ri); }
+      return insertionIndex(rects, x, y, direction);
+    }
+    if (pointer < mid(r)) hi = m; else lo = m + 1;
+  }
+  return lo;
+}
+
 /** The final index after removing `from` and inserting at boundary `insertAt` in the same list. */
 export function dropIndex(from: number, insertAt: number, length: number): number {
   const before = Math.max(0, Math.min(length, insertAt));
@@ -449,26 +480,41 @@ export function SortableList<T>({
     return out;
   }, [keyFor]);
 
+  // Where the indicator was last put (the boundary and the list's length). A pointer that moves within the same gap changes nothing on
+  // screen, so it must not cost a render of the whole list (every `renderItem`), nor the measuring of every item, on each of its moves.
+  const lastAt = useRef<{ at: number; n: number } | null>(null);
+
   const updateIndicator = useCallback((x: number, y: number) => {
     if (!showIndicatorRef.current) { setIndicator(null); return; }
     const listIdNode = listNodeId.current;
     const list = listIdNode != null ? layoutOf(listIdNode) : null;
-    const rs = rects();
-    if (!list || rs.length === 0) { setIndicator(null); return; }
-    const at = insertionIndex(rs, x, y, directionRef.current);
+    const n = itemsRef.current.length;
+    const rectAt = (i: number) => {
+      const id = itemNodes.current.get(keyFor(itemsRef.current[i], i));
+      return id == null ? null : layoutOf(id);
+    };
+    if (!list || n === 0) { lastAt.current = null; setIndicator(null); return; }
+    const at = insertionIndexLazy(n, rectAt, x, y, directionRef.current);
+    if (lastAt.current && lastAt.current.at === at && lastAt.current.n === n) return;
+    lastAt.current = { at, n };
+    // Only the neighbours of the boundary are needed to place the line.
+    const before = at > 0 ? rectAt(at - 1) : null;
+    const after = at < n ? rectAt(at) : null;
     const horizontal = directionRef.current === 'horizontal';
-    const edge = at < rs.length ? rs[at] : rs[rs.length - 1];
+    const edge = after ?? before;
+    if (!edge) { setIndicator(null); return; }
     if (horizontal) {
-      const left = (at < rs.length ? edge.boxX - gapRef.current / 2 : edge.boxX + edge.boxWidth + gapRef.current / 2) - list.boxX;
+      const left = (after ? edge.boxX - gapRef.current / 2 : edge.boxX + edge.boxWidth + gapRef.current / 2) - list.boxX;
       setIndicator({ left, top: 0, width: 2, height: list.boxHeight });
     } else {
-      const top = (at < rs.length ? edge.boxY - gapRef.current / 2 : edge.boxY + edge.boxHeight + gapRef.current / 2) - list.boxY;
+      const top = (after ? edge.boxY - gapRef.current / 2 : edge.boxY + edge.boxHeight + gapRef.current / 2) - list.boxY;
       setIndicator({ top, left: 0, width: list.boxWidth, height: 2 });
     }
   }, [rects]);
 
   const handleDrop = useCallback((data: unknown, info: DropInfo) => {
     setIndicator(null);
+    lastAt.current = null;
     if (!sortableData(data)) { onDrop?.(data, info); return; }
     const rs = rects();
     const at = insertionIndex(rs, info.x, info.y, directionRef.current);
@@ -482,7 +528,7 @@ export function SortableList<T>({
 
   const onItemDrag = useCallback((key: string, active: boolean) => {
     setDraggingKey(active ? key : null);
-    if (!active) setIndicator(null);
+    if (!active) { setIndicator(null); lastAt.current = null; }
   }, []);
 
   const children = items.length === 0 && empty
@@ -525,7 +571,7 @@ export function SortableList<T>({
       onMount: (id: number) => { listNodeId.current = id; },
       onDragEnter: (_data: unknown, info: DropInfo) => { if (sortableData(_data)) updateIndicator(info.x, info.y); },
       onDragOver:  (_data: unknown, info: DropInfo) => { if (sortableData(_data)) updateIndicator(info.x, info.y); },
-      onDragLeave: () => setIndicator(null),
+      onDragLeave: () => { lastAt.current = null; setIndicator(null); },
       onDrop: handleDrop,
     },
     children,

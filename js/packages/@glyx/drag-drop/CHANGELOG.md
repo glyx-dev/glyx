@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Dragging over a long `SortableList` measured every item and rendered the whole list on every pointer move.** The insertion index is now found by bisection (`insertionIndexLazy`, exported: about `log2(n)` native layout calls instead of `n`), and the indicator is only updated when the boundary changes, so a pointer that stays within one gap costs nothing.
+
 ### Added
 - **`SortableList` and `Board`.** Sortable lists reorder by pointer position, report the final index (`onReorder`), accept items from another list (`onTransfer`) and show an insertion line, a dimmed source item and a lifted copy that no longer moves the list around. `Board` draws columns of cards with `onMove({ item, from, to })` for moves inside a column and between columns, plus `renderCard`, `renderColumnFooter`, `renderEmpty`, a fixed column width and horizontal scrolling. Its drag preview is one layer above every column and outside their scroll views, so a card crossing a column boundary is not clipped or painted under the next column; `renderDragPreview` overrides it and `lift={false}` keeps the source in place as the placeholder. Pure helpers `insertionIndex`, `dropIndex` and `moveItem` are exported.
 - **Hover callbacks on DropZone.** `onDragEnter`, `onDragOver` and `onDragLeave` (with the dragged data and pointer), and `activeStyle` for a highlight while a compatible drag is over the zone. Draggable gets `onDragStart`, `onDragMove`, `onDragEnd` (with `dropped`) and `onMount`.

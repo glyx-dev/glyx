@@ -2,8 +2,10 @@ import { test, expect } from 'bun:test';
 import {
   emptyDoc, paraText, splitSpansAt, mergeSpans, cursorEq, hasSelection, normSel,
   clampCursor, moveCursorBy, insertText, insertBreak, deleteChar, deleteSelection,
-  applyFormat, selectionHasFormat, selectionFormatValue, spanAtCursor, selectedText, docToPlainText, docFromPlainText,
-  computeListNumber, wordRangeAt, charIndexAtPoint,
+  applyFormat, selectionHasFormat, selectionFormatValue, spanAtCursor, spanAtOffset, selectedText, docToPlainText, docFromPlainText,
+  linkRangeAtOffset,
+  computeListNumber, wordRangeAt, charIndexAtPoint, paragraphAlign, setParagraphAlign, sliceDocument, insertDocument,
+  docToMarkdown, docToHTML,
 } from './index.js';
 
 function doc(...paraTexts) {
@@ -308,6 +310,15 @@ test('deleteSelection cross-paragraph merge keeps the anchor paragraph\'s list s
   expect(r.doc.paragraphs[0].indent).toBe(0);
 });
 
+test('typing, deleting and formatting inside a paragraph keep its list and alignment', () => {
+  const d: any = { paragraphs: [{ spans: [{ text: 'abc' }], listType: 'bullet', indent: 2, align: 'center' }] };
+  const props = { listType: 'bullet', indent: 2, align: 'center' };
+  expect(insertText(d, { para: 0, offset: 3 }, 'd').doc.paragraphs[0]).toMatchObject(props);
+  expect(deleteChar(d, { para: 0, offset: 2 }, true).doc.paragraphs[0]).toMatchObject(props);
+  expect(deleteSelection(d, { anchor: { para: 0, offset: 0 }, focus: { para: 0, offset: 2 } }).doc.paragraphs[0]).toMatchObject(props);
+  expect(applyFormat(d, { anchor: { para: 0, offset: 0 }, focus: { para: 0, offset: 2 } }, 'bold', true).paragraphs[0]).toMatchObject(props);
+});
+
 // ── computeListNumber ────────────────────────────────────────────────────────
 
 test('computeListNumber numbers a simple consecutive run starting at 1', () => {
@@ -435,4 +446,117 @@ test('mergeSpans does not merge runs in different OpenType features', () => {
     { text: '3', fontFeatureSettings: "'smcp' 1" },
   ]);
   expect(merged.map((s: any) => s.text)).toEqual(['12', '3']);
+});
+
+test('mergeSpans keeps inline code, links and highlights on separate runs', () => {
+  const merged = mergeSpans([
+    { text: 'a', code: true }, { text: 'b', code: true },
+    { text: 'c', link: 'https://example.com' },
+    { text: 'd', highlight: '#f6e05e66' },
+  ]);
+  expect(merged.map((s: any) => s.text)).toEqual(['ab', 'c', 'd']);
+  expect(merged[0].code).toBe(true);
+  expect(merged[1].link).toBe('https://example.com');
+  expect(merged[2].highlight).toBe('#f6e05e66');
+});
+
+test('applyFormat sets and clears code, link and highlight on the selected runs', () => {
+  const d = { paragraphs: [{ spans: [{ text: 'hello world' }] }] };
+  const sel = { anchor: { para: 0, offset: 0 }, focus: { para: 0, offset: 5 } };
+  const coded = applyFormat(d, sel, 'code', true);
+  expect(coded.paragraphs[0].spans[0].code).toBe(true);
+  expect(coded.paragraphs[0].spans[0].text).toBe('hello');
+  const linked = applyFormat(d, sel, 'link', 'https://example.com');
+  expect(linked.paragraphs[0].spans[0].link).toBe('https://example.com');
+  const highlighted = applyFormat(d, sel, 'highlight', '#f6e05e66');
+  expect(highlighted.paragraphs[0].spans[0].highlight).toBe('#f6e05e66');
+  expect(applyFormat(highlighted, sel, 'highlight', undefined).paragraphs[0].spans[0].highlight).toBeUndefined();
+});
+
+test('setParagraphAlign applies to every touched paragraph and clears back to left', () => {
+  const d = { paragraphs: [
+    { spans: [{ text: 'one' }] },
+    { spans: [{ text: 'two' }], align: 'right' as const },
+  ] };
+  const centered = setParagraphAlign(d, { anchor: { para: 0, offset: 0 }, focus: { para: 1, offset: 3 } }, 'center');
+  expect(centered.paragraphs.map((p) => p.align)).toEqual(['center', 'center']);
+  expect(paragraphAlign(centered, { para: 1, offset: 0 })).toBe('center');
+  const left = setParagraphAlign(centered, { anchor: { para: 0, offset: 0 }, focus: { para: 1, offset: 3 } }, 'left');
+  expect(left.paragraphs.every((p) => p.align === undefined)).toBe(true);
+});
+
+test('insertBreak keeps the paragraph alignment', () => {
+  const d = { paragraphs: [{ spans: [{ text: 'ab' }], align: 'center' as const }] };
+  const r = insertBreak(d, { para: 0, offset: 1 });
+  expect(r.doc.paragraphs[0].align).toBe('center');
+  expect(r.doc.paragraphs[1].align).toBe('center');
+});
+
+test('spanAtOffset finds the link run under a click, unlike spanAtCursor at its start', () => {
+  const d = { paragraphs: [{ spans: [{ text: 'go ' }, { text: 'here', link: 'https://example.com' }] }] };
+  expect(spanAtOffset(d, { para: 0, offset: 3 })?.link).toBe('https://example.com');
+  expect(spanAtOffset(d, { para: 0, offset: 6 })?.link).toBe('https://example.com');
+  // The boundary after the link belongs to whatever follows it, not to the
+  // link: clicking the first character after a link must place the caret.
+  expect(spanAtOffset(d, { para: 0, offset: 7 })?.link).toBeUndefined();
+  expect(spanAtOffset(d, { para: 0, offset: 2 })?.link).toBeUndefined();
+});
+
+test('linkRangeAtOffset returns the full linked run and ignores text outside it', () => {
+  const d = { paragraphs: [{ spans: [{ text: 'go ' }, { text: 'here', link: 'https://example.com' }, { text: ' now' }] }] };
+  expect(linkRangeAtOffset(d, { para: 0, offset: 3 })).toEqual({
+    para: 0, start: 3, end: 7, url: 'https://example.com',
+  });
+  expect(linkRangeAtOffset(d, { para: 0, offset: 6 })).toEqual({
+    para: 0, start: 3, end: 7, url: 'https://example.com',
+  });
+  expect(linkRangeAtOffset(d, { para: 0, offset: 2 })).toBeUndefined();
+  expect(linkRangeAtOffset(d, { para: 0, offset: 7 })).toBeUndefined();
+});
+
+test('sliceDocument keeps formatting and paragraph properties, and drops unselected text', () => {
+  const d = { paragraphs: [
+    { spans: [{ text: 'Hello ' }, { text: 'world', bold: true }], align: 'center' as const, listType: 'bullet' as const },
+    { spans: [{ text: 'second' }] },
+  ] };
+  const slice = sliceDocument(d, { anchor: { para: 0, offset: 6 }, focus: { para: 1, offset: 3 } });
+  expect(slice.paragraphs).toHaveLength(2);
+  expect(paraText(slice.paragraphs[0])).toBe('world');
+  expect(slice.paragraphs[0].spans[0].bold).toBe(true);
+  expect(slice.paragraphs[0].align).toBe('center');
+  expect(slice.paragraphs[0].listType).toBe('bullet');
+  expect(paraText(slice.paragraphs[1])).toBe('sec');
+});
+
+test('insertDocument inserts one paragraph inline and several paragraphs with a cursor on the last', () => {
+  const d = { paragraphs: [{ spans: [{ text: 'ac' }] }] };
+  const one = insertDocument(d, { para: 0, offset: 1 }, { paragraphs: [{ spans: [{ text: 'b', code: true }] }] });
+  expect(paraText(one.doc.paragraphs[0])).toBe('abc');
+  expect(one.doc.paragraphs[0].spans[1].code).toBe(true);
+  expect(one.cursor).toEqual({ para: 0, offset: 2 });
+
+  const two = insertDocument(d, { para: 0, offset: 1 }, { paragraphs: [
+    { spans: [{ text: 'b' }] },
+    { spans: [{ text: 'd' }], align: 'right' as const },
+  ] });
+  expect(two.doc.paragraphs.map(paraText)).toEqual(['ab', 'dc']);
+  expect(two.doc.paragraphs[1].align).toBe('right');
+  expect(two.cursor).toEqual({ para: 1, offset: 1 });
+});
+
+test('docToMarkdown serializes inline formats and lists', () => {
+  const d = { paragraphs: [
+    { spans: [{ text: 'Hello ', bold: true }, { text: 'world', link: 'https://example.com' }] },
+    { spans: [{ text: 'one' }], listType: 'bullet' as const },
+    { spans: [{ text: 'two' }], listType: 'bullet' as const },
+  ] };
+  expect(docToMarkdown(d)).toBe('**Hello **[world](https://example.com)\n\n- one\n- two');
+});
+
+test('docToHTML escapes text and serializes paragraphs, alignment and lists', () => {
+  const d = { paragraphs: [
+    { spans: [{ text: '<hello>', bold: true }, { text: ' & ', italic: true }], align: 'center' as const },
+    { spans: [{ text: 'one' }], listType: 'number' as const },
+  ] };
+  expect(docToHTML(d)).toBe('<p style="text-align:center"><strong>&lt;hello&gt;</strong><em> &amp; </em></p><ol><li>one</li></ol>');
 });

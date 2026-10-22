@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Rich-text v2 icons.** `highlighter`, `align-left`, `align-center` and `align-right`, used by the highlight and alignment controls in `@glyx-dev/rich-text`'s toolbar (`code` and `link` already existed).
 - **Text formatting icons.** `bold`, `italic`, `underline`, `list`, `list-ordered`, `indent-increase`, `indent-decrease` and `type`, used by `@glyx-dev/rich-text`'s toolbar.
 - **Written in TypeScript.** The source is now TypeScript (`src/index.ts`), strictly type-checked, and the package ships its declarations (`types/`), so TypeScript apps get types for the whole public API.
 

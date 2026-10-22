@@ -20,7 +20,8 @@ export default defineConfig({
     fs:           { read: [], write: [] },
     db:           false,
     dialog:       false,
-    clipboard:    false,
+    clipboard:    true,
+    shell:        true,
     notification: false,
   },
   dev: {

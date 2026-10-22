@@ -3,7 +3,8 @@
 // Architecture:
 //   Document  = array of paragraphs
 //   Paragraph = array of styled spans
-//   Span      = { text, bold?, italic?, underline?, color?, fontSize?, fontFamily?, fontVariationSettings?, fontFeatureSettings? }
+//   Span      = { text, bold?, italic?, underline?, code?, link?, highlight?, color?, fontSize?, fontFamily?, fontVariationSettings?, fontFeatureSettings? }
+//   Paragraph = { spans, listType?, indent?, align? }
 //   Cursor    = { para, offset }  (offset = char index in flat paragraph text)
 //   Selection = { anchor: Cursor, focus: Cursor }
 //
@@ -12,7 +13,7 @@
 // Cursor pixel position is computed via __glyx_measure_text (styled).
 
 import React, { useState, useEffect, useRef, useCallback, useContext, useMemo, createContext } from 'react';
-import { View, Text, Pressable, addGlobalClickListener, removeGlobalClickListener, clipboard, registerInput, unregisterInput, registerScrollView, unregisterScrollView, registerDraggable, unregisterDraggable } from '@glyx-dev/react';
+import { View, Text, TextInput, Pressable, addGlobalClickListener, removeGlobalClickListener, clipboard, openPopover, closePopover, setFocus, registerInput, unregisterInput, registerScrollView, unregisterScrollView, registerDraggable, unregisterDraggable } from '@glyx-dev/react';
 import type { GlyxStyle } from '@glyx-dev/react';
 import { Icon } from '@glyx-dev/icons';
 import { DocHistory, type EditKind } from './history.js';
@@ -25,6 +26,12 @@ export interface Span {
   bold?:      boolean;
   italic?:    boolean;
   underline?: boolean;
+  /** Inline code: drawn in a monospace family and a subtle background unless the run sets its own family or highlight. */
+  code?:      boolean;
+  /** A URL this run links to. Links are drawn in the link colour and underlined. */
+  link?:      string;
+  /** Inline highlight colour (a background behind this run). */
+  highlight?: string;
   color?:     string;
   fontSize?:  number;
   /** This run's font family (a `fontFamily` value); the editor's `fontFamily` when absent. */
@@ -36,6 +43,7 @@ export interface Span {
 }
 
 export type ListType = 'bullet' | 'number';
+export type TextAlign = 'left' | 'center' | 'right';
 
 /** One paragraph: runs of text, and optionally a list marker with a nesting level. */
 export interface Paragraph {
@@ -43,6 +51,8 @@ export interface Paragraph {
   listType?: ListType | null;
   /** Nesting level of a list item (0 = top level). */
   indent?:   number;
+  /** Horizontal alignment of the paragraph (default `left`). */
+  align?:    TextAlign;
 }
 
 export interface RichTextDocument {
@@ -60,16 +70,28 @@ export interface Selection {
   focus:  Cursor;
 }
 
-/** The character formats that can be toggled on and off. */
-export type FormatKey = 'bold' | 'italic' | 'underline';
+/** The character range of the link run under a click, and its URL. */
+export interface LinkRange {
+  para:  number;
+  /** Character offset where the linked run starts. */
+  start: number;
+  /** Character offset just after the linked run. */
+  end:   number;
+  url:   string;
+}
 
-/** The per-run formats that take a value instead of on/off: the font family, its axes and features, the size, and the colour. */
+/** The character formats that can be toggled on and off. */
+export type FormatKey = 'bold' | 'italic' | 'underline' | 'code';
+
+/** The per-run formats that take a value instead of on/off: fonts, size, colour, a link target and a highlight colour. */
 export type ValueFormatKey =
   | 'fontFamily'
   | 'fontVariationSettings'
   | 'fontFeatureSettings'
   | 'fontSize'
-  | 'color';
+  | 'color'
+  | 'link'
+  | 'highlight';
 
 /** A value a {@link ValueFormatKey} can take; `undefined` removes the run's own value (the editor's default applies again). */
 export type FormatValue = string | number | undefined;
@@ -107,6 +129,10 @@ export interface RichTextEditorProps {
   /** Ctrl+Z undoes and Ctrl+Y (or Ctrl+Shift+Z) redoes, as in a browser (default true; false turns the history off). */
   undoHistory?: boolean;
   style?:       GlyxStyle;
+  /** Offer an Open button in the link editor. Opening still goes through `onLinkPress`; clicking a link always opens the editor. */
+  openLinks?:   boolean;
+  /** Receives the URL when the user chooses Open in a link's editor. Requires `openLinks`. */
+  onLinkPress?: (url: string) => void;
   /** Rendered inside the editor's context, so a {@link RichTextToolbar} can sit above the text. */
   children?:    React.ReactNode;
 }
@@ -119,6 +145,25 @@ export interface RichTextToolbarProps {
    * fonts you want to offer.
    */
   fontFamilies?: string[];
+}
+
+/** One OpenType feature preset shown by {@link RichTextFeaturePicker}. */
+export interface RichTextFeaturePreset {
+  label: string;
+  /** A `fontFeatureSettings` value, e.g. `"'tnum' 1"`. */
+  value: string;
+}
+
+export interface RichTextFeaturePickerProps {
+  /** Presets to offer; defaults to tabular figures, small caps and ligatures off. */
+  features?: RichTextFeaturePreset[];
+  /** Label at the start of the row (default `Features`). */
+  label?: string;
+  /** Label for the button that removes the feature (default `Clear`). */
+  clearLabel?: string;
+  /** Width of the row; useful when it sits above a fixed-width editor. */
+  width?: number;
+  style?: GlyxStyle;
 }
 
 /** What {@link useEditorContext} returns, inside a {@link RichTextEditor}. */
@@ -141,6 +186,10 @@ export interface EditorContextValue {
   /** Changes the nesting level of the list items in the selection by `delta`. */
   indent:             (delta: number) => void;
   isListActive:       (listType: ListType) => boolean;
+  /** The alignment shown for the caret paragraph, or `left` when it has none. */
+  align:              TextAlign;
+  /** Sets the alignment of every paragraph the selection touches (or the caret paragraph). */
+  setAlign:           (align: TextAlign) => void;
   fontSize:           number;
   /** Restores this editor's caret/focus after a custom control is pressed; give that control `keepFocus` too. */
   refocus:            () => void;
@@ -177,6 +226,7 @@ export function mergeSpans(spans: Span[]): Span[] {
     if (!s.text) continue;
     const p = out[out.length - 1];
     if (p && p.bold === s.bold && p.italic === s.italic && p.underline === s.underline &&
+        p.code === s.code && p.link === s.link && p.highlight === s.highlight &&
         p.color === s.color && p.fontSize === s.fontSize && p.fontFamily === s.fontFamily &&
         p.fontVariationSettings === s.fontVariationSettings && p.fontFeatureSettings === s.fontFeatureSettings) {
       out[out.length - 1] = { ...p, text: p.text + s.text };
@@ -264,7 +314,7 @@ export function insertText(
   const para = paras[cursor.para];
   const [before, after] = splitSpansAt(para.spans, cursor.offset);
   const fmt = { ...(before[before.length - 1] ?? after[0] ?? {}), ...format };
-  paras[cursor.para] = { spans: mergeSpans([...before, { ...fmt, text }, ...after]) };
+  paras[cursor.para] = { ...para, spans: mergeSpans([...before, { ...fmt, text }, ...after]) };
   return { doc: { ...doc, paragraphs: paras }, cursor: { para: cursor.para, offset: cursor.offset + text.length } };
 }
 
@@ -282,6 +332,7 @@ export function insertBreak(doc: RichTextDocument, cursor: Cursor) {
   // Enter on a non-empty list item continues the list onto the new paragraph.
   const newPara: any = { spans: mergeSpans(after.length ? after : [{ text: '' }]) };
   if (current.listType) { newPara.listType = current.listType; newPara.indent = current.indent ?? 0; }
+  if (current.align && current.align !== 'left') newPara.align = current.align;
   paras.splice(cursor.para + 1, 0, newPara);
   return { doc: { ...doc, paragraphs: paras }, cursor: { para: cursor.para + 1, offset: 0 } };
 }
@@ -299,7 +350,7 @@ export function deleteChar(doc: RichTextDocument, cursor: Cursor, backward: bool
     }
     const [before, rest] = splitSpansAt(paras[cursor.para].spans, cursor.offset - 1);
     const [, afterOne]   = splitSpansAt(rest, 1);
-    paras[cursor.para] = { spans: mergeSpans([...before, ...afterOne]) };
+    paras[cursor.para] = { ...paras[cursor.para], spans: mergeSpans([...before, ...afterOne]) };
     return { doc: { ...doc, paragraphs: paras }, cursor: { ...cursor, offset: cursor.offset - 1 } };
   } else {
     const text = paraText(paras[cursor.para]);
@@ -312,7 +363,7 @@ export function deleteChar(doc: RichTextDocument, cursor: Cursor, backward: bool
     }
     const [before, rest] = splitSpansAt(paras[cursor.para].spans, cursor.offset);
     const [, afterOne]   = splitSpansAt(rest, 1);
-    paras[cursor.para] = { spans: mergeSpans([...before, ...afterOne]) };
+    paras[cursor.para] = { ...paras[cursor.para], spans: mergeSpans([...before, ...afterOne]) };
     return { doc: { ...doc, paragraphs: paras }, cursor };
   }
 }
@@ -323,7 +374,7 @@ export function deleteSelection(doc: RichTextDocument, sel: Selection) {
   if (anchor.para === focus.para) {
     const [before]  = splitSpansAt(paras[anchor.para].spans, anchor.offset);
     const [, after] = splitSpansAt(paras[anchor.para].spans, focus.offset);
-    paras[anchor.para] = { spans: mergeSpans([...before, ...after]) };
+    paras[anchor.para] = { ...paras[anchor.para], spans: mergeSpans([...before, ...after]) };
     return { doc: { ...doc, paragraphs: paras }, cursor: anchor };
   }
   const [before]  = splitSpansAt(paras[anchor.para].spans, anchor.offset);
@@ -349,6 +400,7 @@ export function applyFormat(doc: RichTextDocument, sel: Selection, key: keyof Sp
     const [pre, rest] = splitSpansAt(paras[pi].spans, s);
     const [mid, post] = splitSpansAt(rest, e - s);
     paras[pi] = {
+      ...paras[pi],
       spans: mergeSpans([
         ...pre,
         ...mid.map((sp) => {
@@ -362,6 +414,36 @@ export function applyFormat(doc: RichTextDocument, sel: Selection, key: keyof Sp
     };
   }
   return { ...doc, paragraphs: paras };
+}
+
+/** The run whose text contains `cursor.offset` (clicks inside a link use this rather than the caret-inheritance rule). */
+export function spanAtOffset(doc: RichTextDocument, cursor: Cursor): Span | undefined {
+  const spans = doc.paragraphs[cursor.para]?.spans ?? [];
+  let offset = 0;
+  for (const span of spans) {
+    if (cursor.offset >= offset && cursor.offset < offset + span.text.length) return span;
+    offset += span.text.length;
+  }
+  return undefined;
+}
+
+/**
+ * The range of the link run containing `cursor.offset`, or `undefined` when
+ * that character is not linked. Used by the click-to-edit link popover so it
+ * edits exactly the run the pointer is inside, even when the click's nearest
+ * caret boundary would fall in the next run.
+ */
+export function linkRangeAtOffset(doc: RichTextDocument, cursor: Cursor): LinkRange | undefined {
+  const spans = doc.paragraphs[cursor.para]?.spans ?? [];
+  let offset = 0;
+  for (const span of spans) {
+    const end = offset + span.text.length;
+    if (span.link && cursor.offset >= offset && cursor.offset < end) {
+      return { para: cursor.para, start: offset, end, url: span.link };
+    }
+    offset = end;
+  }
+  return undefined;
 }
 
 /** The span a caret sits in: the run before it (the one typing inherits), else the run after it, else none. */
@@ -431,6 +513,110 @@ export function selectedText(doc: RichTextDocument, sel: Selection) {
   return parts.join('');
 }
 
+/** The alignment of the paragraph that contains `cursor`, or `left` when it has none. */
+export function paragraphAlign(doc: RichTextDocument, cursor: Cursor): TextAlign {
+  return doc.paragraphs[cursor.para]?.align ?? 'left';
+}
+
+/** Sets the alignment of every paragraph the selection touches, or of the caret paragraph when nothing is selected. */
+export function setParagraphAlign(doc: RichTextDocument, sel: Selection, align: TextAlign): RichTextDocument {
+  const { anchor, focus } = normSel(sel);
+  const paras = [...doc.paragraphs];
+  for (let pi = anchor.para; pi <= focus.para; pi++) {
+    const next: any = { ...paras[pi] };
+    if (align === 'left') delete next.align;
+    else next.align = align;
+    paras[pi] = next;
+  }
+  return { ...doc, paragraphs: paras };
+}
+
+/**
+ * The part of a document covered by `sel`, with paragraph properties preserved. Used by copy/cut; an empty selection copies an empty
+ * paragraph rather than the whole document.
+ */
+export function sliceDocument(doc: RichTextDocument, sel: Selection): RichTextDocument {
+  if (!hasSelection(sel)) return { paragraphs: [{ spans: [{ text: '' }] }] };
+  const { anchor, focus } = normSel(sel);
+  const paragraphs: Paragraph[] = [];
+  for (let pi = anchor.para; pi <= focus.para; pi++) {
+    const s = pi === anchor.para ? anchor.offset : 0;
+    const e = pi === focus.para  ? focus.offset  : paraText(doc.paragraphs[pi]).length;
+    const [, rest] = splitSpansAt(doc.paragraphs[pi].spans, s);
+    const [mid] = splitSpansAt(rest, Math.max(0, e - s));
+    const next: Paragraph = { spans: mergeSpans(mid) };
+    const source = doc.paragraphs[pi];
+    if (source.listType) next.listType = source.listType;
+    if (source.indent) next.indent = source.indent;
+    if (source.align) next.align = source.align;
+    paragraphs.push(next);
+  }
+  return { paragraphs };
+}
+
+/**
+ * Inserts a document fragment at `cursor`. The destination paragraph keeps its list/alignment for the first line; the pasted
+ * paragraphs carry their own paragraph properties, and the last one inherits the destination's where the fragment has none.
+ */
+export function insertDocument(doc: RichTextDocument, cursor: Cursor, fragment: RichTextDocument): EditResult {
+  const frag = fragment.paragraphs.length ? fragment.paragraphs : [{ spans: [{ text: '' }] }];
+  const paras = [...doc.paragraphs];
+  const current = paras[cursor.para];
+  const [before, after] = splitSpansAt(current.spans, cursor.offset);
+
+  if (frag.length === 1) {
+    paras[cursor.para] = {
+      ...current,
+      spans: mergeSpans([...before, ...frag[0].spans, ...after]),
+    };
+    return { doc: { ...doc, paragraphs: paras }, cursor: { para: cursor.para, offset: cursor.offset + paraText(frag[0]).length } };
+  }
+
+  const first: Paragraph = { ...current, spans: mergeSpans([...before, ...frag[0].spans]) };
+  const middle: Paragraph[] = frag.slice(1, -1).map((p) => ({ ...p, spans: mergeSpans(p.spans) }));
+  const lastSource = frag[frag.length - 1];
+  const last: Paragraph = {
+    ...current,
+    ...lastSource,
+    spans: mergeSpans([...lastSource.spans, ...after]),
+  };
+  paras.splice(cursor.para, 1, first, ...middle, last);
+  return {
+    doc: { ...doc, paragraphs: paras },
+    cursor: { para: cursor.para + frag.length - 1, offset: paraText(lastSource).length },
+  };
+}
+
+// The system clipboard only carries text here, so a formatted copy also keeps
+// its fragment in this module for a later paste. If the clipboard text no
+// longer matches (the user copied something else, or another app changed it),
+// paste falls back to plain text rather than resurrecting stale formatting.
+let richClipboard: { text: string; doc: RichTextDocument } | null = null;
+
+/** Copies the selection as plain text, and remembers its formatting for an in-app paste. */
+function copySelectionToClipboard(doc: RichTextDocument, sel: Selection) {
+  if (!hasSelection(sel)) return;
+  const fragment = sliceDocument(doc, sel);
+  const text = docToPlainText(fragment);
+  if (!text) return;
+  richClipboard = { text, doc: fragment };
+  try { clipboard.writeText(text); } catch {}
+}
+
+/** Paste helper shared by Ctrl+V and the context API. `plainText` is what the system clipboard returned. */
+function pasteIntoDocument(doc: RichTextDocument, cursor: Cursor, sel: Selection, plainText: string) {
+  let base = doc, at = cursor;
+  if (hasSelection(sel)) {
+    const deleted = deleteSelection(base, sel);
+    base = deleted.doc;
+    at = deleted.cursor;
+  }
+  const fragment = richClipboard && richClipboard.text === plainText
+    ? richClipboard.doc
+    : docFromPlainText(plainText);
+  return insertDocument(base, at, fragment);
+}
+
 // ── Pixel measurement ─────────────────────────────────────────────────────────
 
 // Real single-line height for `fontSize`, from the native shaper's own
@@ -445,11 +631,18 @@ let _family: string | undefined;
 let _variations: string | undefined;
 let _features: string | undefined;
 
-/** What the native measuring calls take for a span's font: its own font props, else the editor's. */
+/** The family a run is actually drawn in (code gets a monospace fallback unless it names a family). */
+const CODE_FONT_FAMILY = 'Cascadia Mono, Consolas, monospace';
+function spanFamily(span?: any): string | undefined {
+  return span?.fontFamily ?? (span?.code ? CODE_FONT_FAMILY : _family);
+}
+
+/** What the native measuring calls take for a span's font: its own font props, else the editor's. Code does not inherit the editor's
+ *  variable axes/features, which usually belong to a proportional UI family and would be meaningless (or noisy) on a mono fallback. */
 function spanFont(span?: any): any {
-  const family = span?.fontFamily ?? _family;
-  const variations = span?.fontVariationSettings ?? _variations;
-  const features = span?.fontFeatureSettings ?? _features;
+  const family = spanFamily(span);
+  const variations = span?.fontVariationSettings ?? (span?.code ? undefined : _variations);
+  const features = span?.fontFeatureSettings ?? (span?.code ? undefined : _features);
   return (variations || features) ? { family, variations, features } : family;
 }
 
@@ -763,6 +956,8 @@ export function RichTextEditor({
   fontFamily,
   fontVariationSettings,
   fontFeatureSettings,
+  openLinks    = false,
+  onLinkPress,
   wrap         = true,   // true: long paragraphs soft-wrap to fit `width` (a
                          // normal editor/notes surface). false: paragraphs
                          // stay on one line and overflow horizontally instead
@@ -782,6 +977,7 @@ export function RichTextEditor({
   const [focused, setFocused] = useState(false);
   const [blinkOn, setBlinkOn] = useState(true);
   const nodeIdRef = useRef<any>(null);
+  const linkPopoverRef = useRef<number | null>(null);
   // Vertical scroll (wheel + native scrollbar drag) for the paragraphs
   // container — same `clip`/`scrollOffsetY`/`showScrollbar` native
   // infrastructure `@glyx-dev/react`'s `ScrollView`/multiline `TextInput`
@@ -847,6 +1043,29 @@ export function RichTextEditor({
     setDoc_(d);
     onChange?.(d);
   }, [onChange, undoHistory]);
+
+  // The link editor popover owns the native focus while it is open. Once it
+  // unmounts, put keyboard focus back on the editor so typing can continue
+  // without requiring another click.
+  const focusEditorSoon = useCallback(() => {
+    const id = nodeIdRef.current;
+    if (id == null) return;
+    setTimeout(() => {
+      if (nodeIdRef.current === id) setFocus(id);
+    }, 0);
+  }, []);
+
+  // Apply a link value directly to a known run range. The click resolves the
+  // exact linked run before the popover opens, so this does not depend on the
+  // editor's current selection (which may still be from before the click).
+  const applyLinkRange = useCallback((range: LinkRange, value: string) => {
+    const url = normalizeLink(value);
+    if (url === range.url) return;
+    setDoc(applyFormat(docRef.current, {
+      anchor: { para: range.para, offset: range.start },
+      focus:  { para: range.para, offset: range.end },
+    }, 'link', url || undefined));
+  }, [setDoc]);
 
   const setCursor = useCallback((c: { para: number; offset: number }) => {
     historyRef.current?.breakRun();
@@ -921,10 +1140,10 @@ export function RichTextEditor({
         setCursor_({ para: last, offset: paraText(doc.paragraphs[last]).length });
         return;
       }
-      if (key === 'KeyC') { try { clipboard.writeText(selectedText(doc, sel)); } catch {} return; }
+      if (key === 'KeyC') { if (hasSel) copySelectionToClipboard(doc, sel); return; }
       if (key === 'KeyX') {
         if (!hasSel) return;
-        try { clipboard.writeText(selectedText(doc, sel)); } catch {}
+        copySelectionToClipboard(doc, sel);
         const r = deleteSelection(doc, sel);
         setDoc(r.doc); setCursor_(r.cursor); setSel_({ anchor: r.cursor, focus: r.cursor });
         return;
@@ -932,15 +1151,7 @@ export function RichTextEditor({
       if (key === 'KeyV') {
         clipboard.readText().then((text: string) => {
           if (!text) return;
-          let d = docRef.current, c = cursorRef.current, s = selRef.current;
-          if (hasSelection(s)) { const r = deleteSelection(d, s); d = r.doc; c = r.cursor; }
-          // Insert each line as a paragraph break
-          const lines = text.split('\n');
-          let result = { doc: d, cursor: c };
-          for (let i = 0; i < lines.length; i++) {
-            if (i > 0) result = insertBreak(result.doc, result.cursor);
-            if (lines[i]) result = insertText(result.doc, result.cursor, lines[i], typingFormatRef.current);
-          }
+          const result = pasteIntoDocument(docRef.current, cursorRef.current, selRef.current, text);
           setDoc(result.doc); setCursor_(result.cursor); setSel_({ anchor: result.cursor, focus: result.cursor });
         }).catch(() => {});
         return;
@@ -962,6 +1173,12 @@ export function RichTextEditor({
         if (!hasSel) return;
         const on = selectionHasFormat(doc, sel, 'underline');
         setDoc(applyFormat(doc, sel, 'underline', !on));
+        return;
+      }
+      if (key === 'KeyE') {
+        if (!hasSel) return;
+        const on = selectionHasFormat(doc, sel, 'code');
+        setDoc(applyFormat(doc, sel, 'code', !on));
         return;
       }
       return;
@@ -1092,12 +1309,16 @@ export function RichTextEditor({
       const lines = wrap
         ? wrapParagraph(para, Math.max(20, contentWidth - mw), fontSize)
         : [{ start: 0, end: paraText(para).length, pieces: para.spans.map((s: { text: any; }) => ({ span: s, text: s.text, start: 0 })) }];
-      if (!wrap) {
-        // No wrapping means a paragraph's real width can exceed `contentWidth`
-        // — track the widest one so the horizontal scrollbar/pan (below) know
-        // how far there is to scroll.
-        const lineW = mw + lines[0].pieces.reduce((sum: any, p: { text: any; span: any; }) => sum + measureSpan(p.text, p.span, fontSize), 0);
-        if (lineW > maxContentWidth) maxContentWidth = lineW;
+      // Alignment is applied per visual line, inside the content width. Each
+      // line remembers its own offset so the click/caret math can subtract the
+      // same amount the renderer adds.
+      for (const line of lines) {
+        const textW = line.pieces.reduce((sum: number, p: { text: any; span: any }) => sum + measureSpan(p.text, p.span, fontSize), 0);
+        const lineW = mw + textW;
+        const free = Math.max(0, contentWidth - lineW);
+        (line as any).width = lineW;
+        (line as any).alignOffset = para.align === 'center' ? free / 2 : para.align === 'right' ? free : 0;
+        if (!wrap && lineW > maxContentWidth) maxContentWidth = lineW;
       }
       const lineHeight = paragraphLineHeight(para, fontSize);
       const item = { pi, para, mw, number, lines, y, lineHeight, height: lines.length * lineHeight };
@@ -1176,10 +1397,74 @@ export function RichTextEditor({
     const { pi, lineIdx } = hitTestY(y);
     const item = layoutInfoRef.current.items[pi];
     const line = item.lines[lineIdx];
-    const localX = x - EDITOR_PADDING - outerPadLeft - item.mw + scrollXRef.current;
+    const localX = x - EDITOR_PADDING - outerPadLeft - item.mw - (line.alignOffset ?? 0) + scrollXRef.current;
     const localOffset = clickToOffset(lineAsParagraph(line), localX, fontSize);
     return { para: pi, offset: line.start + localOffset };
   }, [fontSize, hitTestY, outerPadLeft]);
+
+  // Link hit-testing deliberately uses character CONTAINMENT rather than
+  // `posFromXY`'s nearest-boundary rounding. At a link's right edge the
+  // boundary offset is also the offset of the next run, so boundary-based
+  // testing would make the first character after a link open that link.
+  const linkRangeAtXY = useCallback((x: number, y: any): LinkRange | undefined => {
+    const { pi, lineIdx } = hitTestY(y);
+    const item = layoutInfoRef.current.items[pi];
+    const line = item.lines[lineIdx];
+    const linePara = lineAsParagraph(line);
+    const localX = x - EDITOR_PADDING - outerPadLeft - item.mw - (line.alignOffset ?? 0) + scrollXRef.current;
+    if (localX < 0 || localX > measureCursorX(linePara, paraText(linePara).length, fontSize)) return undefined;
+    const charIdx = line.start + charIndexAtPoint(linePara, localX, fontSize);
+    return linkRangeAtOffset(docRef.current, { para: pi, offset: charIdx });
+  }, [fontSize, hitTestY, outerPadLeft]);
+
+  // Clicking a linked run opens a small editor anchored to the link. It edits
+  // the run's URL, can remove it, and (when the app supplies an opener) can
+  // open it through `onLinkPress`. Clicks never launch a browser directly.
+  const openLinkEditor = useCallback((range: LinkRange, x: number, y: number) => {
+    if (linkPopoverRef.current != null) {
+      closePopover(linkPopoverRef.current);
+      linkPopoverRef.current = null;
+    }
+    const layout = typeof __glyx_getLayout !== 'undefined' && nodeIdRef.current != null
+      ? __glyx_getLayout(nodeIdRef.current)
+      : null;
+    const anchorX = (layout ? (layout.boxX ?? layout.x) : 0) + x;
+    const anchorY = (layout ? (layout.boxY ?? layout.y) : 0) + y;
+    const id = openPopover({
+      x: anchorX,
+      y: anchorY,
+      h: 4,
+      width: 332,
+      contentH: 118,
+      render: (popoverId) => (
+        <LinkEditorCard
+          initialUrl={range.url}
+          canOpen={openLinks && Boolean(onLinkPress)}
+          onApply={(url) => {
+            applyLinkRange(range, url);
+            closePopover(popoverId);
+            focusEditorSoon();
+          }}
+          onRemove={() => {
+            applyLinkRange(range, '');
+            closePopover(popoverId);
+            focusEditorSoon();
+          }}
+          onOpen={(url) => {
+            onLinkPress?.(normalizeLink(url));
+            closePopover(popoverId);
+            focusEditorSoon();
+          }}
+          onClose={() => {
+            closePopover(popoverId);
+            focusEditorSoon();
+          }}
+        />
+      ),
+      onClose: () => { linkPopoverRef.current = null; },
+    });
+    linkPopoverRef.current = id;
+  }, [applyLinkRange, focusEditorSoon, openLinks, onLinkPress]);
 
   // Click inside → position cursor, anchor a possible drag-selection.
   const dragAnchorRef = useRef({ para: 0, offset: 0 });
@@ -1201,9 +1486,16 @@ export function RichTextEditor({
     setFocused(true);
     setBlinkOn(true);
     const c = posFromXY(ev.locationX, ev.locationY);
+    const link = linkRangeAtXY(ev.locationX, ev.locationY);
+    if (link) {
+      dragAnchorRef.current = c;
+      setCursor(c);
+      openLinkEditor(link, ev.locationX, ev.locationY);
+      return;
+    }
     dragAnchorRef.current = c;
     setCursor(c);
-  }, [posFromXY, setCursor]);
+  }, [posFromXY, linkRangeAtXY, setCursor, openLinkEditor]);
 
   // Mouse-drag selection: registered as an "input" node (alongside the
   // Pressable) so events.ts routes per-frame cursorMoved deltas here while
@@ -1238,7 +1530,7 @@ export function RichTextEditor({
     // nearest-boundary rounding — right at a word/space edge, the boundary
     // is ambiguous and can round to the wrong side, which is what let this
     // pick up an adjacent space instead of the word.
-    const localX = x - EDITOR_PADDING - outerPadLeft - item.mw + scrollXRef.current;
+    const localX = x - EDITOR_PADDING - outerPadLeft - item.mw - (line.alignOffset ?? 0) + scrollXRef.current;
     const charIdx = line.start + charIndexAtPoint(lineAsParagraph(line), localX, fontSize);
     const { start, end } = wordRangeAt(paraText(item.para), charIdx);
     const anchor = { para: pi, offset: start };
@@ -1361,7 +1653,7 @@ export function RichTextEditor({
     const item = li.items[cursor.para];
     if (!item) return;
     const line = item.lines[0];
-    const caretX = item.mw + measureCursorX(lineAsParagraph(line), cursor.offset - line.start, fontSize);
+    const caretX = item.mw + (line.alignOffset ?? 0) + measureCursorX(lineAsParagraph(line), cursor.offset - line.start, fontSize);
     const viewportW = li.contentWidth;
     let sx = scrollXRef.current;
     if (caretX - sx > viewportW) sx = caretX - viewportW;
@@ -1394,7 +1686,10 @@ export function RichTextEditor({
   }, [onPress, onDoubleClickAt, onDragAt, onKey, autoFocus, setCursor]);
 
   useEffect(() => {
-    return () => { if (nodeIdRef.current !== null) unregisterInput(nodeIdRef.current); };
+    return () => {
+      if (linkPopoverRef.current != null) closePopover(linkPopoverRef.current);
+      if (nodeIdRef.current !== null) unregisterInput(nodeIdRef.current);
+    };
   }, []);
 
   const PADDING = EDITOR_PADDING;
@@ -1449,6 +1744,10 @@ export function RichTextEditor({
       if (changed) setDoc({ ...doc, paragraphs: paras });
     },
     isListActive: (listType: any) => doc.paragraphs[cursor.para]?.listType === listType,
+    align: paragraphAlign(doc, cursor),
+    setAlign: (align: TextAlign) => {
+      setDoc(setParagraphAlign(doc, sel, align));
+    },
     fontSize,
     // Toolbar Pressables use `keepFocus`, so the event layer keeps routing
     // keys here; this also reverses the editor's own outside-click blur.
@@ -1515,6 +1814,7 @@ export function RichTextEditor({
                 fontSize={fontSize}
                 color={color}
                 lineHeight={item.lineHeight}
+                contentWidth={layoutInfo.contentWidth}
               />
             ))}
           </View>
@@ -1558,6 +1858,104 @@ export function RichTextEditor({
   );
 }
 
+// ── Link editor ───────────────────────────────────────────────────────────────
+
+// The popover shown when a linked run is clicked. It applies to the exact run
+// range captured at click time (not the editor's current selection), so changing
+// the URL never depends on where the caret happened to be before the click.
+function LinkEditorCard({
+  initialUrl,
+  canOpen,
+  onApply,
+  onRemove,
+  onOpen,
+  onClose,
+}: {
+  initialUrl: string;
+  canOpen: boolean;
+  onApply: (url: string) => void;
+  onRemove: () => void;
+  onOpen: (url: string) => void;
+  onClose: () => void;
+}) {
+  const [url, setUrl] = useState(initialUrl);
+  const trimmedUrl = normalizeLink(url);
+  const showOpen = canOpen && Boolean(trimmedUrl);
+  return (
+    <View style={{
+      backgroundColor: '#1c1c29',
+      borderRadius: 9,
+      borderWidth: 1,
+      borderColor: '#36364e',
+      padding: 10,
+      boxShadow: '0 14 36 #00000088',
+    }}>
+      <Text style={{ fontSize: 10, color: '#74748f', paddingHorizontal: 2, paddingBottom: 6 }}>
+        EDIT LINK
+      </Text>
+      <TextInput
+        value={url}
+        onChangeText={setUrl}
+        onSubmitEditing={() => onApply(url)}
+        autoFocus
+        placeholder="https://example.com"
+        placeholderTextColor="#66667f"
+        style={{
+          height: 32, backgroundColor: '#15151f', borderRadius: 5,
+          borderWidth: 1, borderColor: '#36364e', color: '#e8e8f0',
+          paddingHorizontal: 8, fontSize: 12,
+        } as any}
+      />
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 10 }}>
+        <LinkEditorButton label="Cancel" onPress={onClose} />
+        <View style={{ flex: 1 }} />
+        <LinkEditorButton label="Remove" danger onPress={onRemove} />
+        {showOpen ? <LinkEditorButton label="Open" onPress={() => onOpen(url)} /> : null}
+        <LinkEditorButton label="Apply" primary onPress={() => onApply(url)} />
+      </View>
+    </View>
+  );
+}
+
+function LinkEditorButton({
+  label,
+  primary = false,
+  danger = false,
+  onPress,
+}: {
+  label: string;
+  primary?: boolean;
+  danger?: boolean;
+  onPress: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <Pressable
+      feedback={false}
+      ariaLabel={label}
+      onPress={onPress}
+      onHoverIn={() => setHover(true)}
+      onHoverOut={() => setHover(false)}
+      style={{
+        height: 28,
+        paddingHorizontal: 10,
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 5,
+        backgroundColor: primary ? (hover ? '#4250c4' : TOOLBAR_ACTIVE) : hover ? '#2a2a3d' : 'transparent',
+      }}
+    >
+      <Text style={{
+        fontSize: 12,
+        color: primary ? '#ffffff' : danger ? '#e08a9b' : '#b8b8cc',
+        fontWeight: primary ? 'bold' : 'normal',
+      }}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
 // ── ParagraphRow ──────────────────────────────────────────────────────────────
 
 // Renders `mw` + one flow child per line so absolutely-positioned overlays
@@ -1580,20 +1978,23 @@ function LineSpans({ mw, markerText, fontSize, color, pieces }: Record<string, a
           exactly what should fit, so the native Text itself must never
           re-wrap them on its own (which, mid-relayout while typing, could
           use a stale/squeezed width and visibly wrap+snap-back). */}
-      {pieces.map((p: { text: string | number | boolean | React.ReactElement<any, string | React.JSXElementConstructor<any>> | Iterable<React.ReactNode> | React.ReactPortal | null | undefined; span: { fontSize: any; color: any; bold: any; italic: any; underline: any; fontFamily?: string; fontVariationSettings?: string; fontFeatureSettings?: string; }; }, si: React.Key | null | undefined) => (
+      {pieces.map((p: { text: string | number | boolean | React.ReactElement<any, string | React.JSXElementConstructor<any>> | Iterable<React.ReactNode> | React.ReactPortal | null | undefined; span: { fontSize: any; color: any; bold: any; italic: any; underline: any; code?: boolean; link?: string; highlight?: string; fontFamily?: string; fontVariationSettings?: string; fontFeatureSettings?: string; }; }, si: React.Key | null | undefined) => (
         p.text ? (
           <Text
             key={si}
             textScrollX={0}
             style={{
               fontSize: p.span.fontSize ?? fontSize,
-              ...((p.span.fontFamily ?? _family) ? { fontFamily: p.span.fontFamily ?? _family } : null),
-              ...((p.span.fontVariationSettings ?? _variations) ? { fontVariationSettings: p.span.fontVariationSettings ?? _variations } : null),
-              ...((p.span.fontFeatureSettings ?? _features) ? { fontFeatureSettings: p.span.fontFeatureSettings ?? _features } : null),
-              color: p.span.color ?? color,
+              ...(spanFamily(p.span) ? { fontFamily: spanFamily(p.span) } : null),
+              ...((p.span.fontVariationSettings ?? (p.span.code ? undefined : _variations))
+                ? { fontVariationSettings: p.span.fontVariationSettings ?? (p.span.code ? undefined : _variations) } : null),
+              ...((p.span.fontFeatureSettings ?? (p.span.code ? undefined : _features))
+                ? { fontFeatureSettings: p.span.fontFeatureSettings ?? (p.span.code ? undefined : _features) } : null),
+              color: p.span.color ?? (p.span.link ? '#8ab4f8' : color),
               fontWeight: p.span.bold ? 'bold' : 'normal',
               fontStyle: p.span.italic ? 'italic' : 'normal',
-              textDecorationLine: p.span.underline ? 'underline' : 'none',
+              textDecorationLine: (p.span.underline || p.span.link) ? 'underline' : 'none',
+              ...(p.span.link ? { cursor: 'pointer' } : null),
             }}
           >
             {p.text}
@@ -1604,7 +2005,7 @@ function LineSpans({ mw, markerText, fontSize, color, pieces }: Record<string, a
   );
 }
 
-function ParagraphRow({ para, paraIdx, mw, lines, cursor, sel, focused, blinkOn, fontSize, color, lineHeight, listNumber }: Record<string, any>) {
+function ParagraphRow({ para, paraIdx, mw, lines, cursor, sel, focused, blinkOn, fontSize, color, lineHeight, listNumber, contentWidth }: Record<string, any>) {
   const { anchor, focus: selFocus } = normSel(sel);
   const markerText = para.listType ? listMarkerText(para, listNumber) : '';
   const selActive = hasSelection(sel) && paraIdx >= anchor.para && paraIdx <= selFocus.para;
@@ -1616,6 +2017,7 @@ function ParagraphRow({ para, paraIdx, mw, lines, cursor, sel, focused, blinkOn,
       {lines.map((line: any, li: number) => {
         const lp = lineAsParagraph(line);
         const isLastLine = li === lines.length - 1;
+        const alignOffset = line.alignOffset ?? 0;
 
         // Selection intersected with this visual line's [start, end) range.
         let selX0 = null, selX1: any = null;
@@ -1636,12 +2038,36 @@ function ParagraphRow({ para, paraIdx, mw, lines, cursor, sel, focused, blinkOn,
           (cursor.offset < line.end || isLastLine);
         const cursorX = cursorHere ? measureCursorX(lp, cursor.offset - line.start, fontSize) : null;
 
+        // Inline code and highlight backgrounds. Native `Text` nodes paint
+        // their own box, not a run background that follows the glyphs across a
+        // line, so these are explicit rectangles behind the line's text. The
+        // selection overlay goes above them; the text and caret go above both.
+        const backgrounds: Array<{ left: number; width: number; color: string }> = [];
+        let pieceX = 0;
+        for (const piece of line.pieces) {
+          const width = measureSpan(piece.text, piece.span, fontSize);
+          const color = piece.span.highlight ?? (piece.span.code ? '#2a2a3d' : null);
+          if (color && piece.text) backgrounds.push({ left: alignOffset + mw + pieceX, width, color });
+          pieceX += width;
+        }
+
         return (
-          <View key={li} style={{ height: lineHeight, flexDirection: 'row', position: 'relative' }}>
+          <View key={li} style={{ height: lineHeight, width: contentWidth, flexDirection: 'row', position: 'relative' }}>
+            {backgrounds.map((bg, bi) => (
+              <View key={`bg-${bi}`} style={{
+                position: 'absolute',
+                left: bg.left,
+                top: 2,
+                width: Math.max(1, bg.width),
+                height: lineHeight - 4,
+                backgroundColor: bg.color,
+                borderRadius: 2,
+              }} />
+            ))}
             {selX0 !== null && (
               <View style={{
                 position: 'absolute',
-                left: mw + selX0,
+                left: alignOffset + mw + selX0,
                 top: 2,
                 width: Math.max(1, selX1 - selX0),
                 height: lineHeight - 4,
@@ -1649,11 +2075,13 @@ function ParagraphRow({ para, paraIdx, mw, lines, cursor, sel, focused, blinkOn,
                 borderRadius: 2,
               }} />
             )}
-            <LineSpans mw={mw} markerText={li === 0 ? markerText : ''} fontSize={fontSize} color={color} pieces={line.pieces} />
+            <View style={{ flexDirection: 'row', marginLeft: alignOffset }}>
+              <LineSpans mw={mw} markerText={li === 0 ? markerText : ''} fontSize={fontSize} color={color} pieces={line.pieces} />
+            </View>
             {cursorX !== null && blinkOn && (
               <View style={{
                 position: 'absolute',
-                left: mw + cursorX,
+                left: alignOffset + mw + cursorX,
                 top: 2,
                 width: 2,
                 height: lineHeight - 4,
@@ -1684,17 +2112,45 @@ const TOOLBAR_HOVER = '#28283a';
 const TOOLBAR_ACTIVE = '#3541a3';
 const TOOLBAR_ICON = '#b8b8ce';
 
+const HIGHLIGHT_COLORS = [
+  '#f6e05e66', '#68d39166', '#63b3ed66', '#f687b366', '#b794f466', '#f6ad5566',
+];
+const ALIGN_ICON: Record<TextAlign, string> = {
+  left: 'align-left', center: 'align-center', right: 'align-right',
+};
+const ALIGN_LABEL: Record<TextAlign, string> = { left: 'Left', center: 'Center', right: 'Right' };
+
+function normalizeLink(value: string) {
+  const url = value.trim();
+  if (!url) return '';
+  return /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}`;
+}
+
 export function RichTextToolbar({ style, fontFamilies = DEFAULT_FONT_FAMILIES }: RichTextToolbarProps) {
   const ctx = useContext(EditorCtx);
-  const [open, setOpen] = useState<'font' | 'size' | null>(null);
+  const [open, setOpen] = useState<'font' | 'size' | 'highlight' | 'align' | 'link' | null>(null);
+  const [linkURL, setLinkURL] = useState('');
   if (!ctx) return null;
-  const { toggleFormat, selectionHasFormat, formatValue, setFormat, toggleList, indent, isListActive, fontSize, refocus } = ctx;
+  const { toggleFormat, selectionHasFormat, formatValue, setFormat, toggleList, indent, isListActive, align, setAlign, fontSize, refocus } = ctx;
 
   const currentFamily = (formatValue('fontFamily') as string | undefined) ?? 'system-ui';
   const currentSize = Math.round(Number(formatValue('fontSize') ?? fontSize));
+  const currentHighlight = formatValue('highlight') as string | undefined;
   const families = Array.from(new Set([currentFamily, ...fontFamilies]));
   const familyLabel = currentFamily === 'system-ui' ? 'Default' : currentFamily;
-  const shownFamily = familyLabel.length > 18 ? `${familyLabel.slice(0, 17)}…` : familyLabel;
+  const shownFamily = familyLabel.length > 16 ? `${familyLabel.slice(0, 15)}…` : familyLabel;
+
+  const openMenu = (menu: 'font' | 'size' | 'highlight' | 'align' | 'link') => {
+    refocus();
+    if (menu === 'link') setLinkURL((formatValue('link') as string | undefined) ?? '');
+    setOpen((o) => o === menu ? null : menu);
+  };
+  const applyLink = () => {
+    const url = normalizeLink(linkURL);
+    setFormat('link', url || undefined);
+    setOpen(null);
+    refocus();
+  };
 
   return (
     <Pressable
@@ -1725,13 +2181,114 @@ export function RichTextToolbar({ style, fontFamilies = DEFAULT_FONT_FAMILIES }:
         />
       ) : null}
 
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, flex: 1, zIndex: 1 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 3, flex: 1, zIndex: 1 }}>
         <ToolButton icon="bold" label="Bold" active={selectionHasFormat('bold')}
           onPress={() => { refocus(); setOpen(null); toggleFormat('bold'); }} />
         <ToolButton icon="italic" label="Italic" active={selectionHasFormat('italic')}
           onPress={() => { refocus(); setOpen(null); toggleFormat('italic'); }} />
         <ToolButton icon="underline" label="Underline" active={selectionHasFormat('underline')}
           onPress={() => { refocus(); setOpen(null); toggleFormat('underline'); }} />
+        <ToolButton icon="code" label="Inline code" active={selectionHasFormat('code')}
+          onPress={() => { refocus(); setOpen(null); toggleFormat('code'); }} />
+
+        {/* Highlight and link menus use icon-only triggers to keep the bar compact. */}
+        <View style={{ position: 'relative', zIndex: 55 }}>
+          <IconMenuTrigger
+            icon="highlighter"
+            label="Highlight"
+            open={open === 'highlight'}
+            active={Boolean(currentHighlight)}
+            onPress={() => openMenu('highlight')}
+          />
+          {open === 'highlight' ? (
+            <View style={{
+              position: 'absolute', top: 35, left: -40, width: 196,
+              backgroundColor: '#1c1c29', borderRadius: 9, borderWidth: 1, borderColor: '#36364e',
+              padding: 4, zIndex: 60, boxShadow: '0 14 36 #00000088',
+            }}>
+              <Text style={{ fontSize: 10, color: '#74748f', paddingHorizontal: 8, paddingTop: 5, paddingBottom: 4 }}>
+                HIGHLIGHT
+              </Text>
+              <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 8, paddingVertical: 6 }}>
+                {HIGHLIGHT_COLORS.map((colour) => (
+                  <Pressable
+                    key={colour}
+                    keepFocus
+                    feedback={false}
+                    ariaLabel={`Highlight ${colour}`}
+                    onPress={() => { refocus(); setFormat('highlight', colour); setOpen(null); }}
+                    style={{
+                      width: 22, height: 22, borderRadius: 11,
+                      backgroundColor: colour,
+                      borderWidth: 2,
+                      borderColor: currentHighlight === colour ? '#ffffff' : '#3a3a52',
+                    }}
+                  />
+                ))}
+              </View>
+              <MenuRow
+                label="No highlight"
+                selected={!currentHighlight}
+                onPress={() => { refocus(); setFormat('highlight', undefined); setOpen(null); }}
+              />
+            </View>
+          ) : null}
+        </View>
+
+        <View style={{ position: 'relative', zIndex: 55 }}>
+          <IconMenuTrigger
+            icon="link"
+            label="Link"
+            open={open === 'link'}
+            active={Boolean(formatValue('link'))}
+            onPress={() => openMenu('link')}
+          />
+          {open === 'link' ? (
+            <View style={{
+              position: 'absolute', top: 35, left: -96, width: 286,
+              backgroundColor: '#1c1c29', borderRadius: 9, borderWidth: 1, borderColor: '#36364e',
+              padding: 8, zIndex: 60, boxShadow: '0 14 36 #00000088',
+            }}>
+              <Text style={{ fontSize: 10, color: '#74748f', paddingHorizontal: 2, paddingBottom: 5 }}>
+                LINK URL
+              </Text>
+              <TextInput
+                value={linkURL}
+                onChangeText={setLinkURL}
+                onSubmitEditing={applyLink}
+                autoFocus
+                placeholder="https://example.com"
+                placeholderTextColor="#66667f"
+                style={{
+                  height: 32, backgroundColor: '#15151f', borderRadius: 5,
+                  borderWidth: 1, borderColor: '#36364e', color: '#e8e8f0',
+                  paddingHorizontal: 8, fontSize: 12,
+                } as any}
+              />
+              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 6, marginTop: 8 }}>
+                <Pressable
+                  keepFocus
+                  feedback={false}
+                  onPress={() => { refocus(); setFormat('link', undefined); setOpen(null); }}
+                  style={{ height: 28, paddingHorizontal: 10, justifyContent: 'center', borderRadius: 5 }}
+                >
+                  <Text style={{ fontSize: 12, color: '#a9a9c4' }}>Remove</Text>
+                </Pressable>
+                <Pressable
+                  keepFocus
+                  feedback={false}
+                  onPress={applyLink}
+                  style={{
+                    height: 28, paddingHorizontal: 12, justifyContent: 'center',
+                    borderRadius: 5, backgroundColor: TOOLBAR_ACTIVE,
+                  }}
+                >
+                  <Text style={{ fontSize: 12, color: '#ffffff', fontWeight: 'bold' }}>Apply</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+        </View>
 
         <ToolbarSeparator />
 
@@ -1753,9 +2310,9 @@ export function RichTextToolbar({ style, fontFamilies = DEFAULT_FONT_FAMILIES }:
             previews each family the same way. */}
         <View style={{ position: 'relative', zIndex: 55 }}>
           <MenuTrigger
-            width={150}
+            width={132}
             open={open === 'font'}
-            onPress={() => { refocus(); setOpen((o) => o === 'font' ? null : 'font'); }}
+            onPress={() => openMenu('font')}
           >
             <Icon name="type" size={14} color={open === 'font' ? '#fff' : TOOLBAR_ICON} />
             <Text style={{
@@ -1797,9 +2354,9 @@ export function RichTextToolbar({ style, fontFamilies = DEFAULT_FONT_FAMILIES }:
         {/* Font size: same menu behaviour, sized to the numbers it carries. */}
         <View style={{ position: 'relative', zIndex: 55 }}>
           <MenuTrigger
-            width={68}
+            width={60}
             open={open === 'size'}
-            onPress={() => { refocus(); setOpen((o) => o === 'size' ? null : 'size'); }}
+            onPress={() => openMenu('size')}
           >
             <Text style={{ fontSize: 12, color: open === 'size' ? '#fff' : '#d0d0e2', flex: 1 }}>
               {currentSize}
@@ -1825,7 +2382,114 @@ export function RichTextToolbar({ style, fontFamilies = DEFAULT_FONT_FAMILIES }:
             </View>
           ) : null}
         </View>
+
+        <View style={{ position: 'relative', zIndex: 55 }}>
+          <IconMenuTrigger
+            icon={ALIGN_ICON[align]}
+            label={`Align ${ALIGN_LABEL[align].toLowerCase()}`}
+            open={open === 'align'}
+            onPress={() => openMenu('align')}
+          />
+          {open === 'align' ? (
+            <View style={{
+              position: 'absolute', top: 35, right: 0, width: 132,
+              backgroundColor: '#1c1c29', borderRadius: 9, borderWidth: 1, borderColor: '#36364e',
+              padding: 4, zIndex: 60, boxShadow: '0 14 36 #00000088',
+            }}>
+              <Text style={{ fontSize: 10, color: '#74748f', paddingHorizontal: 8, paddingTop: 5, paddingBottom: 4 }}>
+                ALIGN
+              </Text>
+              {(['left', 'center', 'right'] as TextAlign[]).map((value) => (
+                <MenuRow
+                  key={value}
+                  label={ALIGN_LABEL[value]}
+                  icon={ALIGN_ICON[value]}
+                  selected={align === value}
+                  onPress={() => { refocus(); setAlign(value); setOpen(null); }}
+                />
+              ))}
+            </View>
+          ) : null}
+        </View>
       </View>
+    </Pressable>
+  );
+}
+
+export const DEFAULT_FEATURE_PRESETS: RichTextFeaturePreset[] = [
+  { label: 'Tabular figures', value: "'tnum' 1" },
+  { label: 'Small caps', value: "'smcp' 1" },
+  { label: 'No ligatures', value: "'liga' 0" },
+];
+
+/**
+ * A reusable row of OpenType-feature presets (tabular figures, small caps,
+ * ligatures off, and any presets the app supplies). It must be rendered inside
+ * a {@link RichTextEditor}, like the toolbar, and applies the feature to the
+ * selection or to the text typed next.
+ */
+export function RichTextFeaturePicker({
+  features = DEFAULT_FEATURE_PRESETS,
+  label = 'Features',
+  clearLabel = 'Clear',
+  width,
+  style,
+}: RichTextFeaturePickerProps) {
+  const ctx = useContext(EditorCtx);
+  if (!ctx) return null;
+  const current = ctx.formatValue('fontFeatureSettings') as string | undefined;
+  return (
+    <View style={[{
+      width,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      marginBottom: 8,
+    }, style]}>
+      <Text style={{ fontSize: 11, color: '#707090', width: 60 }}>{label}</Text>
+      {features.map((preset) => {
+        const selected = current === preset.value;
+        return (
+          <FeatureButton
+            key={`${preset.label}:${preset.value}`}
+            label={preset.label}
+            selected={selected}
+            onPress={() => {
+              ctx.refocus();
+              ctx.setFormat('fontFeatureSettings', selected ? undefined : preset.value);
+            }}
+          />
+        );
+      })}
+      <FeatureButton
+        label={clearLabel}
+        selected={!current}
+        onPress={() => {
+          ctx.refocus();
+          ctx.setFormat('fontFeatureSettings', undefined);
+        }}
+      />
+    </View>
+  );
+}
+
+function FeatureButton({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <Pressable
+      keepFocus
+      feedback={false}
+      onPress={onPress}
+      onHoverIn={() => setHover(true)}
+      onHoverOut={() => setHover(false)}
+      style={{
+        height: 26, paddingHorizontal: 8, alignItems: 'center', justifyContent: 'center',
+        borderRadius: 5, borderWidth: 1,
+        borderColor: selected ? '#5c6bc0' : hover ? '#3a3a52' : '#2a2a3a',
+        backgroundColor: selected ? '#3949ab' : hover ? '#242432' : '#1b1b28',
+      }}
+    >
+      <Text style={{ fontSize: 11, color: selected ? '#fff' : '#b8b8cc' }}>{label}</Text>
     </Pressable>
   );
 }
@@ -1863,6 +2527,30 @@ function ToolButton({ icon, label, active, onPress }: Record<string, any>) {
   );
 }
 
+function IconMenuTrigger({ icon, label, open, active, onPress }: Record<string, any>) {
+  const [hover, setHover] = useState(false);
+  return (
+    <Pressable
+      keepFocus
+      feedback={false}
+      ariaLabel={label}
+      onPress={onPress}
+      onHoverIn={() => setHover(true)}
+      onHoverOut={() => setHover(false)}
+      style={{
+        width: 30, height: 30,
+        alignItems: 'center', justifyContent: 'center',
+        backgroundColor: open ? '#2d2d42' : active ? TOOLBAR_ACTIVE : hover ? TOOLBAR_HOVER : 'transparent',
+        borderRadius: 5,
+        borderWidth: 1,
+        borderColor: open ? '#484866' : active ? '#5968d8' : 'transparent',
+      }}
+    >
+      <Icon name={icon} size={16} strokeWidth={2} color={open || active ? '#ffffff' : hover ? '#e4e4f2' : TOOLBAR_ICON} />
+    </Pressable>
+  );
+}
+
 function MenuTrigger({ width, open, onPress, children }: Record<string, any>) {
   const [hover, setHover] = useState(false);
   return (
@@ -1888,7 +2576,7 @@ function MenuTrigger({ width, open, onPress, children }: Record<string, any>) {
   );
 }
 
-function MenuRow({ label, selected, fontFamily, onPress }: Record<string, any>) {
+function MenuRow({ label, selected, fontFamily, icon, onPress }: Record<string, any>) {
   const [hover, setHover] = useState(false);
   return (
     <Pressable
@@ -1907,6 +2595,7 @@ function MenuRow({ label, selected, fontFamily, onPress }: Record<string, any>) 
         backgroundColor: selected ? '#343fa8' : hover ? '#2a2a3d' : 'transparent',
       }}
     >
+      {icon ? <Icon name={icon} size={14} color={selected ? '#fff' : '#a9a9c4'} /> : null}
       <Text style={{ flex: 1, fontSize: 13, color: selected ? '#fff' : '#d0d0e2', fontFamily }}>{label}</Text>
       {selected ? <Icon name="check" size={14} color="#ffffff" /> : null}
     </Pressable>
@@ -1914,6 +2603,96 @@ function MenuRow({ label, selected, fontFamily, onPress }: Record<string, any>) 
 }
 
 // ── Serialization ─────────────────────────────────────────────────────────────
+
+function escapeMarkdown(text: string) {
+  return text.replace(/([\\`*_[\]<>])/g, '\\$1');
+}
+
+function spanToMarkdown(span: Span) {
+  if (span.code) return `\`${span.text.replace(/`/g, '\\`')}\``;
+  let text = escapeMarkdown(span.text);
+  if (span.highlight) text = `<mark style="background-color:${span.highlight}">${text}</mark>`;
+  if (span.underline) text = `<u>${text}</u>`;
+  if (span.italic) text = `*${text}*`;
+  if (span.bold) text = `**${text}**`;
+  if (span.link) text = `[${text}](${span.link})`;
+  return text;
+}
+
+/** The document as Markdown: headings are not a paragraph property yet, so the supported block features are lists and paragraphs. */
+export function docToMarkdown(doc: RichTextDocument): string {
+  const blocks: string[] = [];
+  let list: string[] | null = null;
+  let listType: ListType | null = null;
+
+  const flushList = () => {
+    if (list && list.length) blocks.push(list.join('\n'));
+    list = null;
+    listType = null;
+  };
+
+  doc.paragraphs.forEach((para, index) => {
+    const inline = para.spans.map(spanToMarkdown).join('');
+    if (para.listType) {
+      if (list && listType !== para.listType) flushList();
+      if (!list) { list = []; listType = para.listType; }
+      const indent = '  '.repeat(para.indent ?? 0);
+      const marker = para.listType === 'bullet' ? '-' : `${computeListNumber(doc.paragraphs, index)}.`;
+      list.push(`${indent}${marker} ${inline}`);
+      return;
+    }
+    flushList();
+    blocks.push(inline);
+  });
+  flushList();
+  return blocks.join('\n\n');
+}
+
+function escapeHTML(text: string) {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function spanToHTML(span: Span) {
+  let text = escapeHTML(span.text);
+  if (span.code) text = `<code>${text}</code>`;
+  if (span.highlight) text = `<mark style="background-color:${escapeHTML(span.highlight)}">${text}</mark>`;
+  if (span.underline) text = `<u>${text}</u>`;
+  if (span.italic) text = `<em>${text}</em>`;
+  if (span.bold) text = `<strong>${text}</strong>`;
+  if (span.link) text = `<a href="${escapeHTML(span.link)}">${text}</a>`;
+  return text;
+}
+
+/** The document as simple HTML. Lists become `ul`/`ol`; paragraph alignment becomes an inline `text-align`. */
+export function docToHTML(doc: RichTextDocument): string {
+  let html = '';
+  let listType: ListType | null = null;
+  let items: string[] = [];
+
+  const flushList = () => {
+    if (!items.length) return;
+    const tag = listType === 'number' ? 'ol' : 'ul';
+    html += `<${tag}>${items.join('')}</${tag}>`;
+    items = [];
+    listType = null;
+  };
+
+  for (const para of doc.paragraphs) {
+    const inline = para.spans.map(spanToHTML).join('');
+    if (para.listType) {
+      if (listType && listType !== para.listType) flushList();
+      if (!listType) listType = para.listType;
+      const indent = para.indent ? ` style="margin-left:${para.indent * 20}px"` : '';
+      items.push(`<li${indent}>${inline || '<br>'}</li>`);
+      continue;
+    }
+    flushList();
+    const style = para.align && para.align !== 'left' ? ` style="text-align:${para.align}"` : '';
+    html += `<p${style}>${inline || '<br>'}</p>`;
+  }
+  flushList();
+  return html;
+}
 
 export function docToPlainText(doc: RichTextDocument): string {
   return doc.paragraphs.map((p): any => paraText(p)).join('\n');

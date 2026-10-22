@@ -1,19 +1,13 @@
 import React, { useMemo, useState } from 'react';
-import { View, Text, Pressable, render, useWindowSize } from '@glyx-dev/react';
+import { View, Text, Pressable, render, useWindowSize, glyxWindow } from '@glyx-dev/react';
 import {
-  RichTextEditor, RichTextToolbar, useEditorContext,
+  RichTextEditor, RichTextToolbar, RichTextFeaturePicker, useEditorContext,
 } from '@glyx-dev/rich-text';
 import type { RichTextDocument } from '@glyx-dev/rich-text';
 
 const FONT_FAMILIES = [
   'Segoe UI', 'Arial', 'Georgia', 'Times New Roman',
   'Cascadia Mono', 'Consolas', 'Courier New', 'serif', 'monospace',
-];
-
-const FEATURE_PRESETS = [
-  { label: 'Tabular figures', short: 'tnum', value: "'tnum' 1" },
-  { label: 'Small caps', short: 'smcp', value: "'smcp' 1" },
-  { label: 'No ligatures', short: 'liga off', value: "'liga' 0" },
 ];
 
 const SAMPLE: RichTextDocument = {
@@ -76,6 +70,18 @@ const SAMPLE: RichTextDocument = {
       ],
     },
     {
+      spans: [
+        { text: 'Inline ', color: '#e8e8f4' },
+        { text: 'code', code: true, color: '#e8e8f4' },
+        { text: ', a ', color: '#e8e8f4' },
+        { text: 'link', link: 'https://glyx.dev' },
+        { text: ', and ', color: '#e8e8f4' },
+        { text: 'a highlight', highlight: '#f6e05e66', color: '#e8e8f4' },
+        { text: ', centered on the page.', color: '#e8e8f4' },
+      ],
+      align: 'center',
+    },
+    {
       spans: [{ text: 'A bullet list', color: '#e8e8f4' }],
       listType: 'bullet',
     },
@@ -99,7 +105,7 @@ export default function App() {
         <View style={{ gap: 3 }}>
           <Text style={{ fontSize: 26, fontWeight: 'bold', color: '#f0f0f8' }}>Rich text</Text>
           <Text style={{ fontSize: 13, color: '#8888a8' }}>
-            Toolbar fonts, sizes and per-run OpenType features.
+            Fonts, OpenType features, inline code, links, highlights and alignment.
           </Text>
         </View>
 
@@ -110,10 +116,12 @@ export default function App() {
           height={editorHeight}
           fontSize={15}
           color="#e8e8f4"
+          openLinks
+          onLinkPress={(url) => glyxWindow.openExternal(url)}
           style={{ backgroundColor: '#151520' }}
         >
           <RichTextToolbar style={{ width: editorWidth }} fontFamilies={FONT_FAMILIES} />
-          <FeatureBar width={editorWidth} />
+          <RichTextFeaturePicker width={editorWidth} />
           <FormatStatus width={editorWidth} />
         </RichTextEditor>
 
@@ -135,7 +143,9 @@ export default function App() {
           <Step n="2" text="Select text and pick a family in the Font menu, then a size." />
           <Step n="3" text="Put the caret in the empty last paragraph, choose Georgia and 24, and type: the new text uses them." />
           <Step n="4" text="Select the sample lines and press Tabular figures, Small caps or No ligatures. The status line shows the features on the caret or selection." />
-          <Step n="5" text="Ctrl+Z undoes and Ctrl+Y (or Ctrl+Shift+Z) redoes formatting and typing." />
+          <Step n="5" text="Select text and use the code, highlighter or link buttons in the toolbar. Ctrl+E also toggles inline code." />
+          <Step n="6" text="Click the centered sample line and use the alignment menu. Click the sample link to edit its URL, remove it, or press Open to launch it in the system browser." />
+          <Step n="7" text="Ctrl+C and Ctrl+V a formatted range to paste it with its formatting. Ctrl+Z undoes and Ctrl+Y (or Ctrl+Shift+Z) redoes." />
         </SideCard>
 
         <SideCard title="What to look for">
@@ -159,59 +169,6 @@ export default function App() {
   );
 }
 
-function FeatureBar({ width }: { width: number }) {
-  const ctx = useEditorContext();
-  if (!ctx) return null;
-  const current = ctx.formatValue('fontFeatureSettings') as string | undefined;
-  const apply = (value: string | undefined) => {
-    ctx.refocus();
-    ctx.setFormat('fontFeatureSettings', value);
-  };
-
-  return (
-    <View style={{ width, flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-      <Text style={{ fontSize: 11, color: '#707090', width: 60 }}>Features</Text>
-      {FEATURE_PRESETS.map((preset) => {
-        const selected = current === preset.value;
-        return (
-          <FeatureButton
-            key={preset.short}
-            label={preset.label}
-            selected={selected}
-            onPress={() => apply(selected ? undefined : preset.value)}
-          />
-        );
-      })}
-      <FeatureButton
-        label="Clear"
-        selected={!current}
-        onPress={() => apply(undefined)}
-      />
-    </View>
-  );
-}
-
-function FeatureButton({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
-  const [hover, setHover] = useState(false);
-  return (
-    <Pressable
-      keepFocus
-      feedback={false}
-      onPress={onPress}
-      onHoverIn={() => setHover(true)}
-      onHoverOut={() => setHover(false)}
-      style={{
-        height: 26, paddingHorizontal: 8, alignItems: 'center', justifyContent: 'center',
-        borderRadius: 5, borderWidth: 1,
-        borderColor: selected ? '#5c6bc0' : hover ? '#3a3a52' : '#2a2a3a',
-        backgroundColor: selected ? '#3949ab' : hover ? '#242432' : '#1b1b28',
-      }}
-    >
-      <Text style={{ fontSize: 11, color: selected ? '#fff' : '#b8b8cc' }}>{label}</Text>
-    </Pressable>
-  );
-}
-
 function FormatStatus({ width }: { width: number }) {
   const ctx = useEditorContext();
   if (!ctx) return null;
@@ -231,6 +188,7 @@ function FormatStatus({ width }: { width: number }) {
       <Text style={{ fontSize: 11, color: '#707090' }}>{where}</Text>
       <Text style={{ fontSize: 11, color: '#a8a8c0' }}>Font: {family}</Text>
       <Text style={{ fontSize: 11, color: '#a8a8c0' }}>Size: {size}</Text>
+      <Text style={{ fontSize: 11, color: '#a8a8c0' }}>Align: {ctx.align}</Text>
       <Text style={{ fontSize: 11, color: '#a8a8c0' }}>Features: {features}</Text>
     </View>
   );

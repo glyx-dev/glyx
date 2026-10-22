@@ -15,17 +15,53 @@ use glyx_renderer::peniko::{self, kurbo::Affine};
 use std::time::Instant;
 
 /// Reduced motion: smoothing effects (property transitions, smooth scroll,
-/// canvas easing) jump to their end state instead of moving. On when
-/// `GLYX_REDUCE_MOTION` is set to anything but `0`, or when the OS has
-/// animation effects turned off (Windows: Settings > Accessibility > Visual
-/// effects). Keyframe `animation`s still run: spinners and the like usually
-/// carry meaning. Read once per process.
+/// canvas easing) jump to their end state instead of moving. Decided by the
+/// `motion.reduce` setting: `on`, `off`, or `auto` (the default), which follows
+/// the OS having animation effects turned off (Windows: Settings >
+/// Accessibility > Visual effects). `GLYX_REDUCE_MOTION` sets it (anything but
+/// `0` is on). Keyframe `animation`s still run: spinners and the like usually
+/// carry meaning.
+///
+/// The setting is live, so a change from DevTools applies at once; the value is
+/// kept in an atomic that a listener updates, so this stays a single load.
 pub fn reduced() -> bool {
-    static REDUCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *REDUCED.get_or_init(|| match std::env::var("GLYX_REDUCE_MOTION") {
-        Ok(v) => v != "0",
-        Err(_) => os_reduces_motion(),
-    })
+    use std::sync::atomic::{AtomicU8, Ordering};
+    const UNSET: u8 = 0;
+    const AUTO: u8 = 1;
+    const ON: u8 = 2;
+    const OFF: u8 = 3;
+    static MODE: AtomicU8 = AtomicU8::new(UNSET);
+    static LISTEN: std::sync::Once = std::sync::Once::new();
+
+    fn code(word: &str) -> u8 {
+        match word {
+            "on" => ON,
+            "off" => OFF,
+            _ => AUTO,
+        }
+    }
+
+    let mut mode = MODE.load(Ordering::Relaxed);
+    if mode == UNSET {
+        let settings = glyx_settings::global();
+        LISTEN.call_once(|| {
+            settings.on_change(|name, value| {
+                if let ("motion.reduce", glyx_settings::Value::Str(word)) = (name, value) {
+                    MODE.store(code(word), Ordering::Relaxed);
+                }
+            });
+        });
+        mode = code(&settings.string("motion.reduce"));
+        MODE.store(mode, Ordering::Relaxed);
+    }
+    match mode {
+        ON => true,
+        OFF => false,
+        _ => {
+            static OS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *OS.get_or_init(os_reduces_motion)
+        }
+    }
 }
 
 #[cfg(windows)]

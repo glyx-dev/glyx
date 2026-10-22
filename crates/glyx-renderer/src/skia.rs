@@ -364,11 +364,12 @@ struct TinySkiaShared {
 /// Memory the glyph cache may hold, in bytes. Plain text is far under it (about 1 MB); it is there for colour emoji at large sizes.
 const GLYPH_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 
-/// Whether colour glyphs (emoji) are drawn in colour. On unless `GLYX_COLOR_EMOJI` is `0`, `false` or `off`; off draws them as one-colour
-/// shapes in the text colour (or nothing, where a font has only a bitmap for them) and keeps the colour tables unread.
+/// Whether colour glyphs (emoji) are drawn in colour: the `render.colorEmoji` setting (on unless `GLYX_COLOR_EMOJI` is `0`, `false` or
+/// `off`); off draws them as one-colour shapes in the text colour (or nothing, where a font has only a bitmap for them) and keeps the colour
+/// tables unread. The setting is read at startup, so it is read once.
 pub(crate) fn color_emoji_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| !matches!(std::env::var("GLYX_COLOR_EMOJI").ok().as_deref().map(str::trim), Some("0" | "false" | "off")))
+    *ON.get_or_init(|| glyx_settings::global().bool("render.colorEmoji"))
 }
 
 /// Memory the converted-image cache may hold, in bytes. Each entry is a full sRGB RGBA copy of an image, so a count

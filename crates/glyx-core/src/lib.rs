@@ -1134,7 +1134,21 @@ pub fn run(mut config: AppConfig) -> bool {
     let window_bg = window.background_color;
     // Capture configured mode; Auto is resolved after GPU adapter is known.
     let render_mode_config = window.render_mode;
-    let max_fps = window.max_fps;
+    // The settings registry: the `window` config values that replace a setting go in (a bad one is logged and the next source decides),
+    // and every reader below takes the value in force (environment, then config, then the default).
+    let settings = glyx_settings::global();
+    for (key, value) in [
+        ("labelCacheEntries", window.label_cache_entries),
+        ("canvasCacheMb", window.canvas_cache_mb),
+        ("maxFps", window.max_fps),
+        ("maxJsHeapMb", window.max_js_heap_mb),
+    ] {
+        if let Some(n) = value {
+            if let Err(e) = settings.apply_config(key, glyx_settings::Value::Int(n as i64)) {
+                log::warn!("[glyx] config {key}: {e}");
+            }
+        }
+    }
     // Canvas2D transport config — applied to each runtime after construction.
     let canvas_protocol  = window.canvas_protocol.clone();
     let canvas_buffer_kb = window.canvas_buffer_kb.unwrap_or(256) as usize;
@@ -1142,9 +1156,9 @@ pub fn run(mut config: AppConfig) -> bool {
     // bundle size. V8-only — QuickJS has no isolate-heap-limit equivalent
     // wired up yet (its `new_with_ipc` takes no heap-cap argument), a known gap.
     #[cfg(feature = "v8")]
-    let heap_cap_mb: usize = match window.max_js_heap_mb {
-        Some(mb) => mb as usize,
-        None => {
+    let heap_cap_mb: usize = match settings.int("js.heapMb") {
+        mb if mb > 0 => mb as usize,
+        _ => {
             let bundle_bytes = (*js_src_arc).as_ref().map(|s| s.len()).unwrap_or(0);
             let is_dev = cfg!(feature = "dev");
             let cap = calc_heap_mb(bundle_bytes, is_dev);
@@ -1153,10 +1167,10 @@ pub fn run(mut config: AppConfig) -> bool {
         }
     };
 
-    // Pins the shaped-label cache when the config says so; otherwise it sizes itself (see `label_cache.rs`).
-    let label_cache_entries: Option<u32> = window.label_cache_entries;
+    // The shaped-label cache: pinned when the setting says so, otherwise it sizes itself (see `label_cache.rs`).
+    let label_cache_pinned = label_cache::pinned_entries(settings.int("render.labelCache"));
     // The pixel cache for canvases repainted unchanged (see `canvas_cache.rs`): a byte budget, 0 = off.
-    let canvas_cache_budget = canvas_cache::CanvasPixelCache::budget_from(std::env::var("GLYX_CANVAS_CACHE_MB").ok().as_deref(), window.canvas_cache_mb);
+    let canvas_cache_budget = canvas_cache::CanvasPixelCache::budget_from_mb(settings.int("render.canvasCacheMb"));
 
     // Pre-init splash window sizing: mirror the main window's own configured
     // dimensions so the handoff feels seamless (same size, no visible
@@ -1194,7 +1208,7 @@ pub fn run(mut config: AppConfig) -> bool {
             // ── Pre-init splash window — paint it immediately, before any
             // GPU/JS setup for the real main window even starts. ──────────
             ShellEvent::SplashWindowReady { window } => {
-                match soft_present::SoftPresent::new(Arc::clone(&window), max_fps) {
+                match soft_present::SoftPresent::new(Arc::clone(&window)) {
                     Ok(mut sp) => {
                         let (w, h) = (sp.width(), sp.height());
                         if let Some(splash) = &mut main_splash_state {
@@ -1217,10 +1231,9 @@ pub fn run(mut config: AppConfig) -> bool {
                     devtools = devtools::Devtools::start_from_env(&tokio_handle, ev_proxy.clone());
                 }
                 // Resolve RenderMode → BackendKind.
-                // GLYX_CPU_RENDER=1 forces the cheapest CPU path (TinySkia) for
+                // The `render.cpuRender` setting (GLYX_CPU_RENDER=1) forces the cheapest CPU path (TinySkia) for
                 // CI, headless testing, or machines without a supported GPU.
-                let force_cpu = std::env::var("GLYX_CPU_RENDER")
-                    .map(|v| v.trim() == "1").unwrap_or(false);
+                let force_cpu = glyx_settings::global().bool("render.cpuRender");
                 // Probe the adapter tier WITHOUT creating a device/swapchain —
                 // if the backend resolves to TinySkia, we present via softbuffer
                 // and never initialise wgpu at all (saves ~20 MB private +
@@ -1258,13 +1271,12 @@ pub fn run(mut config: AppConfig) -> bool {
                         probe_name,
                     );
                 }
-                // GLYX_NO_SOFT_PRESENT=1 keeps TinySkia on the wgpu present
+                // `render.softPresent` off (GLYX_NO_SOFT_PRESENT=1) keeps TinySkia on the wgpu present
                 // path (escape hatch while the software path is new).
-                let no_soft = std::env::var("GLYX_NO_SOFT_PRESENT")
-                    .map(|v| v.trim() == "1").unwrap_or(false);
+                let no_soft = !glyx_settings::global().bool("render.softPresent");
                 let (present, mut renderer) =
                     if matches!(backend_kind, BackendKind::TinySkia) && !no_soft {
-                        match soft_present::SoftPresent::new(Arc::clone(&window), max_fps) {
+                        match soft_present::SoftPresent::new(Arc::clone(&window)) {
                             Ok(sp) => {
                                 let size = window.inner_size();
                                 let r = AnyRenderer::TinySkia(
@@ -1617,6 +1629,8 @@ pub fn run(mut config: AppConfig) -> bool {
                 }
 
                 startup_mark("core: app evaluated");
+                // Startup is over: from here a startup-only setting refuses a runtime change (the settings read at startup have been read).
+                glyx_settings::global().finish_startup();
                 let win = window.clone();
                 let request_redraw: Arc<dyn Fn() + Send + Sync> =
                     Arc::new(move || win.request_redraw());
@@ -1677,7 +1691,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     canvas_pixels: canvas_cache::CanvasPixelCache::new(canvas_cache_budget),
                     scroll_drawn: std::collections::HashMap::new(),
                     frame_serial: 0,
-                    label_cache:  label_cache::LabelCache::new(label_cache::pinned_entries(std::env::var("GLYX_LABEL_CACHE").ok().as_deref(), label_cache_entries)),
+                    label_cache:  label_cache::LabelCache::new(label_cache_pinned),
                     cursor_x:     0.0,
                     cursor_y:     0.0,
                     drag_active:  false,
@@ -3047,7 +3061,7 @@ pub fn run(mut config: AppConfig) -> bool {
                     } else if s.gpu_was_upgraded && matches!(s.gpu, Present::Gpu(_)) {
                         let last = s.canvas3d_last_used.unwrap_or(frame_start);
                         if last.elapsed() >= IDLE_3D {
-                            match soft_present::SoftPresent::new(Arc::clone(&s.window), max_fps) {
+                            match soft_present::SoftPresent::new(Arc::clone(&s.window)) {
                                 Ok(sp) => {
                                     log::info!(
                                         "Canvas3D idle for 60 s — releasing wgpu, \
@@ -3758,6 +3772,32 @@ mod tests {
     #[test]
     fn windows_pipe_names_use_the_pipe_namespace() {
         assert_eq!(windows_pipe_name("notes-app"), r"\\.\pipe\glyx-notes-app");
+    }
+
+    #[test]
+    fn the_settings_block_decides_what_javascript_may_change() {
+        use glyx_settings::{Caller, SetError, Settings, Value};
+        let on = |json: &str| {
+            let settings = Settings::new(glyx_settings::defs::DEFS, &|_| None);
+            if let Some(block) = serde_json::from_str::<config::GlyxConfigFile>(json).unwrap().settings {
+                config::apply_settings_config(&block, &settings);
+            }
+            settings
+        };
+        let reduce = || Value::Str("on".into());
+        // No block, or one that does not allow it: JavaScript is locked out.
+        for json in ["{}", r#"{ "settings": {} }"#, r#"{ "settings": { "allowJsChanges": false } }"#] {
+            assert_eq!(on(json).set("motion.reduce", reduce(), Caller::App), Err(SetError::AppLocked), "{json}");
+        }
+        // Allowed: the one setting marked for apps changes; a developer setting still does not.
+        let s = on(r#"{ "settings": { "allowJsChanges": true } }"#);
+        assert!(s.set("motion.reduce", reduce(), Caller::App).is_ok());
+        assert_eq!(s.set("render.labelCache", Value::Int(4096), Caller::App), Err(SetError::NotAllowed));
+        // A lock beats the allowance and holds against DevTools too; an unknown name is ignored.
+        let s = on(r#"{ "settings": { "allowJsChanges": true, "lock": ["motion.reduce", "no.such.setting"] } }"#);
+        assert_eq!(s.set("motion.reduce", reduce(), Caller::App), Err(SetError::Locked));
+        assert_eq!(s.set("motion.reduce", reduce(), Caller::DevTools), Err(SetError::Locked));
+        assert!(s.set("render.labelCache", Value::Int(4096), Caller::DevTools).is_ok());
     }
 
     #[test]

@@ -7,6 +7,7 @@ edition = "2021"
 parley    = { workspace = true, features = ["system"] }
 peniko    = { workspace = true }
 log       = { workspace = true }
+glyx-settings = { path = "../glyx-settings" }
 thiserror = { workspace = true }
 memmap2   = "0.9"
 accesskit = { workspace = true, optional = true }

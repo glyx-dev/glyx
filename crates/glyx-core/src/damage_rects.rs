@@ -50,12 +50,12 @@ pub(crate) fn total_area(rects: &[Rect]) -> f64 {
     rects.iter().map(|r| area(*r)).sum()
 }
 
-/// `GLYX_SINGLE_DAMAGE_RECT=1` repaints one box around everything that changed,
+/// The `render.multiDamageRects` setting off (`GLYX_SINGLE_DAMAGE_RECT`) repaints one box around everything that changed,
 /// as before several rects were supported: for ruling multi-rect repaint out
-/// when something looks stale, and for comparing the two.
+/// when something looks stale, and for comparing the two. Read once, with the other startup settings.
 fn single_rect_forced() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("GLYX_SINGLE_DAMAGE_RECT").is_some())
+    *ON.get_or_init(|| !glyx_settings::global().bool("render.multiDamageRects"))
 }
 
 /// Merge `rects` into a short list of disjoint rectangles covering all of them.

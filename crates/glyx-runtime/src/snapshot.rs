@@ -126,6 +126,10 @@ globalThis.__glyx_quit             = function() {};
 globalThis.__glyx_window_close     = function() {};
 globalThis.__glyx_restart          = function() {};
 globalThis.__glyx_platform         = function() { return ''; };
+globalThis.__glyx_settings_list    = function() { return '[]'; };
+globalThis.__glyx_settings_set     = function() { return '{"ok":false,"error":"settings are not available"}'; };
+globalThis.__glyx_settings_reset   = function() { return '{"ok":false,"error":"settings are not available"}'; };
+globalThis.__glyx_settings_poll    = function() { return '[]'; };
 globalThis.__glyx_collect_memory   = function() {};
 globalThis.__glyx_open_external    = function() {};
 

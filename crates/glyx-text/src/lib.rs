@@ -453,9 +453,9 @@ impl TextSystem {
                         // observed to silently no-op (StyleProperty::FontStyle
                         // request had no visible effect) — a registered italic
                         // face is the reliable path. seguiemj/seguisym cost
-                        // ~40 MB of RAM; set GLYX_NO_EMOJI_FONT=1 to skip them
-                        // in memory-critical apps.
-                        let no_emoji = std::env::var("GLYX_NO_EMOJI_FONT").ok().as_deref() == Some("1");
+                        // ~40 MB of RAM; turn the `text.emojiFont` setting off
+                        // (GLYX_NO_EMOJI_FONT=1) to skip them in memory-critical apps.
+                        let no_emoji = !glyx_settings::global().bool("text.emojiFont");
                         let wanted = matches!(name.as_str(),
                             "segoeui.ttf" | "segoeuib.ttf" | "seguisb.ttf" |
                             "segoeuii.ttf" | "segoeuiz.ttf"

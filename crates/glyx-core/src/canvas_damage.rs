@@ -169,12 +169,12 @@ pub(crate) fn partial_rect(
     Some((x + l, y + t, r - l, b - t))
 }
 
-/// `GLYX_FULL_CANVAS_DAMAGE=1` turns partial canvas redraw off, so every
+/// The `render.canvasPartialRedraw` setting off (`GLYX_FULL_CANVAS_DAMAGE`) turns partial canvas redraw off, so every
 /// redrawn canvas damages its whole rect as it used to. A switch for ruling it
-/// out when something on a canvas looks stale, and for comparing the two.
+/// out when something on a canvas looks stale, and for comparing the two. Read once, with the other startup settings.
 fn partial_redraw_off() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OFF.get_or_init(|| std::env::var_os("GLYX_FULL_CANVAS_DAMAGE").is_some())
+    *OFF.get_or_init(|| !glyx_settings::global().bool("render.canvasPartialRedraw"))
 }
 
 /// For every canvas redrawn this frame: the changed region (canvas pixels, as

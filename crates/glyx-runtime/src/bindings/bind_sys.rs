@@ -1192,6 +1192,60 @@ pub fn restart_callback(
     }
 }
 
+// ── Settings ──────────────────────────────────────────────────────────────
+
+/// `__glyx_settings_list()` → JSON array of every setting (name, value, source, default, type, scope, safety, locked, doc).
+pub fn settings_list_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let text = glyx_settings::json::list(glyx_settings::global()).to_string();
+    rv.set(v8::String::new(scope, &text).unwrap().into());
+}
+
+/// `__glyx_settings_set(name, valueJson)` → JSON `{ ok, name, value, source }` or `{ ok: false, error }`. App JavaScript is the caller, so only a
+/// setting marked safe for apps can change.
+pub fn settings_set_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let name = args.get(0).to_rust_string_lossy(scope);
+    let value = args.get(1).to_rust_string_lossy(scope);
+    let text = glyx_settings::json::set(glyx_settings::global(), &name, &value, glyx_settings::Caller::App).to_string();
+    rv.set(v8::String::new(scope, &text).unwrap().into());
+}
+
+/// `__glyx_settings_reset(name)` → the same answer as `set`: back to the config value or the default.
+pub fn settings_reset_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let name = args.get(0).to_rust_string_lossy(scope);
+    let text = glyx_settings::json::reset(glyx_settings::global(), &name, glyx_settings::Caller::App).to_string();
+    rv.set(v8::String::new(scope, &text).unwrap().into());
+}
+
+/// `__glyx_settings_poll()` → JSON array of `{ name, value }` for changes since the last call (the first call starts collecting).
+pub fn settings_poll_callback(
+    scope: &mut v8::PinScope<'_, '_, v8::Context>,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = scope.get_current_context();
+    let scope = &mut v8::ContextScope::new(scope, ctx);
+    let text = glyx_settings::json::poll_changes().to_string();
+    rv.set(v8::String::new(scope, &text).unwrap().into());
+}
+
 /// `__glyx_platform()` â†' `"windows"` | `"macos"` | `"linux"` (compile-time constant).
 pub fn platform_callback(
     scope: &mut v8::PinScope<'_, '_, v8::Context>,

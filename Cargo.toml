@@ -9,6 +9,7 @@ members = [
     "crates/glyx-layout",
     "crates/glyx-runtime",
     "crates/glyx-security",
+    "crates/glyx-settings",
     "crates/glyx-db",
     "crates/glyx-3d",
     "crates/glyx-ai",

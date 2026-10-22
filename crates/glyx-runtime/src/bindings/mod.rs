@@ -2145,6 +2145,10 @@ pub fn register_all(
     register!("__glyx_window_close",    quit_callback);  // alias: close the window / app
     register!("__glyx_restart",         restart_callback);
     register!("__glyx_platform",        platform_callback);
+    register!("__glyx_settings_list",   settings_list_callback);
+    register!("__glyx_settings_set",    settings_set_callback);
+    register!("__glyx_settings_reset",  settings_reset_callback);
+    register!("__glyx_settings_poll",   settings_poll_callback);
     register!("__glyx_collect_memory",  collect_memory_callback);
     register!("__glyx_open_external",   open_external_callback);
 

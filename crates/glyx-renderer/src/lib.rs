@@ -161,10 +161,10 @@ impl GlyxRenderer {
         }).map_err(|e| RendererError::Init(e.to_string()))?;
         // Vello's scratch buffers are sized from the scene (a few MiB for a window of
         // UI, grown on demand) instead of upstream's fixed ~165 MiB.
-        // GLYX_VELLO_FIXED_BUFFERS=1 goes back to the fixed sizes, to rule the change
+        // The `render.vulloFixedBuffers` setting (GLYX_VELLO_FIXED_BUFFERS) goes back to the fixed sizes, to rule the change
         // out when something looks wrong and to compare memory.
         let mut renderer = renderer;
-        if std::env::var_os("GLYX_VELLO_FIXED_BUFFERS").is_some() {
+        if glyx_settings::global().bool("render.vulloFixedBuffers") {
             renderer.set_adaptive_buffers(false);
             log::info!("glyx-renderer: Vello scratch buffers fixed at upstream sizes (GLYX_VELLO_FIXED_BUFFERS)");
         }

@@ -24,6 +24,7 @@ export * from './window.js';
 export * from './crash.js';
 export * from './backend.js';
 export * from './perf.js';
+export * from './settings.js';
 export * from './system.js';
 export * from './credentials.js';
 export * from './audio.js';

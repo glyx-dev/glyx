@@ -5,7 +5,7 @@
 //! misses on every frame and re-shapes them all, so the right size depends on the app, and a fixed default is
 //! either too small for some or wasted memory for the rest.
 //!
-//! So unless the developer pins a size (`labelCacheEntries` in `glyx.config`, or `GLYX_LABEL_CACHE`), the cache
+//! So unless the developer pins a size (the `render.labelCache` setting: `labelCacheEntries` in `glyx.config`, or `GLYX_LABEL_CACHE`), the cache
 //! **starts small and grows only while it is thrashing**, up to a byte budget, and **shrinks back** when the
 //! working set has been small for a while. Memory is the priority: a quiet app keeps the small default.
 //!
@@ -45,12 +45,10 @@ pub(crate) enum Sizing {
     Fixed,
 }
 
-/// The pinned size from a setting: `value` if it is a number of entries in range (`config` is checked the same
-/// way); anything else is ignored, so a bad value falls back to the next source instead of breaking startup.
-pub(crate) fn pinned_entries(env: Option<&str>, config: Option<u32>) -> Option<usize> {
-    let ok = |n: usize| (MIN_ENTRIES..=MAX_ENTRIES).contains(&n).then_some(n);
-    env.and_then(|v| v.trim().parse::<usize>().ok()).and_then(ok)
-        .or_else(|| config.and_then(|n| ok(n as usize)))
+/// The pinned size from the `render.labelCache` setting (whose sources are resolved by `glyx-settings`): the number of entries if it is
+/// in range, `None` (size itself) for 0 and for anything below the smallest size a developer can pin.
+pub(crate) fn pinned_entries(setting: i64) -> Option<usize> {
+    usize::try_from(setting).ok().filter(|n| (MIN_ENTRIES..=MAX_ENTRIES).contains(n))
 }
 
 pub(crate) struct LabelCache {
@@ -186,16 +184,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_pinned_size_comes_from_the_variable_then_the_config_and_ignores_nonsense() {
-        assert_eq!(pinned_entries(None, None), None);
-        assert_eq!(pinned_entries(Some("4096"), None), Some(4096));
-        assert_eq!(pinned_entries(Some(" 2000 "), Some(9000)), Some(2000), "the variable wins over the config");
-        assert_eq!(pinned_entries(None, Some(9000)), Some(9000));
-        for bad in ["", "lots", "-5", "0", "15", "1000001", "4096.5"] {
-            assert_eq!(pinned_entries(Some(bad), None), None, "{bad:?}");
-            assert_eq!(pinned_entries(Some(bad), Some(512)), Some(512), "a bad variable falls back to the config: {bad:?}");
+    fn a_pinned_size_is_a_number_in_range_and_anything_smaller_means_automatic() {
+        // The setting's default is 0: the cache sizes itself.
+        assert_eq!(pinned_entries(glyx_settings::global().int("render.labelCache")), None);
+        assert_eq!(pinned_entries(4096), Some(4096));
+        assert_eq!(pinned_entries(16), Some(16));
+        for auto in [0, 3, 15, -5, 1_000_001] {
+            assert_eq!(pinned_entries(auto), None, "{auto}");
         }
-        assert_eq!(pinned_entries(None, Some(3)), None);
     }
 
     /// The policy alone, without real labels: counters are set by hand.

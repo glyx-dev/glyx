@@ -1,0 +1,14 @@
+[package]
+name        = "glyx-settings"
+version     = "0.2.0"
+edition     = "2021"
+description = "Glyx's runtime settings registry: typed, namespaced tunables with a scope and a safety class."
+
+# No required dependencies on purpose: every crate (core, renderer, text) reads settings. The JSON that the JavaScript bindings and DevTools
+# speak is an optional feature, enabled only by the crates that have that edge.
+[features]
+# JSON at the edges: `glyx_settings::json`.
+json = ["dep:serde_json"]
+
+[dependencies]
+serde_json = { workspace = true, optional = true }

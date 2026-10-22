@@ -3688,6 +3688,7 @@ dependencies = [
  "glyx-renderer",
  "glyx-runtime",
  "glyx-security",
+ "glyx-settings",
  "glyx-shell",
  "glyx-sysapi",
  "glyx-text",
@@ -3798,6 +3799,7 @@ version = "0.2.0"
 dependencies = [
  "glyx-3d",
  "glyx-gpu",
+ "glyx-settings",
  "glyx-text",
  "image",
  "kurbo 0.11.3",
@@ -3853,6 +3855,7 @@ dependencies = [
  "glyx-media",
  "glyx-perf",
  "glyx-security",
+ "glyx-settings",
  "glyx-sysapi",
  "glyx-text",
  "glyx-tray",
@@ -3892,6 +3895,13 @@ dependencies = [
  "globset",
  "log",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "glyx-settings"
+version = "0.2.0"
+dependencies = [
  "serde_json",
 ]
 
@@ -3938,6 +3948,7 @@ name = "glyx-text"
 version = "0.2.0"
 dependencies = [
  "accesskit",
+ "glyx-settings",
  "log",
  "memmap2",
  "parley",

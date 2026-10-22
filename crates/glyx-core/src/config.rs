@@ -62,6 +62,31 @@ pub(super) struct GlyxConfigFile {
     /// Font files the app ships: `"assets/fonts/Inter.ttf"` or `{ "src": "assets/fonts/Inter.ttf", "family": "Brand" }`.
     #[serde(default)]
     pub(super) fonts:        Vec<FontCfgJson>,
+    /// The app's say over its runtime settings (see `SettingsCfgJson`).
+    pub(super) settings:     Option<SettingsCfgJson>,
+}
+
+/// `settings` in `glyx.config`: the app developer decides who may change the runtime's settings while the app runs.
+#[derive(serde::Deserialize, Default)]
+pub(super) struct SettingsCfgJson {
+    /// Let the app's JavaScript change the few settings marked for apps (`settings.set`). Off by default: JavaScript can read settings
+    /// but not change them. Developer-only settings stay out of its reach either way.
+    #[serde(rename = "allowJsChanges")]
+    pub(super) allow_js_changes: Option<bool>,
+    /// Settings (by name) locked against every runtime change, DevTools included.
+    #[serde(default)]
+    pub(super) lock: Vec<String>,
+}
+
+/// Apply the `settings` block to a registry; unknown names in `lock` are reported, not fatal.
+pub(super) fn apply_settings_config(cfg: &SettingsCfgJson, settings: &glyx_settings::Settings) {
+    settings.allow_app_changes(cfg.allow_js_changes.unwrap_or(false));
+    if !cfg.lock.is_empty() {
+        let names: Vec<&str> = cfg.lock.iter().map(String::as_str).collect();
+        for unknown in settings.lock(&names) {
+            log::warn!("[glyx] config settings.lock: {unknown:?} is not a setting");
+        }
+    }
 }
 
 /// One entry of the `fonts` list: a path, or an object with a `src` path and an optional `family` name to register it under.
@@ -316,6 +341,11 @@ pub(super) fn apply_config_json(json: &str, cfg: &mut WindowConfig) -> (Capabili
     let file: Option<GlyxConfigFile> = serde_json::from_str::<GlyxConfigFile>(json)
         .map_err(|e| { log::error!("glyx config parse error: {e}"); e })
         .ok();
+
+    // Who may change settings at run time (the registry is the process's own, so only a config that has a `settings` block touches it).
+    if let Some(block) = file.as_ref().and_then(|f| f.settings.as_ref()) {
+        apply_settings_config(block, glyx_settings::global());
+    }
 
     // Shipped fonts, before any text system is made (each registers them when it starts).
     if let Some(f) = file.as_ref().filter(|f| !f.fonts.is_empty()) {

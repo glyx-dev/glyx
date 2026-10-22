@@ -34,15 +34,23 @@ pub(crate) struct SoftPresent {
     last_present: Option<std::time::Instant>,
     /// How long the last `pace` slept (not work; excluded from present time).
     last_pace: std::time::Duration,
-    /// `window.maxFps` from config; `None` = monitor refresh rate.
-    max_fps:      Option<u32>,
     /// Whether an overlay was composited into the window buffer at the last present: the buffer holds its pixels until it
     /// is restored from `last_frame`.
     overlay_shown: bool,
 }
 
+/// The time between presents for a monitor of `monitor_hz` and a `render.maxFps` cap (0 = none): the monitor's rate, held to 30 to 500 Hz,
+/// lowered to the cap. A cap below 15 acts as 15, so a stray value cannot make the window look frozen.
+pub(crate) fn frame_interval(monitor_hz: f64, max_fps: i64) -> std::time::Duration {
+    let mut hz = monitor_hz.clamp(30.0, 500.0);
+    if max_fps > 0 {
+        hz = hz.min(max_fps.clamp(15, 500) as f64);
+    }
+    std::time::Duration::from_secs_f64(1.0 / hz)
+}
+
 impl SoftPresent {
-    pub fn new(window: Arc<Window>, max_fps: Option<u32>) -> Result<Self, String> {
+    pub fn new(window: Arc<Window>) -> Result<Self, String> {
         let size = window.inner_size();
         let context = softbuffer::Context::new(Arc::clone(&window))
             .map_err(|e| format!("softbuffer context: {e}"))?;
@@ -56,7 +64,7 @@ impl SoftPresent {
         log::info!("glyx-core: software present active ({w}x{h}, no wgpu).");
         Ok(Self {
             _context: context, surface, width: w, height: h, last_frame: Vec::new(),
-            window, last_present: None, last_pace: std::time::Duration::ZERO, max_fps, overlay_shown: false,
+            window, last_present: None, last_pace: std::time::Duration::ZERO, overlay_shown: false,
         })
     }
 
@@ -108,13 +116,14 @@ impl SoftPresent {
     /// (an animation, video, a drag) otherwise renders as fast as the CPU
     /// allows, several times the refresh rate, with every extra frame thrown
     /// away. A frame after idle never waits.
+    ///
+    /// The cap is the `render.maxFps` setting, read on every present, so a change (DevTools, or app JavaScript where the app allows it)
+    /// applies to the next frame.
     fn pace(&mut self) {
-        let hz = self.window.current_monitor()
+        let monitor_hz = self.window.current_monitor()
             .and_then(|m| m.refresh_rate_millihertz())
-            .map_or(60.0, |mhz| mhz as f64 / 1000.0)
-            .clamp(30.0, 500.0)
-            .min(self.max_fps.map_or(f64::INFINITY, f64::from));
-        let interval = std::time::Duration::from_secs_f64(1.0 / hz);
+            .map_or(60.0, |mhz| mhz as f64 / 1000.0);
+        let interval = frame_interval(monitor_hz, glyx_settings::global().int("render.maxFps"));
         self.last_pace = std::time::Duration::ZERO;
         if let Some(last) = self.last_present {
             let since = last.elapsed();
@@ -321,5 +330,22 @@ mod tests {
         let mut dst = [0u32; 2];
         super::rgba_to_0rgb(&src, &mut dst);
         assert_eq!(dst, [0x0001_0203, 0x00AA_BBCC]);
+    }
+
+    #[test]
+    fn the_frame_interval_follows_the_monitor_and_the_cap() {
+        use std::time::Duration;
+        let ms = |d: Duration| (d.as_secs_f64() * 1000.0 * 10.0).round() / 10.0;
+        // No cap: the monitor's rate, held to 30 to 500 Hz.
+        assert_eq!(ms(super::frame_interval(60.0, 0)), 16.7);
+        assert_eq!(ms(super::frame_interval(144.0, 0)), 6.9);
+        assert_eq!(ms(super::frame_interval(10.0, 0)), 33.3);
+        // A cap lowers it, and never raises it.
+        assert_eq!(ms(super::frame_interval(144.0, 60)), 16.7);
+        assert_eq!(ms(super::frame_interval(60.0, 144)), 16.7);
+        assert_eq!(ms(super::frame_interval(120.0, 30)), 33.3);
+        // A cap below 15 acts as 15; one above 500 is held to 500.
+        assert_eq!(ms(super::frame_interval(120.0, 1)), 66.7);
+        assert_eq!(ms(super::frame_interval(500.0, 9999)), 2.0);
     }
 }

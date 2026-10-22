@@ -9,14 +9,15 @@
 //! bitmap instead. A change to the canvas (`CanvasUpdate`) drops its bitmap.
 //!
 //! Memory is the cost: 4 bytes a pixel for each cached canvas. So the cache is limited to a byte budget (least recently used
-//! out first; 16 MB unless `canvasCacheMb` in `glyx.config` or `GLYX_CANVAS_CACHE_MB` says otherwise, 0 = off), and a
+//! out first; 16 MB unless the `render.canvasCacheMb` setting (`canvasCacheMb` in `glyx.config`, `GLYX_CANVAS_CACHE_MB`) says otherwise, 0 = off), and a
 //! canvas is only cached when drawing it from the bitmap gives the same pixels as drawing it directly: whole-pixel
 //! position, fully opaque node, source-over only (no blend modes or eraser, which depend on what is beneath) and no images
 //! (they can finish loading without the commands changing).
 
 use glyx_runtime::bindings::CanvasCmd;
 
-/// Default budget in bytes.
+/// The default budget in bytes, which the `render.canvasCacheMb` setting must match (a test checks it).
+#[cfg(test)]
 pub const DEFAULT_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 /// A canvas must be repainted unchanged this many times before it is worth a bitmap (drawing the bitmap costs one more paint).
 const REPAINTS_BEFORE_CACHING: u8 = 2;
@@ -56,10 +57,10 @@ impl CanvasPixelCache {
         Self { entries: std::collections::HashMap::new(), bytes: 0, budget, tick: 0, hits: 0 }
     }
 
-    /// `GLYX_CANVAS_CACHE_MB` (env) over `canvasCacheMb` (config) over the default; 0 turns the cache off.
-    pub fn budget_from(env: Option<&str>, configured: Option<u32>) -> usize {
-        let mb = env.and_then(|s| s.trim().parse::<u32>().ok()).or(configured);
-        mb.map_or(DEFAULT_BUDGET_BYTES, |m| (m.min(256) as usize) * 1024 * 1024)
+    /// The byte budget for the `render.canvasCacheMb` setting (the environment, runtime and config sources are resolved by `glyx-settings`);
+    /// 0 turns the cache off.
+    pub fn budget_from_mb(mb: i64) -> usize {
+        (mb.clamp(0, 256) as usize) * 1024 * 1024
     }
 
     #[cfg(test)]
@@ -221,10 +222,11 @@ mod tests {
         for _ in 0..4 { assert!(matches!(off.plan(1, R, &cmds), Plan::Paint)); }
         let mut small = CanvasPixelCache::new(1000);
         for _ in 0..4 { assert!(matches!(small.plan(1, R, &cmds), Plan::Paint)); }
-        assert_eq!(CanvasPixelCache::budget_from(Some("4"), Some(32)), 4 << 20);
-        assert_eq!(CanvasPixelCache::budget_from(None, Some(32)), 32 << 20);
-        assert_eq!(CanvasPixelCache::budget_from(None, None), DEFAULT_BUDGET_BYTES);
-        assert_eq!(CanvasPixelCache::budget_from(Some("0"), Some(32)), 0);
+        assert_eq!(CanvasPixelCache::budget_from_mb(4), 4 << 20);
+        assert_eq!(CanvasPixelCache::budget_from_mb(0), 0);
+        assert_eq!(CanvasPixelCache::budget_from_mb(9999), 256 << 20);
+        // The default of the setting is the 16 MB this module documents.
+        assert_eq!(CanvasPixelCache::budget_from_mb(glyx_settings::global().int("render.canvasCacheMb")), DEFAULT_BUDGET_BYTES);
     }
 
     /// The point of the cache: blitting the bitmap gives the pixels drawing the commands would, including under a partial

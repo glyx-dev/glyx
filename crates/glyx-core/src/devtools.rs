@@ -934,17 +934,47 @@ impl Devtools {
                 let s = windows.get_mut(&win).expect("target_window checked it");
                 Ok(s.canvas_pixels.stats_json())
             })().into(),
+            // The `render.labelCache` setting (see `Settings.set`), applied to every window; 0 sizes the cache itself.
             ("Performance", "setLabelCache") => (|| {
                 let win = target_window(req.window_id, windows)?;
-                let s = windows.get_mut(&win).expect("target_window checked it");
-                if p.get("auto").and_then(Value::as_bool) == Some(true) {
-                    s.label_cache.set_auto();
-                } else if let Some(n) = p.get("entries").and_then(Value::as_u64) {
-                    s.label_cache.set_fixed(n as usize);
+                let entries = if p.get("auto").and_then(Value::as_bool) == Some(true) {
+                    0
+                } else if let Some(n) = p.get("entries").and_then(Value::as_u64).filter(|n| (16..=1_000_000).contains(n)) {
+                    n as i64
                 } else {
                     return Err(ErrorBody::invalid_params("entries (a number, 16 to 1,000,000) or auto: true is required"));
+                };
+                let out = glyx_settings::json::set(glyx_settings::global(), "render.labelCache", &entries.to_string(), glyx_settings::Caller::DevTools);
+                if out["ok"] != true {
+                    return Err(ErrorBody::invalid_params(out["error"].as_str().unwrap_or("the setting was refused")));
                 }
+                apply_label_cache_setting(windows);
+                let s = windows.get_mut(&win).expect("target_window checked it");
                 Ok(s.label_cache.stats_json())
+            })().into(),
+            // The settings registry (`glyx-settings`): every tunable with its value, where the value came from, its range, when it can change
+            // and who may change it. `set` and `reset` act as DevTools, which may change settings marked developer or app.
+            ("Settings", "list") => Ok(json!({ "settings": glyx_settings::json::list(glyx_settings::global()) })).into(),
+            ("Settings", "set") | ("Settings", "reset") => (|| {
+                let name = p.get("name").and_then(Value::as_str).ok_or_else(|| ErrorBody::invalid_params("name (string) is required"))?;
+                let settings = glyx_settings::global();
+                let out = if req.method == "set" {
+                    let value = p.get("value").ok_or_else(|| ErrorBody::invalid_params("value (boolean, whole number or string) is required"))?;
+                    glyx_settings::json::set(settings, name, &value.to_string(), glyx_settings::Caller::DevTools)
+                } else {
+                    glyx_settings::json::reset(settings, name, glyx_settings::Caller::DevTools)
+                };
+                if out["ok"] != true {
+                    return Err(ErrorBody::invalid_params(out["error"].as_str().unwrap_or("the setting was refused")));
+                }
+                if name == "render.labelCache" {
+                    apply_label_cache_setting(windows);
+                }
+                // A live setting may change what is on screen.
+                for s in windows.values() {
+                    s.window.request_redraw();
+                }
+                Ok(out)
             })().into(),
             ("Performance", "getBudget") => (|| {
                 let s = window(req, windows)?;
@@ -1431,6 +1461,17 @@ fn window_list(windows: &HashMap<u32, PerWindowState>) -> Vec<WindowInfo> {
 }
 
 /// The requested window, or the main (first-opened) one.
+/// Apply the `render.labelCache` setting in force to every window's label cache (pinned to a size, or sizing itself).
+fn apply_label_cache_setting(windows: &mut HashMap<u32, PerWindowState>) {
+    let pinned = crate::label_cache::pinned_entries(glyx_settings::global().int("render.labelCache"));
+    for s in windows.values_mut() {
+        match pinned {
+            Some(n) => s.label_cache.set_fixed(n),
+            None => s.label_cache.set_auto(),
+        }
+    }
+}
+
 fn target_window(requested: Option<u32>, windows: &HashMap<u32, PerWindowState>) -> Result<u32, ErrorBody> {
     pick_window(requested, windows.keys().copied())
 }

@@ -33,6 +33,7 @@ a11y     = ["glyx-shell/a11y", "glyx-runtime/a11y", "dep:accesskit", "glyx-text/
 [dependencies]
 glyx-gpu      = { path = "../glyx-gpu" }
 glyx-security = { path = "../glyx-security" }
+glyx-settings = { path = "../glyx-settings", features = ["json"] }
 glyx-shell    = { path = "../glyx-shell" }
 glyx-renderer = { path = "../glyx-renderer" }
 glyx-text     = { path = "../glyx-text" }

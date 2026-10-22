@@ -15,7 +15,7 @@ import { dispatchEvents, setKeyFlush, addGlobalClickListener, removeGlobalClickL
 import {
   _pollWebSockets, _pollIpc, _pollDeeplinks, _pollGamepads,
   _pollGlobalShortcuts, _pollPerfViolations, _pollLeakWarnings,
-  _pollAudio, _pollVideo, _pollFsWatch, _pollWebview,
+  _pollAudio, _pollVideo, _pollFsWatch, _pollWebview, _pollSettings,
 } from './api.js';
 import { _pollCanvas3DRaycasts } from './canvas.js';
 import { View } from './core.js';
@@ -87,6 +87,7 @@ globalThis.__glyx_frameCallback = function glyxFrameCallback() {
     _pollVideo();
     _pollFsWatch();
     _pollWebview();
+    _pollSettings();
     _pollCanvas3DRaycasts();
     dispatchEvents();
   });

@@ -14,6 +14,7 @@ canvas3d = ["dep:glyx-3d"]
 [dependencies]
 glyx-gpu  = { path = "../glyx-gpu" }
 glyx-text = { path = "../glyx-text" }
+glyx-settings = { path = "../glyx-settings" }
 glyx-3d   = { path = "../glyx-3d", optional = true }
 vello      = { workspace = true }
 peniko     = { workspace = true }

@@ -1323,6 +1323,10 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         globals.set("__glyx_restart", Function::new(ctx.clone(), move || crate::quickjs_sys::restart(&window))?)?;
     }
     globals.set("__glyx_platform", Function::new(ctx.clone(), crate::quickjs_sys::platform)?)?;
+    globals.set("__glyx_settings_list", Function::new(ctx.clone(), crate::quickjs_sys::settings_list)?)?;
+    globals.set("__glyx_settings_set", Function::new(ctx.clone(), crate::quickjs_sys::settings_set)?)?;
+    globals.set("__glyx_settings_reset", Function::new(ctx.clone(), crate::quickjs_sys::settings_reset)?)?;
+    globals.set("__glyx_settings_poll", Function::new(ctx.clone(), crate::quickjs_sys::settings_poll)?)?;
     globals.set("__glyx_getEnv", Function::new(ctx.clone(), crate::quickjs_sys::get_env)?)?;
     globals.set("__glyx_collect_memory", Function::new(ctx.clone(), crate::quickjs_sys::collect_memory)?)?;
     {
@@ -3052,6 +3056,7 @@ mod tests {
             "__glyx_perf_poll_leak_warnings", "__glyx_quit", "__glyx_window_close", "__glyx_restart",
             "__glyx_platform", "__glyx_getEnv", "__glyx_collect_memory", "__glyx_open_external",
             "__glyx_system_watch", "__glyx_system_unwatch",
+            "__glyx_settings_list", "__glyx_settings_set", "__glyx_settings_reset", "__glyx_settings_poll",
         ] {
             let out = rt.eval(&format!("typeof {name}")).expect("eval should succeed");
             assert!(out.contains("function"), "{name} should be registered, got {out}");
@@ -3098,6 +3103,28 @@ mod tests {
         for key in ["fps", "frameTime", "memoryJS", "nodeCount"] {
             assert!(out.contains(key), "missing {key} in {out}");
         }
+    }
+
+    #[test]
+    fn settings_are_listed_and_app_javascript_is_locked_out_by_default() {
+        let (_tokio_rt, mut rt) = new_runtime();
+        let out = rt.eval("JSON.stringify(JSON.parse(__glyx_settings_list()).map(s => s.name).sort())")
+            .expect("eval should succeed");
+        for name in ["motion.reduce", "render.labelCache", "render.canvasCacheMb"] {
+            assert!(out.contains(name), "missing {name} in {out}");
+        }
+        // The caller is app JavaScript. A developer setting is out of its reach; motion.reduce is marked for apps, but the app's config has not
+        // allowed JavaScript to change settings, so that too is a refusal, not a change.
+        let out = rt.eval("__glyx_settings_set('render.labelCache', '4096')").expect("eval should succeed");
+        assert!(out.contains("\"ok\":false") && out.contains("cannot be changed"), "{out}");
+        let out = rt.eval("__glyx_settings_set('motion.reduce', '\"on\"')").expect("eval should succeed");
+        assert!(out.contains("\"ok\":false") && out.contains("allowJsChanges"), "{out}");
+        let out = rt.eval("JSON.parse(__glyx_settings_list()).find(s => s.name === 'motion.reduce').appCanSet").expect("eval should succeed");
+        assert!(out.contains("false"), "{out}");
+        let out = rt.eval("__glyx_settings_set('no.such', 'true')").expect("eval should succeed");
+        assert!(out.contains("\"ok\":false"), "{out}");
+        let out = rt.eval("__glyx_settings_set('motion.reduce', '{')").expect("eval should succeed");
+        assert!(out.contains("must be a boolean"), "{out}");
     }
 
     #[test]

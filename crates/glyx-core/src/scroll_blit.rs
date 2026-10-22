@@ -108,7 +108,7 @@ fn disjoint(rects: Vec<(f64, f64, f64, f64)>) -> Vec<(f64, f64, f64, f64)> {
 
 fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("GLYX_SCROLL_BLIT").as_deref() != Ok("0"))
+    *ON.get_or_init(|| glyx_settings::global().bool("render.scrollBlit"))
 }
 
 fn whole(v: f32) -> Option<i32> { ((v - v.round()).abs() < 0.01).then(|| v.round() as i32) }

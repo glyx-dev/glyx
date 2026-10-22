@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **`settings`**: read the runtime's tunables and, where a setting allows it, change them live. `settings.list()` (name, value, source, default, type and range, scope, safety, locked, doc), `settings.get(name)`, `settings.set(name, value)` and `settings.reset(name)` (they return `{ ok, ... }` and never throw), and `settings.onChange(fn)`, which costs nothing until the first listener. JavaScript is locked out of changing settings by default: the app's `glyx.config` must allow it (`settings: { allowJsChanges: true }`), and even then only the few settings marked for apps (`motion.reduce`, `render.maxFps`) can change; each setting has `appCanSet`.
+
 ### Fixed
 - **A right click outside an open popover now dismisses it** (only a left click did), which a context menu needs.
 

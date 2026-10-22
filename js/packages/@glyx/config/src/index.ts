@@ -231,6 +231,17 @@ export interface AppConfig {
   license?:     string;
 }
 
+/** Who may change the runtime's settings (`settings` in the app's `glyx.config`). */
+export interface SettingsConfig {
+  /**
+   * Let the app's JavaScript change the few runtime settings marked for apps with `settings.set(...)`. Off by default: JavaScript can read
+   * settings but not change them, and developer-only settings stay out of its reach either way.
+   */
+  allowJsChanges?: boolean;
+  /** Settings, by name (`'render.labelCache'`), locked against every runtime change, DevTools included. */
+  lock?: string[];
+}
+
 export interface GlyxConfig {
   /** Machine-readable app identifier. Used as the binary filename, installer slug,
    *  and bundle ID. No spaces — use hyphens, e.g. 'my-notes'. */
@@ -254,6 +265,8 @@ export interface GlyxConfig {
   icon?:         string;
   /** Splash screen shown during JS startup. */
   splash?:       SplashConfig;
+  /** Whether the app's JavaScript may change runtime settings, and which settings are locked. */
+  settings?:     SettingsConfig;
   /** Auto-updater target repo. Requires `capabilities.updater: true` too. */
   updater?:      UpdaterConfig;
   /** JS plugin extensions. Each plugin's exported async functions are

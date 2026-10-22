@@ -163,6 +163,26 @@ pub(crate) fn print_file<'js>(
     })
 }
 
+// ── Settings ─────────────────────────────────────────────────────────────
+//
+// The same four sync string calls as the V8 bindings; the answers come from `glyx_settings::json`, so both engines agree.
+
+pub(crate) fn settings_list() -> String {
+    glyx_settings::json::list(glyx_settings::global()).to_string()
+}
+
+pub(crate) fn settings_set(name: String, value_json: String) -> String {
+    glyx_settings::json::set(glyx_settings::global(), &name, &value_json, glyx_settings::Caller::App).to_string()
+}
+
+pub(crate) fn settings_reset(name: String) -> String {
+    glyx_settings::json::reset(glyx_settings::global(), &name, glyx_settings::Caller::App).to_string()
+}
+
+pub(crate) fn settings_poll() -> String {
+    glyx_settings::json::poll_changes().to_string()
+}
+
 // ── Autostart ────────────────────────────────────────────────────────────
 //
 // Same "sync but Promise-free" shape as __glyx_platform / deeplink_get_initial_url:

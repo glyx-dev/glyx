@@ -1,5 +1,7 @@
 // @glyx-dev/react — browser-compatible fetch() + Headers.
 import { netStart, netResponse, netFailed } from '../devNet.js';
+import { _readStreamOf, utf8Decode } from './streams.js';
+import type { FileReadStream } from './streams.js';
 
 // ── fetch ─────────────────────────────────────────────────────────────────────
 //
@@ -34,7 +36,9 @@ import { netStart, netResponse, netFailed } from '../devNet.js';
  * ```
  *
  * @param {string} url
- * @param {{ method?: string, headers?: Record<string,string>,
+ * Pass `stream: true` to get the body as a stream instead of one string (see `StreamResponse`): large and binary downloads.
+ *
+ * @param {{ method?: string, headers?: Record<string,string>, stream?: boolean,
  *           body?: string,
  *           multipart?: Array<{name:string, value?:string, filename?:string,
  *                              base64?:string, contentType?:string}> }} [options]
@@ -100,7 +104,85 @@ function _makeResponse(data: { headers: any; body: string; url: any; status: any
   };
 }
 
-export async function fetch(url: string, options: any = {}) {
+/**
+ * The response of `fetch(url, { stream: true })`: the status and headers are there as soon as the server answers, and the body arrives as a
+ * stream of `Uint8Array` chunks, so a large download does not sit in memory and a binary one is not mangled. Read it once: with `for await`
+ * over `body`, or with `text()`, `json()` or `arrayBuffer()` (which collect all of it). `fs.pipe(res.body, await fs.openWrite(path))` saves it
+ * to disk without the bytes passing through your code. `cancel()` drops the connection.
+ */
+export interface StreamResponse {
+  readonly status: number;
+  readonly ok: boolean;
+  readonly statusText: string;
+  readonly headers: GlyxHeaders;
+  /** The address after redirects. */
+  readonly url: string;
+  readonly body: FileReadStream;
+  /** True once the body has been taken (read from, or collected by a method below). */
+  readonly bodyUsed: boolean;
+  text(): Promise<string>;
+  json(): Promise<any>;
+  arrayBuffer(): Promise<ArrayBuffer>;
+  /** Stop and close the connection. Safe to call more than once, and after the end. */
+  cancel(): Promise<void>;
+}
+
+async function collect(body: FileReadStream): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  // `read()` directly: iterating `body` would count as using it, and the caller has already said so.
+  for (let chunk = await body.read(); chunk !== null; chunk = await body.read()) {
+    chunks.push(chunk);
+    total += chunk.length;
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, at);
+    at += chunk.length;
+  }
+  return out;
+}
+
+async function fetchStream(url: string, init: any, netId: number): Promise<StreamResponse> {
+  if (init.multipart) throw new TypeError('fetch: stream: true supports method, headers and a string body, not multipart; use fetch without stream for an upload');
+  const f = (globalThis as any).__glyx_backend_call2;
+  if (typeof f !== 'function') throw new Error('fetch: stream: true needs a newer runner (__glyx_backend_call2 is missing)');
+  let raw: any;
+  try {
+    raw = await f('glyx_stream.fetch', { url, method: init.method, headers: init.headers, body: typeof init.body === 'string' ? init.body : undefined });
+  } catch (e) {
+    netFailed(netId, e);
+    throw e;
+  }
+  const meta = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  netResponse(netId, { ...meta, body: '[streamed body]' });
+  const body = _readStreamOf(meta.id);
+  const headers = new GlyxHeaders(meta.headers || {});
+  let used = false;
+  const take = () => {
+    if (used) throw new TypeError('Body has already been consumed.');
+    used = true;
+  };
+  // Reading the body directly counts as using it.
+  const iterate = (body as any)[Symbol.asyncIterator].bind(body);
+  (body as any)[Symbol.asyncIterator] = () => {
+    take();
+    return iterate();
+  };
+  return {
+    status: meta.status, ok: meta.ok, statusText: meta.statusText, headers, url: meta.url || url, body,
+    get bodyUsed() { return used; },
+    text: async () => { take(); return utf8Decode(await collect(body)); },
+    json: async () => { take(); return JSON.parse(utf8Decode(await collect(body))); },
+    arrayBuffer: async () => { take(); const bytes = await collect(body); return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer; },
+    cancel: () => body.cancel(),
+  };
+}
+
+export function fetch(url: string, options: { stream: true; [key: string]: any }): Promise<StreamResponse>;
+export function fetch(url: string, options?: any): Promise<ReturnType<typeof _makeResponse>>;
+export async function fetch(url: string, options: any = {}): Promise<any> {
   if (typeof __glyx_fetch === 'undefined') {
     throw new Error('fetch: __glyx_fetch binding is not available');
   }
@@ -127,6 +209,7 @@ export async function fetch(url: string, options: any = {}) {
     method: (init.method || 'GET').toUpperCase(), headers: init.headers,
     body: init.multipart ? `[multipart form: ${init.multipart.length} parts]` : init.body,
   });
+  if (init.stream) return fetchStream(url, init, netId);
   let data;
   try {
     data = JSON.parse(await __glyx_fetch(url, JSON.stringify(init)));
@@ -142,8 +225,8 @@ export async function fetch(url: string, options: any = {}) {
 // web-oriented libraries (Supabase, Stripe, …) work unmodified; both remain
 // importable from @glyx-dev/react.
 //
-// NOTE: response bodies cross the bridge as UTF-8 text, so `arrayBuffer()`/`blob()`
-// are correct for text/JSON but lossy for true binary downloads (images). Fetch
-// binary via a dedicated download/fs API instead.
+// NOTE: without `stream: true` response bodies cross the bridge as UTF-8 text, so `arrayBuffer()`/`blob()`
+// are correct for text/JSON but lossy for true binary downloads (images). Use `fetch(url, { stream: true })`
+// for those: the body then arrives as bytes.
 if (typeof (globalThis as any).fetch === 'undefined')   (globalThis as any).fetch = fetch;
 if (typeof (globalThis as any).Headers === 'undefined') (globalThis as any).Headers = GlyxHeaders;

@@ -1,7 +1,7 @@
 //! `fs.walk`: a recursive directory walk, streamed.
 //!
 //! Walking a tree from JavaScript with `listDir` is one native call per directory, and a project with 100,000 files and 10,000 directories
-//! is 10,000 round trips (about a millisecond each) plus a `stat` per file. Here the walk runs on one blocking thread on the native side
+//! is 10,000 round trips plus a `stat` per file. Here the walk runs on one blocking thread on the native side
 //! and its entries travel through the file-stream machinery in `streams.rs`: batched into chunks of newline-free JSON, in a bounded queue
 //! that the walker waits on when JavaScript is slow, so memory is flat however big the tree is.
 //!

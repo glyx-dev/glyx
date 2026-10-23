@@ -1,7 +1,7 @@
 // @glyx-dev/react — file system API.
 import { _noBinding } from './_shared.js';
-import { _openRead, _openWrite, _walk } from './streams.js';
-import type { FileReadStream, FileWriteStream, FileWalk, OpenReadOptions, OpenWriteOptions, WalkOptions } from './streams.js';
+import { _openRead, _openWrite, _pipe, _walk } from './streams.js';
+import type { FileReadStream, FileWriteStream, FileWalk, OpenReadOptions, OpenWriteOptions, PipeOptions, WalkOptions } from './streams.js';
 
 // ── File system API ───────────────────────────────────────────────────────────
 //
@@ -54,6 +54,14 @@ export const fs = {
    * its content unless `{ append: true }`. Requires the `fs` capability and `fs.write` for the path. See `FileWriteStream`.
    */
   openWrite: (path: string, opts?: OpenWriteOptions): Promise<FileWriteStream> => _openWrite(path, opts),
+  /**
+   * Copy a read stream into a write stream inside the runtime, with no JavaScript per chunk, then flush and close the writer; resolves with the
+   * bytes copied. `from` is a stream from `fs.openRead` or the `body` of `fetch(url, { stream: true })` (untouched: nothing read from it yet),
+   * `to` from `fs.openWrite`; both belong to the pipe until it ends. `{ onProgress(bytes) }` is called about every 100 ms. A download to disk:
+   * `const res = await fetch(url, { stream: true }); await fs.pipe(res.body, await fs.openWrite(path))`. On an error both streams are closed and
+   * it rejects.
+   */
+  pipe: (from: FileReadStream, to: FileWriteStream, opts?: PipeOptions): Promise<number> => _pipe(from, to, opts),
   /**
    * Walk a directory tree: `for await (const entry of await fs.walk(root, { ignore: ['node_modules', '.git'] }))` gives `{ path, name, type,
    * size, mtime, depth }` for every file, directory and link below `root` (not `root` itself), directories before their contents, in the order

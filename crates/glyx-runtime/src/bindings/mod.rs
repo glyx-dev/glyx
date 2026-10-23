@@ -638,25 +638,96 @@ const SHELL_OUTPUT_CAP: usize = 8 * 1024 * 1024; // 8 MiB
 #[cfg(feature = "shell")]
 const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 30;
 
+/// The checks before any process is started, shared by `shell.run` and `shell.spawn`: `bin` must be in the `shellExec.allow` list, and an
+/// argument with a shell metacharacter is refused (defense in depth: arguments are never given to a shell anyway).
+#[cfg(feature = "shell")]
+pub(crate) fn check_shell_request(bin: &str, args: &[String]) -> Result<(), String> {
+    if !glyx_security::get().can_shell_run(bin) {
+        return Err(format!(
+            "shellExec.allow[\"{bin}\"] — add to glyx.config.json under \"capabilities\": \
+             {{ \"shellExec\": {{ \"allow\": [\"{bin}\"] }} }}"
+        ));
+    }
+    if let Some(bad) = args.iter().find(|a| a.chars().any(|c| SHELL_ARG_META.contains(&c))) {
+        return Err(format!("shell: argument {bad:?} contains disallowed characters"));
+    }
+    Ok(())
+}
+
+/// The command for `bin` with `args` as a real argv array. On Windows no console window is opened for it (the app has none, and a console
+/// program started from it would otherwise flash one).
+#[cfg(feature = "shell")]
+pub(crate) fn shell_command(bin: &str, args: &[String]) -> Result<tokio::process::Command, String> {
+    // The program that runs is the one resolved here, not whatever the OS would find for the name at spawn time.
+    let program = resolve_binary(bin, std::env::var_os("PATH").as_deref(), std::env::var("PATHEXT").ok().as_deref())?;
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    Ok(cmd)
+}
+
+/// The file that `bin` names: an absolute path as it is, or a bare name looked up in the `PATH` directories (relative entries, which mean
+/// "this folder", are skipped, so a program dropped in the app's working directory is never picked; on Windows the `PATHEXT` extensions
+/// are tried). A name with a directory part that is not absolute is refused for the same reason.
+#[cfg(feature = "shell")]
+pub(crate) fn resolve_binary(bin: &str, path: Option<&std::ffi::OsStr>, pathext: Option<&str>) -> Result<std::path::PathBuf, String> {
+    use std::path::{Path, PathBuf};
+
+    let is_program = |p: &Path| -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        { p.is_file() }
+    };
+    let with_extensions = |dir: &Path| -> Vec<PathBuf> {
+        let base = dir.join(bin);
+        #[cfg(windows)]
+        {
+            if base.extension().is_some() {
+                return vec![base];
+            }
+            let list = pathext.filter(|s| !s.is_empty()).unwrap_or(".COM;.EXE;.BAT;.CMD");
+            return list.split(';').filter(|e| !e.is_empty()).map(|e| dir.join(format!("{bin}{e}"))).collect();
+        }
+        #[cfg(not(windows))]
+        { let _ = pathext; vec![base] }
+    };
+
+    if bin.is_empty() {
+        return Err("shell: no program named".to_string());
+    }
+    if bin.contains(['/', '\\']) {
+        let p = Path::new(bin);
+        if !p.is_absolute() {
+            return Err(format!("shell: {bin:?} has a directory part but is not an absolute path"));
+        }
+        return if is_program(p) { Ok(p.to_path_buf()) } else { Err(format!("shell: {bin:?} is not a file that can be run")) };
+    }
+    for dir in std::env::split_paths(path.unwrap_or_default()).filter(|d| d.is_absolute()) {
+        if let Some(found) = with_extensions(&dir).into_iter().find(|c| is_program(c)) {
+            return Ok(found);
+        }
+    }
+    Err(format!("shell: {bin:?} was not found on PATH"))
+}
+
 /// Validate `bin` against the `shell.allow` allowlist and reject
 /// defense-in-depth-flagged args, then spawn (argv-only) and wait for
 /// completion with a timeout + output cap. Capability check happens here so
 /// both engines get identical enforcement.
 #[cfg(feature = "shell")]
 pub(crate) async fn shell_run_core(bin: &str, args: Vec<String>) -> Result<ShellRunResult, String> {
-    if !glyx_security::get().can_shell_run(bin) {
-        return Err(format!(
-            "shell.allow[\"{bin}\"] — add to glyx.config.json under \"capabilities\": \
-             {{ \"shell\": {{ \"allow\": [\"{bin}\"] }} }}"
-        ));
-    }
-    if let Some(bad) = args.iter().find(|a| a.chars().any(|c| SHELL_ARG_META.contains(&c))) {
-        return Err(format!("shell.run: argument {bad:?} contains disallowed characters"));
-    }
+    check_shell_request(bin, &args).map_err(|e| e.replacen("shell:", "shell.run:", 1))?;
 
-    let mut cmd = tokio::process::Command::new(bin);
-    cmd.args(&args)
-        .stdin(std::process::Stdio::null())
+    let mut cmd = shell_command(bin, &args).map_err(|e| e.replacen("shell:", "shell.run:", 1))?;
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -3302,5 +3373,101 @@ mod tests {
         // url::Url parser returns the correct hostname.
         assert_eq!(extract_host("https://user:pass@api.example.com/x"), "api.example.com",
             "user:pass@ prefix must be stripped; host is api.example.com");
+    }
+}
+
+/// `resolve_binary`: a bare name becomes the absolute path of a program in an absolute `PATH` directory, never one in the working directory.
+#[cfg(all(test, feature = "shell"))]
+mod resolve_binary_tests {
+    use super::resolve_binary;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("glyx_resolve_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A file the platform treats as a program, named `stem` (with `.exe` on Windows).
+    fn program(dir: &Path, stem: &str) -> PathBuf {
+        let name = if cfg!(windows) { format!("{stem}.exe") } else { stem.to_string() };
+        let path = dir.join(name);
+        std::fs::write(&path, b"x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    /// A path as the file system compares it (Windows ignores case, so `.EXE` and `.exe` are one file).
+    fn same(a: impl AsRef<Path>, b: impl AsRef<Path>) -> bool {
+        let (a, b) = (a.as_ref().to_string_lossy().into_owned(), b.as_ref().to_string_lossy().into_owned());
+        if cfg!(windows) { a.eq_ignore_ascii_case(&b) } else { a == b }
+    }
+
+    fn path_of(dirs: &[&Path]) -> OsString {
+        std::env::join_paths(dirs.iter().map(|d| d.as_os_str())).unwrap()
+    }
+
+    #[test]
+    fn a_bare_name_resolves_to_the_absolute_path_of_the_first_match_on_path() {
+        let (a, b) = (scratch("first_a"), scratch("first_b"));
+        let in_b = program(&b, "mytool");
+        assert!(same(resolve_binary("mytool", Some(&path_of(&[&a, &b])), None).unwrap(), &in_b));
+        let in_a = program(&a, "mytool");
+        assert!(same(resolve_binary("mytool", Some(&path_of(&[&a, &b])), None).unwrap(), &in_a), "the earlier directory wins");
+        assert!(resolve_binary("mytool", Some(&path_of(&[&a])), None).unwrap().is_absolute());
+        let _ = (std::fs::remove_dir_all(&a), std::fs::remove_dir_all(&b));
+    }
+
+    #[test]
+    fn a_program_in_the_working_directory_or_a_relative_path_entry_is_never_picked() {
+        // A program planted in the working directory (what `Command::new` on some systems would find) and PATH entries that mean "here".
+        let stem = format!("glyx_planted_{}", std::process::id());
+        let planted = program(&std::env::current_dir().unwrap(), &stem);
+        let path = std::env::join_paths([PathBuf::from(""), PathBuf::from("."), PathBuf::from("relative_dir")]).unwrap();
+        let found = resolve_binary(&stem, Some(&path), None);
+        let _ = std::fs::remove_file(&planted);
+        assert!(found.is_err(), "resolved {found:?} from the working directory");
+    }
+
+    #[test]
+    fn a_name_with_a_directory_part_must_be_absolute_and_a_real_program() {
+        let dir = scratch("abs");
+        let tool = program(&dir, "tool");
+        assert!(same(resolve_binary(tool.to_str().unwrap(), None, None).unwrap(), &tool), "an absolute path is used as it is");
+        let relative = format!("sub{}tool", std::path::MAIN_SEPARATOR);
+        assert!(resolve_binary(&relative, None, None).unwrap_err().contains("not an absolute path"));
+        assert!(resolve_binary("../tool", None, None).unwrap_err().contains("not an absolute path"));
+        let missing = dir.join("nothing_here");
+        assert!(resolve_binary(missing.to_str().unwrap(), None, None).unwrap_err().contains("not a file that can be run"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_program_and_an_empty_name_say_so() {
+        let dir = scratch("missing");
+        assert!(resolve_binary("nope", Some(&path_of(&[&dir])), None).unwrap_err().contains("was not found on PATH"));
+        assert!(resolve_binary("nope", None, None).unwrap_err().contains("was not found on PATH"));
+        assert!(resolve_binary("", Some(&path_of(&[&dir])), None).unwrap_err().contains("no program named"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_pathext_extensions_are_tried_in_order() {
+        let dir = scratch("pathext");
+        let cmd = dir.join("script.cmd");
+        std::fs::write(&cmd, b"@echo off").unwrap();
+        let exe = program(&dir, "script");
+        let path = path_of(&[&dir]);
+        assert!(same(resolve_binary("script", Some(&path), Some(".EXE;.CMD")).unwrap(), &exe));
+        assert!(same(resolve_binary("script", Some(&path), Some(".CMD;.EXE")).unwrap(), &cmd));
+        assert!(same(resolve_binary("script.cmd", Some(&path), None).unwrap(), &cmd), "a name with an extension is not extended");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

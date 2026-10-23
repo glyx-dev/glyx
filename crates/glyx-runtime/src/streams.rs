@@ -11,25 +11,33 @@
 //! - **Owned by a window.** A stream belongs to the window whose JavaScript opened it (the dispatchers say which, see `crate::as_window`).
 //!   When that window closes, or its JavaScript is reloaded in development, its streams are closed: a reader's file is released and a
 //!   writer's queued chunks are still written, in the background. A stream another window was handed the id of dies with its owner.
-//! - **Latency hidden.** One call from JavaScript costs about a millisecond of round trip, and a 256 KiB chunk takes about 0.2 ms to read,
-//!   so asking for one chunk and waiting would leave the disk idle most of the time (measured: 117 MB/s against 1.6 GB/s for the stream
-//!   alone). Two things fix it: a `read` returns every chunk already queued, up to `chunkKb * queueChunks`, in one answer; and the JavaScript
-//!   side keeps one request in flight ahead of the one it is waiting for. Requests carry a sequence number and are answered in that order
-//!   whatever order they arrive in, so overlapping them is safe.
+//! - **Latency hidden.** One call from JavaScript costs a round trip (0.15 ms in a release build, about 1.2 ms under `glyx dev`, which also
+//!   runs the DevTools pump on every wake), and a 256 KiB chunk takes about 0.2 ms to read, so asking for one chunk and waiting would leave
+//!   the disk idle for much of the time (measured under `glyx dev`: 117 MB/s against 1.6 GB/s for the stream alone; in release 1.3 GB/s
+//!   serial and 1.5 GB/s with the two measures below). Two things fix it: a `read` returns every chunk already queued, up to
+//!   `chunkKb * queueChunks`, in one answer; and the JavaScript side keeps one request in flight ahead of the one it is waiting for.
+//!   Requests carry a sequence number and are answered in that order whatever order they arrive in, so overlapping them is safe.
 //! - **Engine neutral.** The registry is driven by built-in backend commands (see [`register`]), so V8 and QuickJS behave the same and
 //!   neither needs a binding of its own. Control calls are JSON; the data calls use the binary lane (an `ArrayBuffer` each way).
-//! - **Gated.** Opening checks the path against the app's `fs` read or write grant (canonical path first, then open), and every command
-//!   needs the `fs` capability.
+//! - **Gated.** Opening a file checks the path against the app's `fs` read or write grant (canonical path first, then open) and needs the
+//!   `fs` capability; opening an HTTP response (`glyx_stream.fetch`) runs the same checks as `fetch` (scheme, private addresses, the
+//!   `network.allow` list, on every redirect) and needs `network`. A stream remembers which capability opened it, and every later call on it
+//!   (`read`, `write`, `close`, ...) needs that capability too, so an app cannot use a stream it could not have opened.
+//! - **Sources and sinks.** A reader is a file, a directory walk (`walk.rs`), an HTTP response body or a child process's stdout or stderr; a
+//!   writer is a file or a child process's stdin. `glyx_stream.pipe` copies a reader into a writer inside Rust, with no JavaScript per chunk.
+//! - **Processes.** `glyx_stream.spawn` (needs `shell`, with the binary in `shellExec.allow`, as `shell.run` does) starts a child with its
+//!   output as two readers and optionally its input as a writer; a reader nobody drains holds the child back (the pipe fills), which is the
+//!   backpressure. The child itself is one more entry (`wait` for its exit, `kill` to stop it), and a window's children are killed when it closes.
 //!
 //! The wire format of the binary commands is in [`register`]. Chunks are copied twice (disk into a `Vec`, `Vec` into the `ArrayBuffer`);
 //! that is the price of the binary lane, and it is one copy per chunk, not per byte of JSON.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -62,6 +70,50 @@ impl Limits {
 
 type ChunkResult = Result<Vec<u8>, String>;
 
+/// How a child process is stopped: its waiting task is aborted, which drops the child (it was started with `kill_on_drop`, so that kills it),
+/// and the exit is published as `-1` if the task had not already published a real one.
+#[cfg(feature = "shell")]
+pub(crate) struct ProcessControl {
+    task: Mutex<Option<JoinHandle<()>>>,
+    exit: Arc<watch::Sender<Option<(i32, bool)>>>,
+}
+
+#[cfg(feature = "shell")]
+impl ProcessControl {
+    fn kill(&self) {
+        if let Some(task) = self.task.lock().unwrap().take() {
+            task.abort();
+        }
+        self.exit.send_if_modified(|v| {
+            if v.is_none() {
+                *v = Some((-1, false));
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
+
+/// What to start and which pipes to open for `glyx_stream.spawn`.
+#[cfg(feature = "shell")]
+pub(crate) struct SpawnOptions {
+    pub stdout: bool,
+    pub stderr: bool,
+    pub stdin: bool,
+    pub timeout: Option<std::time::Duration>,
+}
+
+/// The ids `glyx_stream.spawn` answers with.
+#[cfg(feature = "shell")]
+pub(crate) struct Spawned {
+    pub process: u32,
+    pub pid: Option<u32>,
+    pub stdout: Option<u32>,
+    pub stderr: Option<u32>,
+    pub stdin: Option<u32>,
+}
+
 struct ReaderState {
     rx: mpsc::Receiver<ChunkResult>,
     /// An error that arrived while chunks were being batched: the next `read` reports it.
@@ -83,6 +135,10 @@ enum Entry {
         /// Tells a walker (a blocking thread, which cannot be aborted) to stop.
         stop: Arc<AtomicBool>,
         owner: Option<u32>,
+        /// The capability that opened it (`fs` or `network`), needed for every call on it.
+        cap: &'static str,
+        /// Set while `pipe` owns it: `read` is refused then.
+        busy: Arc<AtomicBool>,
     },
     Writer {
         tx: Mutex<Option<mpsc::Sender<Vec<u8>>>>,
@@ -90,6 +146,20 @@ enum Entry {
         /// Why the writer task stopped early (disk full, permission), for the next `write` or the `close`.
         failed: Arc<Mutex<Option<String>>>,
         owner: Option<u32>,
+        cap: &'static str,
+        /// Set while `pipe` owns it: `write` is refused then.
+        busy: Arc<AtomicBool>,
+        /// Bytes `pipe` has written so far, for `glyx_stream.progress`.
+        piped: Arc<AtomicU64>,
+    },
+    /// A child process started by `glyx_stream.spawn`: its exit (`(code, timed_out)` once it has) and a way to stop it.
+    #[cfg(feature = "shell")]
+    Process {
+        exit: watch::Receiver<Option<(i32, bool)>>,
+        control: Arc<ProcessControl>,
+        owner: Option<u32>,
+        cap: &'static str,
+        busy: Arc<AtomicBool>,
     },
 }
 
@@ -97,6 +167,46 @@ impl Entry {
     fn owner(&self) -> Option<u32> {
         match self {
             Entry::Reader { owner, .. } | Entry::Writer { owner, .. } => *owner,
+            #[cfg(feature = "shell")]
+            Entry::Process { owner, .. } => *owner,
+        }
+    }
+
+    fn cap(&self) -> &'static str {
+        match self {
+            Entry::Reader { cap, .. } | Entry::Writer { cap, .. } => cap,
+            #[cfg(feature = "shell")]
+            Entry::Process { cap, .. } => cap,
+        }
+    }
+
+    fn busy(&self) -> &Arc<AtomicBool> {
+        match self {
+            Entry::Reader { busy, .. } | Entry::Writer { busy, .. } => busy,
+            #[cfg(feature = "shell")]
+            Entry::Process { busy, .. } => busy,
+        }
+    }
+
+    /// Stop whatever the entry runs, without waiting. A reader's task is aborted (the closed flag first: see `Streams::read_inner`), a
+    /// writer stops accepting chunks, a child process is killed.
+    fn stop(&self, graceful_writer: bool) {
+        match self {
+            Entry::Reader { task, turn, stop, .. } => {
+                turn.send_modify(|t| t.1 = true);
+                stop.store(true, Ordering::Relaxed);
+                task.abort();
+            }
+            Entry::Writer { tx, task, .. } => {
+                tx.lock().unwrap().take();
+                if !graceful_writer {
+                    if let Some(handle) = task.lock().unwrap().take() {
+                        handle.abort();
+                    }
+                }
+            }
+            #[cfg(feature = "shell")]
+            Entry::Process { control, .. } => control.kill(),
         }
     }
 }
@@ -155,21 +265,7 @@ impl Streams {
         if file.metadata().await.map(|m| m.is_dir()).unwrap_or(false) {
             return Err(format!("{} is a directory", path.display()));
         }
-        self.insert(|limits| {
-            let chunk = chunk_kb.map_or(limits.chunk_bytes, |kb| kb * 1024);
-            let (tx, rx) = mpsc::channel(limits.queue_chunks);
-            let produced = Arc::new(AtomicUsize::new(0));
-            let task = tokio::spawn(read_loop(file, chunk, tx, Arc::clone(&produced)));
-            Entry::Reader {
-                state: tokio::sync::Mutex::new(ReaderState { rx, carry_err: None }),
-                turn: watch::channel((0, false)).0,
-                max_batch: chunk * limits.queue_chunks,
-                task,
-                produced,
-                stop: Arc::new(AtomicBool::new(false)),
-                owner,
-            }
-        })
+        self.insert(|limits| make_reader(file, chunk_kb.map_or(limits.chunk_bytes, |kb| kb * 1024), limits, owner, "fs"))
     }
 
     /// Start a directory walk of `root` (already checked against the app's read grant), for window `owner`. Its entries come out of `read` as
@@ -193,6 +289,31 @@ impl Streams {
                 produced,
                 stop,
                 owner,
+                cap: "fs",
+                busy: Arc::new(AtomicBool::new(false)),
+            }
+        })
+    }
+
+    /// Start reading the body of an HTTP response (already past the `fetch` checks), for window `owner`. Chunks come out of `read` as they
+    /// arrive from the network, and the task waits when the queue is full, so a slow consumer holds the connection back (TCP flow control)
+    /// instead of growing memory. Must be called inside the Tokio runtime.
+    #[cfg(feature = "fetch")]
+    pub(crate) fn open_response_for(&self, response: reqwest::Response, owner: Option<u32>) -> Result<u32, String> {
+        self.insert(|limits| {
+            let (tx, rx) = mpsc::channel(limits.queue_chunks);
+            let produced = Arc::new(AtomicUsize::new(0));
+            let task = tokio::spawn(http_loop(response, tx, Arc::clone(&produced)));
+            Entry::Reader {
+                state: tokio::sync::Mutex::new(ReaderState { rx, carry_err: None }),
+                turn: watch::channel((0, false)).0,
+                max_batch: limits.chunk_bytes * limits.queue_chunks,
+                task,
+                produced,
+                stop: Arc::new(AtomicBool::new(false)),
+                owner,
+                cap: "network",
+                busy: Arc::new(AtomicBool::new(false)),
             }
         })
     }
@@ -214,10 +335,7 @@ impl Streams {
         }
         let file = options.open(path).await.map_err(|e| format!("cannot open {} for writing: {e}", path.display()))?;
         self.insert(|limits| {
-            let (tx, rx) = mpsc::channel(limits.queue_chunks);
-            let failed = Arc::new(Mutex::new(None));
-            let task = tokio::spawn(write_loop(file, rx, Arc::clone(&failed)));
-            Entry::Writer { tx: Mutex::new(Some(tx)), task: Mutex::new(Some(task)), failed, owner }
+            make_writer(file, limits, owner, "fs")
         })
     }
 
@@ -225,6 +343,19 @@ impl Streams {
     /// queued, up to the batch size. Request number `seq` (counted from 0 per stream) is answered after request `seq - 1`, so requests
     /// may overlap. An error closes the stream too.
     pub(crate) async fn read(&self, id: u32, seq: u32) -> Result<Option<Vec<Vec<u8>>>, String> {
+        self.check_free(id)?;
+        self.read_inner(id, seq).await
+    }
+
+    /// `Err` while `pipe` owns the stream: two consumers of one queue would split its chunks between them.
+    fn check_free(&self, id: u32) -> Result<(), String> {
+        if self.get(id)?.busy().load(Ordering::Relaxed) {
+            return Err(format!("stream {id} is being piped to another stream"));
+        }
+        Ok(())
+    }
+
+    async fn read_inner(&self, id: u32, seq: u32) -> Result<Option<Vec<Vec<u8>>>, String> {
         let entry = self.get(id)?;
         let Entry::Reader { state, turn, max_batch, .. } = &*entry else {
             return Err(format!("stream {id} is a writer"));
@@ -262,6 +393,10 @@ impl Streams {
                         Ok(Some(chunks))
                     }
                     Some(Err(e)) => Err(e),
+                    // The queue closed: the source ended, or the stream was cancelled under this read (which looks the same from here).
+                    // Cancelling sets the closed flag before it aborts anything, so the flag tells them apart: a cancelled stream is an
+                    // error, never a clean end (a pipe would otherwise report a truncated copy as a success).
+                    None if turn.borrow().1 => Err(closed()),
                     None => Ok(None),
                 }
             }
@@ -284,6 +419,11 @@ impl Streams {
 
     /// Queue a chunk for the writer, waiting while the queue is full (that wait is the backpressure).
     pub(crate) async fn write(&self, id: u32, chunk: Vec<u8>) -> Result<(), String> {
+        self.check_free(id)?;
+        self.write_inner(id, chunk).await
+    }
+
+    async fn write_inner(&self, id: u32, chunk: Vec<u8>) -> Result<(), String> {
         let entry = self.get(id)?;
         let Entry::Writer { tx, failed, .. } = &*entry else {
             return Err(format!("stream {id} is a reader"));
@@ -297,14 +437,76 @@ impl Streams {
         Ok(())
     }
 
+    /// Copy reader `from` into writer `to` until the reader ends, inside Rust (the chunks never reach JavaScript), then flush and close the
+    /// writer. Returns the bytes copied. Both streams belong to the pipe while it runs (`read` and `write` on them are refused); closing or
+    /// cancelling either one stops it. On an error both are cancelled.
+    pub(crate) async fn pipe(&self, from: u32, to: u32) -> Result<u64, String> {
+        if from == to {
+            return Err("a stream cannot be piped into itself".to_string());
+        }
+        let src = self.get(from)?;
+        let dst = self.get(to)?;
+        let (Entry::Reader { turn, busy: src_busy, .. }, Entry::Writer { busy: dst_busy, piped, .. }) = (&*src, &*dst) else {
+            return Err("pipe needs a read stream first and a write stream second".to_string());
+        };
+        if src_busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return Err(format!("stream {from} is already being piped"));
+        }
+        if dst_busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            src_busy.store(false, Ordering::Release);
+            return Err(format!("stream {to} is already being piped"));
+        }
+        // Continue the numbering where any earlier reads left off.
+        let mut seq = turn.borrow().0;
+        let mut bytes = 0u64;
+        let copied: Result<(), String> = async {
+            while let Some(chunks) = self.read_inner(from, seq).await? {
+                seq = seq.wrapping_add(1);
+                for chunk in chunks {
+                    bytes += chunk.len() as u64;
+                    self.write_inner(to, chunk).await?;
+                    piped.store(bytes, Ordering::Relaxed);
+                }
+            }
+            Ok(())
+        }
+        .await;
+        match copied {
+            Ok(()) => self.close(to).await.map(|()| bytes),
+            Err(e) => {
+                self.cancel(from);
+                self.cancel(to);
+                Err(e)
+            }
+        }
+    }
+
+    /// Bytes `pipe` has copied into writer `id` so far.
+    pub(crate) fn pipe_progress(&self, id: u32) -> Result<u64, String> {
+        match &*self.get(id)? {
+            Entry::Writer { piped, .. } => Ok(piped.load(Ordering::Relaxed)),
+            Entry::Reader { .. } => Err(format!("stream {id} is a reader: ask for the progress of the write stream")),
+            #[cfg(feature = "shell")]
+            Entry::Process { .. } => Err(format!("stream {id} is a process")),
+        }
+    }
+
+    /// The capability that opened stream `id` (`fs` or `network`), which every call on it needs.
+    pub(crate) fn capability_of(&self, id: u32) -> Result<&'static str, String> {
+        Ok(self.get(id)?.cap())
+    }
+
     /// Finish a stream. A writer is flushed first (every queued chunk is written), and a failure of the writer is reported here.
     pub(crate) async fn close(&self, id: u32) -> Result<(), String> {
         let Some(entry) = self.remove(id) else { return Ok(()) };
         match &*entry {
-            Entry::Reader { task, turn, stop, .. } => {
-                task.abort();
-                stop.store(true, Ordering::Relaxed);
-                turn.send_modify(|t| t.1 = true);
+            Entry::Reader { .. } => {
+                entry.stop(false);
+                Ok(())
+            }
+            #[cfg(feature = "shell")]
+            Entry::Process { .. } => {
+                entry.stop(false);
                 Ok(())
             }
             Entry::Writer { tx, task, failed, .. } => {
@@ -324,19 +526,7 @@ impl Streams {
     /// Stop a stream now, without waiting for anything queued: a reader's file is released, a writer's queue is dropped.
     pub(crate) fn cancel(&self, id: u32) {
         if let Some(entry) = self.remove(id) {
-            match &*entry {
-                Entry::Reader { task, turn, stop, .. } => {
-                    task.abort();
-                    stop.store(true, Ordering::Relaxed);
-                    turn.send_modify(|t| t.1 = true);
-                }
-                Entry::Writer { task, tx, .. } => {
-                    tx.lock().unwrap().take();
-                    if let Some(handle) = task.lock().unwrap().take() {
-                        handle.abort();
-                    }
-                }
-            }
+            entry.stop(false);
         }
     }
 
@@ -346,6 +536,8 @@ impl Streams {
         let seq = match self.get(id)?.as_ref() {
             Entry::Reader { turn, .. } => turn.borrow().0,
             Entry::Writer { .. } => return Err(format!("stream {id} is a writer")),
+            #[cfg(feature = "shell")]
+            Entry::Process { .. } => return Err(format!("stream {id} is a process")),
         };
         Ok(self.read(id, seq).await?.map(|chunks| chunks.concat()))
     }
@@ -356,16 +548,8 @@ impl Streams {
         let ids: Vec<u32> = self.open.lock().unwrap().iter().filter(|(_, e)| e.owner() == Some(owner)).map(|(id, _)| *id).collect();
         for id in &ids {
             let Some(entry) = self.remove(*id) else { continue };
-            match &*entry {
-                Entry::Reader { task, turn, stop, .. } => {
-                    task.abort();
-                    stop.store(true, Ordering::Relaxed);
-                    turn.send_modify(|t| t.1 = true);
-                }
-                Entry::Writer { tx, .. } => {
-                    tx.lock().unwrap().take();
-                }
-            }
+            // A writer is not aborted: it finishes writing what was already queued, in the background.
+            entry.stop(true);
         }
         if !ids.is_empty() {
             log::warn!(
@@ -374,6 +558,92 @@ impl Streams {
             );
         }
         ids.len()
+    }
+
+    /// Start a child process (a command already approved by the shell checks) and open its pipes: stdout and stderr as readers unless they
+    /// are ignored, stdin as a writer if asked for. The child is one more entry, for `wait` and `kill`. `timeout` kills it when it runs
+    /// longer. A window's children die with it. Must be called inside the Tokio runtime. Four entries at most: the cap must have room for
+    /// all of them, or nothing is started.
+    #[cfg(feature = "shell")]
+    pub(crate) fn open_spawn_for(&self, mut command: tokio::process::Command, opts: &SpawnOptions, owner: Option<u32>) -> Result<Spawned, String> {
+        use std::process::Stdio;
+        let limits = (self.limits)();
+        let needed = 1 + opts.stdout as usize + opts.stderr as usize + opts.stdin as usize;
+        {
+            let open = self.open.lock().unwrap();
+            if open.len() + needed > limits.max_open {
+                return Err(format!(
+                    "too many open streams ({}): a process needs {needed}; close the ones you are done with, or raise streams.maxOpen",
+                    limits.max_open
+                ));
+            }
+        }
+        command
+            .stdin(if opts.stdin { Stdio::piped() } else { Stdio::null() })
+            .stdout(if opts.stdout { Stdio::piped() } else { Stdio::null() })
+            .stderr(if opts.stderr { Stdio::piped() } else { Stdio::null() })
+            .kill_on_drop(true);
+        let mut child = command.spawn().map_err(|e| format!("cannot start the process: {e}"))?;
+        let pid = child.id();
+        let (stdout, stderr, stdin) = (child.stdout.take(), child.stderr.take(), child.stdin.take());
+
+        let (exit_tx, exit_rx) = watch::channel(None);
+        let exit_tx = Arc::new(exit_tx);
+        let publish = Arc::clone(&exit_tx);
+        let timeout = opts.timeout;
+        let task = tokio::spawn(async move {
+            let mut timed_out = false;
+            let status = match timeout {
+                None => child.wait().await,
+                Some(limit) => match tokio::time::timeout(limit, child.wait()).await {
+                    Ok(status) => status,
+                    Err(_) => {
+                        timed_out = true;
+                        let _ = child.kill().await;
+                        child.wait().await
+                    }
+                },
+            };
+            publish.send_replace(Some((status.ok().and_then(|s| s.code()).unwrap_or(-1), timed_out)));
+        });
+        let control = Arc::new(ProcessControl { task: Mutex::new(Some(task)), exit: exit_tx });
+
+        let process = self.insert(|_| Entry::Process { exit: exit_rx, control: Arc::clone(&control), owner, cap: "shellExec", busy: Arc::new(AtomicBool::new(false)) })?;
+        let reader = |source: Option<tokio::process::ChildStdout>| -> Result<Option<u32>, String> {
+            source.map(|s| self.insert(|limits| make_reader(s, limits.chunk_bytes, limits, owner, "shellExec"))).transpose()
+        };
+        let stdout_id = reader(stdout)?;
+        let stderr_id = stderr
+            .map(|s| self.insert(|limits| make_reader(s, limits.chunk_bytes, limits, owner, "shellExec")))
+            .transpose()?;
+        let stdin_id = stdin.map(|s| self.insert(|limits| make_writer(s, limits, owner, "shellExec"))).transpose()?;
+        Ok(Spawned { process, pid, stdout: stdout_id, stderr: stderr_id, stdin: stdin_id })
+    }
+
+    /// Wait for a child to end and answer `(exit code, whether it was killed by its timeout)`. The child's entry is removed: a process is
+    /// waited for once.
+    #[cfg(feature = "shell")]
+    pub(crate) async fn wait_process(&self, id: u32) -> Result<(i32, bool), String> {
+        let entry = self.get(id)?;
+        let Entry::Process { exit, .. } = &*entry else {
+            return Err(format!("stream {id} is not a process"));
+        };
+        let mut exit = exit.clone();
+        let result = exit.wait_for(|v| v.is_some()).await.map(|v| (*v).unwrap()).map_err(|_| "the process was lost".to_string());
+        self.remove(id);
+        result
+    }
+
+    /// Stop a child now (it is killed; `wait` then reports how it ended). Harmless once it has ended.
+    #[cfg(feature = "shell")]
+    pub(crate) fn kill_process(&self, id: u32) -> Result<(), String> {
+        match &*self.get(id)? {
+            Entry::Process { control, .. } => {
+                control.kill();
+                Ok(())
+            }
+            _ => Err(format!("stream {id} is not a process")),
+        }
     }
 
     /// Chunks produced so far by a reader (tests).
@@ -386,9 +656,43 @@ impl Streams {
     }
 }
 
-/// Read the file in chunks into a bounded queue; the send waits while it is full. Ends when the file does, when the reader side is gone
+/// A reader over any async source (a file, a child's stdout): a task reads it in chunks into a bounded queue.
+fn make_reader<R: AsyncRead + Unpin + Send + 'static>(source: R, chunk: usize, limits: Limits, owner: Option<u32>, cap: &'static str) -> Entry {
+    let (tx, rx) = mpsc::channel(limits.queue_chunks);
+    let produced = Arc::new(AtomicUsize::new(0));
+    let task = tokio::spawn(read_loop(source, chunk, tx, Arc::clone(&produced)));
+    Entry::Reader {
+        state: tokio::sync::Mutex::new(ReaderState { rx, carry_err: None }),
+        turn: watch::channel((0, false)).0,
+        max_batch: chunk * limits.queue_chunks,
+        task,
+        produced,
+        stop: Arc::new(AtomicBool::new(false)),
+        owner,
+        cap,
+        busy: Arc::new(AtomicBool::new(false)),
+    }
+}
+
+/// A writer over any async sink (a file, a child's stdin): a task writes the queued chunks to it.
+fn make_writer<W: AsyncWrite + Unpin + Send + 'static>(sink: W, limits: Limits, owner: Option<u32>, cap: &'static str) -> Entry {
+    let (tx, rx) = mpsc::channel(limits.queue_chunks);
+    let failed = Arc::new(Mutex::new(None));
+    let task = tokio::spawn(write_loop(sink, rx, Arc::clone(&failed)));
+    Entry::Writer {
+        tx: Mutex::new(Some(tx)),
+        task: Mutex::new(Some(task)),
+        failed,
+        owner,
+        cap,
+        busy: Arc::new(AtomicBool::new(false)),
+        piped: Arc::new(AtomicU64::new(0)),
+    }
+}
+
+/// Read the source in chunks into a bounded queue; the send waits while it is full. Ends when the source does, when the reader side is gone
 /// (a cancelled stream drops its receiver), or on an error, which is passed on as the last item.
-async fn read_loop(mut file: tokio::fs::File, chunk: usize, tx: mpsc::Sender<ChunkResult>, produced: Arc<AtomicUsize>) {
+async fn read_loop<R: AsyncRead + Unpin>(mut file: R, chunk: usize, tx: mpsc::Sender<ChunkResult>, produced: Arc<AtomicUsize>) {
     loop {
         let mut buf = vec![0u8; chunk];
         match file.read(&mut buf).await {
@@ -408,8 +712,29 @@ async fn read_loop(mut file: tokio::fs::File, chunk: usize, tx: mpsc::Sender<Chu
     }
 }
 
+/// Pass the body of an HTTP response on as it arrives, into the bounded queue (the send waits while it is full, and not reading the socket
+/// holds the sender back). Ends with the body, when the consumer is gone, or on a network error, which is the last item.
+#[cfg(feature = "fetch")]
+async fn http_loop(mut response: reqwest::Response, tx: mpsc::Sender<ChunkResult>, produced: Arc<AtomicUsize>) {
+    loop {
+        match response.chunk().await {
+            Ok(Some(bytes)) => {
+                produced.fetch_add(1, Ordering::Relaxed);
+                if tx.send(Ok(bytes.to_vec())).await.is_err() {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                let _ = tx.send(Err(e.to_string())).await;
+                break;
+            }
+        }
+    }
+}
+
 /// Write queued chunks to the file until the queue closes, then flush. A failure is kept for the next `write` or the `close`.
-async fn write_loop(mut file: tokio::fs::File, mut rx: mpsc::Receiver<Vec<u8>>, failed: Arc<Mutex<Option<String>>>) {
+async fn write_loop<W: AsyncWrite + Unpin>(mut file: W, mut rx: mpsc::Receiver<Vec<u8>>, failed: Arc<Mutex<Option<String>>>) {
     while let Some(chunk) = rx.recv().await {
         if let Err(e) = file.write_all(&chunk).await {
             *failed.lock().unwrap() = Some(e.to_string());
@@ -419,6 +744,7 @@ async fn write_loop(mut file: tokio::fs::File, mut rx: mpsc::Receiver<Vec<u8>>, 
     if let Err(e) = file.flush().await {
         *failed.lock().unwrap() = Some(e.to_string());
     }
+    // Dropping the sink closes it: for a child's stdin that is the end of its input.
 }
 
 // ── Backend commands ──────────────────────────────────────────────────────────
@@ -541,15 +867,192 @@ pub(crate) fn close_window_global(owner: u32) -> usize {
     global().close_window(owner)
 }
 
-/// Register the stream commands (all need the `fs` capability; `glyx_stream.open` also checks the path):
+#[cfg(feature = "fetch")]
+#[derive(serde::Deserialize)]
+struct FetchArgs {
+    url: String,
+    method: Option<String>,
+    headers: Option<serde_json::Map<String, serde_json::Value>>,
+    body: Option<String>,
+}
+
+/// `glyx_stream.fetch`: make the request (after `check` has approved the URL), wait for the response headers, and open the body as a reader.
+/// Answers `{ id, status, ok, statusText, headers, url }`; `url` is the address after redirects. A non-2xx status still opens the body (an error
+/// page is a body too), and `ok` says which it was. Only method, headers and a string body are supported here: use `fetch` for a multipart upload.
+#[cfg(feature = "fetch")]
+pub(crate) async fn fetch_command(
+    streams: &Streams,
+    args: &str,
+    owner: Option<u32>,
+    check: impl Fn(&str) -> Result<(), String>,
+    client: reqwest::Client,
+) -> Result<String, String> {
+    let a: FetchArgs = serde_json::from_str(args).map_err(|e| format!("invalid arguments: {e}"))?;
+    check(&a.url)?;
+    let mut request = match a.method.as_deref().unwrap_or("GET").to_ascii_uppercase().as_str() {
+        "POST" => client.post(&a.url),
+        "PUT" => client.put(&a.url),
+        "PATCH" => client.patch(&a.url),
+        "DELETE" => client.delete(&a.url),
+        "HEAD" => client.head(&a.url),
+        _ => client.get(&a.url),
+    };
+    for (name, value) in a.headers.iter().flatten() {
+        if let Some(value) = value.as_str() {
+            request = request.header(name.as_str(), value);
+        }
+    }
+    if let Some(body) = a.body {
+        request = request.body(body);
+    }
+    let response = request.send().await.map_err(|e| e.to_string())?;
+
+    let status = response.status();
+    let mut headers = serde_json::Map::new();
+    for (name, value) in response.headers() {
+        if let Ok(text) = value.to_str() {
+            // The same name twice is one value joined with a comma, as a browser's Headers does.
+            match headers.get_mut(name.as_str()) {
+                Some(serde_json::Value::String(existing)) => {
+                    existing.push_str(", ");
+                    existing.push_str(text);
+                }
+                _ => {
+                    headers.insert(name.to_string(), serde_json::Value::String(text.to_string()));
+                }
+            }
+        }
+    }
+    let meta = serde_json::json!({
+        "status": status.as_u16(),
+        "ok": status.is_success(),
+        "statusText": status.canonical_reason().unwrap_or(""),
+        "headers": headers,
+        "url": response.url().as_str(),
+    });
+    let id = streams.open_response_for(response, owner)?;
+    let mut meta = meta;
+    meta["id"] = serde_json::json!(id);
+    Ok(meta.to_string())
+}
+
+/// The checks `fetch` makes before a request, for the stream version: scheme, private and loopback addresses, and the `network.allow` list.
+#[cfg(feature = "fetch")]
+fn check_fetch_url(url: &str) -> Result<(), String> {
+    crate::bindings::check_fetch_scheme(url)?;
+    let host = crate::bindings::extract_host(url);
+    if crate::bindings::is_private_host(&host) {
+        return Err(format!("fetch: host {host:?} is a private/loopback address (SSRF denied)"));
+    }
+    if !glyx_security::get().can_network(&host) {
+        return Err(format!(
+            "network.allow[\"{host}\"] -- add to glyx.config.json under \"capabilities\": {{ \"network\": {{ \"allow\": [\"{host}\"] }} }}"
+        ));
+    }
+    Ok(())
+}
+
+/// A call on an open stream needs the capability that opened it. An id that is not open is not this function's business (the call says so).
+fn ensure_capability(streams: &Streams, id: u32, has: &(dyn Fn(&str) -> bool + Sync)) -> Result<(), String> {
+    match streams.capability_of(id) {
+        Ok(cap) if !has(cap) => Err(format!("missing capability \"{cap}\" -- add it to glyx.config.json's \"capabilities\" to use this stream")),
+        _ => Ok(()),
+    }
+}
+
+fn has_capability(name: &str) -> bool {
+    glyx_security::get().has_named(name)
+}
+
+#[cfg(feature = "shell")]
+#[derive(serde::Deserialize)]
+struct SpawnArgs {
+    bin: String,
+    #[serde(default)]
+    args: Vec<String>,
+    /// Open the child's stdin as a writer. Default false: the child gets no input.
+    #[serde(default)]
+    stdin: bool,
+    /// `pipe` (default) or `ignore`.
+    stdout: Option<String>,
+    stderr: Option<String>,
+    #[serde(rename = "timeoutMs")]
+    timeout_ms: Option<u64>,
+}
+
+/// `glyx_stream.spawn`: `prepare(bin, args)` approves the request and builds the command (the shell checks in production), then the child is
+/// started. Answers `{ process, pid, stdout, stderr, stdin }` (a pipe that was not opened is `null`).
+#[cfg(feature = "shell")]
+pub(crate) fn spawn_command(
+    streams: &Streams,
+    args: &str,
+    owner: Option<u32>,
+    prepare: impl Fn(&str, &[String]) -> Result<tokio::process::Command, String>,
+) -> Result<String, String> {
+    let a: SpawnArgs = serde_json::from_str(args).map_err(|e| format!("invalid arguments: {e}"))?;
+    let pipe = |name: &str, v: &Option<String>| match v.as_deref() {
+        None | Some("pipe") => Ok(true),
+        Some("ignore") => Ok(false),
+        Some(other) => Err(format!("{name} must be \"pipe\" or \"ignore\", not {other:?}")),
+    };
+    let opts = SpawnOptions {
+        stdout: pipe("stdout", &a.stdout)?,
+        stderr: pipe("stderr", &a.stderr)?,
+        stdin: a.stdin,
+        timeout: a.timeout_ms.map(std::time::Duration::from_millis),
+    };
+    let command = prepare(&a.bin, &a.args)?;
+    let spawned = streams.open_spawn_for(command, &opts, owner)?;
+    Ok(serde_json::json!({
+        "process": spawned.process,
+        "pid": spawned.pid,
+        "stdout": spawned.stdout,
+        "stderr": spawned.stderr,
+        "stdin": spawned.stdin,
+    })
+    .to_string())
+}
+
+#[cfg(feature = "shell")]
+pub(crate) async fn wait_command(streams: &Streams, args: &str, has: &(dyn Fn(&str) -> bool + Sync)) -> Result<String, String> {
+    let id = id_arg(args)?;
+    ensure_capability(streams, id, has)?;
+    let (code, timed_out) = streams.wait_process(id).await?;
+    Ok(format!("{{\"exitCode\":{code},\"timedOut\":{timed_out}}}"))
+}
+
+#[derive(serde::Deserialize)]
+struct PipeArgs {
+    from: u32,
+    to: u32,
+}
+
+/// `glyx_stream.pipe`: copy reader `from` into writer `to` inside Rust and answer `{ "bytes": n }` when it is done.
+pub(crate) async fn pipe_command(streams: &Streams, args: &str, has: &(dyn Fn(&str) -> bool + Sync)) -> Result<String, String> {
+    let a: PipeArgs = serde_json::from_str(args).map_err(|_| "from and to (stream ids) are required".to_string())?;
+    ensure_capability(streams, a.from, has)?;
+    ensure_capability(streams, a.to, has)?;
+    let bytes = streams.pipe(a.from, a.to).await?;
+    Ok(format!("{{\"bytes\":{bytes}}}"))
+}
+
+/// Register the stream commands. Opening needs a capability (`glyx_stream.open` and `.walk` need `fs` and check the path, `.fetch` needs
+/// `network` and runs the checks `fetch` does); every other call on a stream needs the capability that opened it (checked per call, see
+/// [`ensure_capability`]), so they carry none here.
 ///
 /// | command | request | answer |
 /// |---|---|---|
 /// | `glyx_stream.open` (JSON) | `{ path, mode?, chunkKb? }` | `{ id }` |
-/// | `glyx_stream.read` (binary) | 4-byte id, 4-byte request number (0, 1, 2, ... per stream) | status byte (0 data, 1 end), then the bytes of every chunk that was queued (one or more, up to `chunkKb * queueChunks`) |
-/// | `glyx_stream.write` (binary) | 4-byte id, then the chunk | no bytes; resolves when the chunk is queued |
 /// | `glyx_stream.walk` (JSON) | `{ path, maxDepth?, ignore?, followLinks?, type? }` | `{ id }`; see `walk.rs` |
+/// | `glyx_stream.fetch` (JSON) | `{ url, method?, headers?, body? }` | `{ id, status, ok, statusText, headers, url }` once the headers are in |
+/// | `glyx_stream.read` (binary) | 4-byte id, 4-byte request number (0, 1, 2, ... per stream) | status byte (0 data, 1 end), then the bytes of every chunk that was queued (one or more, up to `chunkKb * queueChunks`) |
 /// | `glyx_stream.next` (JSON) | `{ id, seq }` (a walk) | `{ items: [...] }` or `{ items: [], done: true }` |
+/// | `glyx_stream.write` (binary) | 4-byte id, then the chunk | no bytes; resolves when the chunk is queued |
+/// | `glyx_stream.spawn` (JSON, feature `shell`) | `{ bin, args?, stdin?, stdout?, stderr?, timeoutMs? }` | `{ process, pid, stdout, stderr, stdin }` (ids; `null` for a pipe not opened) |
+/// | `glyx_stream.wait` (JSON, feature `shell`) | `{ id }` (the process) | `{ exitCode, timedOut }` once it has ended |
+/// | `glyx_stream.kill` (JSON, feature `shell`) | `{ id }` (the process) | `{}` |
+/// | `glyx_stream.pipe` (JSON) | `{ from, to }` | `{ bytes }` when the reader has ended and the writer is flushed |
+/// | `glyx_stream.progress` (JSON) | `{ id }` (the write stream of a pipe) | `{ bytes }` copied so far |
 /// | `glyx_stream.close` (JSON) | `{ id }` | `{}`; a writer is flushed first and its failure reported |
 /// | `glyx_stream.cancel` (JSON) | `{ id }` | `{}`; drops what is queued |
 ///
@@ -581,17 +1084,62 @@ pub(crate) fn register(b: &mut BackendRegistryBuilder) {
         }
     });
 
+    #[cfg(feature = "fetch")]
+    {
+        let s = Arc::clone(&streams);
+        b.add_gated("glyx_stream.fetch", &["network"], move |args| {
+            let s = Arc::clone(&s);
+            async move {
+                let client = crate::bindings::safe_http_client()?;
+                fetch_command(&s, &args, crate::current_window(), check_fetch_url, client).await
+            }
+        });
+    }
+
+    #[cfg(feature = "shell")]
+    {
+        let s = Arc::clone(&streams);
+        b.add("glyx_stream.spawn", move |args| {
+            let s = Arc::clone(&s);
+            async move {
+                spawn_command(&s, &args, crate::current_window(), |bin, argv| {
+                    crate::bindings::check_shell_request(bin, argv)?;
+                    crate::bindings::shell_command(bin, argv)
+                })
+            }
+        });
+        let s = Arc::clone(&streams);
+        b.add("glyx_stream.wait", move |args| {
+            let s = Arc::clone(&s);
+            async move { wait_command(&s, &args, &has_capability).await }
+        });
+        let s = Arc::clone(&streams);
+        b.add("glyx_stream.kill", move |args| {
+            let s = Arc::clone(&s);
+            async move {
+                let id = id_arg(&args)?;
+                ensure_capability(&s, id, &has_capability)?;
+                s.kill_process(id)?;
+                Ok("{}".to_string())
+            }
+        });
+    }
+
     let s = Arc::clone(&streams);
-    b.add_gated("glyx_stream.next", FS, move |args| {
+    b.add_gated("glyx_stream.next", &[], move |args| {
         let s = Arc::clone(&s);
-        async move { next_command(&s, &args).await }
+        async move {
+            ensure_capability(&s, id_arg(&args)?, &has_capability)?;
+            next_command(&s, &args).await
+        }
     });
 
     let s = Arc::clone(&streams);
-    b.add_bytes_gated("glyx_stream.read", FS, move |req| {
+    b.add_bytes("glyx_stream.read", move |req| {
         let s = Arc::clone(&s);
         async move {
             let (id, seq) = read_request(&req)?;
+            ensure_capability(&s, id, &has_capability)?;
             Ok(match s.read(id, seq).await? {
                 Some(chunks) => {
                     let mut out = Vec::with_capacity(1 + chunks.iter().map(Vec::len).sum::<usize>());
@@ -607,29 +1155,50 @@ pub(crate) fn register(b: &mut BackendRegistryBuilder) {
     });
 
     let s = Arc::clone(&streams);
-    b.add_bytes_gated("glyx_stream.write", FS, move |req| {
+    b.add_bytes("glyx_stream.write", move |req| {
         let s = Arc::clone(&s);
         async move {
             let (id, chunk) = split_id(&req)?;
+            ensure_capability(&s, id, &has_capability)?;
             s.write(id, chunk.to_vec()).await?;
             Ok(Vec::new())
         }
     });
 
     let s = Arc::clone(&streams);
-    b.add_gated("glyx_stream.close", FS, move |args| {
+    b.add("glyx_stream.pipe", move |args| {
+        let s = Arc::clone(&s);
+        async move { pipe_command(&s, &args, &has_capability).await }
+    });
+
+    let s = Arc::clone(&streams);
+    b.add("glyx_stream.progress", move |args| {
         let s = Arc::clone(&s);
         async move {
-            s.close(id_arg(&args)?).await?;
+            let id = id_arg(&args)?;
+            ensure_capability(&s, id, &has_capability)?;
+            Ok(format!("{{\"bytes\":{}}}", s.pipe_progress(id)?))
+        }
+    });
+
+    let s = Arc::clone(&streams);
+    b.add("glyx_stream.close", move |args| {
+        let s = Arc::clone(&s);
+        async move {
+            let id = id_arg(&args)?;
+            ensure_capability(&s, id, &has_capability)?;
+            s.close(id).await?;
             Ok("{}".to_string())
         }
     });
 
     let s = streams;
-    b.add_gated("glyx_stream.cancel", FS, move |args| {
+    b.add("glyx_stream.cancel", move |args| {
         let s = Arc::clone(&s);
         async move {
-            s.cancel(id_arg(&args)?);
+            let id = id_arg(&args)?;
+            ensure_capability(&s, id, &has_capability)?;
+            s.cancel(id);
             Ok("{}".to_string())
         }
     });
@@ -730,11 +1299,11 @@ mod tests {
             let produced = s.produced(id);
             assert!(produced <= 3, "the reader ran ahead by {produced} chunks of an 8 MiB file with a queue of 2");
             assert!(produced >= 2, "the reader should have filled its queue, produced {produced}");
-            // Reading frees room and it goes on.
-            s.read_next(id).await.unwrap();
-            s.read_next(id).await.unwrap();
+            // Reading frees room and it goes on, but only as far as what was taken (each answer carries every queued chunk, up to two).
+            let taken = s.read_next(id).await.unwrap().unwrap().len() + s.read_next(id).await.unwrap().unwrap().len();
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            assert!(s.produced(id) <= 6);
+            let consumed = taken / (64 * 1024);
+            assert!(s.produced(id) <= consumed + 3, "produced {} after {consumed} chunks were taken", s.produced(id));
             s.cancel(id);
         });
         std::fs::remove_dir_all(dir).ok();
@@ -1112,19 +1681,306 @@ mod tests {
     }
 
     #[test]
-    fn the_stream_commands_are_registered_and_need_the_fs_capability() {
+    fn the_stream_commands_are_registered_opening_is_gated_and_the_rest_check_the_stream() {
         let mut b = BackendRegistryBuilder::new();
         register(&mut b);
         let reg = b.build();
-        for name in ["glyx_stream.open", "glyx_stream.walk", "glyx_stream.next", "glyx_stream.close", "glyx_stream.cancel"] {
+        // Opening needs the capability of what it opens.
+        for name in ["glyx_stream.open", "glyx_stream.walk"] {
             assert!(reg[name].binary.is_none(), "{name}");
             assert_eq!(reg[name].capabilities, vec!["fs".to_string()], "{name}");
         }
+        #[cfg(feature = "fetch")]
+        assert_eq!(reg["glyx_stream.fetch"].capabilities, vec!["network".to_string()]);
+        // Everything else carries none at registration: it checks the capability the stream was opened with, per call.
+        for name in ["glyx_stream.next", "glyx_stream.pipe", "glyx_stream.progress", "glyx_stream.close", "glyx_stream.cancel"] {
+            assert!(reg[name].binary.is_none(), "{name}");
+            assert!(reg[name].capabilities.is_empty(), "{name}");
+        }
         for name in ["glyx_stream.read", "glyx_stream.write"] {
             assert!(reg[name].binary.is_some(), "{name}");
-            assert_eq!(reg[name].capabilities, vec!["fs".to_string()], "{name}");
+            assert!(reg[name].capabilities.is_empty(), "{name}");
         }
     }
+
+    #[test]
+    fn a_call_on_a_stream_needs_the_capability_that_opened_it() {
+        let dir = temp_dir("caps");
+        let path = patterned_file(&dir, "o.bin", 1000);
+        let s = limits(64, 2, 8);
+        runtime().block_on(async {
+            let file = s.open_read(&path, None).await.unwrap();
+            let out = s.open_write(&dir.join("o.out"), false).await.unwrap();
+            assert_eq!(s.capability_of(file).unwrap(), "fs");
+            assert_eq!(s.capability_of(out).unwrap(), "fs");
+            let only_network = |c: &str| c == "network";
+            let only_fs = |c: &str| c == "fs";
+            let err = ensure_capability(&s, file, &only_network).unwrap_err();
+            assert!(err.contains("missing capability \"fs\""), "{err}");
+            assert!(ensure_capability(&s, file, &only_fs).is_ok());
+            // An id that is not open is not a capability matter: the call itself says it is not open.
+            assert!(ensure_capability(&s, 999_999, &only_network).is_ok());
+            assert!(s.capability_of(999_999).unwrap_err().contains("not open"));
+            // The pipe checks both ends.
+            let err = pipe_command(&s, &format!(r#"{{"from":{file},"to":{out}}}"#), &only_network).await.unwrap_err();
+            assert!(err.contains("missing capability"), "{err}");
+            s.cancel(file);
+            s.cancel(out);
+        });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_pipe_copies_a_reader_into_a_writer_inside_rust() {
+        let dir = temp_dir("pipe");
+        let src = patterned_file(&dir, "src.bin", 3 * 1024 * 1024 + 123);
+        let dst = dir.join("dst.bin");
+        let s = limits(64, 2, 8);
+        runtime().block_on(async {
+            let r = s.open_read(&src, None).await.unwrap();
+            let w = s.open_write(&dst, false).await.unwrap();
+            let bytes = s.pipe(r, w).await.unwrap();
+            assert_eq!(bytes, 3 * 1024 * 1024 + 123);
+            assert_eq!(std::fs::read(&dst).unwrap(), std::fs::read(&src).unwrap(), "the copy differs");
+            assert_eq!(s.open_count(), 0, "both ends are closed afterwards");
+        });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_pipe_continues_where_earlier_reads_left_off_and_an_empty_source_is_fine() {
+        let dir = temp_dir("pipe-resume");
+        let src = patterned_file(&dir, "src.bin", 1_000_000);
+        let want = std::fs::read(&src).unwrap();
+        let empty = dir.join("empty");
+        std::fs::write(&empty, b"").unwrap();
+        let s = limits(64, 2, 8);
+        runtime().block_on(async {
+            let r = s.open_read(&src, None).await.unwrap();
+            let first = s.read_next(r).await.unwrap().unwrap();
+            let w = s.open_write(&dir.join("out.bin"), false).await.unwrap();
+            let bytes = s.pipe(r, w).await.unwrap();
+            assert_eq!(first.len() as u64 + bytes, 1_000_000);
+            let mut got = first;
+            got.extend(std::fs::read(dir.join("out.bin")).unwrap());
+            assert_eq!(got, want);
+
+            let r = s.open_read(&empty, None).await.unwrap();
+            let w = s.open_write(&dir.join("empty.out"), false).await.unwrap();
+            assert_eq!(s.pipe(r, w).await.unwrap(), 0);
+            assert!(std::fs::read(dir.join("empty.out")).unwrap().is_empty());
+        });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn while_a_pipe_runs_its_streams_cannot_be_read_or_written_by_anyone_else() {
+        let dir = temp_dir("pipe-busy");
+        let src = patterned_file(&dir, "src.bin", 16 * 1024 * 1024);
+        let s = Arc::new(limits(64, 1, 8));
+        runtime().block_on(async {
+            let r = s.open_read(&src, None).await.unwrap();
+            let w = s.open_write(&dir.join("out.bin"), false).await.unwrap();
+            let piping = {
+                let s = Arc::clone(&s);
+                tokio::spawn(async move { s.pipe(r, w).await })
+            };
+            until(|| s.get(r).map_or(true, |e| e.busy().load(Ordering::Relaxed))).await;
+            if s.get(r).is_ok() {
+                assert!(s.read(r, 0).await.unwrap_err().contains("being piped"));
+                assert!(s.write(w, vec![1]).await.unwrap_err().contains("being piped"));
+                // A second pipe over the same stream is refused too.
+                let other = s.open_write(&dir.join("other.bin"), false).await.unwrap();
+                assert!(s.pipe(r, other).await.unwrap_err().contains("already being piped"));
+                s.cancel(other);
+            }
+            piping.await.unwrap().ok();
+        });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn cancelling_either_end_stops_a_pipe_and_closes_both() {
+        let dir = temp_dir("pipe-cancel");
+        let src = patterned_file(&dir, "src.bin", 64 * 1024 * 1024);
+        let s = Arc::new(limits(64, 1, 8));
+        runtime().block_on(async {
+            let r = s.open_read(&src, None).await.unwrap();
+            let w = s.open_write(&dir.join("out.bin"), false).await.unwrap();
+            let piping = {
+                let s = Arc::clone(&s);
+                tokio::spawn(async move { s.pipe(r, w).await })
+            };
+            until(|| s.pipe_progress(w).map_or(false, |b| b > 0)).await;
+            s.cancel(r);
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), piping).await.expect("the pipe did not stop").unwrap();
+            assert!(result.is_err(), "a cancelled pipe is an error");
+            assert_eq!(s.open_count(), 0, "both ends are closed");
+        });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn pipe_arguments_are_checked() {
+        let dir = temp_dir("pipe-args");
+        let src = patterned_file(&dir, "a.bin", 100);
+        let s = limits(64, 2, 8);
+        runtime().block_on(async {
+            let r = s.open_read(&src, None).await.unwrap();
+            let w = s.open_write(&dir.join("b.out"), false).await.unwrap();
+            assert!(s.pipe(r, r).await.unwrap_err().contains("itself"));
+            assert!(s.pipe(w, r).await.unwrap_err().contains("read stream first"));
+            assert!(s.pipe(r, 424_242).await.unwrap_err().contains("not open"));
+            assert!(s.pipe_progress(r).unwrap_err().contains("is a reader"));
+            assert_eq!(s.pipe_progress(w).unwrap(), 0);
+            s.cancel(r);
+            s.cancel(w);
+            let allow = |_: &str| true;
+            assert!(pipe_command(&s, "{}", &allow).await.unwrap_err().contains("from and to"));
+        });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A one-connection HTTP server for the tests below: answers the first request with `status_line`, then each body chunk as a chunked
+    /// transfer, waiting `delay_ms` before it. Returns the URL. (The `fetch` checks refuse loopback addresses, so these tests call
+    /// `fetch_command` with a check that allows it.)
+    #[cfg(feature = "fetch")]
+    fn serve(status_line: &'static str, chunks: Vec<Vec<u8>>, delay_ms: u64) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Ok((mut conn, _)) = listener.accept() else { return };
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                match conn.read(&mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => seen.extend_from_slice(&buf[..n]),
+                }
+            }
+            let head = format!("HTTP/1.1 {status_line}\r\nContent-Type: application/octet-stream\r\nX-Test: one\r\nX-Test: two\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+            if conn.write_all(head.as_bytes()).is_err() {
+                return;
+            }
+            for chunk in chunks {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                if conn.write_all(format!("{:x}\r\n", chunk.len()).as_bytes()).is_err() || conn.write_all(&chunk).is_err() || conn.write_all(b"\r\n").is_err() {
+                    return;
+                }
+            }
+            let _ = conn.write_all(b"0\r\n\r\n");
+        });
+        format!("http://127.0.0.1:{port}/file")
+    }
+
+    #[cfg(feature = "fetch")]
+    fn meta_of(answer: &str) -> serde_json::Value {
+        serde_json::from_str(answer).unwrap()
+    }
+
+    #[cfg(feature = "fetch")]
+    #[test]
+    fn an_http_body_is_read_as_a_stream_and_the_answer_describes_the_response() {
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let url = serve("200 OK", body.chunks(30_000).map(|c| c.to_vec()).collect(), 5);
+        let s = limits(64, 2, 8);
+        runtime().block_on(async {
+            let answer = fetch_command(&s, &format!(r#"{{"url":{url:?}}}"#), Some(1), |_| Ok(()), reqwest::Client::new()).await.unwrap();
+            let meta = meta_of(&answer);
+            assert_eq!((meta["status"].clone(), meta["ok"].clone(), meta["statusText"].clone()), (200.into(), true.into(), "OK".into()));
+            assert_eq!(meta["headers"]["content-type"], "application/octet-stream");
+            assert_eq!(meta["headers"]["x-test"], "one, two", "a repeated header is one comma-joined value");
+            assert_eq!(meta["url"], url.as_str());
+            let id = meta["id"].as_u64().unwrap() as u32;
+            assert_eq!(s.capability_of(id).unwrap(), "network");
+            let mut got = Vec::new();
+            while let Some(chunk) = s.read_next(id).await.unwrap() {
+                got.extend(chunk);
+            }
+            assert_eq!(got, body);
+            assert_eq!(s.open_count(), 0, "the end closed the stream");
+        });
+    }
+
+    #[cfg(feature = "fetch")]
+    #[test]
+    fn an_error_status_still_opens_the_body_and_a_refused_url_opens_nothing() {
+        let url = serve("404 Not Found", vec![b"no such thing".to_vec()], 0);
+        let s = limits(64, 2, 8);
+        runtime().block_on(async {
+            let answer = fetch_command(&s, &format!(r#"{{"url":{url:?}}}"#), None, |_| Ok(()), reqwest::Client::new()).await.unwrap();
+            let meta = meta_of(&answer);
+            assert_eq!((meta["status"].clone(), meta["ok"].clone()), (404.into(), false.into()));
+            let id = meta["id"].as_u64().unwrap() as u32;
+            assert_eq!(s.read_next(id).await.unwrap().unwrap(), b"no such thing");
+            assert_eq!(s.read_next(id).await.unwrap(), None, "then the end");
+
+            // The check runs before anything is sent; its reason is the answer.
+            let err = fetch_command(&s, r#"{"url":"http://example.invalid/"}"#, None, |_| Err("not allowed".to_string()), reqwest::Client::new()).await.unwrap_err();
+            assert_eq!(err, "not allowed");
+            // Bad arguments, and an address nothing listens on.
+            assert!(fetch_command(&s, "{}", None, |_| Ok(()), reqwest::Client::new()).await.unwrap_err().contains("invalid arguments"));
+            assert!(fetch_command(&s, r#"{"url":"http://127.0.0.1:1/"}"#, None, |_| Ok(()), reqwest::Client::new()).await.is_err());
+            assert_eq!(s.open_count(), 0);
+        });
+    }
+
+    #[cfg(feature = "fetch")]
+    #[test]
+    fn a_slow_http_consumer_holds_the_connection_back_and_cancel_closes_it() {
+        // Many chunks, a queue of one: with nobody reading, the loop stops after the queue and the chunk it holds.
+        let url = serve("200 OK", (0..200).map(|_| vec![7u8; 4096]).collect(), 0);
+        let s = limits(64, 1, 8);
+        runtime().block_on(async {
+            let meta = meta_of(&fetch_command(&s, &format!(r#"{{"url":{url:?}}}"#), None, |_| Ok(()), reqwest::Client::new()).await.unwrap());
+            let id = meta["id"].as_u64().unwrap() as u32;
+            until(|| s.produced(id) >= 1).await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let produced = s.produced(id);
+            assert!(produced <= 3, "the response was read {produced} chunks ahead with a queue of 1");
+            s.cancel(id);
+            assert_eq!(s.open_count(), 0);
+        });
+    }
+
+    #[cfg(feature = "fetch")]
+    #[test]
+    fn cancelling_a_stream_under_a_waiting_read_is_an_error_not_a_clean_end() {
+        // The server sends its first chunk after half a second, so the read is waiting on an empty queue when the stream is cancelled.
+        let url = serve("200 OK", vec![b"late".to_vec()], 500);
+        let s = Arc::new(limits(64, 2, 8));
+        runtime().block_on(async {
+            let meta = meta_of(&fetch_command(&s, &format!(r#"{{"url":{url:?}}}"#), None, |_| Ok(()), reqwest::Client::new()).await.unwrap());
+            let id = meta["id"].as_u64().unwrap() as u32;
+            let waiting = {
+                let s = Arc::clone(&s);
+                tokio::spawn(async move { s.read(id, 0).await })
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            s.cancel(id);
+            let result = tokio::time::timeout(std::time::Duration::from_secs(3), waiting).await.expect("the read did not return").unwrap();
+            assert!(result.unwrap_err().contains("not open"), "a cancelled stream must not look like one that ended");
+        });
+    }
+
+    #[cfg(feature = "fetch")]
+    #[test]
+    fn an_http_body_can_be_piped_straight_into_a_file() {
+        let dir = temp_dir("download");
+        let body: Vec<u8> = (0..500_000u32).map(|i| (i * 7 % 256) as u8).collect();
+        let url = serve("200 OK", body.chunks(16 * 1024).map(|c| c.to_vec()).collect(), 0);
+        let s = limits(64, 2, 8);
+        runtime().block_on(async {
+            let meta = meta_of(&fetch_command(&s, &format!(r#"{{"url":{url:?}}}"#), None, |_| Ok(()), reqwest::Client::new()).await.unwrap());
+            let r = meta["id"].as_u64().unwrap() as u32;
+            let w = s.open_write(&dir.join("download.bin"), false).await.unwrap();
+            assert_eq!(s.pipe(r, w).await.unwrap(), body.len() as u64);
+            assert_eq!(std::fs::read(dir.join("download.bin")).unwrap(), body);
+        });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
 
     /// Throughput of the stream itself, without JavaScript: `GLYX_STREAM_BENCH_FILE=<big file> cargo test -p glyx-runtime --lib bench_stream -- --ignored --nocapture`.
     #[test]
@@ -1152,6 +2008,264 @@ mod tests {
         let started = std::time::Instant::now();
         let n = std::fs::read(&path).unwrap().len() as u64;
         println!("std::fs::read whole: {:>7.0} MB/s", n as f64 / 1e6 / started.elapsed().as_secs_f64());
+    }
+
+    // ── child processes ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+    // The tests build their commands directly (the shell checks sit in the command layer), from programs every machine has.
+
+    #[cfg(all(feature = "shell", windows))]
+    fn shell_line(line: &str) -> tokio::process::Command {
+        let mut c = tokio::process::Command::new("cmd");
+        c.arg("/C").arg(line);
+        c
+    }
+
+    #[cfg(all(feature = "shell", unix))]
+    fn shell_line(line: &str) -> tokio::process::Command {
+        let mut c = tokio::process::Command::new("sh");
+        c.arg("-c").arg(line);
+        c
+    }
+
+    /// A command line that runs for about `secs` seconds and then creates `marker`, so a test can tell whether it was killed.
+    #[cfg(all(feature = "shell", windows))]
+    fn slow_then_marker(secs: u32, marker: &Path) -> String {
+        // No quotes around the path: Rust escapes a quote inside an argument in a way `cmd` does not undo (the temp directory has no spaces).
+        assert!(!marker.to_string_lossy().contains(' '), "the temp directory has a space in its path: {}", marker.display());
+        format!("ping -n {} 127.0.0.1 >nul & echo alive>{}", secs + 1, marker.display())
+    }
+
+    #[cfg(all(feature = "shell", unix))]
+    fn slow_then_marker(secs: u32, marker: &Path) -> String {
+        format!("sleep {secs}; echo alive > '{}'", marker.display())
+    }
+
+    #[cfg(feature = "shell")]
+    fn opts(stdout: bool, stderr: bool, stdin: bool, timeout_ms: Option<u64>) -> SpawnOptions {
+        SpawnOptions { stdout, stderr, stdin, timeout: timeout_ms.map(std::time::Duration::from_millis) }
+    }
+
+    #[cfg(feature = "shell")]
+    async fn drain(s: &Streams, id: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Some(chunk) = s.read_next(id).await.unwrap() {
+            out.extend(chunk);
+        }
+        out
+    }
+
+    #[cfg(feature = "shell")]
+    #[test]
+    fn a_process_output_arrives_as_streams_and_wait_reports_how_it_ended() {
+        let s = limits(64, 2, 16);
+        runtime().block_on(async {
+            let sp = s.open_spawn_for(shell_line("echo hello from the child"), &opts(true, true, false, None), Some(1)).unwrap();
+            assert!(sp.pid.is_some() && sp.stdin.is_none());
+            assert_eq!(s.capability_of(sp.process).unwrap(), "shellExec");
+            assert_eq!(s.capability_of(sp.stdout.unwrap()).unwrap(), "shellExec");
+            let out = String::from_utf8_lossy(&drain(&s, sp.stdout.unwrap()).await).into_owned();
+            assert!(out.contains("hello from the child"), "{out:?}");
+            assert!(drain(&s, sp.stderr.unwrap()).await.is_empty());
+            assert_eq!(s.wait_process(sp.process).await.unwrap(), (0, false));
+            assert_eq!(s.open_count(), 0, "the ends closed the pipes and the wait closed the process");
+            assert!(s.wait_process(sp.process).await.unwrap_err().contains("not open"), "a process is waited for once");
+        });
+    }
+
+    #[cfg(feature = "shell")]
+    #[test]
+    fn the_exit_code_and_stderr_come_through() {
+        let s = limits(64, 2, 16);
+        runtime().block_on(async {
+            let sp = s.open_spawn_for(shell_line("echo oops 1>&2 & exit 3"), &opts(true, true, false, None), None).unwrap();
+            let err = String::from_utf8_lossy(&drain(&s, sp.stderr.unwrap()).await).into_owned();
+            drain(&s, sp.stdout.unwrap()).await;
+            assert!(err.contains("oops"), "{err:?}");
+            assert_eq!(s.wait_process(sp.process).await.unwrap(), (3, false));
+        });
+    }
+
+    #[cfg(all(feature = "shell", windows))]
+    const ECHO_STDIN: &str = "sort";
+    #[cfg(all(feature = "shell", unix))]
+    const ECHO_STDIN: &str = "cat";
+
+    #[cfg(feature = "shell")]
+    #[test]
+    fn what_is_written_to_stdin_reaches_the_child_and_closing_it_ends_the_input() {
+        let s = limits(64, 2, 16);
+        runtime().block_on(async {
+            let sp = s.open_spawn_for(shell_line(ECHO_STDIN), &opts(true, false, true, None), None).unwrap();
+            let stdin = sp.stdin.unwrap();
+            s.write(stdin, b"typed into the child\r\n".to_vec()).await.unwrap();
+            // Closing flushes and ends the input: without it `sort` and `cat` would wait forever.
+            s.close(stdin).await.unwrap();
+            let out = String::from_utf8_lossy(&drain(&s, sp.stdout.unwrap()).await).into_owned();
+            assert!(out.contains("typed into the child"), "{out:?}");
+            assert_eq!(s.wait_process(sp.process).await.unwrap().0, 0);
+        });
+    }
+
+    #[cfg(feature = "shell")]
+    #[test]
+    fn the_marker_command_really_writes_its_marker_when_left_alone() {
+        // The control for the kill, timeout and window tests below, which assert the marker is absent: this shows its absence means something.
+        let dir = temp_dir("marker-control");
+        let marker = dir.join("alive.txt");
+        let s = limits(64, 2, 16);
+        runtime().block_on(async {
+            let sp = s.open_spawn_for(shell_line(&slow_then_marker(1, &marker)), &opts(false, false, false, None), None).unwrap();
+            assert_eq!(s.wait_process(sp.process).await.unwrap(), (0, false));
+            assert!(marker.exists(), "the command line that the kill tests use does not write its marker, so they prove nothing");
+        });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(feature = "shell")]
+    #[test]
+    fn killing_a_process_stops_it_before_it_finishes() {
+        let dir = temp_dir("kill");
+        let marker = dir.join("alive.txt");
+        let s = limits(64, 2, 16);
+        runtime().block_on(async {
+            let sp = s.open_spawn_for(shell_line(&slow_then_marker(2, &marker)), &opts(true, true, false, None), None).unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            s.kill_process(sp.process).unwrap();
+            let started = std::time::Instant::now();
+            let (code, timed_out) = tokio::time::timeout(std::time::Duration::from_secs(5), s.wait_process(sp.process)).await.expect("wait did not return").unwrap();
+            assert_eq!((code, timed_out), (-1, false), "a killed process reports -1");
+            assert!(started.elapsed() < std::time::Duration::from_secs(1), "the kill was not prompt");
+            // Its pipes end (nothing more will come) and the command that was going to run afterwards never did.
+            drain(&s, sp.stdout.unwrap()).await;
+            drain(&s, sp.stderr.unwrap()).await;
+            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+            assert!(!marker.exists(), "the process kept running after it was killed");
+            assert!(s.kill_process(sp.process).unwrap_err().contains("not open"), "nothing left to kill");
+        });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(feature = "shell")]
+    #[test]
+    fn a_process_that_runs_too_long_is_killed_and_wait_says_so() {
+        let dir = temp_dir("timeout");
+        let marker = dir.join("alive.txt");
+        let s = limits(64, 2, 16);
+        runtime().block_on(async {
+            let sp = s.open_spawn_for(shell_line(&slow_then_marker(3, &marker)), &opts(false, false, false, Some(300)), None).unwrap();
+            assert!(sp.stdout.is_none() && sp.stderr.is_none(), "ignored pipes are not opened");
+            let started = std::time::Instant::now();
+            let (_, timed_out) = tokio::time::timeout(std::time::Duration::from_secs(5), s.wait_process(sp.process)).await.expect("wait did not return").unwrap();
+            assert!(timed_out);
+            assert!(started.elapsed() < std::time::Duration::from_secs(2));
+            tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
+            assert!(!marker.exists(), "the process kept running after its timeout");
+        });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(feature = "shell")]
+    #[test]
+    fn closing_a_window_kills_the_processes_it_started() {
+        let dir = temp_dir("window-kill");
+        let marker = dir.join("alive.txt");
+        let s = limits(64, 2, 16);
+        runtime().block_on(async {
+            let mine = s.open_spawn_for(shell_line(&slow_then_marker(2, &marker)), &opts(true, true, false, None), Some(8)).unwrap();
+            let other = s.open_spawn_for(shell_line("echo still here"), &opts(true, false, false, None), Some(9)).unwrap();
+            assert_eq!(s.open_count(), 5);
+            assert_eq!(s.close_window(8), 3, "the process and its two pipes");
+            assert_eq!(s.open_count(), 2, "the other window's are untouched");
+            assert!(String::from_utf8_lossy(&drain(&s, other.stdout.unwrap()).await).contains("still here"));
+            s.wait_process(other.process).await.unwrap();
+            let _ = mine;
+            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+            assert!(!marker.exists(), "the window's process outlived it");
+        });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(feature = "shell")]
+    #[test]
+    fn a_child_that_nobody_reads_is_held_back_by_the_full_pipe() {
+        let dir = temp_dir("backpressure-proc");
+        // Plain text, so `type` prints all of it (it stops at the end-of-file character of a binary file).
+        let big = dir.join("big.txt");
+        std::fs::write(&big, "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnop
+".repeat(180_000)).unwrap();
+        let s = Arc::new(limits(64, 1, 16));
+        runtime().block_on(async {
+            #[cfg(windows)]
+            let line = format!("type {}", big.display());
+            #[cfg(unix)]
+            let line = format!("cat '{}'", big.display());
+            let sp = s.open_spawn_for(shell_line(&line), &opts(true, false, false, None), None).unwrap();
+            let out = sp.stdout.unwrap();
+            until(|| s.produced(out) >= 1).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert!(s.produced(out) <= 3, "the output was read {} chunks ahead of a consumer that never reads", s.produced(out));
+            // And the child has not finished: it is blocked writing into the full pipe.
+            let finished = tokio::time::timeout(std::time::Duration::from_millis(100), s.wait_process(sp.process)).await;
+            assert!(finished.is_err(), "a 16 MiB output finished while nobody read it");
+            s.cancel(out);
+            s.kill_process(sp.process).ok();
+        });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(feature = "shell")]
+    #[test]
+    fn a_spawn_needs_room_for_all_its_streams_or_starts_nothing() {
+        let s = limits(64, 2, 3);
+        runtime().block_on(async {
+            // A process with both pipes is three entries: it fits exactly.
+            let first = s.open_spawn_for(shell_line("echo one"), &opts(true, true, false, None), None).unwrap();
+            assert_eq!(s.open_count(), 3);
+            let err = s.open_spawn_for(shell_line("echo two"), &opts(true, false, false, None), None).err().unwrap();
+            assert!(err.contains("a process needs 2") && err.contains("streams.maxOpen"), "{err}");
+            assert_eq!(s.open_count(), 3, "nothing was started");
+            s.close_window(0);
+            s.cancel(first.process);
+            s.cancel(first.stdout.unwrap());
+            s.cancel(first.stderr.unwrap());
+        });
+    }
+
+    #[cfg(feature = "shell")]
+    #[test]
+    fn the_spawn_command_checks_its_arguments_and_the_request() {
+        let s = limits(64, 2, 16);
+        let echo = |_: &str, _: &[String]| Ok(shell_line("echo hi"));
+        runtime().block_on(async {
+            let answer: serde_json::Value = serde_json::from_str(&spawn_command(&s, r#"{"bin":"echo","stdin":true,"stderr":"ignore"}"#, Some(2), echo).unwrap()).unwrap();
+            assert!(answer["process"].is_u64() && answer["stdout"].is_u64() && answer["stdin"].is_u64() && answer["pid"].is_u64());
+            assert!(answer["stderr"].is_null());
+            assert!(spawn_command(&s, "{}", None, echo).unwrap_err().contains("invalid arguments"));
+            assert!(spawn_command(&s, r#"{"bin":"echo","stdout":"merge"}"#, None, echo).unwrap_err().contains("must be \"pipe\" or \"ignore\""));
+            // The shell checks are the caller's `prepare`: its refusal is the answer and nothing starts.
+            let before = s.open_count();
+            let err = spawn_command(&s, r#"{"bin":"git"}"#, None, |bin, _| Err(format!("shellExec.allow[\"{bin}\"]"))).unwrap_err();
+            assert_eq!(err, "shellExec.allow[\"git\"]");
+            assert_eq!(s.open_count(), before);
+            s.close_window(0);
+            s.close_window(2);
+        });
+    }
+
+    #[cfg(feature = "shell")]
+    #[test]
+    fn a_wait_or_kill_needs_the_capability_that_opened_the_process() {
+        let s = limits(64, 2, 16);
+        runtime().block_on(async {
+            let sp = s.open_spawn_for(shell_line("echo hi"), &opts(true, false, false, None), None).unwrap();
+            let none = |_: &str| false;
+            let err = wait_command(&s, &format!(r#"{{"id":{}}}"#, sp.process), &none).await.unwrap_err();
+            assert!(err.contains("missing capability \"shellExec\""), "{err}");
+            let yes = |_: &str| true;
+            let answer = wait_command(&s, &format!(r#"{{"id":{}}}"#, sp.process), &yes).await.unwrap();
+            assert!(answer.contains("\"exitCode\":0"), "{answer}");
+            s.cancel(sp.stdout.unwrap());
+        });
     }
 
     #[test]

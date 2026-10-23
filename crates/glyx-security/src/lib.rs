@@ -554,6 +554,7 @@ impl Capabilities {
             "battery"          => self.battery,
             "usb"              => self.usb,
             "shell"            => self.shell,
+            "shellExec"        => self.shell_exec.is_some(),
             "mdns"             => self.mdns,
             "system"           => self.system,
             "power"            => self.power,

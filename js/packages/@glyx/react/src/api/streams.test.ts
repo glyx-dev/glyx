@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { fs } from './fs.js';
+import { utf8Decode, utf8Encode } from './streams.js';
 
 const g = globalThis as any;
 
@@ -347,5 +348,166 @@ describe('fs.walk', () => {
   test('opening a walk the runner refuses rejects with its reason', async () => {
     g.__glyx_backend_call2 = () => Promise.reject(new Error('fs.read denied: not allowed'));
     await expect(fs.walk('C:\\elsewhere')).rejects.toThrow('fs.read denied');
+  });
+});
+
+describe('fs.pipe', () => {
+  let pipeArgs: any;
+  let pipeResult: Promise<any>;
+  let progress: number[];
+
+  beforeEach(() => {
+    pipeArgs = null;
+    progress = [];
+    pipeResult = Promise.resolve({ bytes: 1234 });
+    const base = g.__glyx_backend_call2;
+    g.__glyx_backend_call2 = (command: string, arg: any) => {
+      if (command === 'glyx_stream.pipe') {
+        pipeArgs = arg;
+        return pipeResult.then((r) => JSON.stringify(r));
+      }
+      if (command === 'glyx_stream.progress') {
+        // The list in order, then the last value again (progress never goes backwards).
+        const bytes = progress.length > 1 ? progress.shift()! : (progress[0] ?? 0);
+        return Promise.resolve(JSON.stringify({ bytes }));
+      }
+      return base(command, arg);
+    };
+  });
+
+  test('copies one stream into another by id and resolves with the bytes', async () => {
+    const from = await fs.openRead('a.bin');
+    const to = await fs.openWrite('b.bin');
+    expect(await fs.pipe(from, to)).toBe(1234);
+    expect(pipeArgs).toEqual({ from: 7, to: 7 });
+    // No bytes passed through JavaScript: no read or write request was made.
+    expect(names().filter((n) => n === 'glyx_stream.read' || n === 'glyx_stream.write')).toEqual([]);
+  });
+
+  test('both streams are finished for their objects afterwards: no further native calls from close or read', async () => {
+    const from = await fs.openRead('a.bin');
+    const to = await fs.openWrite('b.bin');
+    await fs.pipe(from, to);
+    const before = calls.length;
+    expect(await from.read()).toBeNull();
+    await from.cancel();
+    await to.close();
+    await to.cancel();
+    await expect(to.write('x')).rejects.toThrow('write after close');
+    expect(calls.length).toBe(before);
+  });
+
+  test('a read stream that was already read from is refused before anything is sent', async () => {
+    chunks = [new Uint8Array([1]), new Uint8Array([2])];
+    const from = await fs.openRead('a.bin');
+    await from.read();
+    const to = await fs.openWrite('b.bin');
+    await expect(fs.pipe(from, to)).rejects.toThrow('nobody has read from');
+    expect(pipeArgs).toBeNull();
+    await from.cancel();
+  });
+
+  test('a closed writer is refused, and the reader it was meant for is cancelled', async () => {
+    const from = await fs.openRead('a.bin');
+    const to = await fs.openWrite('b.bin');
+    await to.close();
+    await expect(fs.pipe(from, to)).rejects.toThrow('already closed');
+    expect(names()).toContain('glyx_stream.cancel');
+    expect(pipeArgs).toBeNull();
+  });
+
+  test('anything that is not one of our streams is a TypeError', async () => {
+    const to = await fs.openWrite('b.bin');
+    await expect(fs.pipe({} as any, to)).rejects.toBeInstanceOf(TypeError);
+    await expect(fs.pipe(await fs.openRead('a.bin'), {} as any)).rejects.toBeInstanceOf(TypeError);
+  });
+
+  test('a failed copy rejects with the runtime\'s reason', async () => {
+    pipeResult = Promise.reject(new Error('write failed: disk full'));
+    const from = await fs.openRead('a.bin');
+    const to = await fs.openWrite('b.bin');
+    await expect(fs.pipe(from, to)).rejects.toThrow('disk full');
+  });
+
+  test('onProgress hears the bytes so far while it runs, and the final count', async () => {
+    progress = [100, 400, 900];
+    pipeResult = new Promise((resolve) => setTimeout(() => resolve({ bytes: 1234 }), 120));
+    const heard: number[] = [];
+    const from = await fs.openRead('a.bin');
+    const to = await fs.openWrite('b.bin');
+    expect(await fs.pipe(from, to, { onProgress: (b) => heard.push(b), progressEveryMs: 15 })).toBe(1234);
+    expect(heard.length).toBeGreaterThanOrEqual(2);
+    expect(heard[heard.length - 1]).toBe(1234);
+    expect(heard.slice(0, -1).every((b, i, all) => i === 0 || b >= all[i - 1])).toBe(true);
+    // Polling stops with the pipe.
+    const polls = names().filter((n) => n === 'glyx_stream.progress').length;
+    await new Promise((r) => setTimeout(r, 60));
+    expect(names().filter((n) => n === 'glyx_stream.progress').length).toBe(polls);
+  });
+
+  test('a progress callback that throws does not stop the copy', async () => {
+    const from = await fs.openRead('a.bin');
+    const to = await fs.openWrite('b.bin');
+    expect(await fs.pipe(from, to, { onProgress: () => { throw new Error('ui bug'); } })).toBe(1234);
+  });
+});
+
+describe('UTF-8 without TextEncoder and TextDecoder', () => {
+  const samples = ['', 'plain ascii', 'héllo wörld', 'ひらがな 漢字', 'emoji 😀 and 👨\u200d👩\u200d👧', '\u0000 nul and \u007f del', 'edge \u07ff \u0800 \uffff', 'astral \u{10000} \u{10ffff}'];
+
+  const without = <T>(run: () => T): T => {
+    const enc = g.TextEncoder;
+    const dec = g.TextDecoder;
+    g.TextEncoder = undefined;
+    g.TextDecoder = undefined;
+    try {
+      return run();
+    } finally {
+      g.TextEncoder = enc;
+      g.TextDecoder = dec;
+    }
+  };
+
+  test('the plain encoder gives the bytes TextEncoder gives, and the decoder round trips them', () => {
+    for (const text of samples) {
+      const want = new TextEncoder().encode(text);
+      const got = without(() => utf8Encode(text));
+      expect(Array.from(got)).toEqual(Array.from(want));
+      expect(without(() => utf8Decode(want))).toBe(text);
+    }
+  });
+
+  test('a lone surrogate becomes U+FFFD, as TextEncoder does', () => {
+    const text = 'a\ud800b\udc00c';
+    expect(Array.from(without(() => utf8Encode(text)))).toEqual(Array.from(new TextEncoder().encode(text)));
+  });
+
+  test('invalid UTF-8 becomes U+FFFD in the same places TextDecoder puts it', () => {
+    const bad = [
+      [0x61, 0xff, 0x62],                  // a byte that is never valid
+      [0xc3],                              // a sequence cut short at the end
+      [0xe2, 0x82],                        // another one
+      [0xc0, 0x80],                        // an overlong encoding
+      [0xed, 0xa0, 0x80],                  // an encoded surrogate
+      [0xf4, 0x90, 0x80, 0x80],            // above U+10FFFF
+      [0x80, 0x80, 0x41],                  // continuation bytes with no start
+      [0xe2, 0x28, 0xa1],                  // a start byte followed by a non-continuation
+    ];
+    for (const bytes of bad) {
+      const u8 = Uint8Array.from(bytes);
+      expect(without(() => utf8Decode(u8))).toBe(new TextDecoder().decode(u8));
+    }
+  });
+
+  test('a long text decodes without running out of arguments', () => {
+    const text = 'x'.repeat(200_000) + 'é😀';
+    const bytes = new TextEncoder().encode(text);
+    expect(without(() => utf8Decode(bytes))).toBe(text);
+  });
+
+  test('write() accepts a string even where the runtime has no TextEncoder', async () => {
+    const w = await fs.openWrite('a.bin');
+    await without(async () => { await w.write('hé'); });
+    expect(Array.from(written[0])).toEqual([0x68, 0xc3, 0xa9]);
   });
 });

@@ -172,6 +172,17 @@ pub static DEFS: &[Def] = &[
         doc: "Cap on the JavaScript heap, in MB (V8 only). 0 sizes it from the bundle. The config clamps it to 16 to 512. Config only: a heap cap is never changed at run time.",
     },
     Def {
+        name: "ai.idleUnloadSecs",
+        kind: Kind::Int { min: 0, max: 86_400 },
+        default: DefaultValue::Int(300),
+        scope: Scope::Startup,
+        safety: Safety::Developer,
+        env: Some("GLYX_AI_IDLE_UNLOAD_SECS"),
+        parse_env: None,
+        config_key: None,
+        doc: "Seconds a local AI model (text generation 2.2 GB, speech 170 MB, embeddings 110 MB) may sit unused before it is unloaded from memory. The next call loads it again (about 5 s for text generation). 0 keeps models loaded until the app exits or calls ai.unload.",
+    },
+    Def {
         name: "streams.chunkKb",
         kind: Kind::Int { min: 4, max: 4096 },
         default: DefaultValue::Int(256),

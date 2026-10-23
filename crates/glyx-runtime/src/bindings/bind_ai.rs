@@ -225,18 +225,31 @@ pub fn ai_transcribe_callback(
         None => { rv.set(reject_promise_with_error(scope, "ai capability not loaded").into()); return; }
     };
     let audio_path = v8_arg_to_string(scope, &args, 0);
+    let opts_raw   = v8_arg_to_string(scope, &args, 1);
     let (resolver, promise, queue, redraw) = make_promise(scope, state);
     rv.set(promise.into());
     state.tokio.spawn(async move {
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             let path_b = audio_path.as_bytes();
+            let opts_b = opts_raw.as_bytes();
             let mut out = vec![0u8; 65536];
             let mut out_len: usize = 0;
-            let rc = unsafe { (cap.transcribe)(
-                std::ptr::null(), 0,
-                path_b.as_ptr(), path_b.len(),
-                out.as_mut_ptr(), &mut out_len, out.len(),
-            )};
+            // ABI 3 modules take the options (the language); an older one transcribes with the language detected.
+            let rc = unsafe {
+                if cap.has_streaming() {
+                    (cap.transcribe_opts)(
+                        path_b.as_ptr(), path_b.len(),
+                        opts_b.as_ptr(), opts_b.len(),
+                        out.as_mut_ptr(), &mut out_len, out.len(),
+                    )
+                } else {
+                    (cap.transcribe)(
+                        std::ptr::null(), 0,
+                        path_b.as_ptr(), path_b.len(),
+                        out.as_mut_ptr(), &mut out_len, out.len(),
+                    )
+                }
+            };
             if rc != 0 { return Err(format!("ai.transcribe vtable error: {rc}")); }
             Ok(String::from_utf8_lossy(&out[..out_len]).into_owned())
         }).await.map_err(|e| e.to_string()).and_then(|r| r);
@@ -255,7 +268,7 @@ pub fn ai_unload_embed_callback(
     let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-    *state.ai_embed_model.lock() = None;
+    glyx_ai::unload(&state.ai_embed_model);
 }
 
 #[cfg(not(feature = "ai"))]
@@ -279,7 +292,7 @@ pub fn ai_unload_generate_callback(
     let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-    *state.ai_generate_model.lock() = None;
+    glyx_ai::unload(&state.ai_generate_model);
 }
 
 #[cfg(not(feature = "ai"))]
@@ -303,7 +316,7 @@ pub fn ai_unload_transcribe_callback(
     let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
     let state = unsafe { &*(ext.value() as *const AsyncState) };
-    *state.ai_whisper_model.lock() = None;
+    glyx_ai::unload(&state.ai_whisper_model);
 }
 
 #[cfg(not(feature = "ai"))]

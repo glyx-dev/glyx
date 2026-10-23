@@ -1,13 +1,13 @@
 //! Static glyx-ai-backed AiCap implementation.
 
 use glyx_cap_abi::{AiCap, ABI_VERSION};
-use parking_lot::Mutex;
 
 // ── Model cache ───────────────────────────────────────────────────────────────
+//
+// The models live in glyx-ai's process-wide slots (this module has its own copy of glyx-ai, so its slots are its own), which is where the
+// thread that unloads idle models looks.
 
-static EMBED_MODEL:    Mutex<Option<glyx_ai::EmbedModel>>    = Mutex::new(None);
-static GENERATE_MODEL: Mutex<Option<glyx_ai::GenerateModel>> = Mutex::new(None);
-static WHISPER_MODEL:  Mutex<Option<glyx_ai::WhisperModel>>  = Mutex::new(None);
+use glyx_ai::{shared_embed, shared_generate, shared_whisper};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -33,7 +33,8 @@ unsafe extern "C" fn ai_embed(
 ) -> i32 {
     let text = bytes_to_str(text, text_len).to_string();
     let result = (|| -> Result<String, String> {
-        let mut g = EMBED_MODEL.lock();
+        let slot = shared_embed();
+        let mut g = slot.lock();
         if g.is_none() {
             *g = Some(glyx_ai::EmbedModel::load().map_err(|e| e.to_string())?);
         }
@@ -59,7 +60,8 @@ unsafe extern "C" fn ai_generate(
     let temperature: f32   = opts.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7) as f32;
 
     let result = (|| -> Result<String, String> {
-        let mut g = GENERATE_MODEL.lock();
+        let slot = shared_generate();
+        let mut g = slot.lock();
         if g.is_none() {
             *g = Some(glyx_ai::GenerateModel::load().map_err(|e| e.to_string())?);
         }
@@ -78,7 +80,8 @@ unsafe extern "C" fn ai_transcribe(
 ) -> i32 {
     let audio_path = bytes_to_str(audio_path, audio_path_len).to_string();
     let result = (|| -> Result<String, String> {
-        let mut g = WHISPER_MODEL.lock();
+        let slot = shared_whisper();
+        let mut g = slot.lock();
         if g.is_none() {
             *g = Some(glyx_ai::WhisperModel::load().map_err(|e| e.to_string())?);
         }
@@ -90,19 +93,70 @@ unsafe extern "C" fn ai_transcribe(
     }
 }
 
+unsafe extern "C" fn ai_transcribe_opts(
+    audio_path: *const u8, audio_path_len: usize,
+    opts_json: *const u8, opts_json_len: usize,
+    out_buf: *mut u8, out_len: *mut usize, buf_cap: usize,
+) -> i32 {
+    let audio_path = bytes_to_str(audio_path, audio_path_len).to_string();
+    let opts = serde_json::from_str::<serde_json::Value>(bytes_to_str(opts_json, opts_json_len)).unwrap_or_default();
+    let language = opts.get("language").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let result = (|| -> Result<String, String> {
+        let slot = shared_whisper();
+        let mut g = slot.lock();
+        if g.is_none() {
+            *g = Some(glyx_ai::WhisperModel::load().map_err(|e| e.to_string())?);
+        }
+        g.as_mut().unwrap().transcribe(&audio_path, &language).map_err(|e| e.to_string())
+    })();
+    match result {
+        Ok(s)  => { write_result(&s, out_buf, out_len, buf_cap); 0 }
+        Err(e) => { log::error!("[glyx-cap-ai] transcribe: {e}"); *out_len = 0; -1 }
+    }
+}
+
+unsafe extern "C" fn ai_generate_stream(
+    prompt: *const u8, prompt_len: usize,
+    opts_json: *const u8, opts_json_len: usize,
+    on_text: unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize) -> i32,
+    user: *mut std::ffi::c_void,
+    err_buf: *mut u8, err_len: *mut usize, err_cap: usize,
+) -> i32 {
+    let prompt = bytes_to_str(prompt, prompt_len).to_string();
+    let opts = serde_json::from_str::<serde_json::Value>(bytes_to_str(opts_json, opts_json_len)).unwrap_or_default();
+    let max_tokens:  usize = opts.get("maxTokens").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+    let temperature: f32   = opts.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7) as f32;
+
+    let result = (|| -> Result<(), String> {
+        let slot = shared_generate();
+        let mut g = slot.lock();
+        if g.is_none() {
+            *g = Some(glyx_ai::GenerateModel::load().map_err(|e| e.to_string())?);
+        }
+        g.as_mut().unwrap()
+            .generate_stream(&prompt, max_tokens, temperature, |piece| on_text(user, piece.as_ptr(), piece.len()) == 0)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })();
+    match result {
+        Ok(()) => { *err_len = 0; 0 }
+        Err(e) => { log::error!("[glyx-cap-ai] generate_stream: {e}"); write_result(&e, err_buf, err_len, err_cap); -1 }
+    }
+}
+
 unsafe extern "C" fn ai_unload(kind: u8) {
     match kind {
-        0 => { *EMBED_MODEL.lock()    = None; }
-        1 => { *GENERATE_MODEL.lock() = None; }
-        2 => { *WHISPER_MODEL.lock()  = None; }
+        0 => { glyx_ai::unload(&shared_embed()); }
+        1 => { glyx_ai::unload(&shared_generate()); }
+        2 => { glyx_ai::unload(&shared_whisper()); }
         _ => {}
     }
 }
 
 unsafe extern "C" fn ai_shutdown() {
-    *EMBED_MODEL.lock()    = None;
-    *GENERATE_MODEL.lock() = None;
-    *WHISPER_MODEL.lock()  = None;
+    glyx_ai::unload(&shared_embed());
+    glyx_ai::unload(&shared_generate());
+    glyx_ai::unload(&shared_whisper());
 }
 
 // ── Static vtable ─────────────────────────────────────────────────────────────
@@ -114,6 +168,8 @@ static AI_CAP: AiCap = AiCap {
     transcribe: ai_transcribe,
     unload:     ai_unload,
     shutdown:   ai_shutdown,
+    generate_stream: ai_generate_stream,
+    transcribe_opts: ai_transcribe_opts,
 };
 
 pub fn static_cap() -> &'static AiCap {

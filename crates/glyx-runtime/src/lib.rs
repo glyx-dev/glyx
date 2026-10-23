@@ -144,6 +144,7 @@ mod menubar_api;
 pub use glyx_tray::set_app_icon;
 pub mod bindings;
 pub mod print;
+mod ai_stream;
 mod streams;
 mod walk;
 
@@ -634,6 +635,11 @@ pub fn build_backend_registry(extensions: &[Box<dyn GlyxExtension>]) -> BackendR
     let mut builder = BackendRegistryBuilder::new();
     // Built in: file streams (`glyx_stream.*`), which the `fs` stream API in JavaScript calls.
     streams::register(&mut builder);
+    // The AI models unload themselves when idle (`ai.idleUnloadSecs`). The unloading thread lives in `glyx-ai`, also when it is loaded as a
+    // separate module, so the value travels in the environment variable that setting reads from.
+    if std::env::var_os("GLYX_AI_IDLE_UNLOAD_SECS").is_none() {
+        std::env::set_var("GLYX_AI_IDLE_UNLOAD_SECS", glyx_settings::global().int("ai.idleUnloadSecs").to_string());
+    }
     for ext in extensions {
         ext.register_commands(&mut builder);
     }

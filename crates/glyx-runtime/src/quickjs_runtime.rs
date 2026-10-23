@@ -189,11 +189,11 @@ impl QuickJsRuntime {
         #[cfg(feature = "audio")]
         let next_audio_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
         #[cfg(feature = "ai")]
-        let ai_embed_model: crate::quickjs_ai::EmbedModelCache = Arc::new(parking_lot::Mutex::new(None));
+        let ai_embed_model: crate::quickjs_ai::EmbedModelCache = glyx_ai::shared_embed();
         #[cfg(feature = "ai")]
-        let ai_generate_model: crate::quickjs_ai::GenerateModelCache = Arc::new(parking_lot::Mutex::new(None));
+        let ai_generate_model: crate::quickjs_ai::GenerateModelCache = glyx_ai::shared_generate();
         #[cfg(feature = "ai")]
-        let ai_whisper_model: crate::quickjs_ai::WhisperModelCache = Arc::new(parking_lot::Mutex::new(None));
+        let ai_whisper_model: crate::quickjs_ai::WhisperModelCache = glyx_ai::shared_whisper();
         #[cfg(not(feature = "ai"))]
         let ai_cap: Option<&'static glyx_cap_abi::AiCap> = crate::cap_loader::load_caps().ai;
         let fs_watchers: crate::quickjs_fs::FsWatchers = Arc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
@@ -1596,7 +1596,8 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
             { let opts_raw = opts.0.flatten().unwrap_or_else(|| "{}".to_string());
               crate::quickjs_ai::ai_transcribe(ctx, audio_path, opts_raw, model_cache.clone(), Arc::clone(&queue), tokio.clone(), redraw.clone()) }
             #[cfg(not(feature = "ai"))]
-            { let _ = &opts; crate::quickjs_ai::ai_transcribe(ctx, audio_path, ai_cap, Arc::clone(&queue), tokio.clone(), redraw.clone()) }
+            { let opts_raw = opts.0.flatten().unwrap_or_else(|| "{}".to_string());
+              crate::quickjs_ai::ai_transcribe(ctx, audio_path, opts_raw, ai_cap, Arc::clone(&queue), tokio.clone(), redraw.clone()) }
         })?;
         globals.set("__glyx_ai_transcribe", f)?;
 
@@ -2504,18 +2505,33 @@ mod tests {
     }
 
     #[test]
-    fn the_stream_commands_are_built_in_and_need_the_fs_capability() {
-        // `build_backend_registry` adds them to every app's registry; with no `fs` grant (no capabilities are loaded in a test) each one
-        // rejects, the JSON ones and the binary ones alike.
+    fn the_stream_commands_are_built_in_opening_needs_a_capability_and_the_rest_need_a_stream() {
+        // `build_backend_registry` adds them to every app's registry. Opening a file or a walk needs `fs` (none is granted in a test, so it
+        // rejects); every other call is about a stream that must be open, and none is, so it says so (close and cancel have nothing to do).
         let (_t, mut rt) = new_runtime_with_registry(Some("notes"), PLUGIN_JS, "__glyx_plugin_notes", crate::build_backend_registry(&[]));
         rt.eval(
-            "globalThis.__out = [];              const bad = (tag) => (e) => __out.push(tag + ':' + e.message);              __glyx_backend_call2('glyx_stream.open', { path: 'x' }).catch(bad('open')); __glyx_backend_call2('glyx_stream.walk', { path: 'x' }).catch(bad('walk')); __glyx_backend_call2('glyx_stream.next', { id: 1, seq: 0 }).catch(bad('next'));              __glyx_backend_call2('glyx_stream.close', { id: 1 }).catch(bad('close'));              __glyx_backend_call2('glyx_stream.cancel', { id: 1 }).catch(bad('cancel'));              __glyx_backend_call2('glyx_stream.read', new Uint8Array([1, 0, 0, 0])).catch(bad('read'));              __glyx_backend_call2('glyx_stream.write', new Uint8Array([1, 0, 0, 0, 5])).catch(bad('write'));"
+            "globalThis.__out = []; \
+             const bad = (tag) => (e) => __out.push(tag + ':' + e.message); \
+             const ok = (tag) => () => __out.push(tag + ':ok'); \
+             __glyx_backend_call2('glyx_stream.open', { path: 'x' }).catch(bad('open')); \
+             __glyx_backend_call2('glyx_stream.walk', { path: 'x' }).catch(bad('walk')); \
+             __glyx_backend_call2('glyx_stream.next', { id: 1, seq: 0 }).catch(bad('next')); \
+             __glyx_backend_call2('glyx_stream.pipe', { from: 1, to: 2 }).catch(bad('pipe')); \
+             __glyx_backend_call2('glyx_stream.progress', { id: 1 }).catch(bad('progress')); \
+             __glyx_backend_call2('glyx_stream.close', { id: 1 }).then(ok('close')); \
+             __glyx_backend_call2('glyx_stream.cancel', { id: 1 }).then(ok('cancel')); \
+             __glyx_backend_call2('glyx_stream.read', new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0])).catch(bad('read')); \
+             __glyx_backend_call2('glyx_stream.write', new Uint8Array([1, 0, 0, 0, 5])).catch(bad('write'));"
         ).unwrap();
         for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
         let out = rt.eval("__out.sort().join('|')").unwrap();
-        for tag in ["open", "walk", "next", "close", "cancel", "read", "write"] {
+        for tag in ["open", "walk"] {
             assert!(out.contains(&format!("{tag}:backend.glyx_stream.{tag}: missing capability")), "{tag} in: {out}");
         }
+        for tag in ["next", "pipe", "progress", "read", "write"] {
+            assert!(out.contains(&format!("{tag}:stream ")) && out.contains("is not open"), "{tag} in: {out}");
+        }
+        assert!(out.contains("close:ok") && out.contains("cancel:ok"), "{out}");
     }
 
     #[test]

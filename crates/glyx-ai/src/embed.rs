@@ -14,6 +14,9 @@ use tokenizers::Tokenizer;
 
 const REPO_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
 
+/// Word pieces kept from a long text (the model card's `max_seq_length`). The rest is dropped, as sentence-transformers does.
+const MAX_TOKENS: usize = 256;
+
 /// Lazily-loaded BERT embedding model.
 pub struct EmbedModel {
     model:     BertModel,
@@ -61,8 +64,14 @@ impl EmbedModel {
             .context("building BertModel")?;
 
         // Tokenizer
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
+        let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("tokenizer load: {e}"))?;
+        // The file pads every text to 128 tokens and truncates at 128. Mean pooling over that padding made every vector mostly `[PAD]`
+        // (unrelated sentences scored ~0.8) and cost a 128-token forward pass for a short sentence. Embed exactly the real tokens.
+        tokenizer.with_padding(None);
+        tokenizer
+            .with_truncation(Some(tokenizers::TruncationParams { max_length: MAX_TOKENS, ..Default::default() }))
+            .map_err(|e| anyhow::anyhow!("tokenizer truncation: {e}"))?;
 
         log::info!("[ai] embed model ready");
         Ok(Self { model, tokenizer, device })
@@ -70,6 +79,7 @@ impl EmbedModel {
 
     /// Embed a single text string into a 384-dim unit-normalised vector.
     pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let _in_use = crate::idle::in_use(crate::idle::Kind::Embed);
         // Tokenise
         let encoding = self.tokenizer
             .encode(text, true)
@@ -83,10 +93,10 @@ impl EmbedModel {
         let token_ids   = Tensor::new(ids.as_slice(), &self.device)?.unsqueeze(0)?;
         let token_types = token_ids.zeros_like()?;
 
-        // Forward pass (no attention mask for short texts)
+        // Forward pass: one sequence with no padding, so nothing needs masking.
         let out = self.model.forward(&token_ids, &token_types, None)?;
 
-        // Mean pool over sequence dimension
+        // Mean pool over the (all real) tokens
         let (_, seq_len, _) = out.dims3()?;
         let pooled = (out.sum(1)? / (seq_len as f64))?;
 

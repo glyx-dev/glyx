@@ -150,7 +150,7 @@ rquickjs            = { version = "0.12", features = ["full-async", "parallel"] 
 candle-core         = { version = "0.8", default-features = false }
 candle-nn           = { version = "0.8", default-features = false }
 candle-transformers = { version = "0.8", default-features = false }
-hf-hub              = "0.3"
+hf-hub              = { version = "0.4", default-features = false, features = ["ureq"] }
 tokenizers          = "0.19"
 
 [profile.dev]

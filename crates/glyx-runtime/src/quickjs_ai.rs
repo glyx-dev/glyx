@@ -105,11 +105,11 @@ pub(crate) fn ai_transcribe<'js>(
 }
 
 #[cfg(feature = "ai")]
-pub(crate) fn ai_unload_embed(model_cache: &EmbedModelCache) { *model_cache.lock() = None; }
+pub(crate) fn ai_unload_embed(model_cache: &EmbedModelCache) { glyx_ai::unload(model_cache); }
 #[cfg(feature = "ai")]
-pub(crate) fn ai_unload_generate(model_cache: &GenerateModelCache) { *model_cache.lock() = None; }
+pub(crate) fn ai_unload_generate(model_cache: &GenerateModelCache) { glyx_ai::unload(model_cache); }
 #[cfg(feature = "ai")]
-pub(crate) fn ai_unload_transcribe(model_cache: &WhisperModelCache) { *model_cache.lock() = None; }
+pub(crate) fn ai_unload_transcribe(model_cache: &WhisperModelCache) { glyx_ai::unload(model_cache); }
 
 // ── Dynamic plugin-vtable fallback (feature "ai" off) ────────────────────
 
@@ -163,7 +163,7 @@ pub(crate) fn ai_generate<'js>(
 
 #[cfg(not(feature = "ai"))]
 pub(crate) fn ai_transcribe<'js>(
-    ctx: Ctx<'js>, audio_path: String, cap: Option<&'static glyx_cap_abi::AiCap>,
+    ctx: Ctx<'js>, audio_path: String, opts_raw: String, cap: Option<&'static glyx_cap_abi::AiCap>,
     queue: CompletionQueue, tokio: Handle, redraw: Option<RedrawRequest>,
 ) -> rquickjs::Result<rquickjs::Promise<'js>> {
     if !glyx_security::get().ai { return cap_denied(&ctx); }
@@ -171,13 +171,25 @@ pub(crate) fn ai_transcribe<'js>(
     QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, async move {
         tokio::task::spawn_blocking(move || -> Result<String, String> {
             let path_b = audio_path.as_bytes();
+            let opts_b = opts_raw.as_bytes();
             let mut out = vec![0u8; 65536];
             let mut out_len: usize = 0;
-            let rc = unsafe { (cap.transcribe)(
-                std::ptr::null(), 0,
-                path_b.as_ptr(), path_b.len(),
-                out.as_mut_ptr(), &mut out_len, out.len(),
-            )};
+            // ABI 3 modules take the options (the language); an older one transcribes with the language detected.
+            let rc = unsafe {
+                if cap.has_streaming() {
+                    (cap.transcribe_opts)(
+                        path_b.as_ptr(), path_b.len(),
+                        opts_b.as_ptr(), opts_b.len(),
+                        out.as_mut_ptr(), &mut out_len, out.len(),
+                    )
+                } else {
+                    (cap.transcribe)(
+                        std::ptr::null(), 0,
+                        path_b.as_ptr(), path_b.len(),
+                        out.as_mut_ptr(), &mut out_len, out.len(),
+                    )
+                }
+            };
             if rc != 0 { return Err(format!("ai.transcribe vtable error: {rc}")); }
             Ok(String::from_utf8_lossy(&out[..out_len]).into_owned())
         }).await.map_err(|e| e.to_string()).and_then(|r| r)

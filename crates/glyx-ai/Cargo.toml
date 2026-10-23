@@ -14,9 +14,16 @@ serde               = { workspace = true }
 serde_json          = { workspace = true }
 log                 = { workspace = true }
 sha2                = { workspace = true }
-zip                 = { version = "2", default-features = false, features = ["deflate"] }
+parking_lot         = { workspace = true }
+# Decoders for ai.transcribe's MP3, FLAC and OGG input (WAV is read by our own parser and needs none of this).
+symphonia           = { version = "0.5", default-features = false, features = ["mp3", "flac", "vorbis", "ogg"], optional = true }
 
 [features]
-default = []
+default = ["compressed-audio"]
+# MP3, FLAC and OGG input for transcription. Off: WAV only. The decoders are the ones glyx-cap-audio already links.
+compressed-audio = ["dep:symphonia"]
 # Future: cuda  = ["candle-core/cuda",  "candle-nn/cuda",  "candle-transformers/cuda"]
 # Future: metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+
+[dev-dependencies]
+sysinfo = { workspace = true }

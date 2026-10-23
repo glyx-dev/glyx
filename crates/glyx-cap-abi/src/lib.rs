@@ -18,7 +18,7 @@
 //! Every vtable starts with a `version: u32` field. Loaders reject modules
 //! whose version is outside the supported range (`ABI_VERSION_MIN..=ABI_VERSION`).
 
-pub const ABI_VERSION:     u32 = 2;
+pub const ABI_VERSION:     u32 = 3;
 pub const ABI_VERSION_MIN: u32 = 1;
 
 // ── Audio ─────────────────────────────────────────────────────────────────────
@@ -142,6 +142,40 @@ pub struct AiCap {
     pub unload: unsafe extern "C" fn(kind: u8),
 
     pub shutdown: unsafe extern "C" fn(),
+
+    // ── Added in ABI 3 ── a module built against ABI 2 has no memory behind these two fields: read them only when `version >= 3`
+    // (see `AiCap::has_streaming`).
+
+    /// Generate text and hand it over piece by piece: `on_text(user, ptr, len)` is called with each piece (valid UTF-8, never half a
+    /// character) as soon as it is complete, and returns non-zero to stop the generation. `opts_json` is as for `generate`. Returns 0
+    /// on success (including a stop requested by `on_text`); on failure writes the reason to `err_buf` and returns non-zero.
+    pub generate_stream: unsafe extern "C" fn(
+        prompt:        *const u8,
+        prompt_len:    usize,
+        opts_json:     *const u8,
+        opts_json_len: usize,
+        on_text:       unsafe extern "C" fn(user: *mut core::ffi::c_void, text: *const u8, len: usize) -> i32,
+        user:          *mut core::ffi::c_void,
+        err_buf:       *mut u8,
+        err_len:       *mut usize,
+        err_cap:       usize,
+    ) -> i32,
+
+    /// Like `transcribe`, with `opts_json` (`{ language? }`: an ISO 639-1 code, empty or absent to detect it).
+    pub transcribe_opts: unsafe extern "C" fn(
+        audio_path:     *const u8,
+        audio_path_len: usize,
+        opts_json:      *const u8,
+        opts_json_len:  usize,
+        out_buf:        *mut u8,
+        out_len:        *mut usize,
+        buf_cap:        usize,
+    ) -> i32,
+}
+
+impl AiCap {
+    /// Whether this module has `generate_stream` and `transcribe_opts` (ABI 3 and later).
+    pub fn has_streaming(&self) -> bool { self.version >= 3 }
 }
 
 // ── Camera ────────────────────────────────────────────────────────────────────

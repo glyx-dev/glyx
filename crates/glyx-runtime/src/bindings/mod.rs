@@ -1943,11 +1943,11 @@ pub fn register_all(
         #[cfg(feature = "hid")]
         next_hid_id: std::sync::atomic::AtomicU32::new(1),
         #[cfg(feature = "ai")]
-        ai_embed_model:    Arc::new(Mutex::new(None)),
+        ai_embed_model:    glyx_ai::shared_embed(),
         #[cfg(feature = "ai")]
-        ai_generate_model: Arc::new(Mutex::new(None)),
+        ai_generate_model: glyx_ai::shared_generate(),
         #[cfg(feature = "ai")]
-        ai_whisper_model:  Arc::new(Mutex::new(None)),
+        ai_whisper_model:  glyx_ai::shared_whisper(),
         fs_watch_events:   Arc::new(Mutex::new(VecDeque::new())),
         fs_watchers:       std::cell::RefCell::new(HashMap::new()),
         next_fs_watch_id:  std::sync::atomic::AtomicU32::new(1),

@@ -275,11 +275,19 @@ fn load_audio() -> Option<&'static AudioCap> {
 }
 
 fn load_ai() -> Option<&'static AiCap> {
-    #[cfg(feature = "ai")]
-    { return Some(glyx_cap_ai::static_cap()); }
-    #[cfg(not(feature = "ai"))]
-    unsafe { try_load_dynamic::<AiCap>("ai", "glyx_cap_ai", SYM_AI) }
+    // Asked for by every runtime and by the streaming command: the module is loaded (and its signature checked) once.
+    static AI: std::sync::OnceLock<Option<&'static AiCap>> = std::sync::OnceLock::new();
+    *AI.get_or_init(|| {
+        #[cfg(feature = "ai")]
+        { return Some(glyx_cap_ai::static_cap()); }
+        #[cfg(not(feature = "ai"))]
+        unsafe { try_load_dynamic::<AiCap>("ai", "glyx_cap_ai", SYM_AI) }
+    })
 }
+
+/// The loaded `ai` module, for the streaming command (a build with `ai` compiled in reaches the model directly instead).
+#[cfg(not(feature = "ai"))]
+pub(crate) fn ai_cap() -> Option<&'static AiCap> { load_ai() }
 
 fn load_camera() -> Option<&'static CameraCap> {
     #[cfg(feature = "camera")]

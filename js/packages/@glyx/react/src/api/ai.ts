@@ -1,5 +1,8 @@
 // @glyx-dev/react — local AI (Candle) — embed/generate/transcribe.
 
+import { _noBinding } from './_shared.js';
+import { _readStreamOf, _streamCall, utf8Decode } from './streams.js';
+
 // ── Local AI (Candle) ─────────────────────────────────────────────────────────
 //
 // Capability gate: `ai: true` in glyx.config.json.
@@ -8,9 +11,11 @@
 // ~/.cache/huggingface/. Subsequent calls reuse cached weights.
 //
 // WARNING: first calls block until download completes:
-//   - ai.embed()      — ~22 MB (MiniLM-L6-v2), loads in ~1s after download
-//   - ai.generate()   — ~1.7 GB (Phi-2 Q4_K_M), CPU inference ~10-30s/200 tokens
-//   - ai.transcribe() — ~75 MB (Whisper-tiny), ~5s for a 30s clip
+//   - ai.embed()      — ~22 MB (MiniLM-L6-v2), loads in ~2s after download, ~15 ms a sentence
+//   - ai.generate()   — ~1.7 GB (Phi-2 Q4_K_M), 0.13 s a token built with AVX2, 0.38 s without
+//   - ai.transcribe() — ~75 MB (Whisper-tiny), about 3x faster than real time
+//
+// A download also needs `aiModelDownload: true` next to `ai: true`. Details: the Local AI guide.
 
 export const ai = {
   /**
@@ -33,7 +38,7 @@ export const ai = {
    * Generate text from a prompt using Phi-2 (quantized Q4_K_M, CPU).
    *
    * Resolves with the full generated string when done.
-   * Long-running — expect 10-30 seconds per 200 tokens on CPU.
+   * Long-running — about 0.13 s a token on a runtime built with AVX2, 0.38 s without (a 100-token answer: 13 to 38 s).
    *
    * @param {string} prompt
    * @param {{ maxTokens?: number, temperature?: number }} [opts]
@@ -46,9 +51,41 @@ export const ai = {
   },
 
   /**
+   * Like `generate`, but the text arrives as the model produces it, so a slow answer shows its first words after a token or two instead of
+   * at the end:
+   *
+   * ```ts
+   * let answer = ''
+   * for await (const piece of ai.generateStream(prompt)) { answer += piece; setAnswer(answer) }
+   * ```
+   *
+   * Each piece is whole characters. Leaving the loop early (`break`, or an error thrown inside it) stops the model, which frees the CPU for
+   * the next call. A slow consumer holds the model back rather than letting text pile up. Same options and model as `generate`.
+   *
+   * @param {string} prompt
+   * @param {{ maxTokens?: number, temperature?: number }} [opts]
+   * @returns {AsyncIterable<string>}
+   */
+  generateStream(prompt: any, { maxTokens = 200, temperature = 0.7 }: any = {}): AsyncIterable<string> {
+    return {
+      async *[Symbol.asyncIterator]() {
+        if (typeof (globalThis as any).__glyx_backend_call2 !== 'function') await _noBinding('ai.generateStream');
+        const { id } = await _streamCall('glyx_stream.generate', { prompt: String(prompt), maxTokens, temperature });
+        const stream = _readStreamOf(id);
+        try {
+          for (let chunk = await stream.read(); chunk !== null; chunk = await stream.read()) yield utf8Decode(chunk);
+        } finally {
+          await stream.cancel(); // harmless after the end; stops the model if the loop was left early
+        }
+      },
+    };
+  },
+
+  /**
    * Transcribe an audio file to text using Whisper-tiny (CPU).
    *
-   * Supports WAV (16 kHz mono preferred), MP3, FLAC, OGG.
+   * Supports WAV, MP3, FLAC and OGG (Vorbis), any channel count and sample rate; other formats are refused.
+   * Audio longer than 30 s is transcribed in 30 s windows and joined.
    *
    * @param {string} audioPath  Absolute path to the audio file
    * @param {{ language?: string }} [opts]  ISO 639-1 code, e.g. 'en'; empty = auto-detect

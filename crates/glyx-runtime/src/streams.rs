@@ -295,6 +295,46 @@ impl Streams {
         })
     }
 
+    /// Start a text generation, for window `owner`. `run` is called on a blocking thread and hands its output to the function it is given,
+    /// piece by piece; the pieces come out of `read` as chunks, and `run` waits when the queue is full (so a slow consumer holds the model
+    /// back instead of growing memory). The function it is given returns `false` once the stream is closed or cancelled: `run` should stop
+    /// then. An `Err` from `run` is what the next `read` reports. The stream carries the `ai` capability.
+    pub(crate) fn open_generator_for(
+        &self,
+        run: impl FnOnce(&mut dyn FnMut(&str) -> bool) -> Result<(), String> + Send + 'static,
+        owner: Option<u32>,
+    ) -> Result<u32, String> {
+        self.insert(|limits| {
+            let (tx, rx) = mpsc::channel(limits.queue_chunks);
+            let produced = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (p, s) = (Arc::clone(&produced), Arc::clone(&stop));
+            let task = tokio::task::spawn_blocking(move || {
+                let result = run(&mut |piece: &str| {
+                    if s.load(Ordering::Relaxed) {
+                        return false;
+                    }
+                    p.fetch_add(1, Ordering::Relaxed);
+                    tx.blocking_send(Ok(piece.as_bytes().to_vec())).is_ok()
+                });
+                if let Err(e) = result {
+                    let _ = tx.blocking_send(Err(e));
+                }
+            });
+            Entry::Reader {
+                state: tokio::sync::Mutex::new(ReaderState { rx, carry_err: None }),
+                turn: watch::channel((0, false)).0,
+                max_batch: limits.chunk_bytes * limits.queue_chunks,
+                task,
+                produced,
+                stop,
+                owner,
+                cap: "ai",
+                busy: Arc::new(AtomicBool::new(false)),
+            }
+        })
+    }
+
     /// Start reading the body of an HTTP response (already past the `fetch` checks), for window `owner`. Chunks come out of `read` as they
     /// arrive from the network, and the task waits when the queue is full, so a slow consumer holds the connection back (TCP flow control)
     /// instead of growing memory. Must be called inside the Tokio runtime.
@@ -835,6 +875,15 @@ pub(crate) fn walk_command(
     Ok(format!("{{\"id\":{id}}}"))
 }
 
+/// `glyx_stream.generate`: start a text generation (`{ prompt, maxTokens?, temperature? }`) and answer `{ "id": n }`. The text comes out of
+/// `glyx_stream.read` as UTF-8 chunks that each end on a character boundary; closing or cancelling the stream stops the model.
+pub(crate) fn generate_command(streams: &Streams, args: &str, owner: Option<u32>) -> Result<String, String> {
+    let a: crate::ai_stream::GenerateArgs = serde_json::from_str(args).map_err(|e| format!("invalid arguments: {e}"))?;
+    crate::ai_stream::available()?;
+    let id = streams.open_generator_for(move |on_text| crate::ai_stream::generate_into(&a, on_text), owner)?;
+    Ok(format!("{{\"id\":{id}}}"))
+}
+
 /// `glyx_stream.next`: the next batch of a walk, as `{ "items": [...] }` (every batch already queued, joined), or `{ "items": [], "done": true }`
 /// at the end. Requests are numbered and answered in order, like `glyx_stream.read`. The final batch ends with a `{ "$summary": ... }` item.
 pub(crate) async fn next_command(streams: &Streams, args: &str) -> Result<String, String> {
@@ -1082,6 +1131,12 @@ pub(crate) fn register(b: &mut BackendRegistryBuilder) {
         async move {
             walk_command(&s, &args, crate::current_window(), |p| glyx_security::resolve_and_check_read(p).map_err(|e| e.to_string()))
         }
+    });
+
+    let s = Arc::clone(&streams);
+    b.add_gated("glyx_stream.generate", &["ai"], move |args| {
+        let s = Arc::clone(&s);
+        async move { generate_command(&s, &args, crate::current_window()) }
     });
 
     #[cfg(feature = "fetch")]
@@ -1680,6 +1735,129 @@ mod tests {
         assert!(id_arg("{}").is_err());
     }
 
+    // ── Text generation as a stream ──
+
+    /// Read a generator stream to its end, as the text it produced.
+    async fn read_text(s: &Streams, id: u32) -> Result<String, String> {
+        let mut out = Vec::new();
+        let mut seq = 0;
+        while let Some(chunks) = s.read(id, seq).await? {
+            out.extend(chunks.concat());
+            seq += 1;
+        }
+        Ok(String::from_utf8(out).expect("pieces are whole characters"))
+    }
+
+    #[test]
+    fn a_generation_streams_its_pieces_in_order_and_the_stream_closes_at_the_end() {
+        let s = limits(64, 2, 8);
+        runtime().block_on(async {
+            let id = s
+                .open_generator_for(
+                    |on_text| {
+                        for piece in ["Hel", "lo ", "w\u{f6}rld", " \u{1f600}"] {
+                            if !on_text(piece) {
+                                return Ok(());
+                            }
+                        }
+                        Ok(())
+                    },
+                    Some(1),
+                )
+                .unwrap();
+            assert_eq!(read_text(&s, id).await.unwrap(), "Hello w\u{f6}rld \u{1f600}");
+            assert_eq!(s.open_count(), 0, "a stream that ended is closed");
+        });
+    }
+
+    #[test]
+    fn a_generator_that_fails_hands_over_what_it_made_and_then_the_error() {
+        let s = limits(64, 1, 8);
+        runtime().block_on(async {
+            let id = s
+                .open_generator_for(
+                    |on_text| {
+                        on_text("partial answer");
+                        Err("ai.generate: the model ran out of memory".to_string())
+                    },
+                    None,
+                )
+                .unwrap();
+            let first = s.read(id, 0).await.unwrap().expect("the text made before the failure");
+            assert_eq!(first.concat(), b"partial answer");
+            assert_eq!(s.read(id, 1).await.unwrap_err(), "ai.generate: the model ran out of memory");
+        });
+    }
+
+    #[test]
+    fn closing_the_stream_stops_the_model_instead_of_letting_it_finish() {
+        let s = limits(64, 2, 8);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let made = Arc::new(AtomicUsize::new(0));
+        runtime().block_on(async {
+            let (flag, count) = (Arc::clone(&stopped), Arc::clone(&made));
+            let id = s
+                .open_generator_for(
+                    move |on_text| {
+                        // A model that would run for a long time, a piece every millisecond.
+                        for _ in 0..100_000 {
+                            count.fetch_add(1, Ordering::Relaxed);
+                            if !on_text("x") {
+                                flag.store(true, Ordering::SeqCst);
+                                return Ok(());
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        Ok(())
+                    },
+                    None,
+                )
+                .unwrap();
+            s.read(id, 0).await.unwrap().expect("some text");
+            s.cancel(id);
+            until(|| stopped.load(Ordering::SeqCst)).await;
+            assert!(made.load(Ordering::Relaxed) < 5_000, "the model went on after the stream was closed");
+        });
+    }
+
+    #[test]
+    fn a_consumer_that_does_not_read_holds_the_model_back() {
+        let s = limits(64, 1, 8);
+        runtime().block_on(async {
+            let id = s.open_generator_for(|on_text| { for _ in 0..1_000 { if !on_text("tok ") { break; } } Ok(()) }, None).unwrap();
+            until(|| s.produced(id) >= 2).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let produced = s.produced(id);
+            assert!(produced <= 3, "the model produced {produced} pieces with a queue of 1 and nobody reading");
+            // Cancel inside the runtime: dropping it waits for the blocked generator, which only stops once its stream is closed.
+            s.cancel(id);
+        });
+    }
+
+    #[test]
+    fn a_generator_stream_needs_the_ai_capability_for_every_call_and_dies_with_its_window() {
+        let s = limits(64, 2, 8);
+        runtime().block_on(async {
+            let id = s.open_generator_for(|on_text| { while on_text("x") { std::thread::sleep(std::time::Duration::from_millis(1)); } Ok(()) }, Some(9)).unwrap();
+            let err = ensure_capability(&s, id, &|name| name != "ai").unwrap_err();
+            assert!(err.contains("\"ai\""), "{err}");
+            ensure_capability(&s, id, &|_| true).unwrap();
+            assert_eq!(s.close_window(9), 1);
+            assert_eq!(s.open_count(), 0);
+        });
+    }
+
+    #[cfg(not(feature = "ai"))]
+    #[test]
+    fn the_generate_command_says_why_there_is_no_model() {
+        // The test build has no ai module compiled in or loaded, so opening must fail at once with a reason, not on the first read.
+        let s = limits(64, 1, 8);
+        let err = generate_command(&s, r#"{"prompt":"hi"}"#, None).unwrap_err();
+        assert!(err.contains("ai capability not loaded") || err.contains("cannot stream"), "{err}");
+        assert_eq!(s.open_count(), 0);
+        assert!(generate_command(&s, r#"{"maxTokens":5}"#, None).unwrap_err().contains("invalid arguments"));
+    }
+
     #[test]
     fn the_stream_commands_are_registered_opening_is_gated_and_the_rest_check_the_stream() {
         let mut b = BackendRegistryBuilder::new();
@@ -1692,6 +1870,8 @@ mod tests {
         }
         #[cfg(feature = "fetch")]
         assert_eq!(reg["glyx_stream.fetch"].capabilities, vec!["network".to_string()]);
+        assert_eq!(reg["glyx_stream.generate"].capabilities, vec!["ai".to_string()]);
+        assert!(reg["glyx_stream.generate"].binary.is_none());
         // Everything else carries none at registration: it checks the capability the stream was opened with, per call.
         for name in ["glyx_stream.next", "glyx_stream.pipe", "glyx_stream.progress", "glyx_stream.close", "glyx_stream.cancel"] {
             assert!(reg[name].binary.is_none(), "{name}");

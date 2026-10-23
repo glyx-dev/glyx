@@ -144,6 +144,59 @@ mod menubar_api;
 pub use glyx_tray::set_app_icon;
 pub mod bindings;
 pub mod print;
+mod streams;
+mod walk;
+
+// ── Which window is calling a backend command ─────────────────────────────────
+//
+// A backend command is a plain `Fn(String) -> Future` with no idea who called it. Anything a command opens that belongs to a window
+// (a file stream, say) has to be closed when that window closes, so the dispatchers run each command's future inside
+// `as_window(window, ..)` and the command asks `current_window()`.
+
+tokio::task_local! {
+    static CURRENT_WINDOW: u32;
+}
+
+/// Run `fut` as work done for window `window`: inside it, [`current_window`] is `Some(window)`.
+pub(crate) fn as_window<F: std::future::Future>(window: u32, fut: F) -> impl std::future::Future<Output = F::Output> {
+    CURRENT_WINDOW.scope(window, fut)
+}
+
+/// The window whose call this backend command is serving, if it was dispatched through [`as_window`].
+pub(crate) fn current_window() -> Option<u32> {
+    CURRENT_WINDOW.try_with(|w| *w).ok()
+}
+
+#[cfg(feature = "quickjs")]
+thread_local! {
+    /// The window of the QuickJS runtime that is making a backend call right now (QuickJS runs on the window's own thread, and the call is
+    /// synchronous up to the point where the command's future is spawned, so a thread-local is enough to carry it there).
+    static CALLER_WINDOW: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Run `f` (a synchronous backend call from window `window`'s QuickJS runtime) with [`caller_window`] set.
+#[cfg(feature = "quickjs")]
+pub(crate) fn with_caller_window<R>(window: u32, f: impl FnOnce() -> R) -> R {
+    struct Restore(u32);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CALLER_WINDOW.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(CALLER_WINDOW.with(|c| c.replace(window)));
+    f()
+}
+
+#[cfg(feature = "quickjs")]
+pub(crate) fn caller_window() -> u32 {
+    CALLER_WINDOW.with(|c| c.get())
+}
+
+/// Close the file streams a window opened and left open (when the window closes, or its JavaScript is reloaded). A reader's file is
+/// released; a writer's queued chunks are still written, in the background. Returns how many were open.
+pub fn close_window_streams(window: u32) -> usize {
+    streams::close_window_global(window)
+}
 pub mod cap_loader;
 #[cfg(feature = "v8")]
 pub mod runtime;
@@ -579,6 +632,8 @@ mod backend_registry_tests {
 /// Collect commands from all extensions and build a single shared registry.
 pub fn build_backend_registry(extensions: &[Box<dyn GlyxExtension>]) -> BackendRegistry {
     let mut builder = BackendRegistryBuilder::new();
+    // Built in: file streams (`glyx_stream.*`), which the `fs` stream API in JavaScript calls.
+    streams::register(&mut builder);
     for ext in extensions {
         ext.register_commands(&mut builder);
     }

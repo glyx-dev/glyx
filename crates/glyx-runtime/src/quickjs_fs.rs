@@ -95,9 +95,11 @@ pub(crate) fn list_dir<'js>(
         let mut entries_json = Vec::new();
         let mut rd = tokio::fs::read_dir(&path).await.map_err(|e| e.to_string())?;
         while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
-            let meta   = entry.metadata().await.map_err(|e| e.to_string())?;
+            // An entry whose metadata cannot be read (it vanished since the directory was read, or access was denied) is listed as not a directory,
+            // not a reason to reject the whole listing.
+            let is_dir = entry.metadata().await.map(|m| m.is_dir()).unwrap_or(false);
             let name   = entry.file_name().to_string_lossy().into_owned();
-            entries_json.push(serde_json::json!({ "name": name, "isDir": meta.is_dir() }));
+            entries_json.push(serde_json::json!({ "name": name, "isDir": is_dir }));
         }
         serde_json::to_string(&entries_json).map_err(|e| e.to_string())
     })

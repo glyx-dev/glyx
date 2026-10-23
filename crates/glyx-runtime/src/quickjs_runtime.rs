@@ -1526,12 +1526,14 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let commands = reg.backend_commands.clone();
         let js_backend_commands = Rc::clone(&reg.js_backend_commands);
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
+        let window_id = reg.my_handle;
         let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, name: String, args_json: Opt<Option<String>>| {
-            crate::quickjs_ipc::backend_call(
+            // The command's future is spawned inside this call; it runs as this window's work (see `crate::as_window`).
+            crate::with_caller_window(window_id, || crate::quickjs_ipc::backend_call(
                 ctx, name, args_json.0.flatten().unwrap_or_else(|| "{}".to_string()), commands.clone(),
                 Rc::clone(&js_backend_commands),
                 Arc::clone(&queue), tokio.clone(), redraw.clone(),
-            )
+            ))
         })?;
         globals.set("__glyx_backend_call", f)?;
         // This engine's JSON is slow, so JavaScript should hand Rust commands to `__glyx_backend_call2`
@@ -1542,12 +1544,13 @@ fn do_register<'js>(ctx: Ctx<'js>, reg: RegisterState) -> rquickjs::Result<()> {
         let commands = reg.backend_commands.clone();
         let js_backend_commands = Rc::clone(&reg.js_backend_commands);
         let queue = reg.queue.clone(); let tokio = reg.tokio.clone(); let redraw = reg.redraw.clone();
+        let window_id = reg.my_handle;
         let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, name: String, args: Opt<Value<'js>>| {
-            crate::quickjs_ipc::backend_call_value(
+            crate::with_caller_window(window_id, || crate::quickjs_ipc::backend_call_value(
                 ctx, name, args.0, commands.clone(),
                 Rc::clone(&js_backend_commands),
                 Arc::clone(&queue), tokio.clone(), redraw.clone(),
-            )
+            ))
         })?;
         globals.set("__glyx_backend_call2", f)?;
     }
@@ -2169,6 +2172,13 @@ mod tests {
     fn new_runtime_with_registry(
         prefix: Option<&str>, bundled_js: &str, global_name: &str, backend_commands: crate::BackendRegistry,
     ) -> (tokio::runtime::Runtime, QuickJsRuntime) {
+        new_runtime_for_window(0, prefix, bundled_js, global_name, backend_commands)
+    }
+
+    /// The same, as the runtime of window `window` (what backend commands are told about their caller).
+    fn new_runtime_for_window(
+        window: u32, prefix: Option<&str>, bundled_js: &str, global_name: &str, backend_commands: crate::BackendRegistry,
+    ) -> (tokio::runtime::Runtime, QuickJsRuntime) {
         let tokio_rt = tokio::runtime::Runtime::new().expect("tokio runtime should build");
         let perf = Arc::new(parking_lot::Mutex::new(glyx_perf::PerfState::new()));
         let ipc_bus = crate::bindings::new_ipc_bus();
@@ -2182,7 +2192,7 @@ mod tests {
         }]);
         let rt = QuickJsRuntime::new_with_ipc(
             perf, tokio_rt.handle().clone(), None, None,
-            ipc_bus, 0, next_window_id, backend_commands, js_plugins,
+            ipc_bus, window, next_window_id, backend_commands, js_plugins,
         ).expect("QuickJsRuntime::new_with_ipc should succeed");
         (tokio_rt, rt)
     }
@@ -2468,6 +2478,44 @@ mod tests {
         assert!(out.contains("none:true:backend.rev: expects an ArrayBuffer or a typed array"), "got: {out}");
         assert!(out.contains("boom:true:bytes failed"), "got: {out}");
         assert!(out.contains("secret:true:backend.secret: missing capability"), "got: {out}");
+    }
+
+    #[test]
+    fn a_command_is_told_which_window_called_it() {
+        let mut b = crate::BackendRegistryBuilder::new();
+        b.add("whoami", |_| async move { Ok(format!("{{\"window\":{}}}", crate::current_window().map_or("null".to_string(), |w| w.to_string()))) });
+        b.add_bytes("whoami_bytes", |_| async move { Ok(vec![crate::current_window().map_or(255, |w| w as u8)]) });
+        let registry = b.build();
+        for window in [5u32, 9] {
+            let (_t, mut rt) = new_runtime_for_window(window, Some("notes"), PLUGIN_JS, "__glyx_plugin_notes", registry.clone());
+            rt.eval(
+                "globalThis.__out = []; \
+                 const w = (r) => (typeof r === 'string' ? JSON.parse(r) : r).window; \
+                 __glyx_backend_call2('whoami', {}).then(r => __out.push('call2:' + w(r))); \
+                 __glyx_backend_call('whoami', '{}').then(r => __out.push('call:' + w(r))); \
+                 __glyx_backend_call2('whoami_bytes', new Uint8Array(0)).then(r => __out.push('bytes:' + new Uint8Array(r)[0]));"
+            ).unwrap();
+            for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
+            let out = rt.eval("__out.sort().join('|')").unwrap();
+            for expected in [format!("call2:{window}"), format!("call:{window}"), format!("bytes:{window}")] {
+                assert!(out.contains(&expected), "missing {expected} in: {out}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_stream_commands_are_built_in_and_need_the_fs_capability() {
+        // `build_backend_registry` adds them to every app's registry; with no `fs` grant (no capabilities are loaded in a test) each one
+        // rejects, the JSON ones and the binary ones alike.
+        let (_t, mut rt) = new_runtime_with_registry(Some("notes"), PLUGIN_JS, "__glyx_plugin_notes", crate::build_backend_registry(&[]));
+        rt.eval(
+            "globalThis.__out = [];              const bad = (tag) => (e) => __out.push(tag + ':' + e.message);              __glyx_backend_call2('glyx_stream.open', { path: 'x' }).catch(bad('open')); __glyx_backend_call2('glyx_stream.walk', { path: 'x' }).catch(bad('walk')); __glyx_backend_call2('glyx_stream.next', { id: 1, seq: 0 }).catch(bad('next'));              __glyx_backend_call2('glyx_stream.close', { id: 1 }).catch(bad('close'));              __glyx_backend_call2('glyx_stream.cancel', { id: 1 }).catch(bad('cancel'));              __glyx_backend_call2('glyx_stream.read', new Uint8Array([1, 0, 0, 0])).catch(bad('read'));              __glyx_backend_call2('glyx_stream.write', new Uint8Array([1, 0, 0, 0, 5])).catch(bad('write'));"
+        ).unwrap();
+        for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
+        let out = rt.eval("__out.sort().join('|')").unwrap();
+        for tag in ["open", "walk", "next", "close", "cancel", "read", "write"] {
+            assert!(out.contains(&format!("{tag}:backend.glyx_stream.{tag}: missing capability")), "{tag} in: {out}");
+        }
     }
 
     #[test]

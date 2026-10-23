@@ -9,6 +9,7 @@
 
 export * from './_shared.js';
 export * from './fs.js';
+export type { FileReadStream, FileWriteStream, FileWalk, OpenReadOptions, OpenWriteOptions, WalkEntry, WalkOptions, WalkProblem } from './streams.js';
 export * from './db.js';
 export * from './dialog.js';
 export * from './clipboard.js';

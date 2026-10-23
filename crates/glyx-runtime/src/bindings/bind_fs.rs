@@ -206,7 +206,7 @@ pub fn list_dir_callback(
     // M1: canonicalize+check before open -- closes TOCTOU window.
     let path = match glyx_security::resolve_and_check_read(std::path::Path::new(&path)) {
         Ok(c)  => c.to_string_lossy().into_owned(),
-        Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.watch denied: {e}")).into()); return; }
+        Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.listDir denied: {e}")).into()); return; }
     };
     let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();
@@ -221,9 +221,10 @@ pub fn list_dir_callback(
             let mut rd = tokio::fs::read_dir(&path).await
                 .map_err(|e| e.to_string())?;
             while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
-                let meta   = entry.metadata().await.map_err(|e| e.to_string())?;
+                // An entry whose metadata cannot be read (it vanished since the directory was read, or access was denied) is listed as not a directory,
+                // not a reason to reject the whole listing.
+                let is_dir = entry.metadata().await.map(|m| m.is_dir()).unwrap_or(false);
                 let name   = entry.file_name().to_string_lossy().into_owned();
-                let is_dir = meta.is_dir();
                 entries_json.push(serde_json::json!({ "name": name, "isDir": is_dir }));
             }
             serde_json::to_string(&entries_json).map_err(|e| e.to_string())
@@ -318,7 +319,7 @@ pub fn stat_callback(
     // M1: canonicalize+check before open -- closes TOCTOU window.
     let path = match glyx_security::resolve_and_check_read(std::path::Path::new(&path)) {
         Ok(c)  => c.to_string_lossy().into_owned(),
-        Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.watch denied: {e}")).into()); return; }
+        Err(e) => { rv.set(reject_promise_with_error(scope, &format!("fs.stat denied: {e}")).into()); return; }
     };
     let data  = args.data();
     let ext   = v8::Local::<v8::External>::try_from(data).unwrap();

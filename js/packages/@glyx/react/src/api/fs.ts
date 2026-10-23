@@ -1,5 +1,7 @@
 // @glyx-dev/react — file system API.
 import { _noBinding } from './_shared.js';
+import { _openRead, _openWrite, _walk } from './streams.js';
+import type { FileReadStream, FileWriteStream, FileWalk, OpenReadOptions, OpenWriteOptions, WalkOptions } from './streams.js';
 
 // ── File system API ───────────────────────────────────────────────────────────
 //
@@ -41,6 +43,26 @@ export const fs = {
   readJSON:   async (path: any)          => JSON.parse(await fs.readFile(path)),
   /** Serialize `value` to JSON and write to a file. Requires `fs.write`. */
   writeJSON:  async (path: any, val: any, indent = 2) => fs.writeFile(path, JSON.stringify(val, null, indent)),
+  /**
+   * Open a file for reading in chunks, with flat memory: `for await (const chunk of await fs.openRead(path)) { ... }` gives `Uint8Array`
+   * chunks and stops reading ahead when you are slow. Use it for files too big to hold (`readFile` and `readFileBytes` hold the whole
+   * file). Requires the `fs` capability and `fs.read` for the path. See `FileReadStream`.
+   */
+  openRead: (path: string, opts?: OpenReadOptions): Promise<FileReadStream> => _openRead(path, opts),
+  /**
+   * Open a file for writing in chunks: `write(chunk)` waits when the writer is behind, and `close()` flushes. Creates the file and replaces
+   * its content unless `{ append: true }`. Requires the `fs` capability and `fs.write` for the path. See `FileWriteStream`.
+   */
+  openWrite: (path: string, opts?: OpenWriteOptions): Promise<FileWriteStream> => _openWrite(path, opts),
+  /**
+   * Walk a directory tree: `for await (const entry of await fs.walk(root, { ignore: ['node_modules', '.git'] }))` gives `{ path, name, type,
+   * size, mtime, depth }` for every file, directory and link below `root` (not `root` itself), directories before their contents, in the order
+   * the operating system lists them. The listing runs on one native thread and arrives in batches, so a big tree costs a few hundred calls
+   * instead of one per directory, and memory stays flat. Options: `maxDepth`, `ignore` (globs), `type` (`'file'` or `'dir'`), `followLinks`.
+   * Directories that cannot be read are skipped and counted (`walk.skipped`, `walk.errors`, known at the end). `break` or an error stops it.
+   * Requires the `fs` capability and `fs.read` for `root`, like `listDir`. See `FileWalk`.
+   */
+  walk: (root: string, opts?: WalkOptions): Promise<FileWalk> => _walk(root, opts),
   /**
    * Watch `path` for changes. `callback` is called with `{ path, type }` on each event.
    * `type` is one of `"modified"`, `"created"`, `"removed"`, `"accessed"`, `"other"`.

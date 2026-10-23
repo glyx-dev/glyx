@@ -256,7 +256,7 @@ fn call_rust_command<'js>(
         return QuickJsRuntime::reject_now(&ctx, format!("backend.{name}: {e}"));
     }
     let handler = cmd.handler.clone();
-    QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, async move {
+    QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, crate::as_window(crate::caller_window(), async move {
         let result = handler(args_json).await;
         match result {
             // Only objects and arrays gain from parsing here; a string or scalar result stays text, which
@@ -266,7 +266,7 @@ fn call_rust_command<'js>(
             }
             other => other,
         }
-    })
+    }))
 }
 
 /// The bytes an `ArrayBuffer` or any typed array / `DataView` holds (a view only the part it covers).
@@ -296,7 +296,7 @@ fn call_binary_command<'js>(
     let Some(bytes) = args.as_ref().and_then(bytes_of) else {
         return QuickJsRuntime::reject_now(&ctx, format!("backend.{name}: expects an ArrayBuffer or a typed array"));
     };
-    QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, crate::run_binary_command(bin, bytes))
+    QuickJsRuntime::spawn_async(&ctx, queue, &tokio, redraw, crate::as_window(crate::caller_window(), crate::run_binary_command(bin, bytes)))
 }
 
 /// `__glyx_backend_call2(name, args) -> Promise` — `backend_call` without the JSON round trip for

@@ -593,11 +593,11 @@ fn dispatch_binary_command(
         return reject(format!("backend.{name}: expects an ArrayBuffer or a typed array"));
     };
     let queue = queue_clone.clone();
-    state.tokio.spawn(async move {
+    state.tokio.spawn(crate::as_window(state.my_handle, async move {
         let result = crate::run_binary_command(bin, bytes).await;
         queue.lock().push_back(Completion { resolver_ptr: resolver, result });
         if let Some(r) = redraw { r(); }
-    });
+    }));
 }
 
 /// The Rust-command half of the two backend-call callbacks: capability check, then the async
@@ -634,11 +634,11 @@ fn dispatch_rust_backend_command(
 
     match dispatch {
         Ok(handler) => {
-            state.tokio.spawn(async move {
+            state.tokio.spawn(crate::as_window(state.my_handle, async move {
                 let result = handler(args_json).await;
                 queue_clone.lock().push_back(Completion { resolver_ptr: resolver, result });
                 if let Some(r) = redraw { r(); }
-            });
+            }));
         }
         Err(msg) => {
             queue_clone.lock().push_back(Completion { resolver_ptr: resolver, result: Err(msg) });

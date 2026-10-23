@@ -3841,6 +3841,7 @@ dependencies = [
  "futures-util",
  "gilrs",
  "global-hotkey",
+ "globset",
  "glyx-3d",
  "glyx-ai",
  "glyx-cap-abi",

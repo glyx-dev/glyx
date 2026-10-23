@@ -1008,6 +1008,13 @@ mod tests {
     fn new_runtime_with_registry(
         prefix: Option<&str>, bundled_js: &str, global_name: &str, backend_commands: BackendRegistry,
     ) -> (tokio::runtime::Runtime, V8Runtime) {
+        new_runtime_for_window(0, prefix, bundled_js, global_name, backend_commands)
+    }
+
+    /// The same, as the runtime of window `window` (what backend commands are told about their caller).
+    fn new_runtime_for_window(
+        window: u32, prefix: Option<&str>, bundled_js: &str, global_name: &str, backend_commands: BackendRegistry,
+    ) -> (tokio::runtime::Runtime, V8Runtime) {
         // Must run exactly once per process before any V8Runtime/isolate is
         // created — safe to call repeatedly (see `crate::init_v8`'s doc
         // comment), which is what makes it safe here even though multiple
@@ -1025,7 +1032,7 @@ mod tests {
             entry: None,
         }]);
         let rt = V8Runtime::new_with_ipc(
-            tokio_rt.handle().clone(), None, ipc_bus, 0, next_window_id, perf_state,
+            tokio_rt.handle().clone(), None, ipc_bus, window, next_window_id, perf_state,
             backend_commands, js_plugins, 256,
         );
         (tokio_rt, rt)
@@ -1085,6 +1092,29 @@ mod tests {
         b.add_bytes("boom", |_| async move { Err("bytes failed".to_string()) });
         b.add_bytes_gated("secret", &["fs"], |v| async move { Ok(v) });
         new_runtime_with_registry(Some("notes"), PLUGIN_JS, "__glyx_plugin_notes", b.build())
+    }
+
+    #[test]
+    fn a_command_is_told_which_window_called_it() {
+        let mut b = crate::BackendRegistryBuilder::new();
+        b.add("whoami", |_| async move { Ok(format!("{{\"window\":{}}}", crate::current_window().map_or("null".to_string(), |w| w.to_string()))) });
+        b.add_bytes("whoami_bytes", |_| async move { Ok(vec![crate::current_window().map_or(255, |w| w as u8)]) });
+        let registry = b.build();
+        for window in [5u32, 9] {
+            let (_t, mut rt) = new_runtime_for_window(window, Some("notes"), PLUGIN_JS, "__glyx_plugin_notes", registry.clone());
+            rt.eval(
+                "globalThis.__out = []; \
+                 const w = (r) => (typeof r === 'string' ? JSON.parse(r) : r).window; \
+                 __glyx_backend_call2('whoami', {}).then(r => __out.push('call2:' + w(r))); \
+                 __glyx_backend_call('whoami', '{}').then(r => __out.push('call:' + w(r))); \
+                 __glyx_backend_call2('whoami_bytes', new Uint8Array(0)).then(r => __out.push('bytes:' + new Uint8Array(r)[0]));"
+            ).unwrap();
+            for _ in 0..50 { rt.tick(); std::thread::sleep(std::time::Duration::from_millis(5)); }
+            let out = rt.eval("__out.sort().join('|')").unwrap();
+            for expected in [format!("call2:{window}"), format!("call:{window}"), format!("bytes:{window}")] {
+                assert!(out.contains(&expected), "missing {expected} in: {out}");
+            }
+        }
     }
 
     #[test]

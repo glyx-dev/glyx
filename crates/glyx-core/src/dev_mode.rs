@@ -244,12 +244,14 @@ pub(super) fn start_dev_mode_worker(
 }
 
 #[cfg(feature = "dev")]
-pub(super) fn handle_dev_build_events(state: &mut PerWindowState) {
+pub(super) fn handle_dev_build_events(state: &mut PerWindowState, window_handle: u32) {
     if state.dev_mode.is_none() { return; }
     loop {
         let event = state.dev_mode.as_mut().unwrap().rx.try_recv();
         match event {
             Ok(DevBuildEvent::BuildOk(js)) => {
+                // The old bundle is about to be replaced and will never close the streams it opened.
+                glyx_runtime::close_window_streams(window_handle);
                 state.js_nodes.clear();
                 state.js_root = None;
                 state.images.clear();

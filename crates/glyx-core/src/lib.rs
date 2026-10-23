@@ -2280,7 +2280,7 @@ pub fn run(mut config: AppConfig) -> bool {
                 let Some(s) = windows.get_mut(&window_handle) else { return };
 
                 #[cfg(feature = "dev")]
-                handle_dev_build_events(s);
+                handle_dev_build_events(s, window_handle);
 
                 // ── Perf: wall-clock frame time ───────────────────────────
                 let frame_start = Instant::now();
@@ -3609,6 +3609,8 @@ pub fn run(mut config: AppConfig) -> bool {
                 if let Some(s) = windows.get(&window_handle) {
                     s.runtime.shutdown_db_pools();
                 }
+                // File streams the window opened and left open: release the files (a writer still writes what it had queued).
+                glyx_runtime::close_window_streams(window_handle);
                 // Free the dedupe slot so the window can be reopened.
                 glyx_runtime::window_registry_remove(window_handle);
                 windows.remove(&window_handle);
